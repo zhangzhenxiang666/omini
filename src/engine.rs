@@ -1,6 +1,7 @@
 use crate::api::{ApiRequest, FinishReason, LlmClient};
+use crate::tools::{ToolRegistry, ToolResult};
 use crate::types::config::Settings;
-use crate::types::events::RuntimeEvent;
+use crate::types::events::EngineEvent;
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,46 +23,29 @@ pub struct QueryResult {
 /// 一次查询的上下文。
 ///
 /// 由 `AgentRuntime` 在每次 `process_run` 时构造传入。
-/// `messages` 是可变引用，以便 `run_query` 直接将 assistant 回复和 tool_result 追加进去。
+/// `messages` 是引擎本地的工作副本，runtime 通过 `EngineEvent` 获取新消息。
 #[derive(Debug)]
 pub struct QueryContext<'a> {
     pub messages: &'a mut Vec<Message>,
     pub settings: &'a Settings,
     pub llm_client: &'a LlmClient,
+    pub tool_registry: Arc<ToolRegistry>,
 }
 
 /// 查询引擎。
-///
-/// 有状态 —— 未来会持有：
-/// - `permission_system`: 工具调用前的权限检查
-/// - `hook_system`:  LLM 调用前后 / 工具执行前后的钩子
-///
-/// 当前只负责：
-/// 1. 从 `QueryContext` 构建 `ApiRequest`
-/// 2. 调用 `LlmClient` 发起流式请求
-/// 3. 将 `ApiEvent` 转发为 `RuntimeEvent` 给 UI
-/// 4. 收集 tool_use → 执行工具 → 追加 tool_result 到 messages
-/// 5. 多轮循环直到 LLM 自然结束或达到最大轮次
-pub struct QueryEngine {
-    // ── 未来字段 ──
-    // permission_system: PermissionSystem,
-    // hook_system: HookSystem,
-}
+pub struct QueryEngine;
 
 impl QueryEngine {
     /// 创建新的查询引擎。
     pub fn new() -> Self {
-        Self {
-            // permission_system: PermissionSystem::new(),
-            // hook_system: HookSystem::new(),
-        }
+        Self
     }
 
     /// 执行一次完整的查询（可能包含多轮 LLM 调用 + 工具执行）。
     ///
     /// # 参数
     /// - `ctx`: 查询上下文（messages、settings、llm_client）
-    /// - `event_tx`: 向 UI 发送事件的 channel
+    /// - `event_tx`: 向 Runtime 发送事件的 channel
     /// - `cancelled`: 取消标志（来自 `AgentRuntime`）
     ///
     /// # 返回
@@ -69,7 +53,7 @@ impl QueryEngine {
     pub async fn run_query(
         &self,
         ctx: QueryContext<'_>,
-        event_tx: mpsc::Sender<RuntimeEvent>,
+        event_tx: mpsc::Sender<EngineEvent>,
         cancelled: Arc<AtomicBool>,
     ) -> QueryResult {
         let max_turns = ctx.settings.max_turns.unwrap_or(200);
@@ -78,27 +62,31 @@ impl QueryEngine {
         let mut had_tool_use = false;
         // 在整个 query 生命周期内复用同一个 JoinSet，每轮 drain 后自动清空
         let mut tool_tasks: JoinSet<ToolResultBlock> = JoinSet::new();
+        // 工具定义在一次 process_run 中不会变化，预先计算一次避免重复 clone
+        let tool_definitions = ctx.tool_registry.definitions();
 
         for _turn in 0..max_turns {
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
 
-            let _ = event_tx.send(RuntimeEvent::TurnStarted).await;
+            let _ = event_tx.send(EngineEvent::TurnStarted).await;
 
             let request = ApiRequest {
                 messages: ctx.messages,
                 model: &ctx.settings.model,
                 system_prompt: ctx.settings.system_prompt.as_deref(),
+                tools: Some(&tool_definitions),
                 max_tokens: None,
                 temperature: None,
+                thinking_effort: ctx.settings.thinking_effort,
             };
 
             let mut stream = match ctx.llm_client.invoke(request).await {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = event_tx
-                        .send(RuntimeEvent::Error(format!("LLM request failed: {e}")))
+                        .send(EngineEvent::Error(format!("LLM request failed: {e}")))
                         .await;
                     break;
                 }
@@ -114,20 +102,21 @@ impl QueryEngine {
                 match event {
                     Ok(api_event) => match api_event {
                         crate::api::ApiEvent::Text(delta) => {
-                            let _ = event_tx.send(RuntimeEvent::TextDelta(delta)).await;
+                            let _ = event_tx.send(EngineEvent::TextDelta(delta)).await;
                         }
                         crate::api::ApiEvent::Thinking(delta) => {
-                            let _ = event_tx.send(RuntimeEvent::ThinkingDelta(delta)).await;
+                            let _ = event_tx.send(EngineEvent::ThinkingDelta(delta)).await;
                         }
                         crate::api::ApiEvent::ToolUse(tool_use) => {
                             // 通知 UI：tool 开始执行
-                            let _ = event_tx.send(RuntimeEvent::ToolUse(tool_use.clone())).await;
+                            let _ = event_tx.send(EngineEvent::ToolUse(tool_use.clone())).await;
 
                             // 立即在后台 spawn 执行 tool
                             let tx = event_tx.clone();
                             let cancelled = cancelled.clone();
+                            let tool_registry = ctx.tool_registry.clone();
                             tool_tasks.spawn(async move {
-                                Self::execute_tool(&tool_use, &tx, cancelled).await
+                                Self::execute_tool(&tool_registry, &tool_use, &tx, cancelled).await
                             });
                         }
                         crate::api::ApiEvent::Done(completion) => {
@@ -136,7 +125,7 @@ impl QueryEngine {
                     },
                     Err(stream_err) => {
                         let _ = event_tx
-                            .send(RuntimeEvent::Error(format!("Stream error: {stream_err}")))
+                            .send(EngineEvent::Error(format!("Stream error: {stream_err}")))
                             .await;
                         break;
                     }
@@ -149,7 +138,7 @@ impl QueryEngine {
                 None => {
                     if !cancelled.load(Ordering::Relaxed) {
                         let _ = event_tx
-                            .send(RuntimeEvent::Error("Stream ended unexpectedly".into()))
+                            .send(EngineEvent::Error("Stream ended unexpectedly".into()))
                             .await;
                     }
                     break;
@@ -159,7 +148,11 @@ impl QueryEngine {
             // TODO: 需要将token信息同步(占位)
             finish_reason = completion.finish_reason.clone();
 
-            ctx.messages.push(completion.message);
+            let msg = completion.message;
+            let _ = event_tx
+                .send(EngineEvent::MessageProduced(msg.clone()))
+                .await;
+            ctx.messages.push(msg);
 
             // JoinSet 按完成顺序返回，但 tool_result 需要与 assistant 消息中的 tool_use 顺序一致
             // 因此用 tool_use_id 建立查找表来重建顺序
@@ -171,7 +164,7 @@ impl QueryEngine {
                     }
                     Err(join_err) => {
                         let _ = event_tx
-                            .send(RuntimeEvent::Error(format!(
+                            .send(EngineEvent::Error(format!(
                                 "Tool task panicked: {join_err}"
                             )))
                             .await;
@@ -202,10 +195,14 @@ impl QueryEngine {
                         }
                     })
                     .collect();
-                ctx.messages.push(Message::new(Role::User, result_blocks));
+                let tool_msg = Message::new(Role::User, result_blocks);
+                let _ = event_tx
+                    .send(EngineEvent::ToolResultsProduced(tool_msg.clone()))
+                    .await;
+                ctx.messages.push(tool_msg);
             }
 
-            let _ = event_tx.send(RuntimeEvent::TurnEnded).await;
+            let _ = event_tx.send(EngineEvent::TurnEnded).await;
             turns += 1;
 
             // 如果 LLM 没有请求 tool 调用，结束循环
@@ -223,27 +220,29 @@ impl QueryEngine {
 
     /// 执行单个工具调用。
     ///
-    /// TODO:
-    /// - 集成权限系统（执行前发送 `PermissionRequest`）
-    /// - 集成钩子系统（执行前后钩子）
-    /// - 根据 `tool_use.name` 分发到具体工具实现
     async fn execute_tool(
+        tool_registry: &ToolRegistry,
         tool_use: &ToolUseBlock,
-        event_tx: &mpsc::Sender<RuntimeEvent>,
-        _cancelled: Arc<AtomicBool>,
+        event_tx: &mpsc::Sender<EngineEvent>,
+        cancelled: Arc<AtomicBool>,
     ) -> ToolResultBlock {
-        // TODO: 实际的 tool 分发 + 执行逻辑
-        // 暂时返回空结果占位
-        let result = ToolResultBlock {
-            tool_use_id: tool_use.id.clone(),
-            is_error: false,
-            // TODO: 等待实际的 tool 执行后填充真实输出
-            output: String::new(),
+        if cancelled.load(Ordering::Relaxed) {
+            return ToolResultBlock {
+                tool_use_id: tool_use.id.clone(),
+                is_error: true,
+                content: "Execution cancelled".into(),
+            };
+        }
+
+        let result = if let Some(tool) = tool_registry.get(&tool_use.name) {
+            tool.execute(tool_use.input.clone()).await
+        } else {
+            ToolResult::error(format!("Unknown tool: {}", tool_use.name))
         };
-        let _ = event_tx
-            .send(RuntimeEvent::ToolResult(result.clone()))
-            .await;
-        result
+
+        let block = result.into_block(&tool_use.id);
+        let _ = event_tx.send(EngineEvent::ToolResult(block.clone())).await;
+        block
     }
 }
 

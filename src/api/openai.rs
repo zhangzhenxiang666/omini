@@ -2,6 +2,7 @@ use crate::api::{
     ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, Usage, api_channel,
     send_with_retry, sse::IntoSseStream,
 };
+use crate::types::config::ThinkingEffort;
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -21,11 +22,29 @@ pub(super) async fn invoke_openai(
     );
     let openai_messages = convert_messages_to_openai(request.messages, request.system_prompt);
     map.insert("messages".to_string(), Value::Array(openai_messages));
-    map.insert(
-        "max_tokens".to_string(),
-        Value::Number(request.max_tokens.unwrap_or(4096).into()),
-    );
     map.insert("stream".to_string(), Value::Bool(true));
+
+    // 当启用思考时，确保 max_tokens 足够大（thinking tokens 也消耗 max_tokens）
+    let max_tokens = request.max_tokens.unwrap_or(
+        if request
+            .thinking_effort
+            .is_some_and(|e| e != ThinkingEffort::None)
+        {
+            16384
+        } else {
+            8192
+        },
+    );
+    map.insert("max_tokens".to_string(), Value::Number(max_tokens.into()));
+
+    if let Some(effort) = request.thinking_effort
+        && effort != ThinkingEffort::None
+    {
+        map.insert(
+            "reasoning_effort".to_string(),
+            serde_json::to_value(effort)?,
+        );
+    }
 
     if let Some(temperature) = request.temperature {
         map.insert(
@@ -34,7 +53,22 @@ pub(super) async fn invoke_openai(
         );
     }
 
-    // TODO: 还未实现工具定义系统
+    if let Some(tools) = request.tools {
+        let tools_value: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    }
+                })
+            })
+            .collect();
+        map.insert("tools".to_string(), Value::Array(tools_value));
+    }
 
     let body = Value::Object(map);
     let url = format!("{}/chat/completions", base_url);
@@ -51,7 +85,6 @@ pub(super) async fn invoke_openai(
     let (tx, result_stream) = api_channel(256);
 
     tokio::spawn(async move {
-        // ── 累积状态 ──
         // 文本累积（OpenAI 的 content 不分块类型，统一累积）
         let mut accumulated_text: Option<String> = None;
         // 思考内容累积（reasoning_content）
@@ -110,7 +143,7 @@ pub(super) async fn invoke_openai(
                         None => continue,
                     };
 
-                    // ── finish_reason ──
+                    // finish_reason
                     let current_finish_reason = choice
                         .get("finish_reason")
                         .and_then(|v| v.as_str())
@@ -124,7 +157,7 @@ pub(super) async fn invoke_openai(
                         };
                     }
 
-                    // ── usage（仅最后一块）──
+                    // usage
                     if let Some(usage) = data.get("usage") {
                         prompt_tokens = usage
                             .get("prompt_tokens")
@@ -141,7 +174,7 @@ pub(super) async fn invoke_openai(
                         None => continue,
                     };
 
-                    // ── content delta ──
+                    // content delta
                     if let Some(text) = delta
                         .get("content")
                         .and_then(|v| v.as_str())
@@ -156,7 +189,7 @@ pub(super) async fn invoke_openai(
                         }
                     }
 
-                    // ── reasoning_content delta ──
+                    // reasoning_content delta
                     if let Some(thinking) = delta
                         .get("reasoning_content")
                         .or_else(|| delta.get("reasoning"))
@@ -176,7 +209,7 @@ pub(super) async fn invoke_openai(
                         }
                     }
 
-                    // ── tool_calls delta ──
+                    // tool_calls delta
                     if let Some(tc_array) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                         // 收集这一批 chunk 中的所有 index
                         let mut seen_indices: Vec<usize> = Vec::new();
@@ -228,7 +261,7 @@ pub(super) async fn invoke_openai(
                         active_tool_call_index = seen_indices.last().copied();
                     }
 
-                    // ── 当 finish_reason 为 tool_calls 时，按序发送所有 tool_use ──
+                    // 当 finish_reason 为 tool_calls 时，按序发送所有 tool_use
                     if current_finish_reason == Some("tool_calls") {
                         flush_ready_tool_calls(
                             &mut tool_calls,
@@ -379,7 +412,7 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
                         result.push(serde_json::json!({
                             "role": "tool",
                             "tool_call_id": tr.tool_use_id,
-                            "content": tr.output,
+                            "content": tr.content,
                         }));
                     }
                     continue;

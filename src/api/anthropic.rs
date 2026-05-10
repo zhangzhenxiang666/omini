@@ -2,6 +2,7 @@ use crate::api::{
     ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, Usage, api_channel,
     send_with_retry, sse::IntoSseStream,
 };
+use crate::types::config::ThinkingEffort;
 use crate::types::message::{ContentBlock, Message, Role, ToolUseBlock};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -29,11 +30,35 @@ pub(super) async fn invoke_anthropic(
         "messages".to_string(),
         serde_json::to_value(request.messages)?,
     );
-    map.insert(
-        "max_tokens".to_string(),
-        Value::Number(request.max_tokens.unwrap_or(4096).into()),
-    );
     map.insert("stream".to_string(), Value::Bool(true));
+
+    let mut budget_tokens: Option<u32> = None;
+    if let Some(effort) = request.thinking_effort {
+        match effort {
+            ThinkingEffort::None => {}
+            ThinkingEffort::Low => budget_tokens = Some(4096),
+            ThinkingEffort::Medium => budget_tokens = Some(16384),
+            ThinkingEffort::High => budget_tokens = Some(32768),
+        }
+    }
+    if let Some(budget) = budget_tokens {
+        // Anthropic 要求 max_tokens 必须大于 budget_tokens
+        let raw_max = request.max_tokens.unwrap_or(8192);
+        let adjusted_max = raw_max.max(budget as u64 + 1024);
+        map.insert(
+            "thinking".to_string(),
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget,
+            }),
+        );
+        map.insert("max_tokens".to_string(), Value::Number(adjusted_max.into()));
+    } else {
+        map.insert(
+            "max_tokens".to_string(),
+            Value::Number(request.max_tokens.unwrap_or(8192).into()),
+        );
+    }
 
     if let Some(system_prompt) = request.system_prompt {
         map.insert(
@@ -49,7 +74,9 @@ pub(super) async fn invoke_anthropic(
         );
     }
 
-    // TODO: 还未实现工具定义系统
+    if let Some(tools) = request.tools {
+        map.insert("tools".to_string(), serde_json::to_value(tools)?);
+    }
 
     let body = Value::Object(map);
     let url = format!("{}/v1/messages", base_url);
@@ -64,7 +91,6 @@ pub(super) async fn invoke_anthropic(
     let (tx, result_stream) = api_channel(256);
 
     tokio::spawn(async move {
-        // ── 当前块状态 ──
         enum BlockState {
             Thinking {
                 text: String,
@@ -300,7 +326,7 @@ pub(super) async fn invoke_anthropic(
                     }
                 }
 
-                // -- SSE 解析层错误 --
+                // SSE 解析层错误
                 Ok(Err(err)) => {
                     consecutive_errors += 1;
                     tracing::warn!(

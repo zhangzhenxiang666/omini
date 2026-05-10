@@ -1,20 +1,28 @@
+use crate::types::message::ToolResultBlock;
+use crate::types::tool::ToolDefinition;
+use async_trait::async_trait;
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use schemars::JsonSchema;
-use serde::de::DeserializeOwned;
-use serde_json::Value;
-
-use crate::types::message::ToolResultBlock;
-
 pub mod bash_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// 工具执行后的内部结果（比 ToolResultBlock 更通用）。
+/// 去除 serde_json 错误信息末尾的 " at line X column Y" 位置信息，
+fn clean_json_error(e: &serde_json::Error) -> String {
+    let msg = e.to_string();
+    match msg.split_once(" at line ") {
+        Some((body, _)) => body.to_string(),
+        None => msg,
+    }
+}
+
+/// 工具执行后的内部结果
 #[derive(Debug, Clone)]
 pub struct ToolResult {
     pub output: String,
@@ -41,12 +49,11 @@ impl ToolResult {
         ToolResultBlock {
             tool_use_id: tool_use_id.to_string(),
             is_error: self.is_error,
-            output: self.output,
+            content: self.output,
         }
     }
 }
 
-/// 工具作者看到的 trait —— execute 收到的是强类型的 Self::Input。
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     /// 每个工具关联自己的输入参数结构体（需派生 JsonSchema + Deserialize）
@@ -83,13 +90,15 @@ impl RegisteredTool {
         > = Box::new(move |input: HashMap<String, Value>| {
             let tool = Arc::clone(&tool);
             Box::pin(async move {
-                let value = match serde_json::to_value(&input) {
-                    Ok(v) => v,
-                    Err(e) => return ToolResult::error(format!("Serialize input failed: {e}")),
-                };
+                let value = Value::Object(input.into_iter().collect());
                 let input: T::Input = match serde_json::from_value(value) {
                     Ok(i) => i,
-                    Err(e) => return ToolResult::error(format!("Deserialize input failed: {e}")),
+                    Err(e) => {
+                        return ToolResult::error(format!(
+                            "Invalid tool input: {}",
+                            clean_json_error(&e)
+                        ));
+                    }
                 };
                 tool.execute(input).await
             })
@@ -102,6 +111,15 @@ impl RegisteredTool {
         }
     }
 
+    /// 返回工具定义（名称、描述、输入 schema），供 LLM API 注册使用。
+    pub fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+        }
+    }
+
     pub async fn execute(&self, input: HashMap<String, Value>) -> ToolResult {
         (self.executor)(input).await
     }
@@ -111,6 +129,14 @@ impl RegisteredTool {
 #[derive(Default)]
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+}
+
+impl std::fmt::Debug for ToolRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRegistry")
+            .field("tools", &self.tools.keys())
+            .finish()
+    }
 }
 
 impl ToolRegistry {
@@ -129,8 +155,17 @@ impl ToolRegistry {
         self.tools.get(name)
     }
 
-    /// 返回所有工具定义（供 LLM API 使用）
-    pub fn definitions(&self) -> Vec<&RegisteredTool> {
-        self.tools.values().collect()
+    /// 返回所有已注册工具的 `ToolDefinition` 列表（供 LLM API 注册使用）
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.values().map(|t| t.definition()).collect()
     }
+}
+
+/// 创建默认的工具注册表，注册所有内置工具。
+///
+/// 当需要集成所有 tools/ 中定义的工具时，调用此函数即可。
+pub fn create_default_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(bash_tool::BashTool);
+    registry
 }
