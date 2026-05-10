@@ -1,5 +1,7 @@
 pub mod api;
+pub mod command;
 pub mod config;
+pub mod db;
 pub mod engine;
 pub mod runtime;
 pub mod tools;
