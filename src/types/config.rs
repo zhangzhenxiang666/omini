@@ -1,3 +1,4 @@
+use crate::db::DbError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -53,10 +54,10 @@ pub struct Settings {
     pub max_turns: Option<usize>,
 
     pub cwd: PathBuf,
+    pub thinking_effort: Option<ThinkingEffort>,
 }
 
-// ── 配置错误 ──────────────────────────────────────────────────
-
+// 配置错误
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("no providers configured")]
@@ -81,4 +82,6 @@ pub enum ConfigError {
     TomlSer(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("database error: {0}")]
+    Db(#[from] DbError),
 }

@@ -1,5 +1,6 @@
 use crate::config::settings::UserConfig;
 use crate::types::config::ConfigError;
+use crate::types::config::ThinkingEffort;
 use crate::types::message::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -7,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// 将项目路径转义为安全的目录名：`/`、`_`、空格 → `-`
-fn sanitize(path: &Path) -> String {
+pub fn sanitize(path: &Path) -> String {
     path.to_string_lossy().replace(['/', '_', ' '], "-")
 }
 
@@ -54,6 +55,7 @@ impl ProjectsDir {
             project.save_state(&ProjectState {
                 default_provider,
                 default_model,
+                thinking_effort: None,
                 created_at: now,
                 accessed_at: now,
             })?;
@@ -111,6 +113,7 @@ impl ProjectDir {
             return Ok(ProjectState {
                 default_provider: None,
                 default_model: None,
+                thinking_effort: None,
                 created_at: now,
                 accessed_at: now,
             });
@@ -157,6 +160,7 @@ impl ProjectDir {
 }
 
 /// `~/.omini/projects/<path>/sessions/<id>/` 目录操作句柄。
+#[derive(Debug, Clone)]
 pub struct SessionDir {
     path: PathBuf,
 }
@@ -167,31 +171,9 @@ impl SessionDir {
         &self.path
     }
 
-    /// 返回 `state.toml` 路径。
-    pub fn state_path(&self) -> PathBuf {
-        self.path.join("state.toml")
-    }
-
     /// 返回 `history.jsonl` 路径。
     pub fn history_path(&self) -> PathBuf {
         self.path.join("history.jsonl")
-    }
-
-    /// 加载会话级状态。文件不存在时返回默认值。
-    pub fn load_state(&self) -> Result<SessionState, ConfigError> {
-        let path = self.state_path();
-        if !path.exists() {
-            return Ok(SessionState::default());
-        }
-        let content = fs::read_to_string(path)?;
-        Ok(toml::from_str(&content)?)
-    }
-
-    /// 保存会话级状态。
-    pub fn save_state(&self, state: &SessionState) -> Result<(), ConfigError> {
-        let content = toml::to_string(state)?;
-        fs::write(self.state_path(), content)?;
-        Ok(())
     }
 
     /// 追加一条 Message 到 `history.jsonl`。
@@ -231,14 +213,10 @@ pub struct ProjectState {
     pub default_provider: Option<String>,
     /// 当前默认的模型
     pub default_model: Option<String>,
+    /// 当前选择的思考程度（项目级默认）
+    pub thinking_effort: Option<ThinkingEffort>,
     /// 项目创建时间
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// 最近一次访问时间（每次启动刷新）
     pub accessed_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SessionState {
-    pub provider: Option<String>,
-    pub model: Option<String>,
 }

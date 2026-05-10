@@ -1,11 +1,10 @@
+pub use crate::types::config::{
+    ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-
-pub use crate::types::config::{
-    ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
-};
 
 /// 用户配置文件顶层结构，对应 ~/.omini/config.toml
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +50,7 @@ impl UserConfig {
         &self,
         active_provider: Option<&str>,
         active_model: Option<&str>,
+        thinking_effort: Option<ThinkingEffort>,
     ) -> Result<Settings, ConfigError> {
         // 确定活跃 provider：优先取传入的，否则取第一个
         let active_name = active_provider
@@ -111,6 +111,7 @@ impl UserConfig {
             system_prompt: None,
             max_turns: None,
             cwd: std::env::current_dir()?,
+            thinking_effort,
         })
     }
 
@@ -160,6 +161,11 @@ impl OminiRoot {
     /// 返回 `~/.omini/config.toml` 路径。
     pub fn config_path(&self) -> PathBuf {
         self.path.join("config.toml")
+    }
+
+    /// 返回 `~/.omini/omini.db` 路径。
+    pub fn db_path(&self) -> PathBuf {
+        self.path.join("omini.db")
     }
 
     /// 加载并解析 `~/.omini/config.toml`，返回 `UserConfig`。

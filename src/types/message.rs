@@ -25,7 +25,7 @@ pub struct ToolUseBlock {
 pub struct ToolResultBlock {
     pub tool_use_id: String,
     pub is_error: bool,
-    pub output: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -65,7 +65,7 @@ impl ContentBlock {
         Self::ToolResult(ToolResultBlock {
             tool_use_id,
             is_error,
-            output,
+            content: output,
         })
     }
 
