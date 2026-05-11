@@ -452,17 +452,12 @@ pub enum InteractionStep {
         entries: Vec<ModelSelectionEntry>,
         /// 当前选中索引，只指向 Model 条目
         selected: usize,
-    },
-    /// 思考程度选择（模型支持 thinking 时弹出）
-    ThinkingEffort {
-        provider_key: String,
-        model: ModelConfig,
-        /// 保存模型选择页的条目，用于 Esc 返回
-        entries: Vec<ModelSelectionEntry>,
-        /// 返回模型选择页时恢复的选中索引
-        prev_selected: usize,
-        /// 当前选中的思考程度索引：0=None 1=Low 2=Medium 3=High
-        selected: usize,
+        /// 当前思考程度：0=None 1=Low 2=Medium 3=High
+        thinking_idx: usize,
+        /// 打开面板时正在使用的 provider key（用于标记 ✔）
+        active_provider: String,
+        /// 打开面板时正在使用的 model id
+        active_model: String,
     },
     /// 会话选择
     Session {

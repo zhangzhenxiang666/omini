@@ -1,4 +1,4 @@
-use crate::tui::state::{InteractionStep, ModelSelectionEntry, UiState};
+use crate::tui::state::{AgentStatus, InteractionStep, ModelSelectionEntry, UiState};
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, render_tool,
 };
@@ -9,12 +9,18 @@ use chrono::Utc;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Clear, Paragraph};
 use std::collections::{HashMap, HashSet};
+use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
+    // 整体背景色 #282c34
+    frame.render_widget(
+        Paragraph::new(Line::from("")).style(Style::default().bg(Color::Rgb(40, 44, 52))),
+        area,
+    );
 
     // 会话列表：全屏模式（替换整个界面）
     if let Some(InteractionStep::Session { .. }) = &state.interaction_step {
@@ -24,20 +30,22 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
     .split(area);
-    state.messages_area = chunks[2];
+    state.messages_area = chunks[1];
 
-    render_header(state, frame, chunks[0]);
-    render_messages(state, frame, chunks[2]);
-    render_autocomplete(state, frame, chunks[4]);
-    render_input(state, frame, chunks[4]);
-    render_footer(state, frame, chunks[5]);
+    render_messages(state, frame, chunks[1]);
+    render_autocomplete(state, frame, chunks[3]);
+    render_footer(state, frame, chunks[4]);
+
+    // Draw input box only when no modal interaction is active (prevents cursor showing through overlay)
+    if state.interaction_step.is_none() {
+        render_input(state, frame, chunks[3]);
+    }
 
     // 模型选择等弹窗：覆盖在正常布局之上（不遮盖消息区背景）
     if state.interaction_request.is_some() {
@@ -80,37 +88,44 @@ fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: 
     // ┃ + 2spaces + 内容 + 2spaces + ┃
     let content_width = popup_width.saturating_sub(4) as usize;
 
-    let lines: Vec<Line> = state
-        .autocomplete
-        .filtered
-        .iter()
-        .enumerate()
-        .map(|(i, cmd)| {
-            let is_sel = i == state.autocomplete.selected;
-            let row_bg = if is_sel { sel_bg } else { input_bg };
-            let row_fg = idle_fg;
+    let lines: Vec<Line> = {
+        let cmds: Vec<_> = state.autocomplete.filtered.iter().collect();
+        let max_name_width = cmds
+            .iter()
+            .map(|cmd| format!("/{}", cmd.name).chars().count())
+            .max()
+            .unwrap_or(0);
+        cmds.into_iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let is_sel = i == state.autocomplete.selected;
+                let row_bg = if is_sel { sel_bg } else { input_bg };
+                let row_fg = idle_fg;
 
-            let text = format!("/{}  {}", cmd.name, cmd.description);
-            let text_w = UnicodeWidthStr::width(&text[..]);
-            let pad = content_width.saturating_sub(text_w);
+                let left = format!("/{}", cmd.name);
+                let padding = " ".repeat(max_name_width.saturating_sub(left.chars().count()));
+                let text = format!("{}{}  {}", left, padding, cmd.description);
+                let text_w = UnicodeWidthStr::width(&text[..]);
+                let pad = content_width.saturating_sub(text_w);
 
-            // 边框 ┃ 不设 bg，透出 input_bg；内容区用 row_bg（选中时高亮）
-            let content_style = Style::default().fg(row_fg).bg(row_bg);
-            let border_style = Style::default().fg(border_clr);
+                // 边框 ┃ 不设 bg，透出 input_bg；内容区用 row_bg（选中时高亮）
+                let content_style = Style::default().fg(row_fg).bg(row_bg);
+                let border_style = Style::default().fg(border_clr);
 
-            let mut spans = vec![
-                Span::styled("\u{2503}", border_style),
-                Span::styled(text, content_style),
-            ];
-            if pad > 0 {
-                spans.push(Span::styled(" ".repeat(pad), content_style));
-            }
-            spans.push(Span::styled("  ", content_style));
-            spans.push(Span::styled("\u{2503}", border_style));
+                let mut spans = vec![
+                    Span::styled("\u{2503}", border_style),
+                    Span::styled(text, content_style),
+                ];
+                if pad > 0 {
+                    spans.push(Span::styled(" ".repeat(pad), content_style));
+                }
+                spans.push(Span::styled("  ", content_style));
+                spans.push(Span::styled("\u{2503}", border_style));
 
-            Line::from(spans)
-        })
-        .collect();
+                Line::from(spans)
+            })
+            .collect()
+    };
 
     frame.render_widget(Paragraph::new(ratatui::text::Text::from(lines)), popup_area);
 }
@@ -120,184 +135,291 @@ fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: 
 // ===========================================================================
 
 fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
-    // 弹窗大小：按终端百分比，但有上限
-    let pct_w = (area.width as f32 * 0.6) as u16;
-    let pct_h = (area.height as f32 * 0.55) as u16;
-    let popup_width = pct_w.clamp(40, 80);
-    let popup_height = pct_h.clamp(12, 28);
-    let popup_area = Rect {
-        x: area.x + (area.width - popup_width) / 2,
-        y: area.y + (area.height - popup_height) / 2,
-        width: popup_width,
-        height: popup_height,
+    // ThinkingEffort is now inlined inside ModelSelection
+    let Some(InteractionStep::ModelSelection {
+        entries,
+        selected,
+        thinking_idx,
+        active_provider,
+        active_model,
+    }) = &state.interaction_step
+    else {
+        return;
     };
 
-    frame.render_widget(Clear, popup_area);
+    // Panel height
+    let has_thinking = entries
+        .get(*selected)
+        .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
+    // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
+    let extra: u16 = if has_thinking { 6 } else { 4 };
+    let panel_height = ((entries.len() as u16) + extra)
+        .clamp(5, 22)
+        .min(area.height.saturating_sub(4).max(1));
 
-    // 弹窗背景
-    let bg = Color::Rgb(35, 38, 50);
+    let panel_area = Rect {
+        x: area.x,
+        y: area.y + area.height - panel_height,
+        width: area.width,
+        height: panel_height,
+    };
+
+    // Clear only — no background color
+    frame.render_widget(Clear, panel_area);
+
+    // ── Header: title + subtitle + thick divider ──
+    let accent = Color::Rgb(135, 135, 255);
+
+    // Line 0: thick divider above the panel (━ characters, accent color)
+    let divider_line = Line::from(Span::styled(
+        "━".repeat(panel_area.width.saturating_sub(1) as usize),
+        Style::default().fg(accent),
+    ));
+
     frame.render_widget(
-        Paragraph::new("").style(Style::default().bg(bg)),
-        popup_area,
+        Paragraph::new(divider_line),
+        Rect {
+            x: panel_area.x,
+            y: panel_area.y.saturating_sub(1),
+            width: panel_area.width,
+            height: 1,
+        },
     );
 
-    let is_thinking = matches!(
-        &state.interaction_step,
-        Some(InteractionStep::ThinkingEffort { .. })
+    // Line 1: "Select model" in accent color, bold
+    let title_line = Line::from(Span::styled(
+        " Select model",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    ));
+
+    frame.render_widget(
+        Paragraph::new(title_line),
+        Rect {
+            x: panel_area.x,
+            y: panel_area.y + 1,
+            width: panel_area.width,
+            height: 1,
+        },
     );
 
-    // 内部分栏
-    let (list_area, hint_area) = if is_thinking {
-        // 思考程度：垂直居中（4 行选项）
-        let chunks = Layout::vertical([
-            Constraint::Fill(1),
-            Constraint::Length(4),
-            Constraint::Fill(1),
-            Constraint::Length(1),
-        ])
-        .split(popup_area);
-        (chunks[1], chunks[3])
-    } else {
-        let chunks =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(popup_area);
-        (chunks[0], chunks[1])
-    };
+    // Line 2: Chinese subtitle in gray
+    let subtitle_line = Line::from(Span::styled(
+        " 切换模型，适用于当前会话和未来会话。",
+        Style::default().fg(Color::Rgb(140, 145, 155)),
+    ));
 
-    let items: Vec<ListItem> = match &state.interaction_step {
-        Some(InteractionStep::ThinkingEffort { .. }) => Vec::new(),
-        Some(InteractionStep::ModelSelection { entries, selected }) => {
-            entries
-                .iter()
-                .enumerate()
-                .map(|(i, entry)| {
-                    match entry {
-                        ModelSelectionEntry::ProviderHeader { name } => {
-                            // Provider 标题行：亮色加粗
-                            let header_style = Style::default()
-                                .fg(Color::Rgb(255, 180, 80))
-                                .add_modifier(Modifier::BOLD);
-                            ListItem::new(name.clone()).style(header_style)
-                        }
-                        ModelSelectionEntry::Model { model, .. } => {
-                            let is_sel = i == *selected;
-                            let style = if is_sel {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(Color::Rgb(100, 180, 255))
-                            } else {
-                                Style::default().fg(Color::Rgb(200, 200, 210))
-                            };
-                            let display = model.name.as_deref().unwrap_or(&model.id);
-                            ListItem::new(display.to_string()).style(style)
-                        }
-                    }
-                })
-                .collect()
-        }
-        Some(InteractionStep::Session {
-            sessions, selected, ..
-        }) => sessions
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let prefix = if i == *selected { "▸ " } else { "  " };
-                let style = if i == *selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Rgb(100, 180, 255))
-                } else {
-                    Style::default()
-                };
-                let title_display = if s.title.is_empty() {
-                    &s.id[..8]
-                } else {
-                    &s.title
-                };
-                let short_id = &s.id[..8];
-                ListItem::new(format!(
-                    "{}{}  ({} msgs, {})",
-                    prefix, title_display, s.message_count, short_id
-                ))
-                .style(style)
-            })
-            .collect(),
-        None => Vec::new(),
-    };
-
-    if let Some(InteractionStep::ThinkingEffort { selected, .. }) = &state.interaction_step {
-        let options = ["None", "Low", "Medium", "High"];
-        let labels = ["不使用思考", "轻度思考", "适度思考", "深度思考"];
-        let label_max = options.iter().map(|s| s.len()).max().unwrap_or(6);
-        let lines: Vec<Line> = options
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                let style = if i == *selected {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Rgb(100, 180, 255))
-                } else {
-                    Style::default().fg(Color::Rgb(200, 200, 210))
-                };
-                let padded = format!("{:<width$}", label, width = label_max);
-                Line::from(Span::styled(
-                    format!(" {}  ·  {} ", padded, labels[i]),
-                    style,
-                ))
-            })
-            .collect();
-        // 计算最长行的显示宽度
-        let content_width = options
-            .iter()
-            .enumerate()
-            .map(|(i, label)| {
-                let padded = format!("{:<width$}", label, width = label_max);
-                unicode_width::UnicodeWidthStr::width(
-                    format!(" {}  ·  {} ", padded, labels[i]).as_str(),
-                )
-            })
-            .max()
-            .unwrap_or(20) as u16;
-        // 水平居中内容
-        let h_chunks = Layout::horizontal([
-            Constraint::Fill(1),
-            Constraint::Length(content_width),
-            Constraint::Fill(1),
-        ])
-        .split(list_area);
-        let content_area = h_chunks[1];
-        let paragraph = Paragraph::new(Text::from(lines)).style(Style::default().bg(bg));
-        frame.render_widget(paragraph, content_area);
-    } else {
-        // 列表（无边框）
-        let list = List::new(items).style(Style::default().bg(bg));
-        frame.render_widget(list, list_area);
-    }
-
-    // 帮助提示（在弹窗底部内部）
-    let hint_text = match state.interaction_step {
-        Some(InteractionStep::ModelSelection { .. }) => {
-            " 选择模型  ·  ↑↓ 选择  Enter 确认  Esc 取消 "
-        }
-        Some(InteractionStep::ThinkingEffort { .. }) => {
-            " 思考程度  ·  ↑↓ 选择  Enter 确认  Esc 返回 "
-        }
-        Some(InteractionStep::Session { .. }) => " ↑↓ 选择  Enter 确认  Esc 取消 ",
-        None => "",
-    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            hint_text,
-            Style::default().fg(Color::Rgb(140, 145, 155)),
-        )))
-        .style(Style::default().bg(bg)),
-        hint_area,
+        Paragraph::new(subtitle_line),
+        Rect {
+            x: panel_area.x,
+            y: panel_area.y + 2,
+            width: panel_area.width,
+            height: 1,
+        },
+    );
+
+    // Content area below divider
+    let content_area = Rect {
+        x: panel_area.x,
+        y: panel_area.y + 3,
+        width: panel_area.width,
+        height: panel_area.height - 3,
+    };
+
+    render_model_panel(
+        frame,
+        content_area,
+        entries,
+        *selected,
+        *thinking_idx,
+        active_provider,
+        active_model,
     );
 }
 
-// ===========================================================================
-// 会话列表（全屏模式）
-// ===========================================================================
+fn render_model_panel(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    entries: &[ModelSelectionEntry],
+    selected: usize,
+    thinking_idx: usize,
+    active_provider: &str,
+    active_model: &str,
+) {
+    let has_thinking = entries
+        .get(selected)
+        .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
+
+    // Layout: entries list + [thinking row] + hint
+    let hint_h: u16 = 1;
+    let thinking_h: u16 = if has_thinking { 1 } else { 0 };
+    let gap_h: u16 = if has_thinking { 1 } else { 0 };
+    let list_h = area.height.saturating_sub(hint_h + thinking_h + gap_h);
+
+    let list_area = Rect {
+        x: area.x,
+        y: area.y,
+        width: area.width,
+        height: list_h,
+    };
+    let thinking_y = area.y + list_h + gap_h;
+    let hint_y = area.y + area.height - 1;
+
+    // Render model entries
+    let mut lines: Vec<Line> = Vec::new();
+    let mut model_num: usize = 0;
+
+    for (i, entry) in entries.iter().enumerate() {
+        if lines.len() >= list_h as usize {
+            break;
+        }
+        match entry {
+            ModelSelectionEntry::ProviderHeader { name } => {
+                lines.push(Line::from(Span::styled(
+                    format!("  {}", name),
+                    Style::default()
+                        .fg(Color::Rgb(140, 145, 155))
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+            ModelSelectionEntry::Model {
+                provider_key,
+                model,
+            } => {
+                model_num += 1;
+                let is_sel = i == selected;
+                let display = model.name.as_deref().unwrap_or(&model.id);
+
+                // Build description from model config
+                let mut desc_parts = Vec::new();
+                let limit_k = model.limit / 1000;
+                if limit_k > 0 {
+                    desc_parts.push(format!("{}K context", limit_k));
+                }
+                if model.thinking {
+                    desc_parts.push("thinking".to_string());
+                }
+                let desc = desc_parts.join(" · ");
+
+                // Checkmark for non-standard providers (custom models)
+                let is_active = provider_key == active_provider && model.id == active_model;
+                let checkmark = if is_active { " ✔" } else { "" };
+
+                let number_str = format!("{}.", model_num);
+
+                let selected_color = Color::Rgb(135, 135, 255);
+                let active_color = Color::Rgb(126, 158, 126);
+
+                if is_sel {
+                    let mut spans = vec![
+                        Span::styled(" ❯ ", Style::default().fg(selected_color)),
+                        Span::styled(
+                            format!(" {} {}{}", number_str, display, checkmark),
+                            Style::default()
+                                .fg(selected_color)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ];
+                    if !desc.is_empty() {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(desc, Style::default().fg(selected_color)));
+                    }
+                    lines.push(Line::from(spans));
+                } else {
+                    let fg_color = if is_active {
+                        active_color
+                    } else {
+                        Color::Rgb(165, 172, 182)
+                    };
+                    let style = Style::default().fg(fg_color);
+                    let name_style = if is_active {
+                        Style::default()
+                            .fg(active_color)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        style
+                    };
+                    let mut spans = vec![
+                        Span::styled("   ", style),
+                        Span::styled(
+                            format!(" {} {}{}", number_str, display, checkmark),
+                            name_style,
+                        ),
+                    ];
+                    if !desc.is_empty() {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(desc, Style::default().fg(fg_color)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+        }
+    }
+
+    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
+
+    // Thinking effort row
+    if has_thinking {
+        const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉"];
+        const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High"];
+        const EFFORT_COLORS: &[Color] = &[
+            Color::Rgb(140, 145, 155),
+            Color::Rgb(190, 170, 140),
+            Color::Rgb(220, 185, 145),
+            Color::Rgb(255, 200, 120),
+        ];
+        let ti = thinking_idx.min(EFFORT_ICONS.len() - 1);
+        let icon = EFFORT_ICONS[ti];
+        let label = EFFORT_LABELS[ti];
+        let color = EFFORT_COLORS[ti];
+
+        let thinking_style = Style::default().fg(color).add_modifier(if ti > 0 {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+
+        let thinking_line = Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{} {} effort", icon, label), thinking_style),
+            Span::raw("   "),
+            Span::styled(
+                "← → to adjust",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+        ]);
+
+        frame.render_widget(
+            Paragraph::new(thinking_line),
+            Rect {
+                x: area.x,
+                y: thinking_y,
+                width: area.width,
+                height: 1,
+            },
+        );
+    }
+
+    // Hint
+    let hint_text = if has_thinking {
+        "  ↑↓ select  ·  ←→ effort  ·  Enter confirm  ·  Esc cancel"
+    } else {
+        "  ↑↓ select  ·  Enter confirm  ·  Esc cancel"
+    };
+    let hint = Line::from(Span::styled(
+        hint_text,
+        Style::default().fg(Color::Rgb(140, 145, 155)),
+    ));
+    frame.render_widget(
+        Paragraph::new(hint),
+        Rect {
+            x: area.x,
+            y: hint_y,
+            width: area.width,
+            height: 1,
+        },
+    );
+}
 
 fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     let Some(InteractionStep::Session {
@@ -437,7 +559,7 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
 
         let prefix = if is_selected { "❯ " } else { "  " };
         let time_str = relative_time(session.created_at);
-        let msg = truncate_str(&session.first_message, max_msg_w);
+        let msg = truncate_str(&session.title, max_msg_w);
         let line_content = format!("{}{}  {}", prefix, time_str, msg);
         let padded = format!("{:<width$}", line_content, width = content_w);
 
@@ -538,27 +660,8 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 }
 
 // ===========================================================================
-// Header, Messages, Input, Footer (原逻辑不变)
+// Messages, Input, Footer (原逻辑不变)
 // ===========================================================================
-
-fn render_header(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled(" omini ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("v0.1.0", Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6))),
-        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            if let Some(title) = &state.current_session_title {
-                title.as_str()
-            } else {
-                "No session"
-            },
-            Style::default().fg(Color::Rgb(0xf6, 0xe2, 0xb7)),
-        ),
-    ]);
-
-    let paragraph = Paragraph::new(line).style(Style::default().fg(Color::White));
-    frame.render_widget(paragraph, area);
-}
 
 fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     if state.messages.is_empty() && state.pending_assistant.is_none() {
@@ -687,6 +790,78 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
         }
     }
 
+    // ===== 渲染 pending_assistant（流式增量内容） =====
+    if let Some(pending) = &state.pending_assistant {
+        // 先构建 pending_assistant 内部的 tool_result_map
+        let mut tr_indices: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        for (bi, block) in pending.content.iter().enumerate() {
+            if let ContentBlock::ToolResult(tr) = block {
+                tr_indices.entry(tr.tool_use_id.clone()).or_insert(bi);
+            }
+        }
+        let mut consumed_tr: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for (block_idx, block) in pending.content.iter().enumerate() {
+            if let ContentBlock::ToolResult(_) = block
+                && consumed_tr.contains(&block_idx)
+            {
+                continue;
+            }
+
+            let mut block_lines: Vec<Line> = Vec::new();
+            let mut block_tool_id: Option<String> = None;
+
+            match block {
+                ContentBlock::Text(tb) => {
+                    let mut lines = build_plain_lines(&tb.text, content_width);
+                    block_lines.append(&mut lines);
+                }
+                ContentBlock::Thinking(tb) => {
+                    let mut lines = build_thinking_lines(&tb.thinking, content_width);
+                    block_lines.append(&mut lines);
+                }
+                ContentBlock::ToolUse(tu) => {
+                    // 检查是否有对应的 ToolResult
+                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                            consumed_tr.insert(bi);
+                            Some(tr.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    let tool_lines = render_tool(tu, tr.as_ref(), content_width, false);
+                    block_lines.extend(tool_lines);
+                    block_tool_id = Some(tu.id.clone());
+                }
+                ContentBlock::ToolResult(tr) => {
+                    // 如果没有对应的 ToolUse 来消费它，单独渲染
+                    let color = if tr.is_error {
+                        Color::Rgb(255, 100, 100)
+                    } else {
+                        Color::Rgb(100, 200, 130)
+                    };
+                    let mut lines =
+                        build_bordered_lines(&tr.content, content_width, color, false, None);
+                    block_lines.append(&mut lines);
+                }
+            }
+
+            if !block_lines.is_empty() {
+                if !all_lines.is_empty() {
+                    all_lines.push(Line::from(""));
+                }
+                let base = all_lines.len();
+                let block_len = block_lines.len();
+                if let Some(tool_id) = block_tool_id.take() {
+                    state.block_ranges.push((base..base + block_len, tool_id));
+                }
+                all_lines.append(&mut block_lines);
+            }
+        }
+    }
+
     let total_lines = all_lines.len();
     let prev_total_lines = state.total_lines;
     state.total_lines = total_lines;
@@ -731,16 +906,60 @@ fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     .style(bg);
     frame.render_widget(line_bg, input_line);
 
+    let prefix_style = Style::default().fg(Color::Rgb(0xab, 0xab, 0xab));
+    let cmd_color = Style::default().fg(Color::Rgb(0x7c, 0x5c, 0xf6));
+    let placeholder_style = Style::default().fg(Color::DarkGray);
+
     let content = if state.input.is_empty() {
         Line::from(vec![
-            Span::styled("❯ ", Style::default().fg(Color::Cyan)),
-            Span::styled("Type a message...", Style::default().fg(Color::DarkGray)),
+            Span::styled("\u{276f} ", prefix_style),
+            Span::styled("Type a message...", placeholder_style),
         ])
     } else {
-        Line::from(vec![
-            Span::styled("❯ ", Style::default().fg(Color::Cyan)),
-            Span::raw(&state.input),
-        ])
+        let input = &state.input;
+        let command_matched = input
+            .starts_with('/')
+            .then(|| {
+                let cmd_raw = if let Some(space_pos) = input.find(' ') {
+                    &input[1..space_pos]
+                } else {
+                    &input[1..]
+                };
+                state
+                    .autocomplete
+                    .all_commands
+                    .iter()
+                    .find(|c| c.name == cmd_raw || c.aliases.iter().any(|a| a == cmd_raw))
+            })
+            .flatten();
+
+        if let Some(cmd) = command_matched {
+            let after_cmd = if let Some(space_pos) = input.find(' ') {
+                &input[space_pos..]
+            } else {
+                ""
+            };
+            let mut spans = vec![
+                Span::styled("\u{276f} ", prefix_style),
+                Span::styled(format!("/{}", cmd.name), cmd_color),
+            ];
+            if !after_cmd.is_empty() {
+                spans.push(Span::raw(after_cmd));
+                // 有参数的命令：输入空格后显示 <args_description> 占位提示
+                if cmd.has_args
+                    && after_cmd == " "
+                    && let Some(ref desc) = cmd.args_description
+                {
+                    spans.push(Span::styled(format!("<{}>", desc), placeholder_style));
+                }
+            }
+            Line::from(spans)
+        } else {
+            Line::from(vec![
+                Span::styled("\u{276f} ", prefix_style),
+                Span::raw(input),
+            ])
+        }
     };
     let paragraph = Paragraph::new(content);
     frame.render_widget(paragraph, input_line);
@@ -753,6 +972,53 @@ fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
         input_line.x + 2 + prefix_width as u16
     };
     frame.set_cursor_position((cursor_x, input_line.y));
+}
+
+fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n == 0 {
+        return vec![];
+    }
+
+    // 基于时间计算波位置：每 ~2s 循环一次
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as f64;
+    const CYCLE_MS: f64 = 1200.0;
+    let phase = (ms % CYCLE_MS) / CYCLE_MS; // 0.0 → 1.0
+    let wave_pos = phase * n as f64; // 0 → n
+
+    // 亮色（基色 #c8a9ee）
+    const BR: u8 = 200;
+    const BG: u8 = 169;
+    const BB: u8 = 238;
+    // 暗色（灰紫色）
+    const DR: u8 = 55;
+    const DG: u8 = 47;
+    const DB: u8 = 65;
+
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            // 字符 i 到波峰的有向距离（绕环处理）
+            let diff = ((i as f64 - wave_pos + n as f64) % n as f64) - n as f64 / 2.0;
+            let normalized = diff / (n as f64 / 2.0); // -1 … 1
+            // 余弦钟形：中心 1.0，边缘 0.0
+            let bell = (normalized * std::f64::consts::PI).cos().max(0.0);
+            // 保证最暗也有微弱可见度
+            let dim_min = 0.08;
+            let brightness = dim_min + (1.0 - dim_min) * bell;
+
+            let r = (DR as f64 + (BR as f64 - DR as f64) * brightness) as u8;
+            let g = (DG as f64 + (BG as f64 - DG as f64) * brightness) as u8;
+            let b = (DB as f64 + (BB as f64 - DB as f64) * brightness) as u8;
+
+            Span::styled(c.to_string(), Style::default().fg(Color::Rgb(r, g, b)))
+        })
+        .collect()
 }
 
 fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
@@ -778,13 +1044,13 @@ fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     };
 
     let model_thinking = match state.status_bar.thinking_effort {
-        Some(ThinkingEffort::Low) => format!("{} low", model_part),
-        Some(ThinkingEffort::Medium) => format!("{} medium", model_part),
-        Some(ThinkingEffort::High) => format!("{} high", model_part),
+        Some(ThinkingEffort::Low) => format!("{}  low", model_part),
+        Some(ThinkingEffort::Medium) => format!("{}  medium", model_part),
+        Some(ThinkingEffort::High) => format!("{}  high", model_part),
         _ => model_part,
     };
 
-    let line = Line::from(vec![
+    let mut base_spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         Span::styled(
             format!(" {} ", model_thinking),
@@ -796,11 +1062,24 @@ fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
             Style::default().fg(Color::Rgb(0xab, 0xdf, 0xa7)),
         ),
         Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!(" {} ", state.agent_status),
-            Style::default().fg(Color::Rgb(0xc8, 0xa9, 0xee)),
-        ),
-    ]);
+    ];
+
+    let line = match &state.agent_status {
+        AgentStatus::Thinking | AgentStatus::Working => {
+            let mut spans = base_spans;
+            spans.push(Span::raw(" "));
+            spans.extend(animated_status_spans(&state.agent_status.to_string()));
+            spans.push(Span::raw(" "));
+            Line::from(spans)
+        }
+        _ => {
+            base_spans.push(Span::styled(
+                format!(" {} ", state.agent_status),
+                Style::default().fg(Color::Rgb(0xc8, 0xa9, 0xee)),
+            ));
+            Line::from(base_spans)
+        }
+    };
 
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);

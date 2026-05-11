@@ -283,7 +283,7 @@ impl AgentRuntime {
         .await;
 
         self.send_event(RuntimeEvent::SessionChanged {
-            session_id: session_id.to_string(),
+            session_id: Some(session_id.to_string()),
             messages: ui_messages,
         })
         .await;
@@ -357,32 +357,15 @@ impl AgentRuntime {
         let blocks_dir = session_dir.path().join("blocks");
 
         tokio::spawn(async move {
-            let mut turn_index: i64 = 0;
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
                     EngineEvent::MessageProduced(msg) => {
-                        persist_one(
-                            &session_dir,
-                            &session_id,
-                            &blocks_dir,
-                            &msg,
-                            "assistant",
-                            turn_index,
-                        )
-                        .await;
+                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "assistant")
+                            .await;
                     }
                     EngineEvent::ToolResultsProduced(msg) => {
-                        persist_one(
-                            &session_dir,
-                            &session_id,
-                            &blocks_dir,
-                            &msg,
-                            "user",
-                            turn_index,
-                        )
-                        .await;
-                        turn_index += 1;
+                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "user").await;
                     }
                     // ===== 透传事件 =====
                     EngineEvent::TurnStarted => {
@@ -477,7 +460,7 @@ impl AgentRuntime {
         self.send_event(RuntimeEvent::SessionTitleChanged { title: title_out })
             .await;
         self.send_event(RuntimeEvent::SessionChanged {
-            session_id: session_id_out,
+            session_id: Some(session_id_out),
             messages: self.messages.clone(),
         })
         .await;
@@ -499,15 +482,7 @@ impl AgentRuntime {
         let blocks_root = session_dir.path().join("blocks");
         let msg = &self.messages[idx];
 
-        persist_one(
-            session_dir,
-            session_id,
-            &blocks_root,
-            msg,
-            msg_role(msg),
-            idx as i64,
-        )
-        .await;
+        persist_one(session_dir, session_id, &blocks_root, msg, msg_role(msg)).await;
     }
 }
 
@@ -554,7 +529,6 @@ async fn persist_one(
     blocks_dir: &Path,
     msg: &Message,
     role: &str,
-    turn_index: i64,
 ) {
     // JSONL
     let _ = session_dir.append_history(msg);
@@ -565,7 +539,6 @@ async fn persist_one(
         role: role.to_string(),
         blocks: msg.content.clone(),
         kind: "normal".to_string(),
-        turn_index,
         created_at: Utc::now(),
         blocks_dir: blocks_dir.to_path_buf(),
     };

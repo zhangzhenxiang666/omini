@@ -7,10 +7,12 @@ use crate::types::config::ThinkingEffort;
 use crate::types::events::InteractionRequest::*;
 use crate::types::events::{RuntimeEvent, UiRequest};
 use crate::types::message::Message;
+use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
-use crossterm::event::MouseButton;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -31,6 +33,7 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
     enable_raw_mode()?;
     execute!(stderr(), EnterAlternateScreen)?;
     execute!(stderr(), EnableMouseCapture)?;
+    execute!(stderr(), Hide)?;
     Terminal::new(CrosstermBackend::new(stderr()))
 }
 
@@ -56,11 +59,16 @@ async fn handle_interaction_key(
     request_tx: &mpsc::Sender<UiRequest>,
 ) -> bool {
     match step {
-        InteractionStep::ModelSelection { entries, selected } => {
+        InteractionStep::ModelSelection {
+            entries,
+            selected,
+            thinking_idx,
+            ..
+        } => {
             use ModelSelectionEntry as E;
             match key {
                 KeyCode::Up | KeyCode::Char('k') => {
-                    // 向上跳转，跳过 ProviderHeader
+                    // Jump up, skip ProviderHeader
                     let mut new = selected.saturating_sub(1);
                     while new > 0 && matches!(&entries[new], E::ProviderHeader { .. }) {
                         new = new.saturating_sub(1);
@@ -71,7 +79,7 @@ async fn handle_interaction_key(
                     true
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    // 向下跳转，跳过 ProviderHeader
+                    // Jump down, skip ProviderHeader
                     let max = entries.len().saturating_sub(1);
                     let mut new = (*selected + 1).min(max);
                     while new < max && matches!(&entries[new], E::ProviderHeader { .. }) {
@@ -79,6 +87,23 @@ async fn handle_interaction_key(
                     }
                     if !matches!(&entries[new], E::ProviderHeader { .. }) {
                         *selected = new;
+                    }
+                    true
+                }
+                KeyCode::Left | KeyCode::Char('h') => {
+                    // Adjust thinking effort (only if model supports it)
+                    if let E::Model { model, .. } = &entries[*selected]
+                        && model.thinking
+                    {
+                        *thinking_idx = thinking_idx.saturating_sub(1);
+                    }
+                    true
+                }
+                KeyCode::Right | KeyCode::Char('l') => {
+                    if let E::Model { model, .. } = &entries[*selected]
+                        && model.thinking
+                    {
+                        *thinking_idx = (*thinking_idx + 1).min(3);
                     }
                     true
                 }
@@ -90,26 +115,19 @@ async fn handle_interaction_key(
                     {
                         let pkey = provider_key.clone();
                         let model_id = model.id.clone();
-                        if model.thinking {
-                            // 支持思考 → 进入思考程度选择
-                            let saved_entries = entries.clone();
-                            let saved_selected = *selected;
-                            *step = InteractionStep::ThinkingEffort {
-                                provider_key: pkey,
-                                model: model.clone(),
-                                entries: saved_entries,
-                                prev_selected: saved_selected,
-                                selected: 2, // 默认 Medium
-                            };
-                        } else {
-                            let _ = request_tx
-                                .send(UiRequest::ModelSelected {
-                                    provider: pkey,
-                                    model: model_id,
-                                    thinking_effort: None,
-                                })
-                                .await;
-                        }
+                        let te = match *thinking_idx {
+                            1 => Some(crate::types::config::ThinkingEffort::Low),
+                            2 => Some(crate::types::config::ThinkingEffort::Medium),
+                            3 => Some(crate::types::config::ThinkingEffort::High),
+                            _ => None,
+                        };
+                        let _ = request_tx
+                            .send(UiRequest::ModelSelected {
+                                provider: pkey,
+                                model: model_id,
+                                thinking_effort: te,
+                            })
+                            .await;
                     }
                     true
                 }
@@ -117,54 +135,10 @@ async fn handle_interaction_key(
                 _ => true,
             }
         }
-        InteractionStep::ThinkingEffort {
-            provider_key,
-            model,
-            entries,
-            prev_selected,
-            selected,
-        } => match key {
-            KeyCode::Up | KeyCode::Char('k') => {
-                *selected = selected.saturating_sub(1);
-                true
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                *selected = (*selected + 1).min(3);
-                true
-            }
-            KeyCode::Enter => {
-                let te = match *selected {
-                    0 => None,
-                    1 => Some(ThinkingEffort::Low),
-                    2 => Some(ThinkingEffort::Medium),
-                    3 => Some(ThinkingEffort::High),
-                    _ => None,
-                };
-                let _ = request_tx
-                    .send(UiRequest::ModelSelected {
-                        provider: provider_key.clone(),
-                        model: model.id.clone(),
-                        thinking_effort: te,
-                    })
-                    .await;
-                true
-            }
-            KeyCode::Esc => {
-                // 返回模型选择页
-                let saved_entries = std::mem::take(entries);
-                let saved_prev = *prev_selected;
-                *step = InteractionStep::ModelSelection {
-                    entries: saved_entries,
-                    selected: saved_prev,
-                };
-                true
-            }
-            _ => true,
-        },
         InteractionStep::Session {
             sessions,
-            all_sessions: _,
-            search: _,
+            all_sessions,
+            search,
             selected,
         } => match key {
             KeyCode::Up => {
@@ -185,55 +159,29 @@ async fn handle_interaction_key(
                 true
             }
             KeyCode::Char(c) => {
-                use crate::tui::state::InteractionStep as IS;
-                let fields = match step {
-                    IS::Session {
-                        sessions,
-                        all_sessions,
-                        search,
-                        selected,
-                    } => (sessions, all_sessions, search, selected),
-                    _ => unreachable!(),
-                };
-                let (sessions, all_sessions, search, selected) = fields;
                 search.push(c);
                 let lower = search.to_lowercase();
-                *sessions = all_sessions
+                let mut filtered: Vec<_> = all_sessions
                     .iter()
-                    .filter(|s| {
-                        s.first_message.to_lowercase().contains(&lower)
-                            || s.title.to_lowercase().contains(&lower)
-                    })
+                    .filter(|s| s.title.to_lowercase().contains(&lower))
                     .cloned()
                     .collect();
+                std::mem::swap(sessions, &mut filtered);
                 *selected = 0;
                 true
             }
             KeyCode::Backspace => {
-                use crate::tui::state::InteractionStep as IS;
-                let fields = match step {
-                    IS::Session {
-                        sessions,
-                        all_sessions,
-                        search,
-                        selected,
-                    } => (sessions, all_sessions, search, selected),
-                    _ => unreachable!(),
-                };
-                let (sessions, all_sessions, search, selected) = fields;
                 search.pop();
                 let lower = search.to_lowercase();
                 if lower.is_empty() {
                     *sessions = all_sessions.clone();
                 } else {
-                    *sessions = all_sessions
+                    let mut filtered: Vec<_> = all_sessions
                         .iter()
-                        .filter(|s| {
-                            s.first_message.to_lowercase().contains(&lower)
-                                || s.title.to_lowercase().contains(&lower)
-                        })
+                        .filter(|s| s.title.to_lowercase().contains(&lower))
                         .cloned()
                         .collect();
+                    std::mem::swap(sessions, &mut filtered);
                 }
                 *selected = 0;
                 true
@@ -243,7 +191,6 @@ async fn handle_interaction_key(
         },
     }
 }
-
 pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -312,7 +259,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                             continue;
                         }
 
-                        // ── 自动补全模式 ──
+                        // 自动补全模式
                         if state.autocomplete.visible {
                             match key.code {
                                 KeyCode::Enter => {
@@ -386,7 +333,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                             continue;
                         }
 
-                        // ── 普通输入模式 ──
+                        //  普通输入模式
                         let page_amt = 1.max(state.messages_area.height as usize / 2);
                         match (key.code, key.modifiers) {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => break Ok(()),
@@ -485,6 +432,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         ModelSelection { providers, current_provider, current_model } => {
                             let mut entries: Vec<ModelSelectionEntry> = Vec::new();
                             let mut selected = 0;
+                            let default_thinking = match state.status_bar.thinking_effort {
+                                Some(ThinkingEffort::Low) => 1,
+                                Some(ThinkingEffort::Medium) => 2,
+                                Some(ThinkingEffort::High) => 3,
+                                Some(ThinkingEffort::None) | None => 0,
+                            };
                             // 按 provider key 排序
                             let mut sorted: Vec<_> = providers.clone().into_iter().collect();
                             sorted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -504,7 +457,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 }
                             }
                             // 如果没有任何匹配（或列表为空），selected 保持 0（第一个 Model 条目）
-                            Some(InteractionStep::ModelSelection { entries, selected })
+                            Some(InteractionStep::ModelSelection {
+                                entries,
+                                selected,
+                                thinking_idx: default_thinking,
+                                active_provider: current_provider.clone(),
+                                active_model: current_model.clone(),
+                            })
                         }
                         SessionSelection { sessions } => {
                             let mut sorted = sessions.clone();
@@ -525,13 +484,14 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                     break Ok(());
                 }
 
-               // SessionChanged → 清空消息区并关闭交互
-                if let RuntimeEvent::SessionChanged { session_id, messages, .. } = agent_evt {
-                    state.current_session_id = Some(session_id);
+                // SessionChanged → 清空消息区并关闭交互
+                if let RuntimeEvent::SessionChanged { session_id, messages } = agent_evt {
+                    state.current_session_id = session_id;
                     state.messages = messages;
                     state.pending_assistant = None;
                     state.interaction_step = None;
                     state.interaction_request = None;
+                    state.scroll_to_bottom();
                 } else {
                     state.apply_event(agent_evt);
                 }
@@ -545,12 +505,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         shutdown = true;
                         break;
                     }
-                    if let RuntimeEvent::SessionChanged { session_id, messages, .. } = evt {
-                        state.current_session_id = Some(session_id);
+                    if let RuntimeEvent::SessionChanged { session_id, messages } = evt {
+                        state.current_session_id = session_id;
                         state.messages = messages;
                         state.pending_assistant = None;
                         state.interaction_step = None;
                         state.interaction_request = None;
+                        state.scroll_to_bottom();
                     } else {
                         state.apply_event(evt);
                     }

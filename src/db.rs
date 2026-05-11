@@ -102,7 +102,6 @@ pub struct StoredMessage {
     pub role: String,
     pub content: String,
     pub kind: String,
-    pub turn_index: i64,
     pub created_at: DateTime<Utc>,
 }
 
@@ -112,7 +111,6 @@ pub struct NewMessage {
     /// ContentBlock 数组，在 `insert_message` 内部序列化为 JSON 并按需溢出到文件
     pub blocks: Vec<ContentBlock>,
     pub kind: String,
-    pub turn_index: i64,
     pub created_at: DateTime<Utc>,
     /// 用于存储大块的目录（`sessions/<id>/blocks/`），由调用方提供
     pub blocks_dir: std::path::PathBuf,
@@ -185,16 +183,15 @@ impl Database {
                 role            TEXT NOT NULL,
                 content         TEXT NOT NULL,
                 kind            TEXT NOT NULL DEFAULT 'normal',
-                turn_index      INTEGER NOT NULL,
                 created_at      TEXT NOT NULL
             )",
         )
         .execute(&self.pool)
         .await?;
 
+        // New index on (session_id, id) for efficient session message queries
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_messages_session
-            ON messages(session_id, turn_index)",
+            "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id)",
         )
         .execute(&self.pool)
         .await?;
@@ -306,6 +303,18 @@ impl Database {
         Ok(())
     }
 
+    /// 更新会话标题。
+    pub async fn update_session_title(&self, id: &str, title: &str) -> Result<(), DbError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+            .bind(title)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Message CRUD
     // -----------------------------------------------------------------------
@@ -317,14 +326,13 @@ impl Database {
         };
 
         sqlx::query(
-            "INSERT INTO messages (session_id, role, content, kind, turn_index, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO messages (session_id, role, content, kind, created_at)
+            VALUES (?, ?, ?, ?, ?)",
         )
         .bind(&msg.session_id)
         .bind(&msg.role)
         .bind(&blocks_json)
         .bind(&msg.kind)
-        .bind(msg.turn_index)
         .bind(msg.created_at)
         .execute(&self.pool)
         .await?;
@@ -333,7 +341,7 @@ impl Database {
 
     pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, DbError> {
         let rows = sqlx::query_as::<_, StoredMessage>(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY turn_index",
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -344,7 +352,7 @@ impl Database {
     /// 获取指定会话第一条消息的纯文本内容。
     pub async fn get_first_message_text(&self, session_id: &str) -> Result<String, DbError> {
         let row = sqlx::query_as::<_, StoredMessage>(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY turn_index ASC LIMIT 1",
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)

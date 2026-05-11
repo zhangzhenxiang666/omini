@@ -31,7 +31,20 @@ impl Tool for BashTool {
     }
 
     fn description(&self) -> &str {
-        "Execute a shell command and returns its output. The working directory persists between commands, but shell state does not."
+        concat!(
+            "Execute a shell command and return its output.\n",
+            "The working directory persists between commands, but shell state does not.\n",
+            "\n",
+            "Best for: running build tools (cargo, make), git operations, package managers,\n",
+            "running tests, and any command-line tool.\n",
+            "\n",
+            "For file operations, prefer these dedicated tools instead of using shell commands:\n",
+            "  read         Read file contents (with line numbers and offset/limit support)\n",
+            "  apply_patch  Create, edit, or delete files using a structured patch format\n",
+            "\n",
+            "Avoid using cat/head/tail/sed/awk for file reads — use the `read` tool instead.\n",
+            "Avoid using sed/echo/redirect for file edits — use the `apply_patch` tool instead."
+        )
     }
 
     async fn execute(&self, input: BashInput) -> ToolResult {

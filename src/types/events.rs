@@ -94,7 +94,7 @@ pub enum RuntimeEvent {
     },
     /// 会话已切换
     SessionChanged {
-        session_id: String,
+        session_id: Option<String>,
         messages: Vec<Message>,
     },
 
@@ -156,7 +156,6 @@ pub struct SessionSummary {
     pub provider: String,
     pub message_count: i64,
     pub created_at: DateTime<Utc>,
-    pub first_message: String,
 }
 
 /// 命令摘要（供自动补全 / 帮助展示）。
@@ -168,6 +167,7 @@ pub struct CommandSummary {
     /// true = 需要额外参数，选中后只补全命令名+空格
     /// false = 无参数，选中后直接执行
     pub has_args: bool,
+    pub args_description: Option<&'static str>,
 }
 
 /// 命令执行结果。

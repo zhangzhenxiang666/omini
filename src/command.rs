@@ -1,6 +1,8 @@
 pub mod exit;
 pub mod help;
 pub mod model;
+pub mod new;
+pub mod rename;
 pub mod sessions;
 
 use std::collections::{HashMap, HashSet};
@@ -41,6 +43,9 @@ pub trait Command: Send + Sync {
     fn name(&self) -> &'static str;
     fn aliases(&self) -> &[&'static str];
     fn description(&self) -> &'static str;
+    fn args_description(&self) -> Option<&'static str> {
+        None
+    }
     /// 是否需要额外参数（false = 选中即执行，true = 补全后让用户输入）。
     fn has_args(&self) -> bool {
         false
@@ -99,6 +104,7 @@ impl CommandRegistry {
                 aliases: cmd.aliases().iter().map(|s| s.to_string()).collect(),
                 description: cmd.description().to_string(),
                 has_args: cmd.has_args(),
+                args_description: cmd.args_description(),
             })
             .collect()
     }
@@ -109,5 +115,7 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(exit::ExitCommand));
     registry.register(Arc::new(model::ModelCommand));
     registry.register(Arc::new(sessions::SessionsCommand));
+    registry.register(Arc::new(new::NewCommand));
+    registry.register(Arc::new(rename::RenameCommand));
     registry.register(Arc::new(help::HelpCommand));
 }

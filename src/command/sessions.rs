@@ -25,10 +25,6 @@ impl Command for SessionsCommand {
         };
         let mut summaries = Vec::with_capacity(sessions.len());
         for s in sessions {
-            let first_message = db::global_db()
-                .get_first_message_text(&s.id)
-                .await
-                .unwrap_or_default();
             summaries.push(SessionSummary {
                 id: s.id,
                 title: s.title.unwrap_or_default(),
@@ -36,7 +32,6 @@ impl Command for SessionsCommand {
                 provider: s.provider,
                 message_count: s.message_count,
                 created_at: s.created_at,
-                first_message,
             });
         }
         runtime

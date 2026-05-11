@@ -9,7 +9,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub mod apply_patch_tool;
 pub mod bash_tool;
+pub mod read_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -167,5 +169,7 @@ impl ToolRegistry {
 pub fn create_default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(bash_tool::BashTool);
+    registry.register(read_tool::ReadTool);
+    registry.register(apply_patch_tool::ApplyPatchTool);
     registry
 }
