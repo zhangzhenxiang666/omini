@@ -2,7 +2,8 @@ use crate::tui::state::{AgentStatus, InteractionStep, ModelSelectionEntry, UiSta
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, render_tool,
 };
-use crate::types::message::ContentBlock;
+use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
+use crate::types::message::{ContentBlock, ToolUseBlock};
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -13,6 +14,9 @@ use ratatui::widgets::{Clear, Paragraph};
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
+const EDIT_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
@@ -43,7 +47,7 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     render_footer(state, frame, chunks[4]);
 
     // Draw input box only when no modal interaction is active (prevents cursor showing through overlay)
-    if state.interaction_step.is_none() {
+    if state.interaction_step.is_none() && state.active_tool_pause().is_none() {
         render_input(state, frame, chunks[3]);
     }
 
@@ -51,6 +55,318 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     if state.interaction_request.is_some() {
         render_interaction(state, frame, area);
     }
+
+    render_permission_drawer(state, frame, area);
+}
+
+fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
+    let Some(request) = state.active_tool_pause().cloned() else {
+        state.permission_drawer_area = Rect::default();
+        state.permission_drawer_body_area = Rect::default();
+        state.permission_drawer_content_len = 0;
+        return;
+    };
+
+    let tool_use = find_tool_use(state, &request.tool_use_id);
+    let content_width = area.width.saturating_sub(6) as usize;
+    let lines = build_permission_drawer_lines(&request, tool_use, content_width);
+    let fixed_header = lines.first().cloned();
+    let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
+    let is_edit_preview = matches!(
+        request.kind,
+        ToolPauseKind::Permission(PermissionPreview::Edit(_))
+            | ToolPauseKind::Permission(PermissionPreview::Write(_))
+    );
+
+    let terminal_cap = ((area.height as f32) * 0.8).floor() as u16;
+    let max_height = if is_edit_preview {
+        terminal_cap
+            .min(EDIT_PERMISSION_DRAWER_MAX_HEIGHT)
+            .min(area.height.saturating_sub(1))
+            .max(7)
+    } else {
+        area.height
+            .saturating_sub(4)
+            .clamp(7, PERMISSION_DRAWER_MAX_HEIGHT)
+    };
+    let desired_height = (scroll_lines.len() as u16)
+        .saturating_add(8)
+        .clamp(10, max_height);
+    let body_height = desired_height.saturating_sub(7) as usize;
+    let scroll_line_count = scroll_lines.len();
+    let max_scroll = scroll_line_count.saturating_sub(body_height);
+    let scroll_offset = state.permission_scroll_offset.min(max_scroll);
+    state.permission_scroll_offset = scroll_offset;
+    state.permission_drawer_content_len = scroll_lines.len();
+    let visible_lines: Vec<Line<'static>> = scroll_lines
+        .into_iter()
+        .skip(scroll_offset)
+        .take(body_height)
+        .collect();
+
+    let drawer_area = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(desired_height + 1),
+        width: area.width,
+        height: desired_height,
+    };
+    let body_area = Rect {
+        x: drawer_area.x + 3,
+        y: drawer_area.y + 4,
+        width: drawer_area
+            .width
+            .saturating_sub(if max_scroll > 0 { 8 } else { 6 }),
+        height: body_height as u16,
+    };
+    state.permission_drawer_area = drawer_area;
+    state.permission_drawer_body_area = body_area;
+
+    frame.render_widget(Clear, drawer_area);
+    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+
+    let title = " Permission Request ".to_string();
+    let divider_line = Line::from(Span::styled(
+        "━".repeat(drawer_area.width.saturating_sub(1) as usize),
+        Style::default().fg(accent),
+    ));
+    frame.render_widget(
+        Paragraph::new(divider_line),
+        Rect {
+            x: drawer_area.x,
+            y: drawer_area.y.saturating_sub(1),
+            width: drawer_area.width,
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))),
+        Rect {
+            x: drawer_area.x,
+            y: drawer_area.y + 1,
+            width: drawer_area.width,
+            height: 1,
+        },
+    );
+
+    if let Some(header) = fixed_header {
+        frame.render_widget(
+            Paragraph::new(header),
+            Rect {
+                x: drawer_area.x + 3,
+                y: drawer_area.y + 3,
+                width: drawer_area.width.saturating_sub(6),
+                height: 1,
+            },
+        );
+    }
+
+    let paragraph = Paragraph::new(Text::from(visible_lines));
+    frame.render_widget(paragraph, body_area);
+    if max_scroll > 0 {
+        render_permission_scrollbar(frame, body_area, scroll_offset, scroll_line_count);
+    }
+
+    let yes_style = permission_option_style(state.permission_selected == 0);
+    let no_style = permission_option_style(state.permission_selected == 1);
+    let (yes_desc, no_desc) = permission_option_descriptions(&request);
+    let desc_style = Style::default().fg(Color::Rgb(140, 145, 155));
+    let options = Text::from(vec![
+        Line::from(vec![
+            Span::styled("1. ", yes_style),
+            Span::styled(format!("{:<3}", "Yes"), yes_style),
+            Span::raw("   "),
+            Span::styled(yes_desc, desc_style),
+        ]),
+        Line::from(vec![
+            Span::styled("2. ", no_style),
+            Span::styled(format!("{:<3}", "No"), no_style),
+            Span::raw("   "),
+            Span::styled(no_desc, desc_style),
+        ]),
+    ]);
+    frame.render_widget(
+        Paragraph::new(options),
+        Rect {
+            x: drawer_area.x + 3,
+            y: drawer_area.y + drawer_area.height.saturating_sub(3),
+            width: drawer_area.width.saturating_sub(6),
+            height: 2,
+        },
+    );
+}
+
+fn render_permission_scrollbar(
+    frame: &mut ratatui::Frame,
+    body_area: Rect,
+    scroll_offset: usize,
+    total_lines: usize,
+) {
+    let height = body_area.height as usize;
+    if height == 0 || total_lines <= height {
+        return;
+    }
+
+    let max_scroll = total_lines.saturating_sub(height);
+    let thumb_height = (height.saturating_mul(height) / total_lines).clamp(1, height);
+    let thumb_range = height.saturating_sub(thumb_height);
+    let thumb_y = if max_scroll == 0 {
+        0
+    } else {
+        scroll_offset.saturating_mul(thumb_range) / max_scroll
+    };
+    let x = body_area.x + body_area.width + 1;
+    let track_style = Style::default().fg(Color::Rgb(70, 75, 86));
+    let thumb_style = Style::default().fg(Color::Rgb(140, 145, 155));
+
+    for i in 0..height {
+        let is_thumb = i >= thumb_y && i < thumb_y + thumb_height;
+        let symbol = if is_thumb { "┃" } else { "│" };
+        let style = if is_thumb { thumb_style } else { track_style };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(symbol, style))),
+            Rect {
+                x,
+                y: body_area.y + i as u16,
+                width: 1,
+                height: 1,
+            },
+        );
+    }
+}
+
+fn permission_option_style(selected: bool) -> Style {
+    let style = Style::default();
+    if selected {
+        style
+            .fg(Color::Rgb(135, 135, 255))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, &'static str) {
+    match &request.kind {
+        ToolPauseKind::Permission(PermissionPreview::Bash(_)) => ("run command", "skip command"),
+        ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
+            ("apply changes", "reject changes")
+        }
+        ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
+        ToolPauseKind::Permission(PermissionPreview::ApplyPatch(_)) => {
+            ("apply patch", "reject patch")
+        }
+        ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
+        ToolPauseKind::Permission(PermissionPreview::Custom { .. }) => ("allow tool", "deny tool"),
+        ToolPauseKind::UserInput(_) => ("submit response", "cancel request"),
+    }
+}
+
+fn build_permission_drawer_lines(
+    request: &ToolPauseRequest,
+    tool_use: Option<&ToolUseBlock>,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    match &request.kind {
+        ToolPauseKind::Permission(PermissionPreview::Bash(preview)) => {
+            let mut lines = Vec::new();
+            lines.push(Line::from(vec![
+                Span::raw("· "),
+                Span::styled(
+                    "Bash",
+                    Style::default()
+                        .fg(Color::Rgb(0x42, 0xb3, 0xc2))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" command", Style::default().fg(Color::Rgb(165, 172, 182))),
+            ]));
+            lines.push(Line::from(""));
+
+            if let Some(description) = &preview.description
+                && !description.trim().is_empty()
+            {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("# {}", description),
+                        Style::default()
+                            .fg(Color::Rgb(140, 145, 155))
+                            .add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    "$ ",
+                    Style::default()
+                        .fg(Color::Rgb(0x50, 0xc8, 0x78))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    preview.command.clone(),
+                    Style::default().fg(Color::Rgb(220, 220, 225)),
+                ),
+            ]));
+            lines
+        }
+        ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
+            if let Some(tool_use) = tool_use {
+                render_tool(tool_use, None, Some(request), content_width, false)
+            } else {
+                vec![Line::from(Span::styled(
+                    "Missing edit tool input for preview",
+                    Style::default().fg(Color::Rgb(255, 100, 100)),
+                ))]
+            }
+        }
+        ToolPauseKind::Permission(PermissionPreview::Write(_)) => {
+            if let Some(tool_use) = tool_use {
+                render_tool(tool_use, None, Some(request), content_width, false)
+            } else {
+                vec![Line::from(Span::styled(
+                    "Missing write tool input for preview",
+                    Style::default().fg(Color::Rgb(255, 100, 100)),
+                ))]
+            }
+        }
+        ToolPauseKind::Permission(preview) => vec![Line::from(Span::styled(
+            format!("{} permission requested", permission_name(preview)),
+            Style::default().fg(Color::Rgb(165, 172, 182)),
+        ))],
+        ToolPauseKind::UserInput(preview) => {
+            crate::tui::widgets::word_wrap(&preview.prompt, content_width)
+                .into_iter()
+                .map(Line::from)
+                .collect()
+        }
+    }
+}
+
+fn permission_name(preview: &PermissionPreview) -> &'static str {
+    match preview {
+        PermissionPreview::Bash(_) => "bash",
+        PermissionPreview::ApplyPatch(_) => "apply_patch",
+        PermissionPreview::Edit(_) => "edit",
+        PermissionPreview::Write(_) => "write",
+        PermissionPreview::Read(_) => "read",
+        PermissionPreview::Custom { .. } => "custom tool",
+    }
+}
+
+fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUseBlock> {
+    state
+        .pending_assistant
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .chain(state.messages.iter().flat_map(|m| m.content.iter()))
+        .find_map(|block| match block {
+            ContentBlock::ToolUse(tu) if tu.id == tool_use_id => Some(tu),
+            _ => None,
+        })
 }
 
 fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect) {
@@ -745,7 +1061,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
 
                         let collapsed = !state.expanded_tools.contains(&tu.id);
                         let tool_lines =
-                            render_tool(tu, tool_result.as_ref(), content_width, collapsed);
+                            render_tool(tu, tool_result.as_ref(), None, content_width, collapsed);
                         block_lines.extend(tool_lines);
 
                         block_tool_id = Some(tu.id.clone());
@@ -755,7 +1071,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                         }
                     } else {
                         // 工具结果尚未返回
-                        let tool_lines = render_tool(tu, None, content_width, false);
+                        let tool_lines = render_tool(tu, None, None, content_width, false);
                         block_lines.extend(tool_lines);
                         block_tool_id = Some(tu.id.clone());
                     }
@@ -831,7 +1147,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             None
                         }
                     });
-                    let tool_lines = render_tool(tu, tr.as_ref(), content_width, false);
+                    let tool_lines = render_tool(tu, tr.as_ref(), None, content_width, false);
                     block_lines.extend(tool_lines);
                     block_tool_id = Some(tu.id.clone());
                 }

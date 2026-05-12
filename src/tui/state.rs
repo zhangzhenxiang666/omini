@@ -1,9 +1,9 @@
 use crate::types::config::ModelConfig;
 use crate::types::config::ThinkingEffort;
-use crate::types::events::{CommandSummary, InteractionRequest, RuntimeEvent};
+use crate::types::events::{CommandSummary, InteractionRequest, RuntimeEvent, ToolPauseRequest};
 use crate::types::message::{ContentBlock, Message, Role};
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
 
@@ -81,6 +81,18 @@ pub struct UiState {
     pub runtime_handle: Option<tokio::task::JoinHandle<()>>,
     /// 正在运行中的工具 ID 集合（已收到 ToolUse 但尚未收到 ToolResult）
     pub running_tools: HashSet<String>,
+    /// 等待用户确认的工具预览，按 tool_use_id 关联到对应工具块。
+    pub pending_tool_previews: HashMap<String, ToolPauseRequest>,
+    /// 权限抽屉当前选中的操作：0 = Yes, 1 = No。
+    pub permission_selected: usize,
+    /// 权限抽屉内容视口的顶部行偏移。
+    pub permission_scroll_offset: usize,
+    /// 当前权限抽屉整体区域，用于鼠标事件命中判断。
+    pub permission_drawer_area: Rect,
+    /// 当前权限抽屉可滚动内容区域，用于鼠标滚动命中判断。
+    pub permission_drawer_body_area: Rect,
+    /// 当前权限抽屉内容总行数。
+    pub permission_drawer_content_len: usize,
     /// 已展开的工具块 ID 集合（不在集合中的工具块默认折叠，只显示前 5 行）
     pub expanded_tools: HashSet<String>,
     /// bash 工具块在 all_lines 中的行范围（用于点击判断）
@@ -121,6 +133,12 @@ impl UiState {
             last_scroll_time: None,
             runtime_handle: None,
             running_tools: HashSet::new(),
+            pending_tool_previews: HashMap::new(),
+            permission_selected: 0,
+            permission_scroll_offset: 0,
+            permission_drawer_area: Rect::default(),
+            permission_drawer_body_area: Rect::default(),
+            permission_drawer_content_len: 0,
             expanded_tools: HashSet::new(),
             block_ranges: Vec::new(),
             status_bar: StatusBar::default(),
@@ -130,6 +148,41 @@ impl UiState {
             interaction_request: None,
             interaction_step: None,
         }
+    }
+
+    pub fn active_tool_pause(&self) -> Option<&ToolPauseRequest> {
+        self.pending_tool_previews
+            .values()
+            .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
+    }
+
+    pub fn reset_permission_drawer(&mut self) {
+        self.permission_selected = 0;
+        self.permission_scroll_offset = 0;
+        self.permission_drawer_area = Rect::default();
+        self.permission_drawer_body_area = Rect::default();
+        self.permission_drawer_content_len = 0;
+    }
+
+    pub fn permission_select_prev(&mut self) {
+        self.permission_selected = self.permission_selected.saturating_sub(1);
+    }
+
+    pub fn permission_select_next(&mut self) {
+        self.permission_selected = (self.permission_selected + 1).min(1);
+    }
+
+    pub fn permission_scroll_up(&mut self, lines: usize) {
+        self.permission_scroll_offset = self.permission_scroll_offset.saturating_sub(lines);
+    }
+
+    pub fn permission_scroll_down(&mut self, lines: usize) {
+        let visible = self.permission_drawer_body_area.height as usize;
+        let max_scroll = self.permission_drawer_content_len.saturating_sub(visible);
+        self.permission_scroll_offset = self
+            .permission_scroll_offset
+            .saturating_add(lines)
+            .min(max_scroll);
     }
 
     pub fn apply_event(&mut self, event: RuntimeEvent) {
@@ -179,6 +232,10 @@ impl UiState {
             }
             RuntimeEvent::ToolResult(tr) => {
                 self.running_tools.remove(&tr.tool_use_id);
+                self.pending_tool_previews.remove(&tr.tool_use_id);
+                if self.pending_tool_previews.is_empty() {
+                    self.reset_permission_drawer();
+                }
                 // 工具结果异步返回，追加到 pending_assistant 或最后一条消息中
                 if let Some(pending) = &mut self.pending_assistant {
                     pending.content.push(ContentBlock::ToolResult(tr));
@@ -212,12 +269,10 @@ impl UiState {
                 }
                 self.agent_status = AgentStatus::Idle;
             }
-            RuntimeEvent::PermissionRequest(_) => {
-                // TODO: 实现权限请求弹窗 UI
-                self.agent_status = AgentStatus::AwaitingInput;
-            }
-            RuntimeEvent::UserConfirmation(_) => {
-                // TODO: 实现用户确认输入 UI
+            RuntimeEvent::ToolPauseRequested(req) => {
+                self.reset_permission_drawer();
+                self.pending_tool_previews
+                    .insert(req.tool_use_id.clone(), req);
                 self.agent_status = AgentStatus::AwaitingInput;
             }
             RuntimeEvent::Error(e) => self.agent_status = AgentStatus::Error(e),

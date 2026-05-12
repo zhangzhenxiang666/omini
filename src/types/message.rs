@@ -26,6 +26,8 @@ pub struct ToolResultBlock {
     pub tool_use_id: String,
     pub is_error: bool,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -66,6 +68,7 @@ impl ContentBlock {
             tool_use_id,
             is_error,
             content: output,
+            metadata: None,
         })
     }
 

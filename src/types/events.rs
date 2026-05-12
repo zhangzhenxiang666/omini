@@ -2,6 +2,7 @@ use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
 use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -24,6 +25,11 @@ pub enum UiRequest {
     },
     /// 用户在会话选择页中确认选择
     SessionSelected { session_id: String },
+    /// 用户响应工具暂停请求
+    ResolveToolPause {
+        tool_use_id: String,
+        response: ToolPauseResponse,
+    },
 }
 
 // ===========================================================================
@@ -59,10 +65,8 @@ pub enum EngineEvent {
     /// 工具执行结果
     ToolResult(ToolResultBlock),
 
-    /// 工具需要用户授权
-    PermissionRequest(PermissionRequest),
-    /// LLM 向用户提问
-    UserConfirmation(UserConfirmation),
+    /// 工具需要暂停等待用户授权或输入
+    ToolPauseRequested(ToolPauseRequest),
 
     /// 引擎出错
     Error(String),
@@ -121,10 +125,8 @@ pub enum RuntimeEvent {
     /// 工具执行完成，产出结果
     ToolResult(ToolResultBlock),
 
-    /// 执行工具前需要用户授权
-    PermissionRequest(PermissionRequest),
-    /// LLM 向用户提问
-    UserConfirmation(UserConfirmation),
+    /// 工具需要暂停等待用户授权或输入
+    ToolPauseRequested(ToolPauseRequest),
 
     /// 运行时出错
     Error(String),
@@ -182,26 +184,86 @@ pub enum CommandResult {
 // 共享类型
 // ===========================================================================
 
-/// 工具权限请求。
-/// 当一个工具需要用户授权才能执行时发起此请求。
-/// UI 展示授权对话框后，通过 `reply` 发送用户的决定。
-#[derive(Debug)]
-pub struct PermissionRequest {
-    /// 工具名称
+/// 工具暂停请求。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolPauseRequest {
+    pub tool_use_id: String,
     pub tool_name: String,
-    /// 工具输入参数
-    pub tool_input: HashMap<String, Value>,
-    /// 发送 `true` = 允许, `false` = 拒绝
-    pub reply: tokio::sync::oneshot::Sender<bool>,
+    pub kind: ToolPauseKind,
 }
 
-/// LLM 向用户提问。
-/// 当 LLM 调用 ask_user 等工具需要用户输入时发起此请求。
-/// UI 展示输入框后，通过 `reply` 发送用户的文字回复。
-#[derive(Debug)]
-pub struct UserConfirmation {
-    /// LLM 提出的问题
-    pub question: String,
-    /// 发送用户的文字回复
-    pub reply: tokio::sync::oneshot::Sender<String>,
+/// 工具暂停类型。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolPauseKind {
+    Permission(PermissionPreview),
+    UserInput(UserInputPreview),
+}
+
+/// 工具暂停响应。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolPauseResponse {
+    Permission { approved: bool },
+    UserInput { value: Value },
+    Cancelled,
+}
+
+/// 权限审批预览。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PermissionPreview {
+    Bash(BashPermissionPreview),
+    ApplyPatch(ApplyPatchPermissionPreview),
+    Edit(EditPermissionPreview),
+    Write(EditPermissionPreview),
+    Read(ReadPermissionPreview),
+    Custom {
+        tool_name: String,
+        payload: serde_json::Map<String, Value>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BashPermissionPreview {
+    pub command: String,
+    pub description: Option<String>,
+    pub workdir: Option<String>,
+    pub timeout: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReadPermissionPreview {
+    pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplyPatchPermissionPreview {
+    pub summary: String,
+    pub operations: Vec<PatchOperationPreview>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PatchOperationPreview {
+    pub operation: String,
+    pub path: String,
+    pub new_path: Option<String>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditPermissionPreview {
+    pub summary: String,
+    pub path: String,
+    pub replacement_count: usize,
+    pub replace_all: bool,
+    pub start_lines: Vec<usize>,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserInputPreview {
+    pub prompt: String,
 }

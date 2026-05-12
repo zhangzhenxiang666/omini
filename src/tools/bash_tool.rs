@@ -1,4 +1,5 @@
 use super::{Tool, ToolResult};
+use crate::types::events::{BashPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -22,9 +23,18 @@ pub struct BashInput {
 
 pub struct BashTool;
 
+#[derive(Debug)]
+pub struct PreparedBash {
+    pub command: String,
+    pub description: Option<String>,
+    pub timeout: u64,
+    pub workdir: Option<String>,
+}
+
 #[async_trait]
 impl Tool for BashTool {
     type Input = BashInput;
+    type Prepared = PreparedBash;
 
     fn name(&self) -> &str {
         "bash"
@@ -40,16 +50,35 @@ impl Tool for BashTool {
             "\n",
             "For file operations, prefer these dedicated tools instead of using shell commands:\n",
             "  read         Read file contents (with line numbers and offset/limit support)\n",
-            "  apply_patch  Create, edit, or delete files using a structured patch format\n",
+            "  edit         Edit an existing text file by exact string replacement\n",
             "\n",
             "Avoid using cat/head/tail/sed/awk for file reads — use the `read` tool instead.\n",
-            "Avoid using sed/echo/redirect for file edits — use the `apply_patch` tool instead."
+            "Avoid using sed/echo/redirect for file edits — use the `edit` tool instead."
         )
     }
 
-    async fn execute(&self, input: BashInput) -> ToolResult {
+    async fn prepare(&self, input: BashInput) -> Result<Self::Prepared, ToolResult> {
+        Ok(PreparedBash {
+            command: input.command,
+            description: input.description,
+            timeout: input.timeout.unwrap_or(120_000).min(600_000),
+            workdir: input.workdir,
+        })
+    }
+
+    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
+        Some(PermissionPreview::Bash(BashPermissionPreview {
+            command: prepared.command.clone(),
+            description: prepared.description.clone(),
+            workdir: prepared.workdir.clone(),
+            timeout: prepared.timeout,
+        }))
+    }
+
+    async fn execute_prepared(&self, input: Self::Prepared) -> ToolResult {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&input.command).envs(std::env::vars());
+        cmd.kill_on_drop(true);
 
         // 设置工作目录
         if let Some(ref workdir) = input.workdir {
@@ -57,7 +86,7 @@ impl Tool for BashTool {
         }
 
         // 超时控制（默认 120s，最大 600s）
-        let timeout_dur = Duration::from_millis(input.timeout.unwrap_or(120_000).min(600_000));
+        let timeout_dur = Duration::from_millis(input.timeout);
 
         let output = match tokio::time::timeout(timeout_dur, cmd.output()).await {
             Ok(Ok(o)) => o,

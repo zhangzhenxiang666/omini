@@ -115,6 +115,7 @@ impl AgentRuntime {
                             }
                             UiRequest::CancelRun => {
                                 self.cancelled.store(true, Ordering::Relaxed);
+                                self.query_engine.cancel_current_run();
                             }
                             UiRequest::ModelSelected { provider, model, thinking_effort } => {
                                 if self.pending_interaction
@@ -130,6 +131,14 @@ impl AgentRuntime {
                                 {
                                     self.switch_session(&session_id).await;
                                     self.pending_interaction = None;
+                                }
+                            }
+                            UiRequest::ResolveToolPause { tool_use_id, response } => {
+                                if let Err(e) = self
+                                    .query_engine
+                                    .resolve_tool_pause(&tool_use_id, response)
+                                {
+                                    self.send_event(RuntimeEvent::Error(e)).await;
                                 }
                             }
                         }
@@ -313,18 +322,56 @@ impl AgentRuntime {
         // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
         let processor = self.spawn_event_processor(engine_rx).await;
 
-        // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
-        let ctx = QueryContext {
-            messages: &mut self.messages,
-            settings: &self.settings,
-            llm_client: &self.llm_client,
-            tool_registry: Arc::clone(&self.tool_registry),
-        };
+        {
+            // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
+            let ctx = QueryContext {
+                messages: &mut self.messages,
+                settings: &self.settings,
+                llm_client: &self.llm_client,
+                tool_registry: Arc::clone(&self.tool_registry),
+            };
 
-        let _result = self
-            .query_engine
-            .run_query(ctx, engine_tx, Arc::clone(&self.cancelled))
-            .await;
+            let event_tx = self.event_tx.clone();
+            let query = self
+                .query_engine
+                .run_query(ctx, engine_tx, Arc::clone(&self.cancelled));
+            tokio::pin!(query);
+
+            loop {
+                tokio::select! {
+                    result = &mut query => {
+                        let _result = result;
+                        break;
+                    }
+                    Some(req) = self.request_rx.recv() => {
+                        match req {
+                        UiRequest::CancelRun => {
+                            self.cancelled.store(true, Ordering::Relaxed);
+                            self.query_engine.cancel_current_run();
+                        }
+                            UiRequest::ResolveToolPause { tool_use_id, response } => {
+                                if let Err(e) = self
+                                    .query_engine
+                                    .resolve_tool_pause(&tool_use_id, response)
+                                {
+                                    let _ = event_tx.send(RuntimeEvent::Error(e)).await;
+                                }
+                            }
+                            UiRequest::SendMessage(_)
+                            | UiRequest::ModelSelected { .. }
+                            | UiRequest::SessionSelected { .. } => {
+                                let _ = event_tx
+                                    .send(RuntimeEvent::Error(
+                                        "Cannot handle this request while a run is active".to_string(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                    else => break,
+                }
+            }
+        }
 
         // 等待事件处理器自然退出（engine_tx drop 后 engine_rx 收到 None）
         let _ = processor.await;
@@ -386,11 +433,8 @@ impl AgentRuntime {
                     EngineEvent::ToolResult(tr) => {
                         let _ = event_tx.send(RuntimeEvent::ToolResult(tr)).await;
                     }
-                    EngineEvent::PermissionRequest(pr) => {
-                        let _ = event_tx.send(RuntimeEvent::PermissionRequest(pr)).await;
-                    }
-                    EngineEvent::UserConfirmation(uc) => {
-                        let _ = event_tx.send(RuntimeEvent::UserConfirmation(uc)).await;
+                    EngineEvent::ToolPauseRequested(req) => {
+                        let _ = event_tx.send(RuntimeEvent::ToolPauseRequested(req)).await;
                     }
                     EngineEvent::Error(e) => {
                         let _ = event_tx.send(RuntimeEvent::Error(e)).await;

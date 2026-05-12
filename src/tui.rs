@@ -5,7 +5,7 @@ use crate::tui::state::ModelSelectionEntry;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::InteractionRequest::*;
-use crate::types::events::{RuntimeEvent, UiRequest};
+use crate::types::events::{RuntimeEvent, ToolPauseKind, ToolPauseResponse, UiRequest};
 use crate::types::message::Message;
 use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
@@ -191,6 +191,35 @@ async fn handle_interaction_key(
         },
     }
 }
+
+async fn resolve_active_tool_pause(state: &mut UiState, request_tx: &mpsc::Sender<UiRequest>) {
+    let Some(req) = state.active_tool_pause().cloned() else {
+        return;
+    };
+
+    let response = match req.kind {
+        ToolPauseKind::Permission(_) => ToolPauseResponse::Permission {
+            approved: state.permission_selected == 0,
+        },
+        ToolPauseKind::UserInput(_) => {
+            if state.permission_selected == 0 {
+                return;
+            }
+            ToolPauseResponse::Cancelled
+        }
+    };
+
+    let _ = request_tx
+        .send(UiRequest::ResolveToolPause {
+            tool_use_id: req.tool_use_id.clone(),
+            response,
+        })
+        .await;
+    state.pending_tool_previews.remove(&req.tool_use_id);
+    if state.pending_tool_previews.is_empty() {
+        state.reset_permission_drawer();
+    }
+}
 pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -253,6 +282,52 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 // Esc → 退出交互
                                 state.interaction_step = None;
                                 state.interaction_request = None;
+                            }
+                            last_tick = tokio::time::Instant::now();
+                            terminal.draw(|frame| render::render(&mut state, frame))?;
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Esc
+                            && matches!(
+                                state.agent_status,
+                                AgentStatus::Working | AgentStatus::Thinking
+                            )
+                        {
+                            let _ = request_tx.send(UiRequest::CancelRun).await;
+                            last_tick = tokio::time::Instant::now();
+                            terminal.draw(|frame| render::render(&mut state, frame))?;
+                            continue;
+                        }
+
+                        if state.active_tool_pause().is_some() {
+                            match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    state.permission_select_prev();
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    state.permission_select_next();
+                                }
+                                KeyCode::PageUp => {
+                                    let page = 1.max(state.permission_drawer_body_area.height as usize / 2);
+                                    state.permission_scroll_up(page);
+                                }
+                                KeyCode::PageDown => {
+                                    let page = 1.max(state.permission_drawer_body_area.height as usize / 2);
+                                    state.permission_scroll_down(page);
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    state.permission_selected = 0;
+                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                }
+                                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                    state.permission_selected = 1;
+                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                }
+                                KeyCode::Enter => {
+                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                }
+                                _ => {}
                             }
                             last_tick = tokio::time::Instant::now();
                             terminal.draw(|frame| render::render(&mut state, frame))?;
@@ -387,6 +462,35 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                     }
                     Event::Resize(_, _) => {}
                     Event::Mouse(mouse) => {
+                        if state.active_tool_pause().is_some() {
+                            let drawer = state.permission_drawer_area;
+                            let body = state.permission_drawer_body_area;
+                            let in_drawer = mouse.row >= drawer.top() && mouse.row < drawer.bottom()
+                                && mouse.column >= drawer.left() && mouse.column < drawer.right();
+                            let in_body = mouse.row >= body.top() && mouse.row < body.bottom()
+                                && mouse.column >= body.left() && mouse.column < body.right();
+
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left) if in_drawer => {
+                                    if mouse.row == drawer.bottom().saturating_sub(2) {
+                                        state.permission_selected = 0;
+                                    } else if mouse.row == drawer.bottom().saturating_sub(1) {
+                                        state.permission_selected = 1;
+                                    }
+                                }
+                                MouseEventKind::ScrollUp if in_body => {
+                                    state.permission_scroll_up(1);
+                                }
+                                MouseEventKind::ScrollDown if in_body => {
+                                    state.permission_scroll_down(1);
+                                }
+                                _ => {}
+                            }
+                            last_tick = tokio::time::Instant::now();
+                            terminal.draw(|frame| render::render(&mut state, frame))?;
+                            continue;
+                        }
+
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
                                 let area = state.messages_area;
@@ -425,7 +529,6 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 last_tick = tokio::time::Instant::now();
                 terminal.draw(|frame| render::render(&mut state, frame))?;
             }
-
             Some(agent_evt) = agent_rx.recv() => {
                 if let RuntimeEvent::InteractionRequest(ref req) = agent_evt {
                     state.interaction_step = match req {

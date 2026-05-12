@@ -19,6 +19,7 @@ pub struct ReadTool;
 #[async_trait]
 impl Tool for ReadTool {
     type Input = ReadInput;
+    type Prepared = ReadInput;
 
     fn name(&self) -> &str {
         "read"
@@ -29,9 +30,12 @@ impl Tool for ReadTool {
             "Read a file or directory from the local filesystem.\n",
             "\n",
             "Usage:\n",
-            "  file_path  Absolute path to the file or directory.\n",
+            "  file_path  Absolute path to the file or directory. Relative paths are rejected.\n",
             "  offset     Line number to start from (1-indexed, default: 1).\n",
             "  limit      Max lines to return (default: 2000).\n",
+            "\n",
+            "Rules:\n",
+            "  - file_path must be absolute; do not pass relative paths.\n",
             "\n",
             "Text files: each line is returned as `<line>: <content>`.\n",
             "Directories: entries listed with `/` suffix for subdirectories.\n",
@@ -39,8 +43,29 @@ impl Tool for ReadTool {
         )
     }
 
-    async fn execute(&self, input: ReadInput) -> ToolResult {
+    async fn prepare(&self, input: ReadInput) -> Result<Self::Prepared, ToolResult> {
         let path = std::path::Path::new(&input.file_path);
+        if !path.is_absolute() {
+            return Err(ToolResult::error(format!(
+                "file_path must be absolute: {}",
+                input.file_path
+            )));
+        }
+        if !path.exists() {
+            return Err(ToolResult::error(format!(
+                "Path does not exist: {}",
+                input.file_path
+            )));
+        }
+        Ok(input)
+    }
+
+    async fn execute_prepared(&self, input: Self::Prepared) -> ToolResult {
+        let path = std::path::Path::new(&input.file_path);
+
+        if !path.is_absolute() {
+            return ToolResult::error(format!("file_path must be absolute: {}", input.file_path));
+        }
 
         // Check if path exists
         if !path.exists() {
@@ -151,4 +176,20 @@ async fn read_file(
     }
 
     ToolResult::ok(output.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_read_rejects_relative_path() {
+        let input = ReadInput {
+            file_path: "relative.txt".to_string(),
+            offset: None,
+            limit: None,
+        };
+        let err = ReadTool.prepare(input).await.unwrap_err();
+        assert!(err.output.contains("file_path must be absolute"));
+    }
 }
