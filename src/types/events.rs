@@ -221,7 +221,6 @@ pub enum ToolPauseResponse {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PermissionPreview {
     Bash(BashPermissionPreview),
-    ApplyPatch(ApplyPatchPermissionPreview),
     Edit(EditPermissionPreview),
     Write(EditPermissionPreview),
     Read(ReadPermissionPreview),
@@ -242,21 +241,6 @@ pub struct BashPermissionPreview {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadPermissionPreview {
     pub file_path: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ApplyPatchPermissionPreview {
-    pub summary: String,
-    pub operations: Vec<PatchOperationPreview>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PatchOperationPreview {
-    pub operation: String,
-    pub path: String,
-    pub new_path: Option<String>,
-    pub added_lines: usize,
-    pub removed_lines: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

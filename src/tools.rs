@@ -107,7 +107,7 @@ impl PermissionPolicy for DefaultPermissionPolicy {
     fn decide(&self, tool_name: &str, _preview: &PermissionPreview) -> PermissionPolicyDecision {
         match tool_name {
             "read" => PermissionPolicyDecision::AutoAllow,
-            "bash" | "apply_patch" | "edit" | "write" => PermissionPolicyDecision::AskUser,
+            "bash" | "edit" | "write" => PermissionPolicyDecision::AskUser,
             _ => PermissionPolicyDecision::AskUser,
         }
     }

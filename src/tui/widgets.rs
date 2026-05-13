@@ -731,7 +731,6 @@ fn render_bash(
     result: Option<&ToolResultBlock>,
     content_width: usize,
 ) -> Vec<Line<'static>> {
-    let text = Color::Rgb(205, 207, 214);
     let dim = Color::Rgb(140, 142, 150);
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
     let warn = Color::Rgb(212, 182, 106);
@@ -753,32 +752,68 @@ fn render_bash(
             Style::default().fg(warn),
         ));
     }
-    title.push(Span::raw("· "));
-    title.push(Span::styled("Bash", title_style));
-
     let desc = tool_use
         .input
         .get("description")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .trim();
     let cmd = tool_use
         .input
         .get("command")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .unwrap_or("")
+        .trim();
 
-    if !desc.is_empty() {
+    title.push(Span::raw(". "));
+    title.push(Span::styled("Bash", title_style));
+    if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();
-        let desc_width = content_width.saturating_sub(used_width + 2);
-        if desc_width > 0 {
-            title.push(Span::raw("  "));
+        let parens_width = UnicodeWidthStr::width("()");
+        let cmd_width = content_width
+            .saturating_sub(used_width)
+            .saturating_sub(parens_width);
+        title.push(Span::raw("("));
+        title.push(Span::raw(truncate_display_width(cmd, cmd_width)));
+        title.push(Span::raw(")"));
+    } else {
+        let used_width: usize = title.iter().map(|s| s.width()).sum();
+        if used_width > content_width {
+            title.truncate(1);
             title.push(Span::styled(
-                truncate_display_width(desc, desc_width),
-                Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+                truncate_display_width("Bash", content_width.saturating_sub(2).max(1)),
+                title_style,
             ));
         }
     }
     lines.push(Line::from(title));
+
+    let pipe_style = Style::default().fg(dim);
+    let pipe_prefix = |target_width: usize| -> Vec<Span<'static>> {
+        let spacing = target_width.saturating_sub(3);
+        vec![
+            Span::raw("  "),
+            Span::styled("│", pipe_style),
+            Span::raw(" ".repeat(spacing)),
+        ]
+    };
+    let has_output = result.is_some_and(|tr| !tr.content.is_empty());
+
+    if !desc.is_empty() {
+        let desc_style = Style::default().fg(dim).add_modifier(Modifier::ITALIC);
+        let desc_prefix_width = UnicodeWidthStr::width("  │  ");
+        let desc_wrap_width = content_width.saturating_sub(desc_prefix_width).max(1);
+        for wrapped in word_wrap(&format!("# {desc}"), desc_wrap_width) {
+            let mut spans = pipe_prefix(desc_prefix_width);
+            spans.push(Span::styled(wrapped, desc_style));
+            lines.push(Line::from(spans));
+        }
+    } else if has_output {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("│", pipe_style),
+        ]));
+    }
 
     let mut push_indented =
         |prefix: &'static str, continuation: &'static str, content: String, style: Style| {
@@ -794,20 +829,11 @@ fn render_bash(
             }
         };
 
-    if !cmd.is_empty() {
-        push_indented(
-            "  $ ",
-            "    ",
-            cmd.to_string(),
-            Style::default().fg(text).add_modifier(Modifier::BOLD),
-        );
-    }
-
     if let Some(tr) = result
-        && !tr.content.is_empty()
+        && has_output
     {
         let out_style = Style::default().fg(output);
-        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(5));
+        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(5).max(1));
         let total = wrapped.len();
         let truncated = total > MAX_OUTPUT_LINES;
         let display: &[String] = if truncated {
@@ -816,14 +842,18 @@ fn render_bash(
             &wrapped[..]
         };
 
-        for wl in display {
-            push_indented("    ", "    ", wl.clone(), out_style);
+        for (idx, wl) in display.iter().enumerate() {
+            if idx == 0 {
+                push_indented("  └─ ", "     ", wl.clone(), out_style);
+            } else {
+                push_indented("     ", "     ", wl.clone(), out_style);
+            }
         }
 
         if truncated {
             push_indented(
-                "    ",
-                "    ",
+                "     ",
+                "     ",
                 format!("... ({} more lines)", total - MAX_OUTPUT_LINES),
                 Style::default().fg(dim).add_modifier(Modifier::ITALIC),
             );

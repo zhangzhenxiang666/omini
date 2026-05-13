@@ -265,9 +265,6 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
             ("apply changes", "reject changes")
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
-        ToolPauseKind::Permission(PermissionPreview::ApplyPatch(_)) => {
-            ("apply patch", "reject patch")
-        }
         ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
         ToolPauseKind::Permission(PermissionPreview::Custom { .. }) => ("allow tool", "deny tool"),
         ToolPauseKind::UserInput(_) => ("submit response", "cancel request"),
@@ -300,10 +297,12 @@ fn build_permission_drawer_lines(
                 lines.push(Line::from(vec![
                     Span::raw("  "),
                     Span::styled(
-                        format!("# {}", description),
-                        Style::default()
-                            .fg(Color::Rgb(140, 145, 155))
-                            .add_modifier(Modifier::ITALIC),
+                        "Description: ",
+                        Style::default().fg(Color::Rgb(140, 145, 155)),
+                    ),
+                    Span::styled(
+                        description.trim().to_string(),
+                        Style::default().fg(Color::Rgb(220, 220, 225)),
                     ),
                 ]));
                 lines.push(Line::from(""));
@@ -359,7 +358,6 @@ fn build_permission_drawer_lines(
 fn permission_name(preview: &PermissionPreview) -> &'static str {
     match preview {
         PermissionPreview::Bash(_) => "bash",
-        PermissionPreview::ApplyPatch(_) => "apply_patch",
         PermissionPreview::Edit(_) => "edit",
         PermissionPreview::Write(_) => "write",
         PermissionPreview::Read(_) => "read",
