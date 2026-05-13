@@ -1,4 +1,8 @@
-use self::state::{AgentStatus, InteractionStep, UiState};
+use self::clipboard::copy_to_clipboard;
+use self::selection::{
+    selected_text, selection_point_from_mouse, update_text_selection_from_mouse,
+};
+use self::state::{AgentStatus, InteractionStep, TextSelection, UiState};
 use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
 use crate::tui::state::ModelSelectionEntry;
@@ -25,7 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+mod clipboard;
 mod render;
+mod selection;
 mod state;
 mod widgets;
 
@@ -462,6 +468,34 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                     }
                     Event::Resize(_, _) => {}
                     Event::Mouse(mouse) => {
+                        if state.is_selecting_text {
+                            match mouse.kind {
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    update_text_selection_from_mouse(
+                                        &mut state,
+                                        mouse.row,
+                                        mouse.column,
+                                    );
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    update_text_selection_from_mouse(
+                                        &mut state,
+                                        mouse.row,
+                                        mouse.column,
+                                    );
+                                    state.is_selecting_text = false;
+                                    if let Some(text) = selected_text(&state) {
+                                        copy_to_clipboard(&text);
+                                    }
+                                    state.text_selection = None;
+                                }
+                                _ => {}
+                            }
+                            last_tick = tokio::time::Instant::now();
+                            terminal.draw(|frame| render::render(&mut state, frame))?;
+                            continue;
+                        }
+
                         if state.active_tool_pause().is_some() {
                             let drawer = state.permission_drawer_area;
                             let body = state.permission_drawer_body_area;
@@ -479,10 +513,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     }
                                 }
                                 MouseEventKind::ScrollUp if in_body => {
-                                    state.permission_scroll_up(1);
+                                    state.update_scroll_step(tokio::time::Instant::now());
+                                    state.permission_scroll_up(state.scroll_step);
                                 }
                                 MouseEventKind::ScrollDown if in_body => {
-                                    state.permission_scroll_down(1);
+                                    state.update_scroll_step(tokio::time::Instant::now());
+                                    state.permission_scroll_down(state.scroll_step);
                                 }
                                 _ => {}
                             }
@@ -493,25 +529,34 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
                         match mouse.kind {
                             MouseEventKind::Down(MouseButton::Left) => {
-                                let area = state.messages_area;
-                                if mouse.row >= area.top() && mouse.row < area.bottom()
-                                    && mouse.column >= area.left() && mouse.column < area.right()
+                                if let Some(point) =
+                                    selection_point_from_mouse(&state, mouse.row, mouse.column)
                                 {
-                                    let visible_line = (mouse.row - area.top()) as usize;
-                                    let total = state.total_lines;
-                                    let visible_height = area.height as usize;
-                                    let max_scroll = total.saturating_sub(visible_height);
-                                    let scroll_y = max_scroll.saturating_sub(state.scroll_offset);
-                                    let abs_line = scroll_y + visible_line;
-
-                                    let clicked_tool = state.block_ranges.iter()
-                                        .find(|(range, _)| range.contains(&abs_line))
-                                        .map(|(_, id)| id.clone());
-                                    if let Some(tool_id) = clicked_tool
-                                        && !state.running_tools.contains(&tool_id) {
-                                            state.toggle_tool_expand(&tool_id);
-                                        }
+                                    state.text_selection = Some(TextSelection {
+                                        start: point,
+                                        end: point,
+                                    });
+                                    state.is_selecting_text = true;
                                 }
+                            }
+                            MouseEventKind::Drag(MouseButton::Left) => {
+                                update_text_selection_from_mouse(
+                                    &mut state,
+                                    mouse.row,
+                                    mouse.column,
+                                );
+                            }
+                            MouseEventKind::Up(MouseButton::Left) => {
+                                update_text_selection_from_mouse(
+                                    &mut state,
+                                    mouse.row,
+                                    mouse.column,
+                                );
+                                state.is_selecting_text = false;
+                                if let Some(text) = selected_text(&state) {
+                                    copy_to_clipboard(&text);
+                                }
+                                state.text_selection = None;
                             }
                             MouseEventKind::ScrollUp => {
                                 state.update_scroll_step(tokio::time::Instant::now());

@@ -51,9 +51,10 @@ impl Tool for BashTool {
             "For file operations, prefer these dedicated tools instead of using shell commands:\n",
             "  read         Read file contents (with line numbers and offset/limit support)\n",
             "  edit         Edit an existing text file by exact string replacement\n",
+            "  write        Create a new text file or fully overwrite an existing text file\n",
             "\n",
             "Avoid using cat/head/tail/sed/awk for file reads — use the `read` tool instead.\n",
-            "Avoid using sed/echo/redirect for file edits — use the `edit` tool instead."
+            "Avoid using sed/echo/redirect for file edits — use the `edit` or `write` tool instead."
         )
     }
 

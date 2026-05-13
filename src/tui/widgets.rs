@@ -251,10 +251,9 @@ pub fn render_tool(
     tool_result: Option<&ToolResultBlock>,
     tool_preview: Option<&ToolPauseRequest>,
     content_width: usize,
-    collapsed: bool,
 ) -> Vec<Line<'static>> {
     match tool_use.name.as_str() {
-        "bash" => render_bash(tool_use, tool_result, content_width, collapsed),
+        "bash" => render_bash(tool_use, tool_result, content_width),
         "read" => render_read(tool_use, tool_result, content_width),
         "edit" => render_edit(tool_use, tool_result, tool_preview, content_width),
         "write" => render_write(tool_use, tool_result, tool_preview, content_width),
@@ -488,27 +487,34 @@ fn render_edit(
         let mut old_idx = 0;
         let mut new_idx = 0;
         let mut old_line_no = start_line.unwrap_or(1);
+        let mut suppress_context_line_no: Option<usize> = None;
+
+        let format_diff_line = |line_no: Option<usize>, marker: char, text: &str| {
+            let line_no = line_no
+                .map(|n| format!("{:<width$}", n, width = line_width))
+                .unwrap_or_else(|| " ".repeat(line_width));
+            format!("{line_no} {marker}   {text}")
+        };
 
         while old_idx < old_lines.len() || new_idx < new_lines.len() {
             if old_idx < old_lines.len()
                 && new_idx < new_lines.len()
                 && old_lines[old_idx] == new_lines[new_idx]
             {
-                let formatted = if start_line.is_some() {
-                    format!(
-                        "{:<width$}     {}",
-                        old_line_no,
-                        old_lines[old_idx],
-                        width = line_width
-                    )
+                if suppress_context_line_no == Some(old_line_no) && old_lines[old_idx].is_empty() {
+                    old_idx += 1;
+                    new_idx += 1;
+                    old_line_no += 1;
+                    suppress_context_line_no = None;
+                    continue;
+                }
+
+                let line_no = if suppress_context_line_no == Some(old_line_no) {
+                    None
                 } else {
-                    format!(
-                        "{:>width$}     {}",
-                        "",
-                        old_lines[old_idx],
-                        width = line_width
-                    )
+                    start_line.map(|_| old_line_no)
                 };
+                let formatted = format_diff_line(line_no, ' ', old_lines[old_idx]);
                 lines.push(make_line_bg(
                     &format!("  {}", formatted),
                     Color::Reset,
@@ -517,78 +523,39 @@ fn render_edit(
                 old_idx += 1;
                 new_idx += 1;
                 old_line_no += 1;
+                suppress_context_line_no = None;
             } else if old_idx < old_lines.len()
                 && (new_idx >= new_lines.len()
                     || !new_lines[new_idx..].contains(&old_lines[old_idx]))
             {
                 if new_idx < new_lines.len() && !old_lines[old_idx..].contains(&new_lines[new_idx])
                 {
-                    let del = if start_line.is_some() {
-                        format!(
-                            "{:<width$} -   {}",
-                            old_line_no,
-                            old_lines[old_idx],
-                            width = line_width
-                        )
-                    } else {
-                        format!(
-                            "{:>width$} -   {}",
-                            "",
-                            old_lines[old_idx],
-                            width = line_width
-                        )
-                    };
+                    let del =
+                        format_diff_line(start_line.map(|_| old_line_no), '-', old_lines[old_idx]);
                     lines.push(make_line_bg(&format!("  {}", del), red_fg, del_bg));
 
-                    let add = if start_line.is_some() {
-                        format!(
-                            "{:<width$} +   {}",
-                            old_line_no,
-                            new_lines[new_idx],
-                            width = line_width
-                        )
-                    } else {
-                        format!(
-                            "{:>width$} +   {}",
-                            "",
-                            new_lines[new_idx],
-                            width = line_width
-                        )
-                    };
+                    let add =
+                        format_diff_line(start_line.map(|_| old_line_no), '+', new_lines[new_idx]);
                     lines.push(make_line_bg(&format!("  {}", add), green_fg, add_bg));
 
                     old_idx += 1;
                     new_idx += 1;
                     old_line_no += 1;
+                    suppress_context_line_no = None;
                 } else {
-                    let del = if start_line.is_some() {
-                        format!(
-                            "{:<width$} -   {}",
-                            old_line_no,
-                            old_lines[old_idx],
-                            width = line_width
-                        )
-                    } else {
-                        format!(
-                            "{:>width$} -   {}",
-                            "",
-                            old_lines[old_idx],
-                            width = line_width
-                        )
-                    };
+                    let del =
+                        format_diff_line(start_line.map(|_| old_line_no), '-', old_lines[old_idx]);
                     lines.push(make_line_bg(&format!("  {}", del), red_fg, del_bg));
                     old_idx += 1;
                     old_line_no += 1;
+                    suppress_context_line_no = None;
                 }
             } else if new_idx < new_lines.len() {
-                let add = format!(
-                    "{:>width$} +   {}",
-                    "",
-                    new_lines[new_idx],
-                    width = line_width
-                );
+                let add =
+                    format_diff_line(start_line.map(|_| old_line_no), '+', new_lines[new_idx]);
                 lines.push(make_line_bg(&format!("  {}", add), green_fg, add_bg));
                 new_idx += 1;
+                suppress_context_line_no = Some(old_line_no);
             }
         }
     }
@@ -763,131 +730,134 @@ fn render_bash(
     tool_use: &ToolUseBlock,
     result: Option<&ToolResultBlock>,
     content_width: usize,
-    collapsed: bool,
 ) -> Vec<Line<'static>> {
-    if result.is_none() {
-        return vec![Line::from(vec![
-            Span::styled(
-                format!("{} ", spinner()),
-                Style::default().fg(Color::Rgb(212, 182, 106)),
-            ),
-            Span::styled("Bash", Style::default().fg(Color::Rgb(126, 200, 148))),
-        ])];
-    }
-
-    let bg = Color::Rgb(36, 37, 42);
-    let border = Color::Rgb(92, 94, 106);
-    let text = Color::Rgb(200, 200, 200);
+    let text = Color::Rgb(205, 207, 214);
     let dim = Color::Rgb(140, 142, 150);
-    let accent = Color::Rgb(126, 200, 148);
+    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+    let warn = Color::Rgb(212, 182, 106);
+    let error = Color::Rgb(255, 100, 100);
+    let output = Color::Rgb(156, 156, 156);
 
-    let border_style = Style::default().fg(border);
-    let bg_style = Style::default().bg(bg);
-
-    const MAX_PREVIEW: usize = 9;
-    const MAX_EXPANDED_LINES: usize = 200;
+    const MAX_OUTPUT_LINES: usize = 10;
 
     let mut lines: Vec<Line> = Vec::new();
-
-    let mut push_line = |spans: Vec<Span<'static>>| {
-        let mut line_spans = vec![Span::styled("\u{2503}", border_style)];
-        let mut w = 1;
-        for s in &spans {
-            w += UnicodeWidthStr::width(&*s.content);
-        }
-        line_spans.push(Span::raw(" ").style(bg_style));
-        w += 1;
-        line_spans.extend(spans);
-        let pad = content_width.saturating_sub(w);
-        if pad > 0 {
-            line_spans.push(Span::raw(" ".repeat(pad)).style(bg_style));
-        }
-        lines.push(Line::from(line_spans));
+    let title_style = if result.is_some_and(|tr| tr.is_error) {
+        Style::default().fg(error)
+    } else {
+        Style::default().fg(accent)
     };
+    let mut title = Vec::new();
+    if result.is_none() {
+        title.push(Span::styled(
+            format!("{} ", spinner()),
+            Style::default().fg(warn),
+        ));
+    }
+    title.push(Span::raw("· "));
+    title.push(Span::styled("Bash", title_style));
 
     let desc = tool_use
         .input
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    if !desc.is_empty() {
-        push_line(vec![Span::styled(
-            format!("# {}", desc),
-            Style::default()
-                .fg(dim)
-                .bg(bg)
-                .add_modifier(Modifier::ITALIC),
-        )]);
-    }
-
     let cmd = tool_use
         .input
         .get("command")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    if !desc.is_empty() {
+        let used_width: usize = title.iter().map(|s| s.width()).sum();
+        let desc_width = content_width.saturating_sub(used_width + 2);
+        if desc_width > 0 {
+            title.push(Span::raw("  "));
+            title.push(Span::styled(
+                truncate_display_width(desc, desc_width),
+                Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+            ));
+        }
+    }
+    lines.push(Line::from(title));
+
+    let mut push_indented =
+        |prefix: &'static str, continuation: &'static str, content: String, style: Style| {
+            let prefix_width = UnicodeWidthStr::width(prefix);
+            let wrap_width = content_width.saturating_sub(prefix_width).max(1);
+            let wrapped = word_wrap(&content, wrap_width);
+            for (idx, wl) in wrapped.into_iter().enumerate() {
+                let current_prefix = if idx == 0 { prefix } else { continuation };
+                lines.push(Line::from(vec![
+                    Span::raw(current_prefix),
+                    Span::styled(wl, style),
+                ]));
+            }
+        };
+
     if !cmd.is_empty() {
-        push_line(vec![
-            Span::styled(
-                "$ ",
-                Style::default()
-                    .fg(accent)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(cmd.to_string(), Style::default().fg(text).bg(bg)),
-        ]);
+        push_indented(
+            "  $ ",
+            "    ",
+            cmd.to_string(),
+            Style::default().fg(text).add_modifier(Modifier::BOLD),
+        );
     }
 
     if let Some(tr) = result
         && !tr.content.is_empty()
     {
-        push_line(vec![Span::raw("").style(bg_style)]);
-        let out_style = Style::default().fg(Color::Rgb(180, 180, 185)).bg(bg);
-        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(2));
+        let out_style = Style::default().fg(output);
+        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(5));
         let total = wrapped.len();
-
-        let limit = if collapsed {
-            MAX_PREVIEW
-        } else {
-            MAX_EXPANDED_LINES
-        };
-
-        let truncated = total > limit;
+        let truncated = total > MAX_OUTPUT_LINES;
         let display: &[String] = if truncated {
-            &wrapped[..limit]
+            &wrapped[..MAX_OUTPUT_LINES]
         } else {
             &wrapped[..]
         };
 
         for wl in display {
-            push_line(vec![Span::raw(wl.clone()).style(out_style)]);
+            push_indented("    ", "    ", wl.clone(), out_style);
         }
 
         if truncated {
-            push_line(vec![Span::raw("").style(bg_style)]);
-            let indicator_style = Style::default()
-                .fg(Color::Rgb(110, 112, 120))
-                .bg(bg)
-                .add_modifier(Modifier::ITALIC);
-            if collapsed {
-                push_line(vec![Span::styled(
-                    format!(
-                        "more output — click to expand ({} more lines)",
-                        total - MAX_PREVIEW
-                    ),
-                    indicator_style,
-                )]);
-            } else {
-                push_line(vec![Span::styled(
-                    format!(
-                        "output truncated — full content saved to session blocks ({} more lines)",
-                        total - MAX_EXPANDED_LINES
-                    ),
-                    indicator_style,
-                )]);
-            }
+            push_indented(
+                "    ",
+                "    ",
+                format!("... ({} more lines)", total - MAX_OUTPUT_LINES),
+                Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+            );
         }
     }
 
     lines
+}
+
+fn truncate_display_width(s: &str, max_width: usize) -> String {
+    let width = UnicodeWidthStr::width(s);
+    if width <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ellipsis.chars().take(max_width).collect();
+    }
+
+    let target = max_width - ellipsis_width;
+    let mut result = String::new();
+    let mut current_width = 0;
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > target {
+            break;
+        }
+        result.push(ch);
+        current_width += ch_width;
+    }
+    result.push_str(ellipsis);
+    result
 }

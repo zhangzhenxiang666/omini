@@ -345,10 +345,10 @@ impl AgentRuntime {
                     }
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                        UiRequest::CancelRun => {
-                            self.cancelled.store(true, Ordering::Relaxed);
-                            self.query_engine.cancel_current_run();
-                        }
+                            UiRequest::CancelRun => {
+                                self.cancelled.store(true, Ordering::Relaxed);
+                                self.query_engine.cancel_current_run();
+                            }
                             UiRequest::ResolveToolPause { tool_use_id, response } => {
                                 if let Err(e) = self
                                     .query_engine

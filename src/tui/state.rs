@@ -4,8 +4,19 @@ use crate::types::events::{CommandSummary, InteractionRequest, RuntimeEvent, Too
 use crate::types::message::{ContentBlock, Message, Role};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SelectionPoint {
+    pub row: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TextSelection {
+    pub start: SelectionPoint,
+    pub end: SelectionPoint,
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub enum AgentStatus {
@@ -65,6 +76,13 @@ pub struct UiState {
     pub total_lines: usize,
     /// 消息区域的位置和大小
     pub messages_area: Rect,
+    /// 当前渲染出的全部消息行纯文本，用于鼠标拖选反查内容。
+    pub selectable_message_lines: Vec<String>,
+    /// 当前消息视口顶部对应 selectable_message_lines 的行号。
+    pub message_scroll_y: usize,
+    /// 鼠标拖选状态。
+    pub text_selection: Option<TextSelection>,
+    pub is_selecting_text: bool,
     pub input: String,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
@@ -85,7 +103,7 @@ pub struct UiState {
     pub pending_tool_previews: HashMap<String, ToolPauseRequest>,
     /// 权限抽屉当前选中的操作：0 = Yes, 1 = No。
     pub permission_selected: usize,
-    /// 权限抽屉内容视口的顶部行偏移。
+    /// 权限抽屉从底部向上滚动的行数（0 = 位于底部）。
     pub permission_scroll_offset: usize,
     /// 当前权限抽屉整体区域，用于鼠标事件命中判断。
     pub permission_drawer_area: Rect,
@@ -93,10 +111,6 @@ pub struct UiState {
     pub permission_drawer_body_area: Rect,
     /// 当前权限抽屉内容总行数。
     pub permission_drawer_content_len: usize,
-    /// 已展开的工具块 ID 集合（不在集合中的工具块默认折叠，只显示前 5 行）
-    pub expanded_tools: HashSet<String>,
-    /// bash 工具块在 all_lines 中的行范围（用于点击判断）
-    pub block_ranges: Vec<(Range<usize>, String)>,
     /// 底部状态栏信息
     pub status_bar: StatusBar,
     /// 命令自动补全
@@ -124,6 +138,10 @@ impl UiState {
             pending_assistant: None,
             total_lines: 0,
             messages_area: Rect::default(),
+            selectable_message_lines: Vec::new(),
+            message_scroll_y: 0,
+            text_selection: None,
+            is_selecting_text: false,
             input: String::new(),
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
@@ -139,8 +157,6 @@ impl UiState {
             permission_drawer_area: Rect::default(),
             permission_drawer_body_area: Rect::default(),
             permission_drawer_content_len: 0,
-            expanded_tools: HashSet::new(),
-            block_ranges: Vec::new(),
             status_bar: StatusBar::default(),
             autocomplete: CommandAutocomplete::default(),
             current_session_title: None,
@@ -158,7 +174,7 @@ impl UiState {
 
     pub fn reset_permission_drawer(&mut self) {
         self.permission_selected = 0;
-        self.permission_scroll_offset = 0;
+        self.permission_scroll_offset = usize::MAX;
         self.permission_drawer_area = Rect::default();
         self.permission_drawer_body_area = Rect::default();
         self.permission_drawer_content_len = 0;
@@ -173,16 +189,14 @@ impl UiState {
     }
 
     pub fn permission_scroll_up(&mut self, lines: usize) {
-        self.permission_scroll_offset = self.permission_scroll_offset.saturating_sub(lines);
+        self.permission_scroll_offset = self.permission_scroll_offset.saturating_add(lines);
     }
 
     pub fn permission_scroll_down(&mut self, lines: usize) {
         let visible = self.permission_drawer_body_area.height as usize;
         let max_scroll = self.permission_drawer_content_len.saturating_sub(visible);
-        self.permission_scroll_offset = self
-            .permission_scroll_offset
-            .saturating_add(lines)
-            .min(max_scroll);
+        let capped_offset = self.permission_scroll_offset.min(max_scroll);
+        self.permission_scroll_offset = capped_offset.saturating_sub(lines);
     }
 
     pub fn apply_event(&mut self, event: RuntimeEvent) {
@@ -309,15 +323,6 @@ impl UiState {
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
             RuntimeEvent::SessionChanged { .. } => {}
-        }
-    }
-
-    /// 切换工具块的展开/折叠状态
-    pub fn toggle_tool_expand(&mut self, tool_id: &str) {
-        if self.expanded_tools.contains(tool_id) {
-            self.expanded_tools.remove(tool_id);
-        } else {
-            self.expanded_tools.insert(tool_id.to_string());
         }
     }
 

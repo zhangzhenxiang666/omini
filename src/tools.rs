@@ -6,7 +6,7 @@ use crate::types::tool::ToolDefinition;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -38,7 +38,14 @@ fn clean_json_error(e: &serde_json::Error) -> String {
 pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
-    pub metadata: Option<Value>,
+    pub metadata: Option<Map<String, Value>>,
+}
+
+pub fn tool_metadata<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
 }
 
 impl ToolResult {
@@ -58,7 +65,7 @@ impl ToolResult {
         }
     }
 
-    pub fn with_metadata(mut self, metadata: Value) -> Self {
+    pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
         self.metadata = Some(metadata);
         self
     }

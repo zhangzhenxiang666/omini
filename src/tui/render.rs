@@ -1,4 +1,6 @@
-use crate::tui::state::{AgentStatus, InteractionStep, ModelSelectionEntry, UiState};
+use crate::tui::state::{
+    AgentStatus, InteractionStep, ModelSelectionEntry, SelectionPoint, UiState,
+};
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, render_tool,
 };
@@ -95,12 +97,13 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
     let body_height = desired_height.saturating_sub(7) as usize;
     let scroll_line_count = scroll_lines.len();
     let max_scroll = scroll_line_count.saturating_sub(body_height);
-    let scroll_offset = state.permission_scroll_offset.min(max_scroll);
-    state.permission_scroll_offset = scroll_offset;
+    let capped_offset = state.permission_scroll_offset.min(max_scroll);
+    state.permission_scroll_offset = capped_offset;
+    let scroll_y = max_scroll.saturating_sub(capped_offset);
     state.permission_drawer_content_len = scroll_lines.len();
     let visible_lines: Vec<Line<'static>> = scroll_lines
         .into_iter()
-        .skip(scroll_offset)
+        .skip(scroll_y)
         .take(body_height)
         .collect();
 
@@ -166,7 +169,7 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
     let paragraph = Paragraph::new(Text::from(visible_lines));
     frame.render_widget(paragraph, body_area);
     if max_scroll > 0 {
-        render_permission_scrollbar(frame, body_area, scroll_offset, scroll_line_count);
+        render_permission_scrollbar(frame, body_area, scroll_y, scroll_line_count);
     }
 
     let yes_style = permission_option_style(state.permission_selected == 0);
@@ -201,7 +204,7 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
 fn render_permission_scrollbar(
     frame: &mut ratatui::Frame,
     body_area: Rect,
-    scroll_offset: usize,
+    scroll_y: usize,
     total_lines: usize,
 ) {
     let height = body_area.height as usize;
@@ -215,7 +218,7 @@ fn render_permission_scrollbar(
     let thumb_y = if max_scroll == 0 {
         0
     } else {
-        scroll_offset.saturating_mul(thumb_range) / max_scroll
+        scroll_y.saturating_mul(thumb_range) / max_scroll
     };
     let x = body_area.x + body_area.width + 1;
     let track_style = Style::default().fg(Color::Rgb(70, 75, 86));
@@ -315,7 +318,7 @@ fn build_permission_drawer_lines(
         }
         ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
             if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width, false)
+                render_tool(tool_use, None, Some(request), content_width)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing edit tool input for preview",
@@ -325,7 +328,7 @@ fn build_permission_drawer_lines(
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => {
             if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width, false)
+                render_tool(tool_use, None, Some(request), content_width)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing write tool input for preview",
@@ -981,14 +984,15 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 
 fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     if state.messages.is_empty() && state.pending_assistant.is_none() {
+        state.selectable_message_lines.clear();
+        state.message_scroll_y = 0;
         return;
     }
 
     let content_width = area.width as usize;
     let visible_height = area.height as usize;
-    state.block_ranges.clear();
-
     let mut all_lines: Vec<Line> = Vec::new();
+    let mut selectable_lines: Vec<String> = Vec::new();
 
     let mut tool_result_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     for (mi, msg) in state.messages.iter().enumerate() {
@@ -1012,8 +1016,6 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
             }
 
             let mut block_lines: Vec<Line> = Vec::new();
-            let mut block_tool_id: Option<String> = None;
-
             match block {
                 ContentBlock::Text(tb) if message.role == crate::types::message::Role::User => {
                     let user_bg = Color::Rgb(65, 69, 76);
@@ -1059,21 +1061,16 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             }
                         });
 
-                        let collapsed = !state.expanded_tools.contains(&tu.id);
-                        let tool_lines =
-                            render_tool(tu, tool_result.as_ref(), None, content_width, collapsed);
+                        let tool_lines = render_tool(tu, tool_result.as_ref(), None, content_width);
                         block_lines.extend(tool_lines);
-
-                        block_tool_id = Some(tu.id.clone());
 
                         for pos in positions {
                             consumed.insert(*pos);
                         }
                     } else {
                         // 工具结果尚未返回
-                        let tool_lines = render_tool(tu, None, None, content_width, false);
+                        let tool_lines = render_tool(tu, None, None, content_width);
                         block_lines.extend(tool_lines);
-                        block_tool_id = Some(tu.id.clone());
                     }
                 }
                 ContentBlock::Thinking(tb) => {
@@ -1095,12 +1092,9 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
             if !block_lines.is_empty() {
                 if !all_lines.is_empty() {
                     all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
                 }
-                let base = all_lines.len();
-                let block_len = block_lines.len();
-                if let Some(tool_id) = block_tool_id.take() {
-                    state.block_ranges.push((base..base + block_len, tool_id));
-                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
                 all_lines.append(&mut block_lines);
             }
         }
@@ -1126,8 +1120,6 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
             }
 
             let mut block_lines: Vec<Line> = Vec::new();
-            let mut block_tool_id: Option<String> = None;
-
             match block {
                 ContentBlock::Text(tb) => {
                     let mut lines = build_plain_lines(&tb.text, content_width);
@@ -1147,9 +1139,8 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             None
                         }
                     });
-                    let tool_lines = render_tool(tu, tr.as_ref(), None, content_width, false);
+                    let tool_lines = render_tool(tu, tr.as_ref(), None, content_width);
                     block_lines.extend(tool_lines);
-                    block_tool_id = Some(tu.id.clone());
                 }
                 ContentBlock::ToolResult(tr) => {
                     // 如果没有对应的 ToolUse 来消费它，单独渲染
@@ -1167,12 +1158,9 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
             if !block_lines.is_empty() {
                 if !all_lines.is_empty() {
                     all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
                 }
-                let base = all_lines.len();
-                let block_len = block_lines.len();
-                if let Some(tool_id) = block_tool_id.take() {
-                    state.block_ranges.push((base..base + block_len, tool_id));
-                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
                 all_lines.append(&mut block_lines);
             }
         }
@@ -1194,11 +1182,100 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     let capped_offset = state.scroll_offset.min(max_scroll);
     state.scroll_offset = capped_offset;
     let scroll_y = max_scroll.saturating_sub(capped_offset);
+    state.selectable_message_lines = selectable_lines;
+    state.message_scroll_y = scroll_y;
+
+    apply_text_selection_highlight(state, &mut all_lines);
 
     let paragraph =
         Paragraph::new(ratatui::text::Text::from(all_lines)).scroll((scroll_y as u16, 0));
 
     frame.render_widget(paragraph, area);
+}
+
+fn line_to_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
+}
+
+fn apply_text_selection_highlight(state: &UiState, lines: &mut [Line<'static>]) {
+    let Some((start, end)) = normalized_selection(state) else {
+        return;
+    };
+    if start == end {
+        return;
+    }
+
+    let highlight = Style::default()
+        .fg(Color::Rgb(40, 44, 52))
+        .bg(Color::Rgb(180, 210, 255))
+        .add_modifier(Modifier::BOLD);
+
+    for row in start.row..=end.row {
+        let Some(text) = state.selectable_message_lines.get(row) else {
+            continue;
+        };
+        let start_col = if row == start.row { start.col } else { 0 };
+        let end_col = if row == end.row {
+            end.col.saturating_add(1)
+        } else {
+            display_width(text)
+        };
+        if let Some(line) = lines.get_mut(row) {
+            *line = highlighted_line(text, start_col, end_col, highlight);
+        }
+    }
+}
+
+fn normalized_selection(state: &UiState) -> Option<(SelectionPoint, SelectionPoint)> {
+    let selection = state.text_selection.as_ref()?;
+    if selection.start <= selection.end {
+        Some((selection.start, selection.end))
+    } else {
+        Some((selection.end, selection.start))
+    }
+}
+
+fn highlighted_line(
+    text: &str,
+    start_col: usize,
+    end_col: usize,
+    highlight: Style,
+) -> Line<'static> {
+    let (before, selected, after) = split_by_display_cols(text, start_col, end_col);
+    Line::from(vec![
+        Span::raw(before),
+        Span::styled(selected, highlight),
+        Span::raw(after),
+    ])
+}
+
+fn split_by_display_cols(text: &str, start_col: usize, end_col: usize) -> (String, String, String) {
+    let mut before = String::new();
+    let mut selected = String::new();
+    let mut after = String::new();
+    let mut col = 0;
+
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let next_col = col + width;
+        if next_col <= start_col {
+            before.push(ch);
+        } else if col >= end_col {
+            after.push(ch);
+        } else {
+            selected.push(ch);
+        }
+        col = next_col;
+    }
+
+    (before, selected, after)
+}
+
+fn display_width(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
 }
 
 fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {

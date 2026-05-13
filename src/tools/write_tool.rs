@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult};
+use super::{Tool, ToolResult, tool_metadata};
 use crate::types::events::{EditPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -70,19 +70,22 @@ impl Tool for WriteTool {
 
     async fn execute_prepared(&self, prepared: Self::Prepared) -> ToolResult {
         match execute_write(&prepared).await {
-            Ok(report) => ToolResult::ok(report.output).with_metadata(serde_json::json!({
-                "input": prepared.input.clone(),
-                "permission_preview": prepared.preview.clone(),
-                "file_path": prepared.input.file_path,
-                "added_lines": report.added_lines,
-                "existed": report.existed,
-            })),
-            Err(e) => ToolResult::error(e).with_metadata(serde_json::json!({
-                "input": prepared.input,
-                "permission_preview": prepared.preview,
-                "added_lines": 0,
-                "existed": prepared.existed,
-            })),
+            Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
+                ("input", serde_json::json!(prepared.input.clone())),
+                (
+                    "permission_preview",
+                    serde_json::json!(prepared.preview.clone()),
+                ),
+                ("file_path", serde_json::json!(prepared.input.file_path)),
+                ("added_lines", serde_json::json!(report.added_lines)),
+                ("existed", serde_json::json!(report.existed)),
+            ])),
+            Err(e) => ToolResult::error(e).with_metadata(tool_metadata([
+                ("input", serde_json::json!(prepared.input)),
+                ("permission_preview", serde_json::json!(prepared.preview)),
+                ("added_lines", serde_json::json!(0)),
+                ("existed", serde_json::json!(prepared.existed)),
+            ])),
         }
     }
 }

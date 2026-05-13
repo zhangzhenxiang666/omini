@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult};
+use super::{Tool, ToolResult, tool_metadata};
 use crate::types::events::{EditPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -87,21 +87,30 @@ impl Tool for EditTool {
 
     async fn execute_prepared(&self, prepared: Self::Prepared) -> ToolResult {
         match execute_edit(&prepared).await {
-            Ok(report) => ToolResult::ok(report.output).with_metadata(serde_json::json!({
-                "input": prepared.input.clone(),
-                "permission_preview": prepared.preview.clone(),
-                "prepared_matches": prepared.matches.clone(),
-                "matches": report.matches,
-                "replacement_count": report.replacement_count,
-                "file_path": prepared.input.file_path,
-            })),
-            Err(e) => ToolResult::error(e).with_metadata(serde_json::json!({
-                "input": prepared.input,
-                "permission_preview": prepared.preview,
-                "prepared_matches": prepared.matches,
-                "matches": [],
-                "replacement_count": 0,
-            })),
+            Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
+                ("input", serde_json::json!(prepared.input.clone())),
+                (
+                    "permission_preview",
+                    serde_json::json!(prepared.preview.clone()),
+                ),
+                (
+                    "prepared_matches",
+                    serde_json::json!(prepared.matches.clone()),
+                ),
+                ("matches", serde_json::json!(report.matches)),
+                (
+                    "replacement_count",
+                    serde_json::json!(report.replacement_count),
+                ),
+                ("file_path", serde_json::json!(prepared.input.file_path)),
+            ])),
+            Err(e) => ToolResult::error(e).with_metadata(tool_metadata([
+                ("input", serde_json::json!(prepared.input)),
+                ("permission_preview", serde_json::json!(prepared.preview)),
+                ("prepared_matches", serde_json::json!(prepared.matches)),
+                ("matches", serde_json::json!([])),
+                ("replacement_count", serde_json::json!(0)),
+            ])),
         }
     }
 }
