@@ -1,12 +1,9 @@
-use std::collections::HashMap;
-
-use async_trait::async_trait;
-
+use crate::command::Command;
 use crate::runtime::AgentRuntime;
 use crate::types::config::ProviderProfile;
-use crate::types::events::{CommandResult, InteractionRequest, RuntimeEvent};
-
-use super::Command;
+use crate::types::events::{CommandResult, InteractionRequest, RuntimeToUiEvent};
+use async_trait::async_trait;
+use std::collections::HashMap;
 
 pub struct ModelCommand;
 
@@ -26,7 +23,7 @@ impl Command for ModelCommand {
         let current_provider = runtime.settings.active_provider.clone();
         let current_model = runtime.settings.model.clone();
         runtime
-            .send_event(RuntimeEvent::InteractionRequest(
+            .send_event(RuntimeToUiEvent::InteractionRequest(
                 InteractionRequest::ModelSelection {
                     providers,
                     current_provider,

@@ -8,7 +8,9 @@ use crate::engine::{QueryContext, QueryEngine};
 use crate::tools::ToolRegistry;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
-use crate::types::events::{CommandResult, EngineEvent, RuntimeEvent, UiRequest};
+use crate::types::events::{
+    CommandResult, EngineToRuntimeEvent, RuntimeToUiEvent, UiToRuntimeEvent,
+};
 use crate::types::message::{Message, Role};
 use chrono::Utc;
 use std::path::Path;
@@ -27,7 +29,7 @@ pub(crate) enum PendingInteraction {
 /// Agent 运行时。
 ///
 /// 维护自己的对话历史，通过 channel 与 UI 双向通信。
-/// 一次 `SendMessage` 可能触发多轮 LLM 调用 + 工具执行，
+/// 一次 `UiToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用 + 工具执行，
 /// 直到 LLM 自然结束或达到最大轮次。
 pub struct AgentRuntime {
     /// 当前会话 ID（第一次提交时生成）
@@ -35,9 +37,9 @@ pub struct AgentRuntime {
     /// 创建后缓存会话目录句柄
     pub(crate) session_dir: Option<SessionDir>,
     /// 向 UI 发送事件
-    event_tx: mpsc::Sender<RuntimeEvent>,
+    event_tx: mpsc::Sender<RuntimeToUiEvent>,
     /// 接收 UI 发来的请求
-    request_rx: mpsc::Receiver<UiRequest>,
+    request_rx: mpsc::Receiver<UiToRuntimeEvent>,
     /// 配置
     pub(crate) settings: Settings,
     /// 当前项目目录
@@ -60,8 +62,8 @@ pub struct AgentRuntime {
 
 impl AgentRuntime {
     pub fn new(
-        event_tx: mpsc::Sender<RuntimeEvent>,
-        request_rx: mpsc::Receiver<UiRequest>,
+        event_tx: mpsc::Sender<RuntimeToUiEvent>,
+        request_rx: mpsc::Receiver<UiToRuntimeEvent>,
         settings: Settings,
         project: ProjectDir,
     ) -> Self {
@@ -78,7 +80,7 @@ impl AgentRuntime {
 
         // 向 UI 推送命令列表（供自动补全使用）
         let summaries = command_registry.summaries();
-        let _ = event_tx.try_send(RuntimeEvent::CommandList(summaries));
+        let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(summaries));
 
         Self {
             session_id: None,
@@ -104,20 +106,27 @@ impl AgentRuntime {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            UiRequest::SendMessage(text) => {
-                                // 检查是否为命令
+                            UiToRuntimeEvent::SendMessage(msg) => {
+                                self.messages.push(msg);
+                                self.process_run().await;
+                            }
+                            UiToRuntimeEvent::SendCommand(text) => {
                                 if let Some(parsed) = command::parse(&text) {
                                     self.handle_command(&parsed).await;
-                                } else {
-                                    self.messages.push(Message::from_user_text(text));
-                                    self.process_run().await;
                                 }
                             }
-                            UiRequest::CancelRun => {
+                            UiToRuntimeEvent::InterveneMessage(msg) => {
+                                let _ = msg;
+                                self.send_event(RuntimeToUiEvent::Error(
+                                    "Cannot intervene because no run is active".to_string(),
+                                ))
+                                .await;
+                            }
+                            UiToRuntimeEvent::CancelRun => {
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.cancel_current_run();
                             }
-                            UiRequest::ModelSelected { provider, model, thinking_effort } => {
+                            UiToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 if self.pending_interaction
                                     == Some(PendingInteraction::ModelSelect)
                                 {
@@ -125,7 +134,7 @@ impl AgentRuntime {
                                     self.pending_interaction = None;
                                 }
                             }
-                            UiRequest::SessionSelected { session_id } => {
+                            UiToRuntimeEvent::SessionSelected { session_id } => {
                                 if self.pending_interaction
                                     == Some(PendingInteraction::SessionSelect)
                                 {
@@ -133,13 +142,11 @@ impl AgentRuntime {
                                     self.pending_interaction = None;
                                 }
                             }
-                            UiRequest::ResolveToolPause { tool_use_id, response } => {
-                                if let Err(e) = self
-                                    .query_engine
-                                    .resolve_tool_pause(&tool_use_id, response)
-                                {
-                                    self.send_event(RuntimeEvent::Error(e)).await;
-                                }
+                            UiToRuntimeEvent::ResolveToolPause { .. } => {
+                                self.send_event(RuntimeToUiEvent::Error(
+                                    "Cannot resolve tool pause because no run is active".to_string(),
+                                ))
+                                .await;
                             }
                         }
                     }
@@ -164,11 +171,11 @@ impl AgentRuntime {
                     };
                 }
                 CommandResult::Error(e) => {
-                    self.send_event(RuntimeEvent::Error(e)).await;
+                    self.send_event(RuntimeToUiEvent::Error(e)).await;
                 }
             }
         } else {
-            self.send_event(RuntimeEvent::CommandOutput(format!(
+            self.send_event(RuntimeToUiEvent::CommandOutput(format!(
                 "未知命令: /{}. 输入 /help 查看可用命令。",
                 parsed.name
             )))
@@ -212,15 +219,17 @@ impl AgentRuntime {
             }
 
             // 通知 UI
-            self.send_event(RuntimeEvent::ModelChanged {
+            self.send_event(RuntimeToUiEvent::ModelChanged {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 thinking_effort: self.settings.thinking_effort,
             })
             .await;
         } else {
-            self.send_event(RuntimeEvent::Error(format!("提供商 '{provider}' 不存在")))
-                .await;
+            self.send_event(RuntimeToUiEvent::Error(format!(
+                "提供商 '{provider}' 不存在"
+            )))
+            .await;
         }
     }
 
@@ -231,7 +240,7 @@ impl AgentRuntime {
         let db_session = match db::global_db().get_session(session_id).await {
             Ok(Some(s)) => s,
             _ => {
-                self.send_event(RuntimeEvent::Error("会话不存在".to_string()))
+                self.send_event(RuntimeToUiEvent::Error("会话不存在".to_string()))
                     .await;
                 return;
             }
@@ -279,19 +288,19 @@ impl AgentRuntime {
             .update_session_msg_count(session_id, count)
             .await;
 
-        self.send_event(RuntimeEvent::SessionTitleChanged {
+        self.send_event(RuntimeToUiEvent::SessionTitleChanged {
             title: db_session.title,
         })
         .await;
 
-        self.send_event(RuntimeEvent::ModelChanged {
+        self.send_event(RuntimeToUiEvent::ModelChanged {
             provider: db_session.provider.clone(),
             model: db_session.model.clone(),
             thinking_effort,
         })
         .await;
 
-        self.send_event(RuntimeEvent::SessionChanged {
+        self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id.to_string()),
             messages: ui_messages,
         })
@@ -308,26 +317,25 @@ impl AgentRuntime {
             let _ = db::global_db().update_session_updated_at(id).await;
         }
 
-        self.send_event(RuntimeEvent::RunStarted).await;
-
-        // 本轮开始时已有的消息数，即用户消息所在的位置
-        let prev_len = self.messages.len();
-
-        // 先把用户消息持久化（这条不是引擎产生的）
-        self.persist_message_at(prev_len - 1).await;
+        self.send_event(RuntimeToUiEvent::RunStarted).await;
 
         // 创建 engine → runtime 的内部通信通道
-        let (engine_tx, engine_rx) = mpsc::channel::<EngineEvent>(256);
+        let (engine_tx, engine_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
 
         // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
         let processor = self.spawn_event_processor(engine_rx).await;
+        if let Some(msg) = self.messages.last().cloned() {
+            let _ = engine_tx
+                .send(EngineToRuntimeEvent::UserMessageProduced(msg))
+                .await;
+        }
 
         {
             // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
             let ctx = QueryContext {
                 messages: &mut self.messages,
                 settings: &self.settings,
-                llm_client: &self.llm_client,
+                llm_client: self.llm_client.clone(),
                 tool_registry: Arc::clone(&self.tool_registry),
             };
 
@@ -345,23 +353,27 @@ impl AgentRuntime {
                     }
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            UiRequest::CancelRun => {
+                            UiToRuntimeEvent::CancelRun => {
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.cancel_current_run();
                             }
-                            UiRequest::ResolveToolPause { tool_use_id, response } => {
+                            UiToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
                                 if let Err(e) = self
                                     .query_engine
                                     .resolve_tool_pause(&tool_use_id, response)
                                 {
-                                    let _ = event_tx.send(RuntimeEvent::Error(e)).await;
+                                    let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
                                 }
                             }
-                            UiRequest::SendMessage(_)
-                            | UiRequest::ModelSelected { .. }
-                            | UiRequest::SessionSelected { .. } => {
+                            UiToRuntimeEvent::InterveneMessage(msg) => {
+                                self.query_engine.enqueue_user_message(msg);
+                            }
+                            UiToRuntimeEvent::SendMessage(_)
+                            | UiToRuntimeEvent::SendCommand(_)
+                            | UiToRuntimeEvent::ModelSelected { .. }
+                            | UiToRuntimeEvent::SessionSelected { .. } => {
                                 let _ = event_tx
-                                    .send(RuntimeEvent::Error(
+                                    .send(RuntimeToUiEvent::Error(
                                         "Cannot handle this request while a run is active".to_string(),
                                     ))
                                     .await;
@@ -384,13 +396,13 @@ impl AgentRuntime {
             .expect("failed to update session message count");
 
         self.cancelled.store(false, Ordering::Relaxed);
-        self.send_event(RuntimeEvent::RunFinished).await;
+        self.send_event(RuntimeToUiEvent::RunFinished).await;
     }
 
     /// 启动事件处理器
     async fn spawn_event_processor(
         &self,
-        mut engine_rx: mpsc::Receiver<EngineEvent>,
+        mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
     ) -> tokio::task::JoinHandle<()> {
         let session_id = self
             .session_id
@@ -407,37 +419,42 @@ impl AgentRuntime {
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
-                    EngineEvent::MessageProduced(msg) => {
+                    EngineToRuntimeEvent::UserMessageProduced(msg) => {
+                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "user").await;
+                    }
+                    EngineToRuntimeEvent::MessageProduced(msg) => {
                         persist_one(&session_dir, &session_id, &blocks_dir, &msg, "assistant")
                             .await;
                     }
-                    EngineEvent::ToolResultsProduced(msg) => {
+                    EngineToRuntimeEvent::ToolResultsProduced(msg) => {
                         persist_one(&session_dir, &session_id, &blocks_dir, &msg, "user").await;
                     }
                     // ===== 透传事件 =====
-                    EngineEvent::TurnStarted => {
-                        let _ = event_tx.send(RuntimeEvent::TurnStarted).await;
+                    EngineToRuntimeEvent::TurnStarted => {
+                        let _ = event_tx.send(RuntimeToUiEvent::TurnStarted).await;
                     }
-                    EngineEvent::TurnEnded => {
-                        let _ = event_tx.send(RuntimeEvent::TurnEnded).await;
+                    EngineToRuntimeEvent::TurnEnded => {
+                        let _ = event_tx.send(RuntimeToUiEvent::TurnEnded).await;
                     }
-                    EngineEvent::ThinkingDelta(t) => {
-                        let _ = event_tx.send(RuntimeEvent::ThinkingDelta(t)).await;
+                    EngineToRuntimeEvent::ThinkingDelta(t) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::ThinkingDelta(t)).await;
                     }
-                    EngineEvent::TextDelta(t) => {
-                        let _ = event_tx.send(RuntimeEvent::TextDelta(t)).await;
+                    EngineToRuntimeEvent::TextDelta(t) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::TextDelta(t)).await;
                     }
-                    EngineEvent::ToolUse(tu) => {
-                        let _ = event_tx.send(RuntimeEvent::ToolUse(tu)).await;
+                    EngineToRuntimeEvent::ToolUse(tu) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::ToolUse(tu)).await;
                     }
-                    EngineEvent::ToolResult(tr) => {
-                        let _ = event_tx.send(RuntimeEvent::ToolResult(tr)).await;
+                    EngineToRuntimeEvent::ToolResult(tr) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::ToolResult(tr)).await;
                     }
-                    EngineEvent::ToolPauseRequested(req) => {
-                        let _ = event_tx.send(RuntimeEvent::ToolPauseRequested(req)).await;
+                    EngineToRuntimeEvent::ToolPauseRequested(req) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::ToolPauseRequested(req))
+                            .await;
                     }
-                    EngineEvent::Error(e) => {
-                        let _ = event_tx.send(RuntimeEvent::Error(e)).await;
+                    EngineToRuntimeEvent::Error(e) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
                     }
                 }
             }
@@ -445,7 +462,7 @@ impl AgentRuntime {
     }
 
     /// 发送事件到 UI（忽略 send 失败）
-    pub(crate) async fn send_event(&self, event: RuntimeEvent) {
+    pub(crate) async fn send_event(&self, event: RuntimeToUiEvent) {
         let _ = self.event_tx.send(event).await;
     }
 
@@ -501,32 +518,13 @@ impl AgentRuntime {
 
         let title_out = session.title.clone();
         let session_id_out = session.id.clone();
-        self.send_event(RuntimeEvent::SessionTitleChanged { title: title_out })
+        self.send_event(RuntimeToUiEvent::SessionTitleChanged { title: title_out })
             .await;
-        self.send_event(RuntimeEvent::SessionChanged {
+        self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id_out),
             messages: self.messages.clone(),
         })
         .await;
-    }
-
-    /// 持久化 `messages[idx]` 处的单条消息（用于持久化用户输入）。
-    async fn persist_message_at(&self, idx: usize) {
-        if idx >= self.messages.len() {
-            return;
-        }
-        let session_id = self
-            .session_id
-            .as_ref()
-            .expect("session must exist before persisting");
-        let session_dir = self
-            .session_dir
-            .as_ref()
-            .expect("session dir must exist before persisting");
-        let blocks_root = session_dir.path().join("blocks");
-        let msg = &self.messages[idx];
-
-        persist_one(session_dir, session_id, &blocks_root, msg, msg_role(msg)).await;
     }
 }
 
@@ -587,11 +585,4 @@ async fn persist_one(
         blocks_dir: blocks_dir.to_path_buf(),
     };
     let _ = db::global_db().insert_message(&new_msg).await;
-}
-
-fn msg_role(msg: &Message) -> &'static str {
-    match msg.role {
-        Role::User => "user",
-        Role::Assistant => "assistant",
-    }
 }

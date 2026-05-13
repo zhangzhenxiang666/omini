@@ -1,9 +1,11 @@
 use crate::types::config::ModelConfig;
 use crate::types::config::ThinkingEffort;
-use crate::types::events::{CommandSummary, InteractionRequest, RuntimeEvent, ToolPauseRequest};
+use crate::types::events::{
+    CommandSummary, InteractionRequest, RuntimeToUiEvent, ToolPauseRequest,
+};
 use crate::types::message::{ContentBlock, Message, Role};
 use ratatui::layout::Rect;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,6 +86,10 @@ pub struct UiState {
     pub text_selection: Option<TextSelection>,
     pub is_selecting_text: bool,
     pub input: String,
+    /// 当前 query 运行期间由普通 Enter 暂存在 UI 侧的用户输入。
+    pub queued_user_inputs: VecDeque<String>,
+    /// 已提交给 engine、等待当前轮结束后插入历史的用户输入。
+    pub pending_intervention_inputs: VecDeque<String>,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
@@ -143,6 +149,8 @@ impl UiState {
             text_selection: None,
             is_selecting_text: false,
             input: String::new(),
+            queued_user_inputs: VecDeque::new(),
+            pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
             scroll_offset: 0,
@@ -172,6 +180,47 @@ impl UiState {
             .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
     }
 
+    pub fn is_run_active(&self) -> bool {
+        matches!(
+            self.agent_status,
+            AgentStatus::Working | AgentStatus::Thinking | AgentStatus::AwaitingInput
+        )
+    }
+
+    pub fn take_queued_user_message(&mut self) -> Option<Message> {
+        Self::message_from_inputs(&mut self.queued_user_inputs)
+    }
+
+    pub fn take_queued_user_message_for_intervention(&mut self) -> Option<Message> {
+        if !self.pending_intervention_inputs.is_empty() {
+            return None;
+        }
+
+        let msg = Self::message_from_inputs(&mut self.queued_user_inputs)?;
+        self.pending_intervention_inputs = msg
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(tb) => Some(tb.text.clone()),
+                _ => None,
+            })
+            .collect();
+        Some(msg)
+    }
+
+    fn take_pending_intervention_message(&mut self) -> Option<Message> {
+        Self::message_from_inputs(&mut self.pending_intervention_inputs)
+    }
+
+    fn message_from_inputs(inputs: &mut VecDeque<String>) -> Option<Message> {
+        if inputs.is_empty() {
+            return None;
+        }
+
+        let content = inputs.drain(..).map(ContentBlock::from_text).collect();
+        Some(Message::new(Role::User, content))
+    }
+
     pub fn reset_permission_drawer(&mut self) {
         self.permission_selected = 0;
         self.permission_scroll_offset = usize::MAX;
@@ -199,13 +248,13 @@ impl UiState {
         self.permission_scroll_offset = capped_offset.saturating_sub(lines);
     }
 
-    pub fn apply_event(&mut self, event: RuntimeEvent) {
+    pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
         match event {
-            RuntimeEvent::RunStarted => {
+            RuntimeToUiEvent::RunStarted => {
                 self.pending_assistant = None;
                 self.agent_status = AgentStatus::Thinking;
             }
-            RuntimeEvent::TurnStarted => {
+            RuntimeToUiEvent::TurnStarted => {
                 // 如果上轮还有未提交的 pending_assistant，先推入 messages
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
@@ -214,7 +263,7 @@ impl UiState {
                 }
                 self.agent_status = AgentStatus::Thinking;
             }
-            RuntimeEvent::ThinkingDelta(t) => {
+            RuntimeToUiEvent::ThinkingDelta(t) => {
                 self.agent_status = AgentStatus::Thinking;
                 let pending = self
                     .pending_assistant
@@ -225,7 +274,7 @@ impl UiState {
                     pending.content.push(ContentBlock::from_thinking(t));
                 }
             }
-            RuntimeEvent::TextDelta(t) => {
+            RuntimeToUiEvent::TextDelta(t) => {
                 self.agent_status = AgentStatus::Working;
                 let pending = self
                     .pending_assistant
@@ -236,7 +285,7 @@ impl UiState {
                     pending.content.push(ContentBlock::from_text(t));
                 }
             }
-            RuntimeEvent::ToolUse(tu) => {
+            RuntimeToUiEvent::ToolUse(tu) => {
                 self.running_tools.insert(tu.id.clone());
                 let pending = self
                     .pending_assistant
@@ -244,7 +293,7 @@ impl UiState {
                 pending.content.push(ContentBlock::ToolUse(tu));
                 self.agent_status = AgentStatus::Working;
             }
-            RuntimeEvent::ToolResult(tr) => {
+            RuntimeToUiEvent::ToolResult(tr) => {
                 self.running_tools.remove(&tr.tool_use_id);
                 self.pending_tool_previews.remove(&tr.tool_use_id);
                 if self.pending_tool_previews.is_empty() {
@@ -261,10 +310,13 @@ impl UiState {
                     self.messages.push(msg);
                 }
             }
-            RuntimeEvent::TurnEnded => {
+            RuntimeToUiEvent::TurnEnded => {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
+                    self.messages.push(msg);
+                }
+                if let Some(msg) = self.take_pending_intervention_message() {
                     self.messages.push(msg);
                 }
                 if self.auto_scroll {
@@ -272,35 +324,36 @@ impl UiState {
                 }
                 self.agent_status = AgentStatus::Working;
             }
-            RuntimeEvent::RunFinished => {
+            RuntimeToUiEvent::RunFinished => {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
                     self.messages.push(msg);
                 }
+                self.pending_intervention_inputs.clear();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
                 self.agent_status = AgentStatus::Idle;
             }
-            RuntimeEvent::ToolPauseRequested(req) => {
+            RuntimeToUiEvent::ToolPauseRequested(req) => {
                 self.reset_permission_drawer();
                 self.pending_tool_previews
                     .insert(req.tool_use_id.clone(), req);
                 self.agent_status = AgentStatus::AwaitingInput;
             }
-            RuntimeEvent::Error(e) => self.agent_status = AgentStatus::Error(e),
+            RuntimeToUiEvent::Error(e) => self.agent_status = AgentStatus::Error(e),
             // ===== 命令系统事件 =====
-            RuntimeEvent::Shutdown => {
+            RuntimeToUiEvent::Shutdown => {
                 // TUI 主循环检测到此状态后会 break
             }
-            RuntimeEvent::CommandOutput(text) => {
+            RuntimeToUiEvent::CommandOutput(text) => {
                 self.messages.push(Message::from_user_text(text));
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
             }
-            RuntimeEvent::ModelChanged {
+            RuntimeToUiEvent::ModelChanged {
                 provider,
                 model,
                 thinking_effort,
@@ -312,17 +365,17 @@ impl UiState {
                 self.interaction_step = None;
                 self.interaction_request = None;
             }
-            RuntimeEvent::SessionTitleChanged { title } => {
+            RuntimeToUiEvent::SessionTitleChanged { title } => {
                 self.current_session_title = title;
             }
-            RuntimeEvent::InteractionRequest(req) => {
+            RuntimeToUiEvent::InteractionRequest(req) => {
                 self.interaction_request = Some(req);
             }
-            RuntimeEvent::CommandList(cmds) => {
+            RuntimeToUiEvent::CommandList(cmds) => {
                 self.autocomplete.all_commands = cmds;
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
-            RuntimeEvent::SessionChanged { .. } => {}
+            RuntimeToUiEvent::SessionChanged { .. } => {}
         }
     }
 

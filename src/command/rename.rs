@@ -1,7 +1,7 @@
-use super::Command;
+use crate::command::Command;
 use crate::db;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeEvent};
+use crate::types::events::{CommandResult, RuntimeToUiEvent};
 use async_trait::async_trait;
 
 pub struct RenameCommand;
@@ -21,7 +21,7 @@ impl Command for RenameCommand {
         true
     }
     fn args_description(&self) -> Option<&'static str> {
-        Some("name")
+        Some("<name>")
     }
     async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {
         let session_id = match &runtime.session_id {
@@ -47,7 +47,7 @@ impl Command for RenameCommand {
         }
 
         runtime
-            .send_event(RuntimeEvent::SessionTitleChanged { title: Some(title) })
+            .send_event(RuntimeToUiEvent::SessionTitleChanged { title: Some(title) })
             .await;
 
         CommandResult::Done

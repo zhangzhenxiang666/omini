@@ -7,16 +7,20 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 // ===========================================================================
-// 第一层：UI → Runtime 的请求
+// 第一层：UI → Runtime 的事件
 // ===========================================================================
 
-/// UI → Runtime 的请求。
+/// UI → Runtime 的事件。
 #[derive(Debug)]
-pub enum UiRequest {
+pub enum UiToRuntimeEvent {
     /// 用户取消当前正在运行的对话
     CancelRun,
     /// 用户发送一条消息给 runtime
-    SendMessage(String),
+    SendMessage(Message),
+    /// 用户执行一条命令
+    SendCommand(String),
+    /// 用户发送一条消息插入正在运行的 query，在下一轮 LLM 调用前生效
+    InterveneMessage(Message),
     /// 用户在模型选择页中确认选择
     ModelSelected {
         provider: String,
@@ -41,9 +45,12 @@ pub enum UiRequest {
 /// Runtime 消费此事件后负责：
 /// 1. 更新内部 `messages` 状态
 /// 2. 增量持久化
-/// 3. 翻译为 `RuntimeEvent` 转发给 UI
+/// 3. 翻译为 `RuntimeToUiEvent` 转发给 UI
 #[derive(Debug)]
-pub enum EngineEvent {
+pub enum EngineToRuntimeEvent {
+    /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。
+    UserMessageProduced(Message),
+
     /// 引擎完成一轮流式输出，产出一条完整的 Assistant Message。
     MessageProduced(Message),
 
@@ -51,7 +58,7 @@ pub enum EngineEvent {
     ToolResultsProduced(Message),
 
     /// 当前轮完整结束（助理消息 + 工具结果均已产出）。
-    /// Runtime 收到后转发 `RuntimeEvent::TurnEnded` 给 UI。
+    /// Runtime 收到后转发 `RuntimeToUiEvent::TurnEnded` 给 UI。
     TurnEnded,
 
     /// 新一轮 LLM 调用开始
@@ -78,7 +85,7 @@ pub enum EngineEvent {
 
 /// Runtime → UI 的事件。
 #[derive(Debug)]
-pub enum RuntimeEvent {
+pub enum RuntimeToUiEvent {
     /// 用户输入已提交，运行时开始处理
     RunStarted,
     /// 所有轮次完成，运行结束

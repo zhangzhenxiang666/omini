@@ -275,7 +275,7 @@ fn render_read(
         .unwrap_or("<unknown>");
 
     // Running state: spinner before "-> Read <path>"
-    let read_color = Color::Rgb(38, 42, 50);
+    let read_color = Color::Rgb(0x42, 0xb3, 0xc2);
     let mut main_spans = Vec::new();
 
     if result.is_none() {

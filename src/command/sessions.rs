@@ -1,7 +1,7 @@
-use super::Command;
+use crate::command::Command;
 use crate::db;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, InteractionRequest, RuntimeEvent, SessionSummary};
+use crate::types::events::{CommandResult, InteractionRequest, RuntimeToUiEvent, SessionSummary};
 use async_trait::async_trait;
 
 pub struct SessionsCommand;
@@ -35,7 +35,7 @@ impl Command for SessionsCommand {
             });
         }
         runtime
-            .send_event(RuntimeEvent::InteractionRequest(
+            .send_event(RuntimeToUiEvent::InteractionRequest(
                 InteractionRequest::SessionSelection {
                     sessions: summaries,
                 },

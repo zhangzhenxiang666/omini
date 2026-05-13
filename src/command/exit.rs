@@ -1,6 +1,6 @@
 use super::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeEvent};
+use crate::types::events::{CommandResult, RuntimeToUiEvent};
 use async_trait::async_trait;
 
 pub struct ExitCommand;
@@ -17,7 +17,7 @@ impl Command for ExitCommand {
         "退出程序"
     }
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
-        runtime.send_event(RuntimeEvent::Shutdown).await;
+        runtime.send_event(RuntimeToUiEvent::Shutdown).await;
         CommandResult::Done
     }
 }

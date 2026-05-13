@@ -9,13 +9,14 @@ use crate::tui::state::ModelSelectionEntry;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::InteractionRequest::*;
-use crate::types::events::{RuntimeEvent, ToolPauseKind, ToolPauseResponse, UiRequest};
+use crate::types::events::{RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crate::types::message::Message;
 use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -38,6 +39,13 @@ mod widgets;
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
     enable_raw_mode()?;
     execute!(stderr(), EnterAlternateScreen)?;
+    execute!(
+        stderr(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
+        )
+    )?;
     execute!(stderr(), EnableMouseCapture)?;
     execute!(stderr(), Hide)?;
     Terminal::new(CrosstermBackend::new(stderr()))
@@ -45,12 +53,14 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
 
 fn safe_restore_terminal() {
     let _ = disable_raw_mode();
+    let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
     let _ = execute!(io::stderr(), LeaveAlternateScreen);
     let _ = execute!(io::stderr(), DisableMouseCapture);
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io::Result<()> {
     disable_raw_mode()?;
+    execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -62,7 +72,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io
 async fn handle_interaction_key(
     step: &mut InteractionStep,
     key: KeyCode,
-    request_tx: &mpsc::Sender<UiRequest>,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
 ) -> bool {
     match step {
         InteractionStep::ModelSelection {
@@ -128,7 +138,7 @@ async fn handle_interaction_key(
                             _ => None,
                         };
                         let _ = request_tx
-                            .send(UiRequest::ModelSelected {
+                            .send(UiToRuntimeEvent::ModelSelected {
                                 provider: pkey,
                                 model: model_id,
                                 thinking_effort: te,
@@ -159,7 +169,7 @@ async fn handle_interaction_key(
                 if !sessions.is_empty() {
                     let session_id = sessions[*selected].id.clone();
                     let _ = request_tx
-                        .send(UiRequest::SessionSelected { session_id })
+                        .send(UiToRuntimeEvent::SessionSelected { session_id })
                         .await;
                 }
                 true
@@ -198,7 +208,10 @@ async fn handle_interaction_key(
     }
 }
 
-async fn resolve_active_tool_pause(state: &mut UiState, request_tx: &mpsc::Sender<UiRequest>) {
+async fn resolve_active_tool_pause(
+    state: &mut UiState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
     let Some(req) = state.active_tool_pause().cloned() else {
         return;
     };
@@ -216,7 +229,7 @@ async fn resolve_active_tool_pause(state: &mut UiState, request_tx: &mpsc::Sende
     };
 
     let _ = request_tx
-        .send(UiRequest::ResolveToolPause {
+        .send(UiToRuntimeEvent::ResolveToolPause {
             tool_use_id: req.tool_use_id.clone(),
             response,
         })
@@ -226,6 +239,44 @@ async fn resolve_active_tool_pause(state: &mut UiState, request_tx: &mpsc::Sende
         state.reset_permission_drawer();
     }
 }
+
+async fn flush_queued_user_inputs(
+    state: &mut UiState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
+    let Some(msg) = state.take_queued_user_message() else {
+        return;
+    };
+
+    state.messages.push(msg.clone());
+    state.scroll_offset = 0;
+    state.auto_scroll = true;
+    state.agent_status = AgentStatus::Working;
+    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(msg)).await;
+}
+
+async fn submit_queued_intervention(
+    state: &mut UiState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
+    if state.is_run_active()
+        && state.pending_intervention_inputs.is_empty()
+        && let Some(msg) = state.take_queued_user_message_for_intervention()
+    {
+        let _ = request_tx
+            .send(UiToRuntimeEvent::InterveneMessage(msg))
+            .await;
+    }
+}
+
+fn is_intervention_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    if !modifiers.contains(KeyModifiers::ALT) {
+        return false;
+    }
+
+    matches!(code, KeyCode::Enter)
+}
+
 pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -261,8 +312,8 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
         }
     });
 
-    let (agent_tx, mut agent_rx) = mpsc::channel::<RuntimeEvent>(256);
-    let (request_tx, request_rx) = mpsc::channel::<UiRequest>(256);
+    let (agent_tx, mut agent_rx) = mpsc::channel::<RuntimeToUiEvent>(256);
+    let (request_tx, request_rx) = mpsc::channel::<UiToRuntimeEvent>(256);
 
     let runtime = AgentRuntime::new(agent_tx.clone(), request_rx, settings, project);
     state.runtime_handle = Some(runtime.run());
@@ -277,12 +328,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
             Some(event) = input_rx.recv() => {
                 match event {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
-                        // ── 交互模式：键盘事件由交互步骤处理 ──
+                        // 交互模式: 键盘事件由交互步骤处理
                         if let Some(ref mut step) = state.interaction_step {
                             let consumed = handle_interaction_key(step, key.code, &request_tx).await;
                             if consumed {
                                 // 如果 Enter 确认后交互完成，step 被消费
-                                // (handle_interaction_key 内部发送了 UiRequest)
+                                // (handle_interaction_key 内部发送了 UiToRuntimeEvent)
                                 // 但我们需要检测 step 是否因为 Enter 而提交完成
                             } else {
                                 // Esc → 退出交互
@@ -300,12 +351,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 AgentStatus::Working | AgentStatus::Thinking
                             )
                         {
-                            let _ = request_tx.send(UiRequest::CancelRun).await;
+                            let _ = request_tx.send(UiToRuntimeEvent::CancelRun).await;
                             last_tick = tokio::time::Instant::now();
                             terminal.draw(|frame| render::render(&mut state, frame))?;
                             continue;
                         }
 
+                        // 工具暂停, 权限抽屉模式
                         if state.active_tool_pause().is_some() {
                             match key.code {
                                 KeyCode::Up | KeyCode::Char('k') => {
@@ -357,7 +409,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                             state.autocomplete.visible = false;
                                             if !msg.is_empty() {
                                                 // 命令：不添加消息，不切换工作模式，仅发送到 runtime
-                                                let _ = request_tx.send(UiRequest::SendMessage(msg)).await;
+                                                let _ = request_tx.send(UiToRuntimeEvent::SendCommand(msg)).await;
                                             }
                                         }
                                     }
@@ -377,7 +429,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                             state.cursor_char = 0;
                                             if !msg.is_empty() {
                                                 // 命令：不添加消息，不切换工作模式，仅发送到 runtime
-                                                let _ = request_tx.send(UiRequest::SendMessage(msg)).await;
+                                                let _ = request_tx.send(UiToRuntimeEvent::SendCommand(msg)).await;
                                             }
                                         }
                                     }
@@ -429,19 +481,31 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 state.update_scroll_step(tokio::time::Instant::now());
                                 state.scroll_down(state.scroll_step.max(page_amt));
                             }
+                            (code, modifiers) if is_intervention_key(code, modifiers) => {
+                                submit_queued_intervention(&mut state, &request_tx).await;
+                            }
                             (KeyCode::Enter, _) => {
+                                if !state.pending_intervention_inputs.is_empty() {
+                                    last_tick = tokio::time::Instant::now();
+                                    terminal.draw(|frame| render::render(&mut state, frame))?;
+                                    continue;
+                                }
+
                                 let msg = std::mem::take(&mut state.input);
                                 state.cursor_char = 0;
                                 if !msg.is_empty() {
                                     if msg.starts_with('/') {
                                         // 命令：不添加消息，不切换工作模式，仅发送到 runtime
-                                        let _ = request_tx.send(UiRequest::SendMessage(msg)).await;
+                                        let _ = request_tx.send(UiToRuntimeEvent::SendCommand(msg)).await;
+                                    } else if state.is_run_active() {
+                                        state.queued_user_inputs.push_back(msg);
                                     } else {
-                                        state.messages.push(Message::from_user_text(msg.clone()));
+                                        let msg = Message::from_user_text(msg);
+                                        state.messages.push(msg.clone());
                                         state.scroll_offset = 0;
                                         state.auto_scroll = true;
                                         state.agent_status = AgentStatus::Working;
-                                        let _ = request_tx.send(UiRequest::SendMessage(msg)).await;
+                                        let _ = request_tx.send(UiToRuntimeEvent::SendMessage(msg)).await;
                                     }
                                 }
                             }
@@ -575,7 +639,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 terminal.draw(|frame| render::render(&mut state, frame))?;
             }
             Some(agent_evt) = agent_rx.recv() => {
-                if let RuntimeEvent::InteractionRequest(ref req) = agent_evt {
+                if let RuntimeToUiEvent::InteractionRequest(ref req) = agent_evt {
                     state.interaction_step = match req {
                         ModelSelection { providers, current_provider, current_model } => {
                             let mut entries: Vec<ModelSelectionEntry> = Vec::new();
@@ -628,20 +692,25 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 }
 
                 // 检查是否需要退出
-                if matches!(agent_evt, RuntimeEvent::Shutdown) {
+                if matches!(agent_evt, RuntimeToUiEvent::Shutdown) {
                     break Ok(());
                 }
 
                 // SessionChanged → 清空消息区并关闭交互
-                if let RuntimeEvent::SessionChanged { session_id, messages } = agent_evt {
+                if let RuntimeToUiEvent::SessionChanged { session_id, messages } = agent_evt {
                     state.current_session_id = session_id;
                     state.messages = messages;
                     state.pending_assistant = None;
+                    state.queued_user_inputs.clear();
                     state.interaction_step = None;
                     state.interaction_request = None;
                     state.scroll_to_bottom();
                 } else {
+                    let should_flush_queue = matches!(agent_evt, RuntimeToUiEvent::RunFinished);
                     state.apply_event(agent_evt);
+                    if should_flush_queue {
+                        flush_queued_user_inputs(&mut state, &request_tx).await;
+                    }
                 }
             }
 
@@ -649,19 +718,24 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 // tick 分支：检查待处理事件并重绘
                 let mut shutdown = false;
                 while let Ok(evt) = agent_rx.try_recv() {
-                    if matches!(evt, RuntimeEvent::Shutdown) {
+                    if matches!(evt, RuntimeToUiEvent::Shutdown) {
                         shutdown = true;
                         break;
                     }
-                    if let RuntimeEvent::SessionChanged { session_id, messages } = evt {
+                    if let RuntimeToUiEvent::SessionChanged { session_id, messages } = evt {
                         state.current_session_id = session_id;
                         state.messages = messages;
                         state.pending_assistant = None;
+                        state.queued_user_inputs.clear();
                         state.interaction_step = None;
                         state.interaction_request = None;
                         state.scroll_to_bottom();
                     } else {
+                        let should_flush_queue = matches!(evt, RuntimeToUiEvent::RunFinished);
                         state.apply_event(evt);
+                        if should_flush_queue {
+                            flush_queued_user_inputs(&mut state, &request_tx).await;
+                        }
                     }
                 }
                 if shutdown {

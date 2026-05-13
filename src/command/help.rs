@@ -1,9 +1,7 @@
-use async_trait::async_trait;
-
+use crate::command::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeEvent};
-
-use super::Command;
+use crate::types::events::{CommandResult, RuntimeToUiEvent};
+use async_trait::async_trait;
 
 pub struct HelpCommand;
 
@@ -44,7 +42,9 @@ impl Command for HelpCommand {
             let padding = " ".repeat(max_width.saturating_sub(left.chars().count()));
             help.push_str(&format!("  {}{}  — {}\n", left, padding, cmd.description()));
         }
-        runtime.send_event(RuntimeEvent::CommandOutput(help)).await;
+        runtime
+            .send_event(RuntimeToUiEvent::CommandOutput(help))
+            .await;
         CommandResult::Done
     }
 }

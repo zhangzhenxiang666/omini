@@ -1,5 +1,5 @@
 use crate::types::events::{
-    EngineEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+    EngineToRuntimeEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
 };
 use crate::types::message::ToolResultBlock;
 use crate::types::tool::ToolDefinition;
@@ -117,7 +117,7 @@ impl PermissionPolicy for DefaultPermissionPolicy {
 pub struct ToolExecutionContext {
     pub tool_use_id: String,
     pub tool_name: String,
-    pub event_tx: mpsc::Sender<EngineEvent>,
+    pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_policy: Arc<dyn PermissionPolicy>,
     pub cancelled: Arc<AtomicBool>,
@@ -149,7 +149,7 @@ impl ToolExecutionContext {
 
         if self
             .event_tx
-            .send(EngineEvent::ToolPauseRequested(request))
+            .send(EngineToRuntimeEvent::ToolPauseRequested(request))
             .await
             .is_err()
         {
