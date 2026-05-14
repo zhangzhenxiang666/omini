@@ -312,10 +312,9 @@ fn render_ask_user(
     let text = Color::Rgb(220, 220, 225);
     let warn = Color::Rgb(212, 182, 106);
     let error = Color::Rgb(255, 100, 100);
-    let answer = Color::Rgb(135, 135, 255);
-
     let questions = ask_user_questions(tool_use);
     let question_count = questions.len();
+    let answered_count = ask_user_answer_count(result);
     let mut lines = Vec::new();
 
     let mut title = Vec::new();
@@ -326,15 +325,23 @@ fn render_ask_user(
         ));
     }
     title.push(Span::raw("· "));
-    title.push(Span::styled(
-        "Ask User",
-        Style::default().fg(if result.is_some_and(|tr| tr.is_error) {
-            error
+    let title_style = Style::default().fg(if result.is_some_and(|tr| tr.is_error) {
+        error
+    } else {
+        accent
+    });
+    if result.is_some_and(|tr| !tr.is_error) && answered_count > 0 {
+        title.push(Span::styled("Questions", title_style));
+        let answered_text = if question_count > 0 {
+            format!(" {answered_count}/{question_count} answered")
         } else {
-            accent
-        }),
-    ));
-    if question_count > 0 {
+            format!(" {answered_count} answered")
+        };
+        title.push(Span::styled(answered_text, Style::default().fg(dim)));
+    } else {
+        title.push(Span::styled("Ask User", title_style));
+    }
+    if question_count > 0 && answered_count == 0 {
         title.push(Span::styled(
             format!(
                 " ({} question{})",
@@ -398,30 +405,26 @@ fn render_ask_user(
             push_ask_user_answer(
                 &mut lines,
                 AskUserAnswerRenderInput {
-                    index: None,
                     id,
                     question: None,
                     answer_value,
                     content_width,
                     dim,
-                    answer,
                     text,
                 },
             );
         }
     } else {
-        for (idx, question) in questions.iter().enumerate() {
+        for question in questions.iter() {
             if let Some(answer_value) = answers.get(&question.id) {
                 push_ask_user_answer(
                     &mut lines,
                     AskUserAnswerRenderInput {
-                        index: Some(idx + 1),
                         id: &question.id,
                         question: Some(question),
                         answer_value,
                         content_width,
                         dim,
-                        answer,
                         text,
                     },
                 );
@@ -440,13 +443,11 @@ struct AskUserQuestionSummary {
 }
 
 struct AskUserAnswerRenderInput<'a> {
-    index: Option<usize>,
     id: &'a str,
     question: Option<&'a AskUserQuestionSummary>,
     answer_value: &'a serde_json::Value,
     content_width: usize,
     dim: Color,
-    answer: Color,
     text: Color,
 }
 
@@ -478,6 +479,18 @@ fn ask_user_questions(tool_use: &ToolUseBlock) -> Vec<AskUserQuestionSummary> {
         .unwrap_or_default()
 }
 
+fn ask_user_answer_count(result: Option<&ToolResultBlock>) -> usize {
+    result
+        .and_then(|tr| serde_json::from_str::<serde_json::Value>(&tr.content).ok())
+        .and_then(|value| {
+            value
+                .get("answers")
+                .and_then(|v| v.as_object())
+                .map(|v| v.len())
+        })
+        .unwrap_or(0)
+}
+
 fn push_ask_user_question_summary(
     lines: &mut Vec<Line<'static>>,
     question: &AskUserQuestionSummary,
@@ -505,13 +518,11 @@ fn push_ask_user_question_summary(
 
 fn push_ask_user_answer(lines: &mut Vec<Line<'static>>, input: AskUserAnswerRenderInput<'_>) {
     let AskUserAnswerRenderInput {
-        index,
         id,
         question,
         answer_value,
         content_width,
         dim,
-        answer,
         text,
     } = input;
 
@@ -530,19 +541,20 @@ fn push_ask_user_answer(lines: &mut Vec<Line<'static>>, input: AskUserAnswerRend
         })
         .unwrap_or(id);
 
-    let title = index
-        .map(|idx| format!("{idx}. {question_label}"))
-        .unwrap_or_else(|| question_label.to_string());
     lines.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled(title, Style::default().fg(dim).add_modifier(Modifier::BOLD)),
+        Span::styled(". ", Style::default().fg(dim)),
+        Span::styled(
+            question_label.to_string(),
+            Style::default().fg(dim).add_modifier(Modifier::BOLD),
+        ),
     ]));
     push_ask_user_answer_field(
         lines,
-        "Answer",
+        "answer",
         label,
         content_width,
-        Style::default().fg(answer).add_modifier(Modifier::BOLD),
+        Style::default().fg(text),
         dim,
     );
 
@@ -551,7 +563,7 @@ fn push_ask_user_answer(lines: &mut Vec<Line<'static>>, input: AskUserAnswerRend
     {
         push_ask_user_answer_field(
             lines,
-            "Note",
+            "note",
             note.trim(),
             content_width,
             Style::default().fg(text),
@@ -568,9 +580,8 @@ fn push_ask_user_answer_field(
     value_style: Style,
     dim: Color,
 ) {
-    let label = format!("{name:<6}");
-    let prefix = format!("    {label} ");
-    let continuation = "           ";
+    let prefix = format!("    {name}: ");
+    let continuation = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
     let wrap_width = content_width
         .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
         .max(1);
@@ -578,7 +589,7 @@ fn push_ask_user_answer_field(
         let current_prefix = if idx == 0 {
             prefix.as_str()
         } else {
-            continuation
+            continuation.as_str()
         };
         lines.push(Line::from(vec![
             Span::styled(current_prefix.to_string(), Style::default().fg(dim)),
@@ -1121,32 +1132,7 @@ fn render_bash(
     }
     lines.push(Line::from(title));
 
-    let pipe_style = Style::default().fg(dim);
-    let pipe_prefix = |target_width: usize| -> Vec<Span<'static>> {
-        let spacing = target_width.saturating_sub(3);
-        vec![
-            Span::raw("  "),
-            Span::styled("│", pipe_style),
-            Span::raw(" ".repeat(spacing)),
-        ]
-    };
     let has_output = result.is_some_and(|tr| !tr.content.is_empty());
-
-    if !desc.is_empty() {
-        let desc_style = Style::default().fg(dim).add_modifier(Modifier::ITALIC);
-        let desc_prefix_width = UnicodeWidthStr::width("  │  ");
-        let desc_wrap_width = content_width.saturating_sub(desc_prefix_width).max(1);
-        for wrapped in word_wrap(&format!("# {desc}"), desc_wrap_width) {
-            let mut spans = pipe_prefix(desc_prefix_width);
-            spans.push(Span::styled(wrapped, desc_style));
-            lines.push(Line::from(spans));
-        }
-    } else if has_output {
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("│", pipe_style),
-        ]));
-    }
 
     let mut push_indented =
         |prefix: &'static str, continuation: &'static str, content: String, style: Style| {
@@ -1162,6 +1148,15 @@ fn render_bash(
             }
         };
 
+    if !desc.is_empty() {
+        push_indented(
+            "  └─ ",
+            "     ",
+            format!("# {desc}"),
+            Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+        );
+    }
+
     if let Some(tr) = result
         && has_output
     {
@@ -1176,7 +1171,7 @@ fn render_bash(
         };
 
         for (idx, wl) in display.iter().enumerate() {
-            if idx == 0 {
+            if idx == 0 && desc.is_empty() {
                 push_indented("  └─ ", "     ", wl.clone(), out_style);
             } else {
                 push_indented("     ", "     ", wl.clone(), out_style);
