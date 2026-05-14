@@ -1,7 +1,6 @@
-use std::error::Error;
-
 use omini::config::settings::OminiRoot;
 use omini::db::Database;
+use std::error::Error;
 
 #[tokio::main]
 async fn main() {
@@ -26,11 +25,12 @@ async fn run() -> Result<(), Box<dyn Error>> {
     let project = root.init_project(&cwd, &config)?;
 
     let project_state = project.load_state()?;
-    let settings = config.to_settings(
+    let mut settings = config.to_settings(
         project_state.default_provider.as_deref(),
         project_state.default_model.as_deref(),
         project_state.thinking_effort,
     )?;
+    settings.system_prompt = Some(omini::prompts::build_system_prompt(&settings));
 
     Database::open(&root.db_path())
         .await
