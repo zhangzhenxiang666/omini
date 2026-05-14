@@ -88,14 +88,16 @@ pub enum EngineToRuntimeEvent {
 pub enum RuntimeToUiEvent {
     /// 用户输入已提交，运行时开始处理
     RunStarted,
+    /// Runtime 注入了一条用户消息，UI 需要显示到消息区
+    UserMessageInjected(Message),
     /// 所有轮次完成，运行结束
     RunFinished,
 
     /// 请求关闭整个程序
     Shutdown,
 
-    /// 命令产生的文本输出（显示在消息区）
-    CommandOutput(String),
+    /// 命令产生的提示信息（显示在消息区，但不作为对话消息）
+    CommandNotice(String),
 
     /// 模型已切换（TUI 更新状态栏用）
     ModelChanged {
@@ -182,9 +184,21 @@ pub struct CommandSummary {
 /// 命令执行结果。
 #[derive(Debug)]
 pub enum CommandResult {
-    Done,
-    Pending,
+    Ok(Vec<CommandEffect>),
     Error(String),
+}
+
+/// 命令执行后需要 runtime 统一应用的语义化效果。
+#[derive(Debug)]
+pub enum CommandEffect {
+    /// 无状态提示信息，仅用于 UI 展示。
+    Notice(String),
+    /// 请求 UI 打开一个交互面板。
+    ShowInteraction(InteractionRequest),
+    /// 注入一条用户消息并立即启动 query。
+    InjectUserMessage(Message),
+    /// 复用已有 Runtime → UI 事件表达非命令专属的生命周期变更。
+    Emit(RuntimeToUiEvent),
 }
 
 // ===========================================================================

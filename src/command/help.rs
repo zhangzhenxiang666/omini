@@ -1,7 +1,8 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult};
 use async_trait::async_trait;
+use unicode_width::UnicodeWidthStr;
 
 pub struct HelpCommand;
 
@@ -27,7 +28,7 @@ impl Command for HelpCommand {
                 } else {
                     format!("/{} (别名: {})", cmd.name(), cmd.aliases().join(", "))
                 };
-                left.chars().count()
+                UnicodeWidthStr::width(left.as_str())
             })
             .max()
             .unwrap_or(0);
@@ -39,12 +40,10 @@ impl Command for HelpCommand {
             } else {
                 format!("/{} (别名: {})", cmd.name(), cmd.aliases().join(", "))
             };
-            let padding = " ".repeat(max_width.saturating_sub(left.chars().count()));
+            let padding =
+                " ".repeat(max_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
             help.push_str(&format!("  {}{}  — {}\n", left, padding, cmd.description()));
         }
-        runtime
-            .send_event(RuntimeToUiEvent::CommandOutput(help))
-            .await;
-        CommandResult::Done
+        CommandResult::Ok(vec![CommandEffect::Notice(help)])
     }
 }

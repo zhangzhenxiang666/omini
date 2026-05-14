@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
 use crate::types::config::ProviderProfile;
-use crate::types::events::{CommandResult, InteractionRequest, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult, InteractionRequest};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -22,15 +22,12 @@ impl Command for ModelCommand {
         let providers: HashMap<String, ProviderProfile> = runtime.settings.providers.clone();
         let current_provider = runtime.settings.active_provider.clone();
         let current_model = runtime.settings.model.clone();
-        runtime
-            .send_event(RuntimeToUiEvent::InteractionRequest(
-                InteractionRequest::ModelSelection {
-                    providers,
-                    current_provider,
-                    current_model,
-                },
-            ))
-            .await;
-        CommandResult::Pending
+        CommandResult::Ok(vec![CommandEffect::ShowInteraction(
+            InteractionRequest::ModelSelection {
+                providers,
+                current_provider,
+                current_model,
+            },
+        )])
     }
 }

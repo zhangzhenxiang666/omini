@@ -9,7 +9,8 @@ use crate::tools::ToolRegistry;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    CommandResult, EngineToRuntimeEvent, RuntimeToUiEvent, UiToRuntimeEvent,
+    CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest, RuntimeToUiEvent,
+    UiToRuntimeEvent,
 };
 use crate::types::message::{Message, Role};
 use chrono::Utc;
@@ -162,24 +163,50 @@ impl AgentRuntime {
             let cmd = Arc::clone(cmd);
             let result = cmd.execute(self, parsed.args).await;
             match result {
-                CommandResult::Done => {}
-                CommandResult::Pending => {
-                    self.pending_interaction = match parsed.name {
-                        "model" => Some(PendingInteraction::ModelSelect),
-                        "sessions" | "resume" => Some(PendingInteraction::SessionSelect),
-                        _ => None,
-                    };
+                CommandResult::Ok(effects) => {
+                    for effect in effects {
+                        self.apply_command_effect(effect).await;
+                    }
                 }
                 CommandResult::Error(e) => {
                     self.send_event(RuntimeToUiEvent::Error(e)).await;
                 }
             }
         } else {
-            self.send_event(RuntimeToUiEvent::CommandOutput(format!(
+            self.send_event(RuntimeToUiEvent::CommandNotice(format!(
                 "未知命令: /{}. 输入 /help 查看可用命令。",
                 parsed.name
             )))
             .await;
+        }
+    }
+
+    async fn apply_command_effect(&mut self, effect: CommandEffect) {
+        match effect {
+            CommandEffect::Notice(text) => {
+                self.send_event(RuntimeToUiEvent::CommandNotice(text)).await;
+            }
+            CommandEffect::ShowInteraction(req) => {
+                self.pending_interaction = match &req {
+                    InteractionRequest::ModelSelection { .. } => {
+                        Some(PendingInteraction::ModelSelect)
+                    }
+                    InteractionRequest::SessionSelection { .. } => {
+                        Some(PendingInteraction::SessionSelect)
+                    }
+                };
+                self.send_event(RuntimeToUiEvent::InteractionRequest(req))
+                    .await;
+            }
+            CommandEffect::InjectUserMessage(msg) => {
+                self.messages.push(msg.clone());
+                self.send_event(RuntimeToUiEvent::UserMessageInjected(msg))
+                    .await;
+                self.process_run().await;
+            }
+            CommandEffect::Emit(event) => {
+                self.send_event(event).await;
+            }
         }
     }
 

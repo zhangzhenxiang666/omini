@@ -2,7 +2,7 @@ use self::clipboard::copy_to_clipboard;
 use self::selection::{
     selected_text, selection_point_from_mouse, update_text_selection_from_mouse,
 };
-use self::state::{AgentStatus, InteractionStep, TextSelection, UiState};
+use self::state::{AgentStatus, InteractionStep, TextSelection, UiMessage, UiState};
 use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
 use crate::tui::state::ModelSelectionEntry;
@@ -279,7 +279,7 @@ async fn flush_queued_user_inputs(
         return;
     };
 
-    state.messages.push(msg.clone());
+    state.messages.push(UiMessage::Message(msg.clone()));
     state.scroll_offset = 0;
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
@@ -608,7 +608,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                         state.queued_user_inputs.push_back(msg);
                                     } else {
                                         let msg = Message::from_user_text(msg);
-                                        state.messages.push(msg.clone());
+                                        state.messages.push(UiMessage::Message(msg.clone()));
                                         state.scroll_offset = 0;
                                         state.auto_scroll = true;
                                         state.agent_status = AgentStatus::Working;
@@ -806,9 +806,10 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 // SessionChanged → 清空消息区并关闭交互
                 if let RuntimeToUiEvent::SessionChanged { session_id, messages } = agent_evt {
                     state.current_session_id = session_id;
-                    state.messages = messages;
+                    state.messages = UiMessage::from_messages(messages);
                     state.pending_assistant = None;
                     state.queued_user_inputs.clear();
+                    state.agent_status = AgentStatus::Idle;
                     state.interaction_step = None;
                     state.interaction_request = None;
                     state.scroll_to_bottom();
@@ -831,9 +832,10 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                     }
                     if let RuntimeToUiEvent::SessionChanged { session_id, messages } = evt {
                         state.current_session_id = session_id;
-                        state.messages = messages;
+                        state.messages = UiMessage::from_messages(messages);
                         state.pending_assistant = None;
                         state.queued_user_inputs.clear();
+                        state.agent_status = AgentStatus::Idle;
                         state.interaction_step = None;
                         state.interaction_request = None;
                         state.scroll_to_bottom();

@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::db;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, InteractionRequest, RuntimeToUiEvent, SessionSummary};
+use crate::types::events::{CommandEffect, CommandResult, InteractionRequest, SessionSummary};
 use async_trait::async_trait;
 
 pub struct SessionsCommand;
@@ -34,13 +34,10 @@ impl Command for SessionsCommand {
                 created_at: s.created_at,
             });
         }
-        runtime
-            .send_event(RuntimeToUiEvent::InteractionRequest(
-                InteractionRequest::SessionSelection {
-                    sessions: summaries,
-                },
-            ))
-            .await;
-        CommandResult::Pending
+        CommandResult::Ok(vec![CommandEffect::ShowInteraction(
+            InteractionRequest::SessionSelection {
+                sessions: summaries,
+            },
+        )])
     }
 }

@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::db;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult, RuntimeToUiEvent};
 use async_trait::async_trait;
 
 pub struct RenameCommand;
@@ -46,10 +46,8 @@ impl Command for RenameCommand {
             return CommandResult::Error(format!("重命名失败: {e}"));
         }
 
-        runtime
-            .send_event(RuntimeToUiEvent::SessionTitleChanged { title: Some(title) })
-            .await;
-
-        CommandResult::Done
+        CommandResult::Ok(vec![CommandEffect::Emit(
+            RuntimeToUiEvent::SessionTitleChanged { title: Some(title) },
+        )])
     }
 }

@@ -31,7 +31,6 @@ pub enum AgentStatus {
     Working,
     /// 等待用户操作（权限确认/回答问题）
     AwaitingInput,
-    Error(String),
 }
 
 impl std::fmt::Display for AgentStatus {
@@ -41,7 +40,33 @@ impl std::fmt::Display for AgentStatus {
             AgentStatus::Thinking => write!(f, "Thinking"),
             AgentStatus::Working => write!(f, "Working"),
             AgentStatus::AwaitingInput => write!(f, "Waiting for you"),
-            AgentStatus::Error(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiMessage {
+    Message(Message),
+    Notice { text: String },
+    Error { text: String },
+}
+
+impl UiMessage {
+    pub fn from_messages(messages: Vec<Message>) -> Vec<Self> {
+        messages.into_iter().map(Self::Message).collect()
+    }
+
+    pub fn as_message(&self) -> Option<&Message> {
+        match self {
+            Self::Message(message) => Some(message),
+            Self::Notice { .. } | Self::Error { .. } => None,
+        }
+    }
+
+    pub fn as_message_mut(&mut self) -> Option<&mut Message> {
+        match self {
+            Self::Message(message) => Some(message),
+            Self::Notice { .. } | Self::Error { .. } => None,
         }
     }
 }
@@ -72,7 +97,7 @@ impl Default for StatusBar {
 
 #[derive(Debug)]
 pub struct UiState {
-    pub messages: Vec<Message>,
+    pub messages: Vec<UiMessage>,
     /// 正在流式构建中的 assistant 消息（SSE 实时显示）
     pub pending_assistant: Option<Message>,
     /// 渲染后的消息总行数（用于滚动条计算）
@@ -461,12 +486,18 @@ impl UiState {
                 self.pending_assistant = None;
                 self.agent_status = AgentStatus::Thinking;
             }
+            RuntimeToUiEvent::UserMessageInjected(msg) => {
+                self.messages.push(UiMessage::Message(msg));
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
             RuntimeToUiEvent::TurnStarted => {
                 // 如果上轮还有未提交的 pending_assistant，先推入 messages
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    self.messages.push(msg);
+                    self.messages.push(UiMessage::Message(msg));
                 }
                 self.agent_status = AgentStatus::Thinking;
             }
@@ -509,22 +540,27 @@ impl UiState {
                 // 工具结果异步返回，追加到 pending_assistant 或最后一条消息中
                 if let Some(pending) = &mut self.pending_assistant {
                     pending.content.push(ContentBlock::ToolResult(tr));
-                } else if let Some(last) = self.messages.last_mut() {
+                } else if let Some(last) = self
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find_map(UiMessage::as_message_mut)
+                {
                     last.content.push(ContentBlock::ToolResult(tr));
                 } else {
                     let mut msg = Message::new(Role::Assistant, Vec::new());
                     msg.content.push(ContentBlock::ToolResult(tr));
-                    self.messages.push(msg);
+                    self.messages.push(UiMessage::Message(msg));
                 }
             }
             RuntimeToUiEvent::TurnEnded => {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    self.messages.push(msg);
+                    self.messages.push(UiMessage::Message(msg));
                 }
                 if let Some(msg) = self.take_pending_intervention_message() {
-                    self.messages.push(msg);
+                    self.messages.push(UiMessage::Message(msg));
                 }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -535,7 +571,7 @@ impl UiState {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    self.messages.push(msg);
+                    self.messages.push(UiMessage::Message(msg));
                 }
                 self.pending_intervention_inputs.clear();
                 if self.auto_scroll {
@@ -552,13 +588,23 @@ impl UiState {
                     .insert(req.tool_use_id.clone(), req);
                 self.agent_status = AgentStatus::AwaitingInput;
             }
-            RuntimeToUiEvent::Error(e) => self.agent_status = AgentStatus::Error(e),
+            RuntimeToUiEvent::Error(e) => {
+                self.messages.push(UiMessage::Error { text: e });
+                if self.pending_tool_previews.is_empty() {
+                    self.agent_status = AgentStatus::Idle;
+                } else {
+                    self.agent_status = AgentStatus::AwaitingInput;
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
             // ===== 命令系统事件 =====
             RuntimeToUiEvent::Shutdown => {
                 // TUI 主循环检测到此状态后会 break
             }
-            RuntimeToUiEvent::CommandOutput(text) => {
-                self.messages.push(Message::from_user_text(text));
+            RuntimeToUiEvent::CommandNotice(text) => {
+                self.messages.push(UiMessage::Notice { text });
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }

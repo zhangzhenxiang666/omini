@@ -2,6 +2,7 @@ use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
@@ -133,6 +134,32 @@ pub fn build_plain_lines(text: &str, content_width: usize) -> Vec<Line<'static>>
     wrapped.into_iter().map(Line::from).collect()
 }
 
+pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
+    let path_obj = Path::new(path);
+
+    if let Some(project_dir) = project_dir.filter(|p| !p.as_os_str().is_empty())
+        && let Ok(relative) = path_obj.strip_prefix(project_dir)
+    {
+        return if relative.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            relative.display().to_string()
+        };
+    }
+
+    if let Some(home_dir) = dirs::home_dir().filter(|p| !p.as_os_str().is_empty())
+        && let Ok(relative) = path_obj.strip_prefix(&home_dir)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+
+    path.to_string()
+}
+
 pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
     let available = content_width.saturating_sub(2);
     let mut lines: Vec<Line> = Vec::new();
@@ -251,12 +278,25 @@ pub fn render_tool(
     tool_result: Option<&ToolResultBlock>,
     tool_preview: Option<&ToolPauseRequest>,
     content_width: usize,
+    project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
     match tool_use.name.as_str() {
         "bash" => render_bash(tool_use, tool_result, content_width),
-        "read" => render_read(tool_use, tool_result, content_width),
-        "edit" => render_edit(tool_use, tool_result, tool_preview, content_width),
-        "write" => render_write(tool_use, tool_result, tool_preview, content_width),
+        "read" => render_read(tool_use, tool_result, content_width, project_dir),
+        "edit" => render_edit(
+            tool_use,
+            tool_result,
+            tool_preview,
+            content_width,
+            project_dir,
+        ),
+        "write" => render_write(
+            tool_use,
+            tool_result,
+            tool_preview,
+            content_width,
+            project_dir,
+        ),
         "ask_user" => render_ask_user(tool_use, tool_result, content_width),
         _ => Vec::new(),
     }
@@ -357,14 +397,16 @@ fn render_ask_user(
         for (id, answer_value) in answers {
             push_ask_user_answer(
                 &mut lines,
-                None,
-                id,
-                None,
-                answer_value,
-                content_width,
-                dim,
-                answer,
-                text,
+                AskUserAnswerRenderInput {
+                    index: None,
+                    id,
+                    question: None,
+                    answer_value,
+                    content_width,
+                    dim,
+                    answer,
+                    text,
+                },
             );
         }
     } else {
@@ -372,14 +414,16 @@ fn render_ask_user(
             if let Some(answer_value) = answers.get(&question.id) {
                 push_ask_user_answer(
                     &mut lines,
-                    Some(idx + 1),
-                    &question.id,
-                    Some(question),
-                    answer_value,
-                    content_width,
-                    dim,
-                    answer,
-                    text,
+                    AskUserAnswerRenderInput {
+                        index: Some(idx + 1),
+                        id: &question.id,
+                        question: Some(question),
+                        answer_value,
+                        content_width,
+                        dim,
+                        answer,
+                        text,
+                    },
                 );
             }
         }
@@ -393,6 +437,17 @@ struct AskUserQuestionSummary {
     id: String,
     header: String,
     question: String,
+}
+
+struct AskUserAnswerRenderInput<'a> {
+    index: Option<usize>,
+    id: &'a str,
+    question: Option<&'a AskUserQuestionSummary>,
+    answer_value: &'a serde_json::Value,
+    content_width: usize,
+    dim: Color,
+    answer: Color,
+    text: Color,
 }
 
 fn ask_user_questions(tool_use: &ToolUseBlock) -> Vec<AskUserQuestionSummary> {
@@ -448,17 +503,18 @@ fn push_ask_user_question_summary(
     }
 }
 
-fn push_ask_user_answer(
-    lines: &mut Vec<Line<'static>>,
-    index: Option<usize>,
-    id: &str,
-    question: Option<&AskUserQuestionSummary>,
-    answer_value: &serde_json::Value,
-    content_width: usize,
-    dim: Color,
-    answer: Color,
-    text: Color,
-) {
+fn push_ask_user_answer(lines: &mut Vec<Line<'static>>, input: AskUserAnswerRenderInput<'_>) {
+    let AskUserAnswerRenderInput {
+        index,
+        id,
+        question,
+        answer_value,
+        content_width,
+        dim,
+        answer,
+        text,
+    } = input;
+
     let label = answer_value
         .get("label")
         .and_then(|v| v.as_str())
@@ -535,6 +591,7 @@ fn render_read(
     tool_use: &ToolUseBlock,
     result: Option<&ToolResultBlock>,
     content_width: usize,
+    project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -543,6 +600,7 @@ fn render_read(
         .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
+    let display_file_path = display_path(file_path, project_dir);
 
     // Running state: spinner before "-> Read <path>"
     let read_color = Color::Rgb(0x42, 0xb3, 0xc2);
@@ -558,7 +616,7 @@ fn render_read(
 
     main_spans.push(Span::raw("· "));
     main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
-    main_spans.push(Span::raw(format!(" {}", file_path)));
+    main_spans.push(Span::raw(format!(" {}", display_file_path)));
 
     let main_line = Line::from(main_spans);
     lines.push(main_line);
@@ -582,6 +640,7 @@ fn render_edit(
     result: Option<&ToolResultBlock>,
     preview: Option<&ToolPauseRequest>,
     content_width: usize,
+    project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -590,6 +649,7 @@ fn render_edit(
         .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
+    let display_file_path = display_path(file_path, project_dir);
     let old_string = tool_use
         .input
         .get("old_string")
@@ -632,6 +692,7 @@ fn render_edit(
         lines.push(Line::from(vec![
             Span::raw("· "),
             Span::styled("Edit", Style::default().fg(accent)),
+            Span::raw(format!(" {}", display_file_path)),
         ]));
         let error_style = Style::default().fg(red_fg);
         let wrapped = word_wrap(&tr.content, w.saturating_sub(2));
@@ -688,7 +749,7 @@ fn render_edit(
         let hdr_red = Style::default().fg(red_fg).bg(header_bg);
         header_spans.push(Span::styled("· ", hdr_plain));
         header_spans.push(Span::styled("Edit", hdr_accent));
-        header_spans.push(Span::styled(format!(" {} (", file_path), hdr_plain));
+        header_spans.push(Span::styled(format!(" {} (", display_file_path), hdr_plain));
         header_spans.push(Span::styled(format!("+{}", total_added), hdr_green));
         header_spans.push(Span::styled(" ", hdr_plain));
         header_spans.push(Span::styled(format!("-{}", total_removed), hdr_red));
@@ -874,6 +935,7 @@ fn render_write(
     result: Option<&ToolResultBlock>,
     preview: Option<&ToolPauseRequest>,
     content_width: usize,
+    project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
@@ -882,6 +944,7 @@ fn render_write(
         .get("file_path")
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
+    let display_file_path = display_path(file_path, project_dir);
     let content = tool_use
         .input
         .get("content")
@@ -957,7 +1020,7 @@ fn render_write(
     let mut header_spans: Vec<Span<'static>> = vec![
         Span::styled("· ", hdr_plain),
         Span::styled("Write", hdr_accent),
-        Span::styled(format!(" {} (", file_path), hdr_plain),
+        Span::styled(format!(" {} (", display_file_path), hdr_plain),
         Span::styled(format!("+{}", added_lines), hdr_green),
         Span::styled(" -0)", hdr_plain),
     ];

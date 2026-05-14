@@ -1,6 +1,6 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult, RuntimeToUiEvent};
 use async_trait::async_trait;
 
 pub struct NewCommand;
@@ -22,17 +22,12 @@ impl Command for NewCommand {
         runtime.session_dir = None;
         runtime.messages.clear();
 
-        // 通知 UI 清空状态
-        runtime
-            .send_event(RuntimeToUiEvent::SessionChanged {
+        CommandResult::Ok(vec![
+            CommandEffect::Emit(RuntimeToUiEvent::SessionChanged {
                 session_id: None,
                 messages: vec![],
-            })
-            .await;
-        runtime
-            .send_event(RuntimeToUiEvent::SessionTitleChanged { title: None })
-            .await;
-
-        CommandResult::Done
+            }),
+            CommandEffect::Emit(RuntimeToUiEvent::SessionTitleChanged { title: None }),
+        ])
     }
 }

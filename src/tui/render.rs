@@ -1,8 +1,8 @@
 use crate::tui::state::{
-    AgentStatus, InteractionStep, ModelSelectionEntry, SelectionPoint, UiState,
+    AgentStatus, InteractionStep, ModelSelectionEntry, SelectionPoint, UiMessage, UiState,
 };
 use crate::tui::widgets::{
-    build_bordered_lines, build_plain_lines, build_thinking_lines, render_tool,
+    build_bordered_lines, build_plain_lines, build_thinking_lines, display_path, render_tool,
 };
 use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ContentBlock, ToolUseBlock};
@@ -14,6 +14,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -28,6 +29,18 @@ struct DrawerLines {
     lines: Vec<Line<'static>>,
     note_line_index: Option<usize>,
     note_cursor_column: Option<usize>,
+}
+
+struct PermissionDrawerLinesInput<'a> {
+    request: &'a ToolPauseRequest,
+    tool_use: Option<&'a ToolUseBlock>,
+    content_width: usize,
+    project_dir: Option<&'a Path>,
+    question_index: usize,
+    user_input_selected: usize,
+    current_user_input_note: &'a str,
+    user_input_note_cursor: usize,
+    user_input_note_mode: bool,
 }
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
@@ -86,22 +99,24 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
         return;
     };
 
+    let project_dir = state.status_bar.cwd.clone();
     let tool_use = find_tool_use(state, &request.tool_use_id);
     let content_width = area.width.saturating_sub(6) as usize;
     let DrawerLines {
         lines,
         note_line_index,
         note_cursor_column,
-    } = build_permission_drawer_lines(
-        &request,
+    } = build_permission_drawer_lines(PermissionDrawerLinesInput {
+        request: &request,
         tool_use,
         content_width,
-        state.user_input_question_index,
-        state.current_user_input_selected(),
-        state.current_user_input_note(),
-        state.current_user_input_note_cursor(),
-        state.user_input_note_mode,
-    );
+        project_dir: Some(project_dir.as_path()),
+        question_index: state.user_input_question_index,
+        user_input_selected: state.current_user_input_selected(),
+        current_user_input_note: state.current_user_input_note(),
+        user_input_note_cursor: state.current_user_input_note_cursor(),
+        user_input_note_mode: state.user_input_note_mode,
+    });
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
     let is_edit_preview = matches!(
@@ -368,16 +383,19 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
     }
 }
 
-fn build_permission_drawer_lines(
-    request: &ToolPauseRequest,
-    tool_use: Option<&ToolUseBlock>,
-    content_width: usize,
-    question_index: usize,
-    user_input_selected: usize,
-    current_user_input_note: &str,
-    user_input_note_cursor: usize,
-    user_input_note_mode: bool,
-) -> DrawerLines {
+fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> DrawerLines {
+    let PermissionDrawerLinesInput {
+        request,
+        tool_use,
+        content_width,
+        project_dir,
+        question_index,
+        user_input_selected,
+        current_user_input_note,
+        user_input_note_cursor,
+        user_input_note_mode,
+    } = input;
+
     match &request.kind {
         ToolPauseKind::Permission(PermissionPreview::Bash(preview)) => {
             let mut lines = Vec::new();
@@ -430,7 +448,7 @@ fn build_permission_drawer_lines(
         }
         ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
             let lines = if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width)
+                render_tool(tool_use, None, Some(request), content_width, project_dir)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing edit tool input for preview",
@@ -445,12 +463,36 @@ fn build_permission_drawer_lines(
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => {
             let lines = if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width)
+                render_tool(tool_use, None, Some(request), content_width, project_dir)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing write tool input for preview",
                     Style::default().fg(Color::Rgb(255, 100, 100)),
                 ))]
+            };
+            DrawerLines {
+                lines,
+                note_line_index: None,
+                note_cursor_column: None,
+            }
+        }
+        ToolPauseKind::Permission(PermissionPreview::Read(preview)) => {
+            let lines = if let Some(tool_use) = tool_use {
+                render_tool(tool_use, None, Some(request), content_width, project_dir)
+            } else {
+                vec![Line::from(vec![
+                    Span::raw("· "),
+                    Span::styled(
+                        "Read",
+                        Style::default()
+                            .fg(Color::Rgb(0x42, 0xb3, 0xc2))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(format!(
+                        " {}",
+                        display_path(&preview.file_path, project_dir)
+                    )),
+                ])]
             };
             DrawerLines {
                 lines,
@@ -610,7 +652,13 @@ fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUs
         .pending_assistant
         .iter()
         .flat_map(|m| m.content.iter())
-        .chain(state.messages.iter().flat_map(|m| m.content.iter()))
+        .chain(
+            state
+                .messages
+                .iter()
+                .filter_map(UiMessage::as_message)
+                .flat_map(|m| m.content.iter()),
+        )
         .find_map(|block| match block {
             ContentBlock::ToolUse(tu) if tu.id == tool_use_id => Some(tu),
             _ => None,
@@ -623,7 +671,14 @@ fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: 
     }
 
     let max_items = 6;
-    let count = state.autocomplete.filtered.len().min(max_items);
+    let total = state.autocomplete.filtered.len();
+    let selected = state.autocomplete.selected.min(total.saturating_sub(1));
+    let start = if selected >= max_items {
+        selected + 1 - max_items
+    } else {
+        0
+    };
+    let count = total.saturating_sub(start).min(max_items);
     let popup_width = input_area.width;
 
     let popup_height = count as u16;
@@ -660,9 +715,11 @@ fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: 
             .max()
             .unwrap_or(0);
         cmds.into_iter()
+            .skip(start)
+            .take(count)
             .enumerate()
             .map(|(i, cmd)| {
-                let is_sel = i == state.autocomplete.selected;
+                let is_sel = start + i == selected;
                 let row_bg = if is_sel { sel_bg } else { input_bg };
                 let row_fg = idle_fg;
 
@@ -1239,8 +1296,14 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
 
+    let rendered_messages: Vec<&crate::types::message::Message> = state
+        .messages
+        .iter()
+        .filter_map(UiMessage::as_message)
+        .collect();
+
     let mut tool_result_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    for (mi, msg) in state.messages.iter().enumerate() {
+    for (mi, msg) in rendered_messages.iter().enumerate() {
         for (bi, block) in msg.content.iter().enumerate() {
             if let ContentBlock::ToolResult(tr) = block {
                 tool_result_map
@@ -1252,7 +1315,29 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     }
     let mut consumed: HashSet<(usize, usize)> = HashSet::new();
 
-    for (msg_idx, message) in state.messages.iter().enumerate() {
+    let mut rendered_msg_idx = 0;
+    for ui_message in &state.messages {
+        let UiMessage::Message(message) = ui_message else {
+            let (color, text) = match ui_message {
+                UiMessage::Notice { text } => (Color::Rgb(120, 170, 210), text.clone()),
+                UiMessage::Error { text } => (Color::Rgb(255, 100, 100), format!("Error: {text}")),
+                UiMessage::Message(_) => unreachable!(),
+            };
+            let block_lines = build_bordered_lines(&text, content_width, color, false, None);
+            if !block_lines.is_empty() {
+                if !all_lines.is_empty() {
+                    all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
+                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+                all_lines.extend(block_lines);
+            }
+            continue;
+        };
+
+        let msg_idx = rendered_msg_idx;
+        rendered_msg_idx += 1;
+
         for (block_idx, block) in message.content.iter().enumerate() {
             if let ContentBlock::ToolResult(_) = block
                 && consumed.contains(&(msg_idx, block_idx))
@@ -1298,7 +1383,8 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                 ContentBlock::ToolUse(tu) => {
                     if let Some(positions) = tool_result_map.get(&tu.id) {
                         let tool_result = positions.first().and_then(|(mi, bi)| {
-                            if let ContentBlock::ToolResult(tr) = &state.messages[*mi].content[*bi]
+                            if let ContentBlock::ToolResult(tr) =
+                                &rendered_messages[*mi].content[*bi]
                             {
                                 Some(tr.clone())
                             } else {
@@ -1306,7 +1392,13 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             }
                         });
 
-                        let tool_lines = render_tool(tu, tool_result.as_ref(), None, content_width);
+                        let tool_lines = render_tool(
+                            tu,
+                            tool_result.as_ref(),
+                            None,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        );
                         block_lines.extend(tool_lines);
 
                         for pos in positions {
@@ -1314,7 +1406,13 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                         }
                     } else {
                         // 工具结果尚未返回
-                        let tool_lines = render_tool(tu, None, None, content_width);
+                        let tool_lines = render_tool(
+                            tu,
+                            None,
+                            None,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        );
                         block_lines.extend(tool_lines);
                     }
                 }
@@ -1384,7 +1482,13 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             None
                         }
                     });
-                    let tool_lines = render_tool(tu, tr.as_ref(), None, content_width);
+                    let tool_lines = render_tool(
+                        tu,
+                        tr.as_ref(),
+                        None,
+                        content_width,
+                        Some(state.status_bar.cwd.as_path()),
+                    );
                     block_lines.extend(tool_lines);
                 }
                 ContentBlock::ToolResult(tr) => {
@@ -1563,6 +1667,8 @@ fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     let cmd_color = Style::default().fg(Color::Rgb(0x7c, 0x5c, 0xf6));
     let placeholder_style = Style::default().fg(Color::DarkGray);
 
+    let command_match = matched_input_command(state, &state.input);
+
     let content = if state.input.is_empty() {
         Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
@@ -1570,23 +1676,7 @@ fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
         ])
     } else {
         let input = &state.input;
-        let command_matched = input
-            .starts_with('/')
-            .then(|| {
-                let cmd_raw = if let Some(space_pos) = input.find(' ') {
-                    &input[1..space_pos]
-                } else {
-                    &input[1..]
-                };
-                state
-                    .autocomplete
-                    .all_commands
-                    .iter()
-                    .find(|c| c.name == cmd_raw || c.aliases.iter().any(|a| a == cmd_raw))
-            })
-            .flatten();
-
-        if let Some(cmd) = command_matched {
+        if let Some(cmd) = command_match {
             let after_cmd = if let Some(space_pos) = input.find(' ') {
                 &input[space_pos..]
             } else {
@@ -1619,12 +1709,61 @@ fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
 
     let cursor_x = if state.input.is_empty() {
         input_line.x + 2
+    } else if let Some(cmd) = command_match {
+        input_line.x + 2 + rendered_command_input_width(state, cmd) as u16
     } else {
         let byte_idx = state.char_to_byte(state.cursor_char);
         let prefix_width = UnicodeWidthStr::width(&state.input[..byte_idx]);
         input_line.x + 2 + prefix_width as u16
     };
     frame.set_cursor_position((cursor_x, input_line.y));
+}
+
+fn matched_input_command<'a>(
+    state: &'a UiState,
+    input: &str,
+) -> Option<&'a crate::types::events::CommandSummary> {
+    input
+        .starts_with('/')
+        .then(|| {
+            let cmd_raw = if let Some(space_pos) = input.find(' ') {
+                &input[1..space_pos]
+            } else {
+                &input[1..]
+            };
+            state
+                .autocomplete
+                .all_commands
+                .iter()
+                .find(|c| c.name == cmd_raw || c.aliases.iter().any(|a| a == cmd_raw))
+        })
+        .flatten()
+}
+
+fn rendered_command_input_width(
+    state: &UiState,
+    cmd: &crate::types::events::CommandSummary,
+) -> usize {
+    let input = &state.input;
+    let command_end_byte = input.find(' ').unwrap_or(input.len());
+    let command_end_char = input[..command_end_byte].chars().count();
+
+    if state.cursor_char <= command_end_char {
+        let rendered_command = format!("/{}", cmd.name);
+        if state.cursor_char == command_end_char {
+            return UnicodeWidthStr::width(rendered_command.as_str());
+        }
+        let partial = rendered_command
+            .chars()
+            .take(state.cursor_char)
+            .collect::<String>();
+        return UnicodeWidthStr::width(partial.as_str());
+    }
+
+    let rendered_command_width = UnicodeWidthStr::width(format!("/{}", cmd.name).as_str());
+    let suffix_start = state.char_to_byte(command_end_char);
+    let cursor_byte = state.char_to_byte(state.cursor_char);
+    rendered_command_width + UnicodeWidthStr::width(&input[suffix_start..cursor_byte])
 }
 
 fn render_queued_user_inputs(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
