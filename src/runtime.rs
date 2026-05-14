@@ -234,7 +234,7 @@ impl AgentRuntime {
 
             // 持久化：新会话 → 项目状态；已有会话 → 数据库会话记录
             if let Some(sid) = &self.session_id {
-                let te = thinking_effort.as_ref().map(|t| format!("{t:?}"));
+                let te = thinking_effort.map(|t| t.to_string());
                 let _ = db::global_db()
                     .update_session_config(sid, provider, model, te.as_deref())
                     .await;
@@ -295,12 +295,10 @@ impl AgentRuntime {
         }
 
         // 同步思考程度
-        let thinking_effort = db_session.thinking_effort.as_deref().and_then(|s| match s {
-            "low" => Some(ThinkingEffort::Low),
-            "medium" => Some(ThinkingEffort::Medium),
-            "high" => Some(ThinkingEffort::High),
-            _ => None,
-        });
+        let thinking_effort = db_session
+            .thinking_effort
+            .as_deref()
+            .and_then(|s| s.parse::<ThinkingEffort>().ok());
         self.settings.thinking_effort = thinking_effort;
 
         // 从数据库加载消息（而非 JSONL）
@@ -529,10 +527,7 @@ impl AgentRuntime {
             agent_label: None,
             provider: self.settings.active_provider.clone(),
             model: self.settings.model.clone(),
-            thinking_effort: self
-                .settings
-                .thinking_effort
-                .map(|t| format!("{t:?}").to_lowercase()),
+            thinking_effort: self.settings.thinking_effort.map(|t| t.to_string()),
             title,
             message_count: 0,
             created_at: now,

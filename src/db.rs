@@ -303,6 +303,22 @@ impl Database {
         Ok(())
     }
 
+    /// 更新会话的思考程度配置。
+    pub async fn update_session_thinking_effort(
+        &self,
+        id: &str,
+        thinking_effort: Option<&str>,
+    ) -> Result<(), DbError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE sessions SET thinking_effort = ?, updated_at = ? WHERE id = ?")
+            .bind(thinking_effort)
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// 更新会话标题。
     pub async fn update_session_title(&self, id: &str, title: &str) -> Result<(), DbError> {
         let now = Utc::now();

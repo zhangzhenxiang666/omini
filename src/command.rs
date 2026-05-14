@@ -1,3 +1,4 @@
+pub mod effort;
 pub mod exit;
 pub mod help;
 pub mod model;
@@ -5,13 +6,11 @@ pub mod new;
 pub mod rename;
 pub mod sessions;
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
-use async_trait::async_trait;
-
 use crate::runtime::AgentRuntime;
 use crate::types::events::{CommandResult, CommandSummary};
+use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 /// 从用户输入中解析命令。
 #[derive(Debug)]
@@ -113,6 +112,7 @@ impl CommandRegistry {
 /// 注册所有内置命令。
 pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(exit::ExitCommand));
+    registry.register(Arc::new(effort::EffortCommand));
     registry.register(Arc::new(model::ModelCommand));
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));

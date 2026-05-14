@@ -1,7 +1,9 @@
 use crate::db::DbError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -18,6 +20,32 @@ pub enum ThinkingEffort {
     #[default]
     Medium,
     High,
+}
+
+impl fmt::Display for ThinkingEffort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            ThinkingEffort::None => "none",
+            ThinkingEffort::Low => "low",
+            ThinkingEffort::Medium => "medium",
+            ThinkingEffort::High => "high",
+        };
+        f.write_str(value)
+    }
+}
+
+impl FromStr for ThinkingEffort {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "none" => Ok(ThinkingEffort::None),
+            "low" => Ok(ThinkingEffort::Low),
+            "medium" => Ok(ThinkingEffort::Medium),
+            "high" => Ok(ThinkingEffort::High),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
