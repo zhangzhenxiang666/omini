@@ -1,5 +1,6 @@
 use crate::types::events::{
     EngineToRuntimeEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+    UserInputPreview,
 };
 use crate::types::message::ToolResultBlock;
 use crate::types::tool::ToolDefinition;
@@ -14,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
+pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod edit_tool;
 pub mod read_tool;
@@ -124,6 +126,19 @@ pub struct ToolExecutionContext {
 }
 
 impl ToolExecutionContext {
+    #[cfg(test)]
+    pub fn test(tool_name: &str) -> Self {
+        let (event_tx, _event_rx) = mpsc::channel(1);
+        Self {
+            tool_use_id: format!("test_{tool_name}"),
+            tool_name: tool_name.to_string(),
+            event_tx,
+            pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
+            permission_policy: Arc::new(DefaultPermissionPolicy),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub async fn request_permission(&self, preview: PermissionPreview) -> ToolPauseResponse {
         if self.cancelled.load(Ordering::Relaxed) {
             return ToolPauseResponse::Cancelled;
@@ -145,6 +160,45 @@ impl ToolExecutionContext {
             tool_use_id: self.tool_use_id.clone(),
             tool_name: self.tool_name.clone(),
             kind: ToolPauseKind::Permission(preview),
+        };
+
+        if self
+            .event_tx
+            .send(EngineToRuntimeEvent::ToolPauseRequested(request))
+            .await
+            .is_err()
+        {
+            self.remove_pending_pause();
+            return ToolPauseResponse::Cancelled;
+        }
+
+        match rx.await {
+            Ok(response) => response,
+            Err(_) => ToolPauseResponse::Cancelled,
+        }
+    }
+
+    pub async fn request_user_input(&self, preview: UserInputPreview) -> ToolPauseResponse {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return ToolPauseResponse::Cancelled;
+        }
+
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut pending = self
+                .pending_tool_pauses
+                .lock()
+                .expect("pending tool pause mutex poisoned");
+            if pending.contains_key(&self.tool_use_id) {
+                return ToolPauseResponse::Cancelled;
+            }
+            pending.insert(self.tool_use_id.clone(), PendingToolPause::UserInput(tx));
+        }
+
+        let request = ToolPauseRequest {
+            tool_use_id: self.tool_use_id.clone(),
+            tool_name: self.tool_name.clone(),
+            kind: ToolPauseKind::UserInput(preview),
         };
 
         if self
@@ -195,7 +249,11 @@ pub trait Tool: Send + Sync + 'static {
     }
 
     /// 执行已经预检查过的工具计划。
-    async fn execute_prepared(&self, prepared: Self::Prepared) -> ToolResult;
+    async fn execute_prepared(
+        &self,
+        prepared: Self::Prepared,
+        ctx: ToolExecutionContext,
+    ) -> ToolResult;
 }
 
 /// 注册表中存的「已擦除类型」的工具。
@@ -262,7 +320,7 @@ impl RegisteredTool {
                         }
                     }
 
-                    tool.execute_prepared(prepared).await
+                    tool.execute_prepared(prepared, ctx).await
                 })
             },
         );
@@ -333,6 +391,7 @@ impl ToolRegistry {
 /// 当需要集成所有 tools/ 中定义的工具时，调用此函数即可。
 pub fn create_default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
+    registry.register(ask_user_tool::AskUserTool);
     registry.register(bash_tool::BashTool);
     registry.register(read_tool::ReadTool);
     registry.register(edit_tool::EditTool);

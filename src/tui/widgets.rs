@@ -257,7 +257,277 @@ pub fn render_tool(
         "read" => render_read(tool_use, tool_result, content_width),
         "edit" => render_edit(tool_use, tool_result, tool_preview, content_width),
         "write" => render_write(tool_use, tool_result, tool_preview, content_width),
+        "ask_user" => render_ask_user(tool_use, tool_result, content_width),
         _ => Vec::new(),
+    }
+}
+
+fn render_ask_user(
+    tool_use: &ToolUseBlock,
+    result: Option<&ToolResultBlock>,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let accent = Color::Rgb(0x42, 0xd9, 0xe8);
+    let dim = Color::Rgb(140, 145, 155);
+    let text = Color::Rgb(220, 220, 225);
+    let warn = Color::Rgb(212, 182, 106);
+    let error = Color::Rgb(255, 100, 100);
+    let answer = Color::Rgb(135, 135, 255);
+
+    let questions = ask_user_questions(tool_use);
+    let question_count = questions.len();
+    let mut lines = Vec::new();
+
+    let mut title = Vec::new();
+    if result.is_none() {
+        title.push(Span::styled(
+            format!("{} ", spinner()),
+            Style::default().fg(warn),
+        ));
+    }
+    title.push(Span::raw("· "));
+    title.push(Span::styled(
+        "Ask User",
+        Style::default().fg(if result.is_some_and(|tr| tr.is_error) {
+            error
+        } else {
+            accent
+        }),
+    ));
+    if question_count > 0 {
+        title.push(Span::styled(
+            format!(
+                " ({} question{})",
+                question_count,
+                if question_count == 1 { "" } else { "s" }
+            ),
+            Style::default().fg(dim),
+        ));
+    }
+    lines.push(Line::from(title));
+
+    if let Some(tr) = result
+        && tr.is_error
+    {
+        let wrap_width = content_width.saturating_sub(2).max(1);
+        for wl in word_wrap(&tr.content, wrap_width) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(wl, Style::default().fg(error)),
+            ]));
+        }
+        return lines;
+    }
+
+    if result.is_none() {
+        for question in questions.iter().take(3) {
+            push_ask_user_question_summary(&mut lines, question, content_width, dim, text);
+        }
+        return lines;
+    }
+
+    let Some(tr) = result else {
+        return lines;
+    };
+    if tr.content.trim().is_empty() {
+        return lines;
+    }
+
+    let Some(value) = serde_json::from_str::<serde_json::Value>(&tr.content).ok() else {
+        for wl in word_wrap(&tr.content, content_width.saturating_sub(2).max(1)) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(wl, Style::default().fg(text)),
+            ]));
+        }
+        return lines;
+    };
+
+    let Some(answers) = value.get("answers").and_then(|v| v.as_object()) else {
+        for wl in word_wrap(&tr.content, content_width.saturating_sub(2).max(1)) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(wl, Style::default().fg(text)),
+            ]));
+        }
+        return lines;
+    };
+
+    if questions.is_empty() {
+        for (id, answer_value) in answers {
+            push_ask_user_answer(
+                &mut lines,
+                None,
+                id,
+                None,
+                answer_value,
+                content_width,
+                dim,
+                answer,
+                text,
+            );
+        }
+    } else {
+        for (idx, question) in questions.iter().enumerate() {
+            if let Some(answer_value) = answers.get(&question.id) {
+                push_ask_user_answer(
+                    &mut lines,
+                    Some(idx + 1),
+                    &question.id,
+                    Some(question),
+                    answer_value,
+                    content_width,
+                    dim,
+                    answer,
+                    text,
+                );
+            }
+        }
+    }
+
+    lines
+}
+
+#[derive(Debug)]
+struct AskUserQuestionSummary {
+    id: String,
+    header: String,
+    question: String,
+}
+
+fn ask_user_questions(tool_use: &ToolUseBlock) -> Vec<AskUserQuestionSummary> {
+    tool_use
+        .input
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .map(|questions| {
+            questions
+                .iter()
+                .filter_map(|q| {
+                    Some(AskUserQuestionSummary {
+                        id: q.get("id")?.as_str()?.to_string(),
+                        header: q
+                            .get("header")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        question: q
+                            .get("question")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn push_ask_user_question_summary(
+    lines: &mut Vec<Line<'static>>,
+    question: &AskUserQuestionSummary,
+    content_width: usize,
+    dim: Color,
+    text: Color,
+) {
+    let label = if question.header.trim().is_empty() {
+        question.id.as_str()
+    } else {
+        question.header.as_str()
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(label.to_string(), Style::default().fg(dim)),
+    ]));
+    let wrap_width = content_width.saturating_sub(4).max(1);
+    for wl in word_wrap(&question.question, wrap_width) {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(wl, Style::default().fg(text)),
+        ]));
+    }
+}
+
+fn push_ask_user_answer(
+    lines: &mut Vec<Line<'static>>,
+    index: Option<usize>,
+    id: &str,
+    question: Option<&AskUserQuestionSummary>,
+    answer_value: &serde_json::Value,
+    content_width: usize,
+    dim: Color,
+    answer: Color,
+    text: Color,
+) {
+    let label = answer_value
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing answer>");
+    let note = answer_value.get("note").and_then(|v| v.as_str());
+    let question_label = question
+        .map(|q| {
+            if q.header.trim().is_empty() {
+                q.id.as_str()
+            } else {
+                q.header.as_str()
+            }
+        })
+        .unwrap_or(id);
+
+    let title = index
+        .map(|idx| format!("{idx}. {question_label}"))
+        .unwrap_or_else(|| question_label.to_string());
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(title, Style::default().fg(dim).add_modifier(Modifier::BOLD)),
+    ]));
+    push_ask_user_answer_field(
+        lines,
+        "Answer",
+        label,
+        content_width,
+        Style::default().fg(answer).add_modifier(Modifier::BOLD),
+        dim,
+    );
+
+    if let Some(note) = note
+        && !note.trim().is_empty()
+    {
+        push_ask_user_answer_field(
+            lines,
+            "Note",
+            note.trim(),
+            content_width,
+            Style::default().fg(text),
+            dim,
+        );
+    }
+}
+
+fn push_ask_user_answer_field(
+    lines: &mut Vec<Line<'static>>,
+    name: &'static str,
+    value: &str,
+    content_width: usize,
+    value_style: Style,
+    dim: Color,
+) {
+    let label = format!("{name:<6}");
+    let prefix = format!("    {label} ");
+    let continuation = "           ";
+    let wrap_width = content_width
+        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+        .max(1);
+    for (idx, wl) in word_wrap(value, wrap_width).into_iter().enumerate() {
+        let current_prefix = if idx == 0 {
+            prefix.as_str()
+        } else {
+            continuation
+        };
+        lines.push(Line::from(vec![
+            Span::styled(current_prefix.to_string(), Style::default().fg(dim)),
+            Span::styled(wl, value_style),
+        ]));
     }
 }
 

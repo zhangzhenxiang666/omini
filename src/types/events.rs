@@ -256,5 +256,19 @@ pub struct EditPermissionPreview {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserInputPreview {
-    pub prompt: String,
+    pub questions: Vec<UserInputQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserInputQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub options: Vec<UserInputOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserInputOption {
+    pub label: String,
+    pub description: String,
 }

@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult};
+use super::{Tool, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -60,7 +60,11 @@ impl Tool for ReadTool {
         Ok(input)
     }
 
-    async fn execute_prepared(&self, input: Self::Prepared) -> ToolResult {
+    async fn execute_prepared(
+        &self,
+        input: Self::Prepared,
+        _ctx: ToolExecutionContext,
+    ) -> ToolResult {
         let path = std::path::Path::new(&input.file_path);
 
         if !path.is_absolute() {

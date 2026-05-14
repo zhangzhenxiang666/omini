@@ -19,6 +19,16 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
 const EDIT_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
+const USER_INPUT_NONE_LABEL: &str = "None of the above";
+const USER_INPUT_NONE_DESCRIPTION: &str = "Optionally, add details in notes (tab).";
+const USER_INPUT_NOTE_PREFIX: &str = "› ";
+const USER_INPUT_NOTE_PLACEHOLDER: &str = "Add notes";
+
+struct DrawerLines {
+    lines: Vec<Line<'static>>,
+    note_line_index: Option<usize>,
+    note_cursor_column: Option<usize>,
+}
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
@@ -78,7 +88,20 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
 
     let tool_use = find_tool_use(state, &request.tool_use_id);
     let content_width = area.width.saturating_sub(6) as usize;
-    let lines = build_permission_drawer_lines(&request, tool_use, content_width);
+    let DrawerLines {
+        lines,
+        note_line_index,
+        note_cursor_column,
+    } = build_permission_drawer_lines(
+        &request,
+        tool_use,
+        content_width,
+        state.user_input_question_index,
+        state.current_user_input_selected(),
+        state.current_user_input_note(),
+        state.current_user_input_note_cursor(),
+        state.user_input_note_mode,
+    );
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
     let is_edit_preview = matches!(
@@ -134,7 +157,15 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
     frame.render_widget(Clear, drawer_area);
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
 
-    let title = " Permission Request ".to_string();
+    let title = match &request.kind {
+        ToolPauseKind::UserInput(preview) => format!(
+            " Question {}/{} ({} unanswered) ",
+            state.user_input_question_index + 1,
+            preview.questions.len(),
+            state.user_input_unanswered_count()
+        ),
+        ToolPauseKind::Permission(_) => " Permission Request ".to_string(),
+    };
     let divider_line = Line::from(Span::styled(
         "━".repeat(drawer_area.width.saturating_sub(1) as usize),
         Style::default().fg(accent),
@@ -179,11 +210,38 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
         render_permission_scrollbar(frame, body_area, scroll_y, scroll_line_count);
     }
 
+    if state.user_input_note_mode
+        && let (Some(note_line_idx), Some(note_cursor_column)) =
+            (note_line_index, note_cursor_column)
+        && note_line_idx >= scroll_y
+        && note_line_idx < scroll_y + body_height
+    {
+        let cursor_x = body_area.x + note_cursor_column as u16;
+        let cursor_y = body_area.y + (note_line_idx - scroll_y) as u16;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    let options = match &request.kind {
+        ToolPauseKind::Permission(_) => build_permission_action_lines(state, &request),
+        ToolPauseKind::UserInput(preview) => build_user_input_action_lines(state, preview),
+    };
+    frame.render_widget(
+        Paragraph::new(options),
+        Rect {
+            x: drawer_area.x + 3,
+            y: drawer_area.y + drawer_area.height.saturating_sub(3),
+            width: drawer_area.width.saturating_sub(6),
+            height: 2,
+        },
+    );
+}
+
+fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) -> Text<'static> {
     let yes_style = permission_option_style(state.permission_selected == 0);
     let no_style = permission_option_style(state.permission_selected == 1);
-    let (yes_desc, no_desc) = permission_option_descriptions(&request);
+    let (yes_desc, no_desc) = permission_option_descriptions(request);
     let desc_style = Style::default().fg(Color::Rgb(140, 145, 155));
-    let options = Text::from(vec![
+    Text::from(vec![
         Line::from(vec![
             Span::styled("1. ", yes_style),
             Span::styled(format!("{:<3}", "Yes"), yes_style),
@@ -196,16 +254,55 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
             Span::raw("   "),
             Span::styled(no_desc, desc_style),
         ]),
-    ]);
-    frame.render_widget(
-        Paragraph::new(options),
-        Rect {
-            x: drawer_area.x + 3,
-            y: drawer_area.y + drawer_area.height.saturating_sub(3),
-            width: drawer_area.width.saturating_sub(6),
-            height: 2,
-        },
-    );
+    ])
+}
+
+fn build_user_input_action_lines(
+    state: &UiState,
+    _preview: &crate::types::events::UserInputPreview,
+) -> Text<'static> {
+    if state.user_input_note_mode {
+        Text::from(vec![Line::from(vec![
+            Span::styled(
+                "tab or esc ",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+            Span::styled(
+                "to finish notes",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+            Span::raw(" | "),
+            Span::styled("enter ", Style::default().fg(Color::Rgb(140, 145, 155))),
+            Span::styled(
+                "to submit answer",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+        ])])
+    } else {
+        Text::from(vec![Line::from(vec![
+            Span::styled(
+                "tab to add notes",
+                Style::default()
+                    .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "enter to submit answer",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "←/→ to navigate questions",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+            Span::raw(" | "),
+            Span::styled(
+                "esc to interrupt",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+        ])])
+    }
 }
 
 fn render_permission_scrollbar(
@@ -275,7 +372,12 @@ fn build_permission_drawer_lines(
     request: &ToolPauseRequest,
     tool_use: Option<&ToolUseBlock>,
     content_width: usize,
-) -> Vec<Line<'static>> {
+    question_index: usize,
+    user_input_selected: usize,
+    current_user_input_note: &str,
+    user_input_note_cursor: usize,
+    user_input_note_mode: bool,
+) -> DrawerLines {
     match &request.kind {
         ToolPauseKind::Permission(PermissionPreview::Bash(preview)) => {
             let mut lines = Vec::new();
@@ -320,39 +422,177 @@ fn build_permission_drawer_lines(
                     Style::default().fg(Color::Rgb(220, 220, 225)),
                 ),
             ]));
-            lines
+            DrawerLines {
+                lines,
+                note_line_index: None,
+                note_cursor_column: None,
+            }
         }
         ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
-            if let Some(tool_use) = tool_use {
+            let lines = if let Some(tool_use) = tool_use {
                 render_tool(tool_use, None, Some(request), content_width)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing edit tool input for preview",
                     Style::default().fg(Color::Rgb(255, 100, 100)),
                 ))]
+            };
+            DrawerLines {
+                lines,
+                note_line_index: None,
+                note_cursor_column: None,
             }
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => {
-            if let Some(tool_use) = tool_use {
+            let lines = if let Some(tool_use) = tool_use {
                 render_tool(tool_use, None, Some(request), content_width)
             } else {
                 vec![Line::from(Span::styled(
                     "Missing write tool input for preview",
                     Style::default().fg(Color::Rgb(255, 100, 100)),
                 ))]
+            };
+            DrawerLines {
+                lines,
+                note_line_index: None,
+                note_cursor_column: None,
             }
         }
-        ToolPauseKind::Permission(preview) => vec![Line::from(Span::styled(
-            format!("{} permission requested", permission_name(preview)),
-            Style::default().fg(Color::Rgb(165, 172, 182)),
-        ))],
+        ToolPauseKind::Permission(preview) => DrawerLines {
+            lines: vec![Line::from(Span::styled(
+                format!("{} permission requested", permission_name(preview)),
+                Style::default().fg(Color::Rgb(165, 172, 182)),
+            ))],
+            note_line_index: None,
+            note_cursor_column: None,
+        },
         ToolPauseKind::UserInput(preview) => {
-            crate::tui::widgets::word_wrap(&preview.prompt, content_width)
-                .into_iter()
-                .map(Line::from)
-                .collect()
+            let Some(question) = preview.questions.get(question_index) else {
+                return DrawerLines {
+                    lines: vec![Line::from("Missing question")],
+                    note_line_index: None,
+                    note_cursor_column: None,
+                };
+            };
+            let mut lines = Vec::new();
+            lines.extend(user_input_question_lines(question, content_width));
+            lines.push(Line::from(""));
+            for (idx, option) in question.options.iter().enumerate() {
+                let selected = idx == user_input_selected;
+                lines.push(user_input_option_line(
+                    selected,
+                    &format!("{}. {}", idx + 1, option.label),
+                    &option.description,
+                ));
+            }
+            lines.push(user_input_option_line(
+                user_input_selected == question.options.len(),
+                &format!("{}. {}", question.options.len() + 1, USER_INPUT_NONE_LABEL),
+                USER_INPUT_NONE_DESCRIPTION,
+            ));
+            let mut note_line_index = None;
+            let mut note_cursor_column = None;
+            if user_input_note_mode || !current_user_input_note.is_empty() {
+                lines.push(Line::from(""));
+                note_line_index = Some(lines.len().saturating_sub(1));
+                note_cursor_column = Some(user_input_note_cursor_column(
+                    current_user_input_note,
+                    user_input_note_cursor,
+                ));
+                lines.push(user_input_note_line(
+                    current_user_input_note,
+                    user_input_note_mode,
+                ));
+            }
+            DrawerLines {
+                lines,
+                note_line_index,
+                note_cursor_column,
+            }
         }
     }
+}
+
+fn user_input_note_line(note: &str, editing: bool) -> Line<'static> {
+    let marker_style = if editing {
+        Style::default()
+            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Rgb(140, 145, 155))
+    };
+    let value = if note.is_empty() {
+        USER_INPUT_NOTE_PLACEHOLDER
+    } else {
+        note
+    };
+    let value_style = if note.is_empty() {
+        Style::default().fg(Color::Rgb(140, 145, 155))
+    } else {
+        Style::default().fg(Color::Rgb(220, 220, 225))
+    };
+    Line::from(vec![
+        Span::styled(USER_INPUT_NOTE_PREFIX, marker_style),
+        Span::styled(value.to_string(), value_style),
+    ])
+}
+
+fn user_input_question_lines(
+    question: &crate::types::events::UserInputQuestion,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::from(Span::styled(
+        question.header.clone(),
+        Style::default().fg(Color::Rgb(140, 145, 155)),
+    ))];
+    lines.extend(
+        crate::tui::widgets::word_wrap(&question.question, content_width)
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+                        .add_modifier(Modifier::BOLD),
+                ))
+            }),
+    );
+    lines
+}
+
+fn user_input_note_cursor_column(note: &str, cursor_char: usize) -> usize {
+    USER_INPUT_NOTE_PREFIX.width()
+        + note
+            .chars()
+            .take(cursor_char)
+            .map(|c| c.width().unwrap_or(0))
+            .sum::<usize>()
+}
+
+fn user_input_option_line(selected: bool, label: &str, description: &str) -> Line<'static> {
+    let marker_style = if selected {
+        Style::default()
+            .fg(Color::Rgb(135, 135, 255))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Rgb(85, 92, 105))
+    };
+    let label_style = if selected {
+        Style::default()
+            .fg(Color::Rgb(135, 135, 255))
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Rgb(220, 220, 225))
+    };
+    Line::from(vec![
+        Span::styled(if selected { "› " } else { "  " }, marker_style),
+        Span::styled(label.to_string(), label_style),
+        Span::raw("   "),
+        Span::styled(
+            description.to_string(),
+            Style::default().fg(Color::Rgb(140, 145, 155)),
+        ),
+    ])
 }
 
 fn permission_name(preview: &PermissionPreview) -> &'static str {

@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult, tool_metadata};
+use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
 use crate::types::events::{EditPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -85,7 +85,11 @@ impl Tool for EditTool {
         Some(PermissionPreview::Edit(prepared.preview.clone()))
     }
 
-    async fn execute_prepared(&self, prepared: Self::Prepared) -> ToolResult {
+    async fn execute_prepared(
+        &self,
+        prepared: Self::Prepared,
+        _ctx: ToolExecutionContext,
+    ) -> ToolResult {
         match execute_edit(&prepared).await {
             Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
                 ("input", serde_json::json!(prepared.input.clone())),
@@ -279,7 +283,9 @@ mod tests {
         let prepared = EditTool.prepare(input).await.unwrap();
         assert_eq!(prepared.matches[0].start_line, 2);
 
-        let result = EditTool.execute_prepared(prepared).await;
+        let result = EditTool
+            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
+            .await;
         assert!(!result.is_error, "{}", result.output);
         assert_eq!(
             fs::read_to_string(&path).await.unwrap(),
@@ -332,7 +338,9 @@ mod tests {
         let prepared = EditTool.prepare(input).await.unwrap();
         fs::write(&path, "changed\n").await.unwrap();
 
-        let result = EditTool.execute_prepared(prepared).await;
+        let result = EditTool
+            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
+            .await;
         assert!(result.is_error);
         assert!(result.output.contains("old_string not found"));
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "changed\n");
@@ -354,7 +362,9 @@ mod tests {
         let prepared = EditTool.prepare(input).await.unwrap();
         assert_eq!(prepared.matches.len(), 2);
 
-        let result = EditTool.execute_prepared(prepared).await;
+        let result = EditTool
+            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
+            .await;
         assert!(!result.is_error, "{}", result.output);
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "z y z");
 

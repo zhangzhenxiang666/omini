@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult};
+use super::{Tool, ToolExecutionContext, ToolResult};
 use crate::types::events::{BashPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -76,7 +76,11 @@ impl Tool for BashTool {
         }))
     }
 
-    async fn execute_prepared(&self, input: Self::Prepared) -> ToolResult {
+    async fn execute_prepared(
+        &self,
+        input: Self::Prepared,
+        _ctx: ToolExecutionContext,
+    ) -> ToolResult {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&input.command).envs(std::env::vars());
         cmd.kill_on_drop(true);

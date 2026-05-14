@@ -1,4 +1,4 @@
-use super::{Tool, ToolResult, tool_metadata};
+use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
 use crate::types::events::{EditPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -68,7 +68,11 @@ impl Tool for WriteTool {
         Some(PermissionPreview::Write(prepared.preview.clone()))
     }
 
-    async fn execute_prepared(&self, prepared: Self::Prepared) -> ToolResult {
+    async fn execute_prepared(
+        &self,
+        prepared: Self::Prepared,
+        _ctx: ToolExecutionContext,
+    ) -> ToolResult {
         match execute_write(&prepared).await {
             Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
                 ("input", serde_json::json!(prepared.input.clone())),
@@ -196,7 +200,9 @@ mod tests {
         assert_eq!(prepared.preview.added_lines, 3);
         assert!(!prepared.existed);
 
-        let result = WriteTool.execute_prepared(prepared).await;
+        let result = WriteTool
+            .execute_prepared(prepared, ToolExecutionContext::test("write"))
+            .await;
         assert!(!result.is_error, "{}", result.output);
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
 
@@ -225,7 +231,9 @@ mod tests {
         let prepared = WriteTool.prepare(input).await.unwrap();
         assert!(prepared.existed);
 
-        let result = WriteTool.execute_prepared(prepared).await;
+        let result = WriteTool
+            .execute_prepared(prepared, ToolExecutionContext::test("write"))
+            .await;
         assert!(!result.is_error, "{}", result.output);
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\n");
 

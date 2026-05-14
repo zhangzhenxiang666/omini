@@ -216,15 +216,46 @@ async fn resolve_active_tool_pause(
         return;
     };
 
-    let response = match req.kind {
+    let response = match &req.kind {
         ToolPauseKind::Permission(_) => ToolPauseResponse::Permission {
             approved: state.permission_selected == 0,
         },
-        ToolPauseKind::UserInput(_) => {
-            if state.permission_selected == 0 {
-                return;
+        ToolPauseKind::UserInput(preview) => {
+            let mut answers = serde_json::Map::new();
+
+            for (idx, question) in preview.questions.iter().enumerate() {
+                let custom_idx = question.options.len();
+                let selected = state
+                    .user_input_selected
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(custom_idx);
+                let label = if selected == custom_idx {
+                    "None of the above".to_string()
+                } else {
+                    question.options[selected].label.clone()
+                };
+                let note = state
+                    .user_input_notes
+                    .get(idx)
+                    .map(|note| note.trim())
+                    .filter(|note| !note.is_empty());
+
+                answers.insert(
+                    question.id.clone(),
+                    serde_json::json!({
+                        "label": label,
+                        "note": note,
+                    }),
+                );
             }
-            ToolPauseResponse::Cancelled
+
+            ToolPauseResponse::UserInput {
+                value: serde_json::json!({
+                    "answers": answers,
+                }),
+            }
         }
     };
 
@@ -358,13 +389,61 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         }
 
                         // 工具暂停, 权限抽屉模式
-                        if state.active_tool_pause().is_some() {
-                            match key.code {
-                                KeyCode::Up | KeyCode::Char('k') => {
-                                    state.permission_select_prev();
+                        if let Some(active_pause) = state.active_tool_pause().cloned() {
+                            let user_input_option_max = match &active_pause.kind {
+                                ToolPauseKind::UserInput(preview) => preview
+                                    .questions
+                                    .get(state.user_input_question_index)
+                                    .map(|question| question.options.len())
+                                    .unwrap_or(0),
+                                ToolPauseKind::Permission(_) => 1,
+                            };
+
+                            if state.user_input_note_mode {
+                                match key.code {
+                                    KeyCode::Tab | KeyCode::Esc => {
+                                        state.user_input_note_mode = false;
+                                    }
+                                    KeyCode::Enter => {
+                                        state.mark_current_user_input_answered();
+                                        if state.user_input_unanswered_count() == 0 {
+                                            resolve_active_tool_pause(&mut state, &request_tx).await;
+                                        } else {
+                                            state.move_to_next_unanswered_user_input();
+                                        }
+                                    }
+                                    KeyCode::Backspace => state.delete_note_before(),
+                                    KeyCode::Delete => state.delete_note_after(),
+                                    KeyCode::Up | KeyCode::Char('k') => state.permission_select_prev(),
+                                    KeyCode::Down | KeyCode::Char('j') => {
+                                        state.permission_select_next_with_max(user_input_option_max);
+                                    }
+                                    KeyCode::Char(c) => state.insert_note_char(c),
+                                    KeyCode::Left => state.note_cursor_left(),
+                                    KeyCode::Right => state.note_cursor_right(),
+                                    KeyCode::Home => state.note_cursor_home(),
+                                    KeyCode::End => state.note_cursor_end(),
+                                    _ => {}
                                 }
+                                last_tick = tokio::time::Instant::now();
+                                terminal.draw(|frame| render::render(&mut state, frame))?;
+                                continue;
+                            }
+
+                            match key.code {
+                                KeyCode::Up | KeyCode::Char('k') => state.permission_select_prev(),
                                 KeyCode::Down | KeyCode::Char('j') => {
-                                    state.permission_select_next();
+                                    state.permission_select_next_with_max(user_input_option_max);
+                                }
+                                KeyCode::Left | KeyCode::Char('h')
+                                    if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) =>
+                                {
+                                    state.user_input_question_prev();
+                                }
+                                KeyCode::Right | KeyCode::Char('l')
+                                    if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) =>
+                                {
+                                    state.user_input_question_next();
                                 }
                                 KeyCode::PageUp => {
                                     let page = 1.max(state.permission_drawer_body_area.height as usize / 2);
@@ -374,16 +453,44 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     let page = 1.max(state.permission_drawer_body_area.height as usize / 2);
                                     state.permission_scroll_down(page);
                                 }
-                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                KeyCode::Tab if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) => {
+                                    state.user_input_note_mode = true;
+                                    state.note_cursor_end();
+                                }
+                                KeyCode::Char('y') | KeyCode::Char('Y')
+                                    if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
+                                {
                                     state.permission_selected = 0;
                                     resolve_active_tool_pause(&mut state, &request_tx).await;
                                 }
-                                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
+                                    if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
+                                {
                                     state.permission_selected = 1;
                                     resolve_active_tool_pause(&mut state, &request_tx).await;
                                 }
+                                KeyCode::Esc => {
+                                    state.permission_selected = 1;
+                                    let _ = request_tx
+                                        .send(UiToRuntimeEvent::ResolveToolPause {
+                                            tool_use_id: active_pause.tool_use_id.clone(),
+                                            response: ToolPauseResponse::Cancelled,
+                                        })
+                                        .await;
+                                    state.pending_tool_previews.remove(&active_pause.tool_use_id);
+                                    state.reset_permission_drawer();
+                                }
                                 KeyCode::Enter => {
-                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                    if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) {
+                                        state.mark_current_user_input_answered();
+                                        if state.user_input_unanswered_count() == 0 {
+                                            resolve_active_tool_pause(&mut state, &request_tx).await;
+                                        } else {
+                                            state.move_to_next_unanswered_user_input();
+                                        }
+                                    } else {
+                                        resolve_active_tool_pause(&mut state, &request_tx).await;
+                                    }
                                 }
                                 _ => {}
                             }
