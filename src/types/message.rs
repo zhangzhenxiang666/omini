@@ -50,6 +50,15 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
 }
 
+impl ToString for Role {
+    fn to_string(&self) -> String {
+        match self {
+            Role::User => "user".to_string(),
+            Role::Assistant => "assistant".to_string(),
+        }
+    }
+}
+
 impl ContentBlock {
     pub fn from_thinking(thinking: String) -> Self {
         Self::Thinking(ThinkingBlock { thinking })

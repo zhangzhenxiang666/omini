@@ -444,15 +444,10 @@ impl AgentRuntime {
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
-                    EngineToRuntimeEvent::UserMessageProduced(msg) => {
-                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "user").await;
-                    }
-                    EngineToRuntimeEvent::MessageProduced(msg) => {
-                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "assistant")
-                            .await;
-                    }
-                    EngineToRuntimeEvent::ToolResultsProduced(msg) => {
-                        persist_one(&session_dir, &session_id, &blocks_dir, &msg, "user").await;
+                    EngineToRuntimeEvent::UserMessageProduced(msg)
+                    | EngineToRuntimeEvent::MessageProduced(msg)
+                    | EngineToRuntimeEvent::ToolResultsProduced(msg) => {
+                        persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
                     }
                     // ===== 透传事件 =====
                     EngineToRuntimeEvent::TurnStarted => {
@@ -587,21 +582,15 @@ async fn load_messages_from_db(session_id: &str, blocks_dir: &std::path::Path) -
 }
 
 /// 持久化单条消息到 JSONL + SQLite。
-async fn persist_one(
-    session_dir: &SessionDir,
-    session_id: &str,
-    blocks_dir: &Path,
-    msg: &Message,
-    role: &str,
-) {
+async fn persist_one(session_dir: &SessionDir, session_id: &str, blocks_dir: &Path, msg: Message) {
     // JSONL
-    let _ = session_dir.append_history(msg);
+    let _ = session_dir.append_history(&msg);
 
     // SQLite
     let new_msg = NewMessage {
         session_id: session_id.to_string(),
-        role: role.to_string(),
-        blocks: msg.content.clone(),
+        role: msg.role.to_string(),
+        blocks: msg.content,
         kind: "normal".to_string(),
         created_at: Utc::now(),
         blocks_dir: blocks_dir.to_path_buf(),
