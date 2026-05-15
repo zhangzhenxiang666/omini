@@ -1,7 +1,7 @@
 use crate::api::{ApiRequest, FinishReason, LlmClient};
 use crate::tools::{
     DefaultPermissionPolicy, PendingToolPause, PendingToolPauses, PermissionPolicy,
-    ToolExecutionContext, ToolRegistry, ToolResult,
+    ToolExecutionContext, ToolRegistry, ToolResult, ToolRuntimeContext,
 };
 use crate::types::config::Settings;
 use crate::types::events::{EngineToRuntimeEvent, ToolPauseResponse};
@@ -32,6 +32,14 @@ enum ToolCollection {
     Cancelled(Vec<ToolResultBlock>),
 }
 
+struct ToolRunControls {
+    pending_tool_pauses: PendingToolPauses,
+    permission_policy: Arc<dyn PermissionPolicy>,
+    cancelled: Arc<AtomicBool>,
+    cancel_notify: Arc<Notify>,
+    runtime_context: Option<Arc<ToolRuntimeContext>>,
+}
+
 /// 一次查询的上下文。
 ///
 /// 由 `AgentRuntime` 在每次 `process_run` 时构造传入。
@@ -39,9 +47,10 @@ enum ToolCollection {
 #[derive(Debug)]
 pub struct QueryContext<'a> {
     pub messages: &'a mut Vec<Message>,
-    pub settings: &'a Settings,
+    pub settings: Arc<Settings>,
     pub llm_client: LlmClient,
     pub tool_registry: Arc<ToolRegistry>,
+    pub runtime_context: Option<Arc<ToolRuntimeContext>>,
 }
 
 /// 查询引擎。
@@ -59,6 +68,19 @@ impl QueryEngine {
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
             permission_policy: Arc::new(DefaultPermissionPolicy),
             cancel_notify: Arc::new(Notify::new()),
+            pending_user_messages: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    pub fn with_shared_tool_controls(
+        pending_tool_pauses: PendingToolPauses,
+        permission_policy: Arc<dyn PermissionPolicy>,
+        cancel_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            pending_tool_pauses,
+            permission_policy,
+            cancel_notify,
             pending_user_messages: Mutex::new(VecDeque::new()),
         }
     }
@@ -245,16 +267,17 @@ impl QueryEngine {
                             let tool_registry = ctx.tool_registry.clone();
                             let pending_tool_pauses = Arc::clone(&self.pending_tool_pauses);
                             let permission_policy = Arc::clone(&self.permission_policy);
+                            let cancel_notify = Arc::clone(&self.cancel_notify);
+                            let runtime_context = ctx.runtime_context.clone();
+                            let controls = ToolRunControls {
+                                pending_tool_pauses,
+                                permission_policy,
+                                cancelled,
+                                cancel_notify,
+                                runtime_context,
+                            };
                             tool_tasks.spawn(async move {
-                                Self::execute_tool(
-                                    &tool_registry,
-                                    &tool_use,
-                                    &tx,
-                                    pending_tool_pauses,
-                                    permission_policy,
-                                    cancelled,
-                                )
-                                .await
+                                Self::execute_tool(&tool_registry, &tool_use, &tx, controls).await
                             });
                         }
                         crate::api::ApiEvent::Done(completion) => {
@@ -598,11 +621,9 @@ impl QueryEngine {
         tool_registry: &ToolRegistry,
         tool_use: &ToolUseBlock,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-        pending_tool_pauses: PendingToolPauses,
-        permission_policy: Arc<dyn PermissionPolicy>,
-        cancelled: Arc<AtomicBool>,
+        controls: ToolRunControls,
     ) -> ToolResultBlock {
-        if cancelled.load(Ordering::Relaxed) {
+        if controls.cancelled.load(Ordering::Relaxed) {
             return ToolResultBlock {
                 tool_use_id: tool_use.id.clone(),
                 is_error: true,
@@ -612,13 +633,21 @@ impl QueryEngine {
         }
 
         let result = if let Some(tool) = tool_registry.get(&tool_use.name) {
+            let runtime_context = controls.runtime_context;
             let ctx = ToolExecutionContext {
                 tool_use_id: tool_use.id.clone(),
+                pause_id: runtime_context
+                    .as_ref()
+                    .filter(|runtime| runtime.session_type == "subagent")
+                    .map(|runtime| format!("{}:{}", runtime.session_id, tool_use.id))
+                    .unwrap_or_else(|| tool_use.id.clone()),
                 tool_name: tool_use.name.clone(),
                 event_tx: event_tx.clone(),
-                pending_tool_pauses,
-                permission_policy,
-                cancelled,
+                pending_tool_pauses: controls.pending_tool_pauses,
+                permission_policy: controls.permission_policy,
+                cancelled: controls.cancelled,
+                cancel_notify: controls.cancel_notify,
+                runtime: runtime_context,
             };
             tool.execute(tool_use.input.clone(), ctx).await
         } else {

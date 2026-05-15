@@ -85,6 +85,7 @@ impl ProjectsDir {
 }
 
 /// `~/.omini/projects/<sanitized-cwd>/` 目录操作句柄。
+#[derive(Debug, Clone)]
 pub struct ProjectDir {
     path: PathBuf,
 }
@@ -174,6 +175,20 @@ impl SessionDir {
     /// 返回 `history.jsonl` 路径。
     pub fn history_path(&self) -> PathBuf {
         self.path.join("history.jsonl")
+    }
+
+    /// 获取指定子 agent session 的目录句柄（不创建目录）。
+    pub fn subagent(&self, id: &str) -> SessionDir {
+        SessionDir {
+            path: self.path.join("subagents").join(id),
+        }
+    }
+
+    /// 创建子 agent session 目录（位于当前 session 的 `subagents/` 下）。
+    pub fn create_subagent(&self, id: &str) -> Result<SessionDir, ConfigError> {
+        let dir = self.subagent(id);
+        fs::create_dir_all(&dir.path)?;
+        Ok(dir)
     }
 
     /// 追加一条 Message 到 `history.jsonl`。

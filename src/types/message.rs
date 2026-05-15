@@ -50,11 +50,11 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
 }
 
-impl ToString for Role {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for Role {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Role::User => "user".to_string(),
-            Role::Assistant => "assistant".to_string(),
+            Role::User => write!(f, "user"),
+            Role::Assistant => write!(f, "assistant"),
         }
     }
 }

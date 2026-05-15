@@ -26,6 +26,7 @@ impl Command for NewCommand {
             CommandEffect::Emit(RuntimeToUiEvent::SessionChanged {
                 session_id: None,
                 messages: vec![],
+                subagents: vec![],
             }),
             CommandEffect::Emit(RuntimeToUiEvent::SessionTitleChanged { title: None }),
         ])

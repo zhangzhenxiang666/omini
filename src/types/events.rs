@@ -75,6 +75,17 @@ pub enum EngineToRuntimeEvent {
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
 
+    /// 子 agent 创建并开始运行。
+    SubagentStarted(SubagentStartedEvent),
+    /// 子 agent 产生了一条完整消息，需要持久化并更新 UI 视图模型。
+    SubagentMessageProduced(SubagentMessageEvent),
+    /// 子 agent 请求工具调用。
+    SubagentToolUse(SubagentToolUseEvent),
+    /// 子 agent 工具执行完成。
+    SubagentToolResult(SubagentToolResultEvent),
+    /// 子 agent 运行结束。
+    SubagentFinished(SubagentFinishedEvent),
+
     /// 引擎出错
     Error(String),
 }
@@ -109,6 +120,7 @@ pub enum RuntimeToUiEvent {
     SessionChanged {
         session_id: Option<String>,
         messages: Vec<Message>,
+        subagents: Vec<SubagentSnapshot>,
     },
 
     /// 会话标题变更（TUI 头部栏显示用）
@@ -137,8 +149,69 @@ pub enum RuntimeToUiEvent {
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
 
+    /// 子 agent 创建并开始运行。
+    SubagentStarted(SubagentStartedEvent),
+    /// 子 agent 产生了一条完整消息。
+    SubagentMessageProduced(SubagentMessageEvent),
+    /// 子 agent 请求工具调用。
+    SubagentToolUse(SubagentToolUseEvent),
+    /// 子 agent 工具执行完成。
+    SubagentToolResult(SubagentToolResultEvent),
+    /// 子 agent 运行结束。
+    SubagentFinished(SubagentFinishedEvent),
+
     /// 运行时出错
     Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentStartedEvent {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub spawn_tool_use_id: String,
+    pub agent_label: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentSnapshot {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub spawn_tool_use_id: String,
+    pub agent_label: String,
+    pub status: SubagentStatus,
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentMessageEvent {
+    pub session_id: String,
+    pub message: Message,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentToolUseEvent {
+    pub session_id: String,
+    pub tool_use: ToolUseBlock,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentToolResultEvent {
+    pub session_id: String,
+    pub tool_result: ToolResultBlock,
+}
+
+#[derive(Debug, Clone)]
+pub struct SubagentFinishedEvent {
+    pub session_id: String,
+    pub status: SubagentStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
 }
 
 // ===========================================================================
@@ -209,7 +282,13 @@ pub enum CommandEffect {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolPauseRequest {
     pub tool_use_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_tool_use_id: Option<String>,
     pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_agent_label: Option<String>,
     pub kind: ToolPauseKind,
 }
 

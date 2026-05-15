@@ -5,6 +5,7 @@ pub mod db;
 pub mod engine;
 pub mod prompts;
 pub mod runtime;
+pub mod subagents;
 pub mod tools;
 pub mod tui;
 pub mod types;

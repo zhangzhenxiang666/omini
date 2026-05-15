@@ -5,12 +5,12 @@ use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
 use crate::db::{self, NewMessage};
 use crate::engine::{QueryContext, QueryEngine};
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
     CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest, RuntimeToUiEvent,
-    UiToRuntimeEvent,
+    SubagentSnapshot, SubagentStatus, UiToRuntimeEvent,
 };
 use crate::types::message::{Message, Role};
 use chrono::Utc;
@@ -73,7 +73,7 @@ impl AgentRuntime {
             settings.api_key.clone(),
             settings.base_url.clone(),
         );
-        let tool_registry = Arc::new(crate::tools::create_default_registry());
+        let tool_registry = Arc::new(crate::tools::create_main_registry());
 
         // 初始化命令注册表并注册内置命令
         let mut command_registry = CommandRegistry::new();
@@ -82,6 +82,12 @@ impl AgentRuntime {
         // 向 UI 推送命令列表（供自动补全使用）
         let summaries = command_registry.summaries();
         let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(summaries));
+        for diagnostic in crate::subagents::load_agent_diagnostics(&settings.cwd) {
+            let _ = event_tx.try_send(RuntimeToUiEvent::CommandNotice(format!(
+                "Subagent warning: {}",
+                diagnostic.message()
+            )));
+        }
 
         Self {
             session_id: None,
@@ -304,6 +310,7 @@ impl AgentRuntime {
         // 从数据库加载消息（而非 JSONL）
         let blocks_dir = session_dir.path().join("blocks");
         let messages = load_messages_from_db(session_id, &blocks_dir).await;
+        let subagents = load_subagents_for_session(session_id, &self.project).await;
 
         let count = messages.len() as i64;
         let ui_messages = messages.clone();
@@ -328,6 +335,7 @@ impl AgentRuntime {
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id.to_string()),
             messages: ui_messages,
+            subagents,
         })
         .await;
     }
@@ -356,12 +364,27 @@ impl AgentRuntime {
         }
 
         {
+            let run_settings = Arc::new(self.settings.clone());
             // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
             let ctx = QueryContext {
                 messages: &mut self.messages,
-                settings: &self.settings,
+                settings: Arc::clone(&run_settings),
                 llm_client: self.llm_client.clone(),
                 tool_registry: Arc::clone(&self.tool_registry),
+                runtime_context: Some(Arc::new(ToolRuntimeContext {
+                    session_id: self
+                        .session_id
+                        .clone()
+                        .expect("session must exist before query"),
+                    session_type: "main".to_string(),
+                    agent_label: None,
+                    session_dir: self
+                        .session_dir
+                        .clone()
+                        .expect("session dir must exist before query"),
+                    settings_snapshot: Arc::clone(&run_settings),
+                    project: self.project.clone(),
+                })),
             };
 
             let event_tx = self.event_tx.clone();
@@ -438,6 +461,7 @@ impl AgentRuntime {
             .clone()
             .expect("session dir must exist before processing events");
         let event_tx = self.event_tx.clone();
+        let project = self.project.clone();
         let blocks_dir = session_dir.path().join("blocks");
 
         tokio::spawn(async move {
@@ -471,6 +495,36 @@ impl AgentRuntime {
                     EngineToRuntimeEvent::ToolPauseRequested(req) => {
                         let _ = event_tx
                             .send(RuntimeToUiEvent::ToolPauseRequested(req))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::SubagentStarted(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::SubagentStarted(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::SubagentMessageProduced(event) => {
+                        let parent_dir = project.session(&session_id);
+                        let subagent_dir = parent_dir.subagent(&event.session_id);
+                        let subagent_blocks_dir = subagent_dir.path().join("blocks");
+                        persist_db_only(&event.session_id, &subagent_blocks_dir, &event.message)
+                            .await;
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::SubagentMessageProduced(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::SubagentToolUse(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::SubagentToolUse(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::SubagentToolResult(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::SubagentToolResult(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::SubagentFinished(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::SubagentFinished(event))
                             .await;
                     }
                     EngineToRuntimeEvent::Error(e) => {
@@ -518,6 +572,7 @@ impl AgentRuntime {
             id,
             project_path,
             parent_session_id: None,
+            spawn_tool_use_id: None,
             session_type: "main".to_string(),
             agent_label: None,
             provider: self.settings.active_provider.clone(),
@@ -540,6 +595,7 @@ impl AgentRuntime {
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id_out),
             messages: self.messages.clone(),
+            subagents: Vec::new(),
         })
         .await;
     }
@@ -581,6 +637,44 @@ async fn load_messages_from_db(session_id: &str, blocks_dir: &std::path::Path) -
     messages
 }
 
+async fn load_subagents_for_session(
+    session_id: &str,
+    project: &ProjectDir,
+) -> Vec<SubagentSnapshot> {
+    let sessions = match db::global_db().list_child_sessions(session_id).await {
+        Ok(sessions) => sessions,
+        Err(e) => {
+            eprintln!("load_subagents_for_session: {e}");
+            return Vec::new();
+        }
+    };
+
+    let mut subagents = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let Some(parent_session_id) = session.parent_session_id.clone() else {
+            continue;
+        };
+        let Some(spawn_tool_use_id) = session.spawn_tool_use_id.clone() else {
+            continue;
+        };
+        let parent_dir = project.session(&parent_session_id);
+        let session_dir = parent_dir.subagent(&session.id);
+        let blocks_dir = session_dir.path().join("blocks");
+        let messages = load_messages_from_db(&session.id, &blocks_dir).await;
+        subagents.push(SubagentSnapshot {
+            session_id: session.id,
+            parent_session_id,
+            spawn_tool_use_id,
+            agent_label: session
+                .agent_label
+                .unwrap_or_else(|| "Subagent".to_string()),
+            status: SubagentStatus::Completed,
+            messages,
+        });
+    }
+    subagents
+}
+
 /// 持久化单条消息到 JSONL + SQLite。
 async fn persist_one(session_dir: &SessionDir, session_id: &str, blocks_dir: &Path, msg: Message) {
     // JSONL
@@ -591,6 +685,18 @@ async fn persist_one(session_dir: &SessionDir, session_id: &str, blocks_dir: &Pa
         session_id: session_id.to_string(),
         role: msg.role.to_string(),
         blocks: msg.content,
+        kind: "normal".to_string(),
+        created_at: Utc::now(),
+        blocks_dir: blocks_dir.to_path_buf(),
+    };
+    let _ = db::global_db().insert_message(&new_msg).await;
+}
+
+async fn persist_db_only(session_id: &str, blocks_dir: &Path, msg: &Message) {
+    let new_msg = NewMessage {
+        session_id: session_id.to_string(),
+        role: msg.role.to_string(),
+        blocks: msg.content.clone(),
         kind: "normal".to_string(),
         created_at: Utc::now(),
         blocks_dir: blocks_dir.to_path_buf(),

@@ -26,10 +26,6 @@ struct InstructionFile {
 
 /// Build the full system prompt for the current request.
 pub fn build_system_prompt(settings: &Settings) -> String {
-    let env = EnvironmentContext::detect(&settings.cwd);
-    let global_instructions = load_global_instructions();
-    let project_instructions = load_project_instructions(&settings.cwd);
-
     let mut prompt = String::new();
     prompt.push_str("You are Omini, a coding agent running in the user's local terminal.\n\n");
     prompt.push_str(&agent_identity_section());
@@ -38,14 +34,25 @@ pub fn build_system_prompt(settings: &Settings) -> String {
     prompt.push('\n');
     prompt.push_str(&tool_instructions_section());
     prompt.push('\n');
+    prompt.push_str(&subagent_section(&settings.cwd));
+    prompt.push('\n');
     // TODO: Add a skills section after the skills registry and loading protocol are implemented.
+    prompt.push_str(&project_context_prompt(&settings.cwd));
+    prompt
+}
+
+pub fn project_context_prompt(cwd: &Path) -> String {
+    let env = EnvironmentContext::detect(cwd);
+    let global_instructions = load_global_instructions();
+    let project_instructions = load_project_instructions(cwd);
+
+    let mut prompt = String::new();
     prompt.push_str(&project_instructions_section(
         global_instructions.as_ref(),
         project_instructions.as_ref(),
     ));
     prompt.push('\n');
     prompt.push_str(&environment_context_section(&env));
-
     prompt
 }
 
@@ -96,6 +103,12 @@ fn core_behavior_section() -> String {
 - Do not rewrite unrelated code.
 - Do not discard or overwrite user changes unless the user explicitly asks for it.
 
+## Task Routing
+
+- Treat requests to "explore", "introduce", "explain", "summarize", "walk me through", or "help me understand" the current project as broad codebase exploration unless the user names a specific file or symbol.
+- For broad codebase exploration, first use the `subagent` tool with the `explorer` subagent, then synthesize its findings for the user.
+- Keep only targeted follow-up inspection in the main context after the explorer returns.
+
 ## Communication
 
 - Be direct and concise.
@@ -141,6 +154,57 @@ fn tool_instructions_section() -> String {
 "#
     .trim()
     .to_string()
+}
+
+fn subagent_section(cwd: &Path) -> String {
+    let agents = crate::subagents::load_agent_summaries(cwd);
+    let mut section = String::new();
+    section.push_str("<delegation_instructions>\n");
+    section.push_str("## Delegation Policy\n\n");
+    section.push_str(
+        "- Subagents isolate their intermediate context from the main conversation and return only a final result.\n",
+    );
+    section.push_str(
+        "- Use the `subagent` tool proactively when isolation, parallelism, or specialized exploration materially helps the task.\n",
+    );
+    section.push_str(
+        "- For broad codebase exploration, architecture discovery, dependency tracing, project introductions, project overviews, or research likely to require more than 3 searches or file reads, use the `explorer` subagent instead of doing all exploration in the main context.\n",
+    );
+    section.push_str(
+        "- For multiple independent codebase questions, run multiple `explorer` subagents in the same assistant turn when practical.\n",
+    );
+    section.push_str(
+        "- For focused implementation work that can be separated by file or module ownership, use `worker` subagents; give each worker a bounded scope and explicit files or responsibilities.\n",
+    );
+    section.push_str(
+        "- Do not duplicate a subagent's investigation in the main context. Use the subagent result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
+    );
+    section.push_str(
+        "- Keep urgent blocking work local when the next step cannot proceed without your own immediate inspection or judgment.\n",
+    );
+    section.push_str(
+        "- The main agent remains responsible for synthesis, final decisions, user communication, and verifying code changes before reporting completion.\n\n",
+    );
+    section.push_str("## Subagent Prompting\n\n");
+    section.push_str("- The tool input must include `name` and a concrete `prompt` task.\n");
+    section.push_str(
+        "- Optionally include a short `title` when a compact UI label would help the user distinguish concurrent subagent tasks. Keep it brief and use the user's language.\n",
+    );
+    section.push_str(
+        "- Write prompts as self-contained briefs: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own.\n",
+    );
+    section.push_str(
+        "- Prefer assigning questions over step-by-step command scripts for investigations, so the subagent can adapt if the first search path is wrong.\n",
+    );
+    section.push_str(
+        "- Subagents cannot spawn other subagents. Do not ask them to delegate further.\n\n",
+    );
+    section.push_str("## Available Subagents\n\n");
+    for agent in agents {
+        section.push_str(&format!("- `{}`: {}\n", agent.name, agent.description));
+    }
+    section.push_str("</delegation_instructions>");
+    section
 }
 
 fn project_instructions_section(

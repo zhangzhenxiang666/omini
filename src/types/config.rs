@@ -1,4 +1,5 @@
 use crate::db::DbError;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -12,7 +13,7 @@ pub enum ProviderType {
     Anthropic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
     None,

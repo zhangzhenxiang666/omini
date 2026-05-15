@@ -84,6 +84,7 @@ pub struct Session {
     pub id: String,
     pub project_path: String,
     pub parent_session_id: Option<String>,
+    pub spawn_tool_use_id: Option<String>,
     pub session_type: String,
     pub agent_label: Option<String>,
     pub provider: String,
@@ -162,6 +163,7 @@ impl Database {
                 id                TEXT PRIMARY KEY,
                 project_path      TEXT NOT NULL,
                 parent_session_id TEXT REFERENCES sessions(id),
+                spawn_tool_use_id TEXT,
                 session_type      TEXT NOT NULL DEFAULT 'main',
                 agent_label       TEXT,
                 provider          TEXT NOT NULL DEFAULT '',
@@ -175,6 +177,9 @@ impl Database {
         )
         .execute(&self.pool)
         .await?;
+
+        self.ensure_sessions_column("spawn_tool_use_id", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS messages (
@@ -220,13 +225,14 @@ impl Database {
     pub async fn create_session(&self, session: &Session) -> Result<(), DbError> {
         sqlx::query(
             "INSERT INTO sessions
-            (id, project_path, parent_session_id, session_type, agent_label,
+            (id, project_path, parent_session_id, spawn_tool_use_id, session_type, agent_label,
             provider, model, thinking_effort, title, message_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&session.id)
         .bind(&session.project_path)
         .bind(&session.parent_session_id)
+        .bind(&session.spawn_tool_use_id)
         .bind(&session.session_type)
         .bind(&session.agent_label)
         .bind(&session.provider)
@@ -251,9 +257,19 @@ impl Database {
 
     pub async fn list_sessions(&self, project_path: &str) -> Result<Vec<Session>, DbError> {
         let rows = sqlx::query_as::<_, Session>(
-            "SELECT * FROM sessions WHERE project_path = ? ORDER BY created_at DESC",
+            "SELECT * FROM sessions WHERE project_path = ? AND session_type = 'main' ORDER BY created_at DESC",
         )
         .bind(project_path)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, DbError> {
+        let rows = sqlx::query_as::<_, Session>(
+            "SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC",
+        )
+        .bind(parent_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
@@ -378,6 +394,23 @@ impl Database {
             Some(msg) => Ok(extract_message_text(&msg.content)),
             None => Ok(String::new()),
         }
+    }
+
+    async fn ensure_sessions_column(&self, column: &str, definition: &str) -> Result<(), DbError> {
+        let rows = sqlx::query("PRAGMA table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let exists = rows.iter().any(|row| {
+            use sqlx::Row;
+            row.try_get::<String, _>("name")
+                .map(|name| name == column)
+                .unwrap_or(false)
+        });
+        if !exists {
+            let sql = format!("ALTER TABLE sessions ADD COLUMN {column} {definition}");
+            sqlx::query(&sql).execute(&self.pool).await?;
+        }
+        Ok(())
     }
 }
 

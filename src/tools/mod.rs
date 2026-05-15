@@ -1,3 +1,5 @@
+use crate::config::project::{ProjectDir, SessionDir};
+use crate::types::config::Settings;
 use crate::types::events::{
     EngineToRuntimeEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
     UserInputPreview,
@@ -13,12 +15,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod edit_tool;
 pub mod read_tool;
+pub mod subagent_tool;
 pub mod write_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -118,11 +121,24 @@ impl PermissionPolicy for DefaultPermissionPolicy {
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     pub tool_use_id: String,
+    pub pause_id: String,
     pub tool_name: String,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_policy: Arc<dyn PermissionPolicy>,
     pub cancelled: Arc<AtomicBool>,
+    pub cancel_notify: Arc<Notify>,
+    pub runtime: Option<Arc<ToolRuntimeContext>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolRuntimeContext {
+    pub session_id: String,
+    pub session_type: String,
+    pub agent_label: Option<String>,
+    pub session_dir: SessionDir,
+    pub settings_snapshot: Arc<Settings>,
+    pub project: ProjectDir,
 }
 
 impl ToolExecutionContext {
@@ -131,11 +147,14 @@ impl ToolExecutionContext {
         let (event_tx, _event_rx) = mpsc::channel(1);
         Self {
             tool_use_id: format!("test_{tool_name}"),
+            pause_id: format!("test_{tool_name}"),
             tool_name: tool_name.to_string(),
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
             permission_policy: Arc::new(DefaultPermissionPolicy),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_notify: Arc::new(Notify::new()),
+            runtime: None,
         }
     }
 
@@ -150,15 +169,24 @@ impl ToolExecutionContext {
                 .pending_tool_pauses
                 .lock()
                 .expect("pending tool pause mutex poisoned");
-            if pending.contains_key(&self.tool_use_id) {
+            if pending.contains_key(&self.pause_id) {
                 return ToolPauseResponse::Permission { approved: false };
             }
-            pending.insert(self.tool_use_id.clone(), PendingToolPause::Permission(tx));
+            pending.insert(self.pause_id.clone(), PendingToolPause::Permission(tx));
         }
 
         let request = ToolPauseRequest {
-            tool_use_id: self.tool_use_id.clone(),
+            tool_use_id: self.pause_id.clone(),
+            preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
+            source_session_id: self
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.session_id.clone()),
+            source_agent_label: self
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.agent_label.clone()),
             kind: ToolPauseKind::Permission(preview),
         };
 
@@ -189,15 +217,24 @@ impl ToolExecutionContext {
                 .pending_tool_pauses
                 .lock()
                 .expect("pending tool pause mutex poisoned");
-            if pending.contains_key(&self.tool_use_id) {
+            if pending.contains_key(&self.pause_id) {
                 return ToolPauseResponse::Cancelled;
             }
-            pending.insert(self.tool_use_id.clone(), PendingToolPause::UserInput(tx));
+            pending.insert(self.pause_id.clone(), PendingToolPause::UserInput(tx));
         }
 
         let request = ToolPauseRequest {
-            tool_use_id: self.tool_use_id.clone(),
+            tool_use_id: self.pause_id.clone(),
+            preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
+            source_session_id: self
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.session_id.clone()),
+            source_agent_label: self
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.agent_label.clone()),
             kind: ToolPauseKind::UserInput(preview),
         };
 
@@ -222,8 +259,12 @@ impl ToolExecutionContext {
             .pending_tool_pauses
             .lock()
             .expect("pending tool pause mutex poisoned");
-        pending.remove(&self.tool_use_id);
+        pending.remove(&self.pause_id);
     }
+}
+
+fn preview_tool_use_id(pause_id: &str, tool_use_id: &str) -> Option<String> {
+    (pause_id != tool_use_id).then(|| tool_use_id.to_string())
 }
 
 #[async_trait]
@@ -384,17 +425,70 @@ impl ToolRegistry {
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|t| t.definition()).collect()
     }
+
+    pub fn contains(&self, name: &str) -> bool {
+        self.tools.contains_key(name)
+    }
+
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.tools.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 /// 创建默认的工具注册表，注册所有内置工具。
 ///
 /// 当需要集成所有 tools/ 中定义的工具时，调用此函数即可。
 pub fn create_default_registry() -> ToolRegistry {
+    create_registry_with_allowed(None, false)
+}
+
+pub fn create_main_registry() -> ToolRegistry {
+    create_registry_with_allowed(None, true)
+}
+
+pub fn create_subagent_registry(allowed_tools: &[String]) -> ToolRegistry {
+    create_registry_with_allowed(Some(allowed_tools), false)
+}
+
+pub fn inherited_subagent_tool_names() -> Vec<String> {
+    create_subagent_registry(&[
+        "ask_user".to_string(),
+        "bash".to_string(),
+        "read".to_string(),
+        "edit".to_string(),
+        "write".to_string(),
+    ])
+    .tool_names()
+}
+
+fn create_registry_with_allowed(
+    allowed: Option<&[String]>,
+    include_subagent: bool,
+) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(ask_user_tool::AskUserTool);
-    registry.register(bash_tool::BashTool);
-    registry.register(read_tool::ReadTool);
-    registry.register(edit_tool::EditTool);
-    registry.register(write_tool::WriteTool);
+    if tool_allowed(allowed, "ask_user") {
+        registry.register(ask_user_tool::AskUserTool);
+    }
+    if tool_allowed(allowed, "bash") {
+        registry.register(bash_tool::BashTool);
+    }
+    if tool_allowed(allowed, "read") {
+        registry.register(read_tool::ReadTool);
+    }
+    if tool_allowed(allowed, "edit") {
+        registry.register(edit_tool::EditTool);
+    }
+    if tool_allowed(allowed, "write") {
+        registry.register(write_tool::WriteTool);
+    }
+    if include_subagent && tool_allowed(allowed, "subagent") {
+        registry.register(subagent_tool::SubagentTool);
+    }
     registry
+}
+
+fn tool_allowed(allowed: Option<&[String]>, name: &str) -> bool {
+    allowed.is_none_or(|tools| tools.iter().any(|tool| tool == name))
 }
