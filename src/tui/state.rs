@@ -1,13 +1,19 @@
-use crate::types::config::ModelConfig;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    CommandSummary, InteractionRequest, RuntimeToUiEvent, ToolPauseKind, ToolPauseRequest,
-    UserInputPreview,
+    InteractionRequest, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus, ToolPauseKind,
+    ToolPauseRequest,
 };
 use crate::types::message::{ContentBlock, Message, Role};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+
+mod autocomplete;
+mod interaction;
+mod permission;
+
+pub use autocomplete::CommandAutocomplete;
+pub use interaction::{InteractionStep, ModelSelectionEntry};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
@@ -49,6 +55,29 @@ pub enum UiMessage {
     Message(Message),
     Notice { text: String },
     Error { text: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentNode {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub spawn_tool_use_id: String,
+    pub agent_label: String,
+    pub status: SubagentStatus,
+    pub messages: Vec<Message>,
+}
+
+impl From<SubagentSnapshot> for SubagentNode {
+    fn from(snapshot: SubagentSnapshot) -> Self {
+        Self {
+            session_id: snapshot.session_id,
+            parent_session_id: snapshot.parent_session_id,
+            spawn_tool_use_id: snapshot.spawn_tool_use_id,
+            agent_label: snapshot.agent_label,
+            status: snapshot.status,
+            messages: snapshot.messages,
+        }
+    }
 }
 
 impl UiMessage {
@@ -133,6 +162,10 @@ pub struct UiState {
     pub running_tools: HashSet<String>,
     /// 等待用户确认的工具预览，按 tool_use_id 关联到对应工具块。
     pub pending_tool_previews: HashMap<String, ToolPauseRequest>,
+    /// 子 agent 视图模型，按 session id 存储完整消息。
+    pub subagents: HashMap<String, SubagentNode>,
+    /// 父 tool_use_id 到子 agent session id 的映射。
+    pub subagents_by_tool_use: HashMap<String, String>,
     /// 权限抽屉当前选中的操作：0 = Yes, 1 = No。
     pub permission_selected: usize,
     /// 用户问题抽屉当前题目索引。
@@ -198,6 +231,8 @@ impl UiState {
             runtime_handle: None,
             running_tools: HashSet::new(),
             pending_tool_previews: HashMap::new(),
+            subagents: HashMap::new(),
+            subagents_by_tool_use: HashMap::new(),
             permission_selected: 0,
             user_input_question_index: 0,
             user_input_selected: Vec::new(),
@@ -265,219 +300,57 @@ impl UiState {
         Some(Message::new(Role::User, content))
     }
 
-    pub fn reset_permission_drawer(&mut self) {
-        self.permission_selected = 0;
-        self.user_input_question_index = 0;
-        self.user_input_selected.clear();
-        self.user_input_answered.clear();
-        self.user_input_note_mode = false;
-        self.user_input_notes.clear();
-        self.user_input_note_cursors.clear();
-        self.permission_scroll_offset = usize::MAX;
-        self.permission_drawer_area = Rect::default();
-        self.permission_drawer_body_area = Rect::default();
-        self.permission_drawer_content_len = 0;
-    }
-
-    pub fn permission_select_prev(&mut self) {
-        if self.user_input_selected.is_empty() {
-            self.permission_selected = self.permission_selected.saturating_sub(1);
-        } else if let Some(selected) = self
-            .user_input_selected
-            .get_mut(self.user_input_question_index)
-        {
-            *selected = selected.saturating_sub(1);
-        }
-    }
-
-    pub fn permission_select_next_with_max(&mut self, max_selected: usize) {
-        if self.user_input_selected.is_empty() {
-            self.permission_selected = (self.permission_selected + 1).min(max_selected);
-        } else if let Some(selected) = self
-            .user_input_selected
-            .get_mut(self.user_input_question_index)
-        {
-            *selected = (*selected + 1).min(max_selected);
-        }
-    }
-
-    pub fn current_user_input_selected(&self) -> usize {
-        self.user_input_selected
-            .get(self.user_input_question_index)
-            .copied()
-            .unwrap_or(self.permission_selected)
-    }
-
-    pub fn current_user_input_note(&self) -> &str {
-        self.user_input_notes
-            .get(self.user_input_question_index)
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-
-    pub fn current_user_input_note_cursor(&self) -> usize {
-        self.user_input_note_cursors
-            .get(self.user_input_question_index)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub fn user_input_unanswered_count(&self) -> usize {
-        self.user_input_answered
-            .iter()
-            .filter(|answered| !**answered)
-            .count()
-    }
-
-    pub fn user_input_question_next(&mut self) {
-        if !self.user_input_selected.is_empty() {
-            self.user_input_question_index =
-                (self.user_input_question_index + 1).min(self.user_input_selected.len() - 1);
-        }
-        self.user_input_note_mode = false;
-    }
-
-    pub fn user_input_question_prev(&mut self) {
-        self.user_input_question_index = self.user_input_question_index.saturating_sub(1);
-        self.user_input_note_mode = false;
-    }
-
-    pub fn mark_current_user_input_answered(&mut self) {
-        if let Some(answered) = self
-            .user_input_answered
-            .get_mut(self.user_input_question_index)
-        {
-            *answered = true;
-        }
-    }
-
-    pub fn move_to_next_unanswered_user_input(&mut self) {
-        if let Some((idx, _)) = self
-            .user_input_answered
-            .iter()
-            .enumerate()
-            .find(|(_, answered)| !**answered)
-        {
-            self.user_input_question_index = idx;
-            self.user_input_note_mode = false;
-        }
-    }
-
-    fn note_char_to_byte(&self, char_idx: usize) -> usize {
-        self.current_user_input_note()
-            .chars()
-            .take(char_idx)
-            .map(char::len_utf8)
-            .sum()
-    }
-
-    pub fn insert_note_char(&mut self, c: char) {
-        let byte_idx = self.note_char_to_byte(self.current_user_input_note_cursor());
-        if let Some(note) = self
-            .user_input_notes
-            .get_mut(self.user_input_question_index)
-        {
-            note.insert(byte_idx, c);
-        }
-        if let Some(cursor) = self
-            .user_input_note_cursors
-            .get_mut(self.user_input_question_index)
-        {
-            *cursor += 1;
-        }
-    }
-
-    pub fn delete_note_before(&mut self) {
-        let cursor = self.current_user_input_note_cursor();
-        if cursor > 0 {
-            let new_cursor = cursor - 1;
-            let byte_idx = self.note_char_to_byte(new_cursor);
-            if let Some(note) = self
-                .user_input_notes
-                .get_mut(self.user_input_question_index)
-            {
-                note.remove(byte_idx);
+    pub fn open_interaction_request(&mut self, req: &InteractionRequest) {
+        self.interaction_step = match req {
+            InteractionRequest::ModelSelection {
+                providers,
+                current_provider,
+                current_model,
+            } => {
+                let mut entries: Vec<ModelSelectionEntry> = Vec::new();
+                let mut selected = 0;
+                let default_thinking = match self.status_bar.thinking_effort {
+                    Some(ThinkingEffort::Low) => 1,
+                    Some(ThinkingEffort::Medium) => 2,
+                    Some(ThinkingEffort::High) => 3,
+                    Some(ThinkingEffort::None) | None => 0,
+                };
+                let mut sorted: Vec<_> = providers.clone().into_iter().collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                for (provider_key, profile) in &sorted {
+                    entries.push(ModelSelectionEntry::ProviderHeader {
+                        name: profile.name.clone(),
+                    });
+                    for model in &profile.models {
+                        if *provider_key == *current_provider && model.id == *current_model {
+                            selected = entries.len();
+                        }
+                        entries.push(ModelSelectionEntry::Model {
+                            provider_key: provider_key.clone(),
+                            model: model.clone(),
+                        });
+                    }
+                }
+                Some(InteractionStep::ModelSelection {
+                    entries,
+                    selected,
+                    thinking_idx: default_thinking,
+                    active_provider: current_provider.clone(),
+                    active_model: current_model.clone(),
+                })
             }
-            if let Some(cursor) = self
-                .user_input_note_cursors
-                .get_mut(self.user_input_question_index)
-            {
-                *cursor = new_cursor;
+            InteractionRequest::SessionSelection { sessions } => {
+                let mut sorted = sessions.clone();
+                sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                let all_sessions = sorted.clone();
+                Some(InteractionStep::Session {
+                    sessions: sorted,
+                    all_sessions,
+                    search: String::new(),
+                    selected: 0,
+                })
             }
-        }
-    }
-
-    pub fn delete_note_after(&mut self) {
-        let cursor = self.current_user_input_note_cursor();
-        let byte_idx = self.note_char_to_byte(cursor);
-        if let Some(note) = self
-            .user_input_notes
-            .get_mut(self.user_input_question_index)
-            && byte_idx < note.len()
-        {
-            note.remove(byte_idx);
-        }
-    }
-
-    pub fn note_cursor_left(&mut self) {
-        if let Some(cursor) = self
-            .user_input_note_cursors
-            .get_mut(self.user_input_question_index)
-        {
-            *cursor = cursor.saturating_sub(1);
-        }
-    }
-
-    pub fn note_cursor_right(&mut self) {
-        let max_chars = self.current_user_input_note().chars().count();
-        if let Some(cursor) = self
-            .user_input_note_cursors
-            .get_mut(self.user_input_question_index)
-            && *cursor < max_chars
-        {
-            *cursor += 1;
-        }
-    }
-
-    pub fn note_cursor_home(&mut self) {
-        if let Some(cursor) = self
-            .user_input_note_cursors
-            .get_mut(self.user_input_question_index)
-        {
-            *cursor = 0;
-        }
-    }
-
-    pub fn note_cursor_end(&mut self) {
-        let len = self.current_user_input_note().chars().count();
-        if let Some(cursor) = self
-            .user_input_note_cursors
-            .get_mut(self.user_input_question_index)
-        {
-            *cursor = len;
-        }
-    }
-
-    fn prepare_user_input_preview(&mut self, preview: &UserInputPreview) {
-        let len = preview.questions.len();
-        self.user_input_question_index = 0;
-        self.user_input_selected = vec![0; len];
-        self.user_input_answered = vec![false; len];
-        self.user_input_notes = vec![String::new(); len];
-        self.user_input_note_cursors = vec![0; len];
-        self.user_input_note_mode = false;
-        self.permission_selected = 0;
-    }
-
-    pub fn permission_scroll_up(&mut self, lines: usize) {
-        self.permission_scroll_offset = self.permission_scroll_offset.saturating_add(lines);
-    }
-
-    pub fn permission_scroll_down(&mut self, lines: usize) {
-        let visible = self.permission_drawer_body_area.height as usize;
-        let max_scroll = self.permission_drawer_content_len.saturating_sub(visible);
-        let capped_offset = self.permission_scroll_offset.min(max_scroll);
-        self.permission_scroll_offset = capped_offset.saturating_sub(lines);
+        };
     }
 
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
@@ -536,6 +409,9 @@ impl UiState {
                 self.pending_tool_previews.remove(&tr.tool_use_id);
                 if self.pending_tool_previews.is_empty() {
                     self.reset_permission_drawer();
+                    if self.agent_status == AgentStatus::AwaitingInput {
+                        self.agent_status = AgentStatus::Working;
+                    }
                 }
                 // 工具结果异步返回，追加到 pending_assistant 或最后一条消息中
                 if let Some(pending) = &mut self.pending_assistant {
@@ -588,6 +464,61 @@ impl UiState {
                     .insert(req.tool_use_id.clone(), req);
                 self.agent_status = AgentStatus::AwaitingInput;
             }
+            RuntimeToUiEvent::SubagentStarted(event) => {
+                self.subagents_by_tool_use
+                    .insert(event.spawn_tool_use_id.clone(), event.session_id.clone());
+                self.subagents.insert(
+                    event.session_id.clone(),
+                    SubagentNode {
+                        session_id: event.session_id,
+                        parent_session_id: event.parent_session_id,
+                        spawn_tool_use_id: event.spawn_tool_use_id,
+                        agent_label: event.agent_label,
+                        status: SubagentStatus::Running,
+                        messages: Vec::new(),
+                    },
+                );
+                self.agent_status = AgentStatus::Working;
+            }
+            RuntimeToUiEvent::SubagentMessageProduced(event) => {
+                if let Some(node) = self.subagents.get_mut(&event.session_id) {
+                    node.messages.push(event.message);
+                }
+            }
+            RuntimeToUiEvent::SubagentToolUse(event) => {
+                if let Some(node) = self.subagents.get_mut(&event.session_id) {
+                    let msg =
+                        Message::new(Role::Assistant, vec![ContentBlock::ToolUse(event.tool_use)]);
+                    node.messages.push(msg);
+                }
+            }
+            RuntimeToUiEvent::SubagentToolResult(event) => {
+                self.running_tools.remove(&event.tool_result.tool_use_id);
+                self.pending_tool_previews
+                    .remove(&event.tool_result.tool_use_id);
+                self.pending_tool_previews.remove(&format!(
+                    "{}:{}",
+                    event.session_id, event.tool_result.tool_use_id
+                ));
+                if self.pending_tool_previews.is_empty() {
+                    self.reset_permission_drawer();
+                    if self.agent_status == AgentStatus::AwaitingInput {
+                        self.agent_status = AgentStatus::Working;
+                    }
+                }
+                if let Some(node) = self.subagents.get_mut(&event.session_id) {
+                    let msg = Message::new(
+                        Role::User,
+                        vec![ContentBlock::ToolResult(event.tool_result)],
+                    );
+                    node.messages.push(msg);
+                }
+            }
+            RuntimeToUiEvent::SubagentFinished(event) => {
+                if let Some(node) = self.subagents.get_mut(&event.session_id) {
+                    node.status = event.status;
+                }
+            }
             RuntimeToUiEvent::Error(e) => {
                 self.messages.push(UiMessage::Error { text: e });
                 if self.pending_tool_previews.is_empty() {
@@ -633,6 +564,30 @@ impl UiState {
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
             RuntimeToUiEvent::SessionChanged { .. } => {}
         }
+    }
+
+    pub fn apply_session_changed(
+        &mut self,
+        session_id: Option<String>,
+        messages: Vec<Message>,
+        subagents: Vec<SubagentSnapshot>,
+    ) {
+        self.current_session_id = session_id;
+        self.messages = UiMessage::from_messages(messages);
+        self.subagents.clear();
+        self.subagents_by_tool_use.clear();
+        for subagent in subagents {
+            let node = SubagentNode::from(subagent);
+            self.subagents_by_tool_use
+                .insert(node.spawn_tool_use_id.clone(), node.session_id.clone());
+            self.subagents.insert(node.session_id.clone(), node);
+        }
+        self.pending_assistant = None;
+        self.queued_user_inputs.clear();
+        self.agent_status = AgentStatus::Idle;
+        self.interaction_step = None;
+        self.interaction_request = None;
+        self.scroll_to_bottom();
     }
 
     pub fn char_to_byte(&self, char_idx: usize) -> usize {
@@ -728,113 +683,4 @@ impl UiState {
         self.scroll_offset = 0;
         self.auto_scroll = true;
     }
-}
-// ===========================================================================
-// 命令自动补全
-// ===========================================================================
-
-/// 命令自动补全状态。
-#[derive(Debug, Clone, Default)]
-pub struct CommandAutocomplete {
-    /// 是否显示下拉列表
-    pub visible: bool,
-    /// Runtime 推送的全量命令列表
-    pub all_commands: Vec<CommandSummary>,
-    /// 经过当前输入过滤后的子集
-    pub filtered: Vec<CommandSummary>,
-    /// 当前选中的索引
-    pub selected: usize,
-}
-
-impl CommandAutocomplete {
-    /// 根据当前输入更新过滤后的命令列表。
-    pub fn update(&mut self, input: &str) {
-        if !input.starts_with('/') {
-            self.visible = false;
-            return;
-        }
-        self.visible = true;
-
-        let partial = input[1..].to_lowercase();
-        self.filtered = self
-            .all_commands
-            .iter()
-            .filter(|cmd| {
-                cmd.name.to_lowercase().contains(&partial)
-                    || cmd
-                        .aliases
-                        .iter()
-                        .any(|a| a.to_lowercase().contains(&partial))
-            })
-            .cloned()
-            .collect();
-
-        // 修正 selected 不越界
-        let max = self.filtered.len().saturating_sub(1);
-        self.selected = self.selected.min(max);
-    }
-
-    /// 选中当前项（Enter 时调用）。
-    pub fn selected_command(&self) -> Option<&CommandSummary> {
-        if self.filtered.is_empty() {
-            return None;
-        }
-        self.filtered.get(self.selected)
-    }
-
-    pub fn select_next(&mut self) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        self.selected = (self.selected + 1) % self.filtered.len();
-    }
-
-    pub fn select_prev(&mut self) {
-        if self.filtered.is_empty() {
-            return;
-        }
-        self.selected = self.selected.saturating_sub(1);
-    }
-}
-// ===========================================================================
-// 交互选择页步骤
-// ===========================================================================
-
-/// 交互选择页的当前步骤。
-#[derive(Debug, Clone)]
-pub enum ModelSelectionEntry {
-    /// Provider 标题（不可选中）
-    ProviderHeader { name: String },
-    /// 某个 provider 下的模型（可选中）
-    Model {
-        provider_key: String,
-        model: ModelConfig,
-    },
-}
-
-/// 交互选择页的当前步骤。
-#[derive(Debug, Clone)]
-pub enum InteractionStep {
-    /// 模型选择 — 按 provider 分组的扁平列表
-    ModelSelection {
-        /// 展平后的条目（ProviderHeader + Model 交替）
-        entries: Vec<ModelSelectionEntry>,
-        /// 当前选中索引，只指向 Model 条目
-        selected: usize,
-        /// 当前思考程度：0=None 1=Low 2=Medium 3=High
-        thinking_idx: usize,
-        /// 打开面板时正在使用的 provider key（用于标记 ✔）
-        active_provider: String,
-        /// 打开面板时正在使用的 model id
-        active_model: String,
-    },
-    /// 会话选择
-    Session {
-        sessions: Vec<crate::types::events::SessionSummary>,
-        /// 原始全量列表（用于过滤后恢复）
-        all_sessions: Vec<crate::types::events::SessionSummary>,
-        /// 当前搜索关键词
-        search: String,
-        selected: usize,
-    },
 }

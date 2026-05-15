@@ -1,11 +1,11 @@
 use crate::tui::state::{
-    AgentStatus, InteractionStep, ModelSelectionEntry, SelectionPoint, UiMessage, UiState,
+    InteractionStep, ModelSelectionEntry, SelectionPoint, SubagentNode, UiMessage, UiState,
 };
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, display_path, render_tool,
 };
-use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
-use crate::types::message::{ContentBlock, ToolUseBlock};
+use crate::types::events::{PermissionPreview, SubagentStatus, ToolPauseKind, ToolPauseRequest};
+use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -15,8 +15,11 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+mod autocomplete;
+mod input;
+mod status;
 
 const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
 const EDIT_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
@@ -57,7 +60,7 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         return;
     }
 
-    let drawer_len = queued_drawer_inputs(state).len();
+    let drawer_len = input::queued_drawer_inputs(state).len();
     let queued_height = if drawer_len == 0 {
         0
     } else {
@@ -75,12 +78,12 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     state.messages_area = chunks[1];
 
     render_messages(state, frame, chunks[1]);
-    render_autocomplete(state, frame, chunks[3]);
-    render_footer(state, frame, chunks[4]);
+    autocomplete::render_autocomplete(state, frame, chunks[3]);
+    status::render_footer(state, frame, chunks[4]);
 
     // Draw input box only when no modal interaction is active (prevents cursor showing through overlay)
     if state.interaction_step.is_none() && state.active_tool_pause().is_none() {
-        render_input(state, frame, chunks[3]);
+        input::render_input(state, frame, chunks[3]);
     }
 
     // 模型选择等弹窗：覆盖在正常布局之上（不遮盖消息区背景）
@@ -100,7 +103,11 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
     };
 
     let project_dir = state.status_bar.cwd.clone();
-    let tool_use = find_tool_use(state, &request.tool_use_id);
+    let preview_tool_use_id = request
+        .preview_tool_use_id
+        .as_deref()
+        .unwrap_or(&request.tool_use_id);
+    let tool_use = find_tool_use(state, preview_tool_use_id);
     let content_width = area.width.saturating_sub(6) as usize;
     let DrawerLines {
         lines,
@@ -396,7 +403,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
         user_input_note_mode,
     } = input;
 
-    match &request.kind {
+    let mut drawer = match &request.kind {
         ToolPauseKind::Permission(PermissionPreview::Bash(preview)) => {
             let mut lines = Vec::new();
             lines.push(Line::from(vec![
@@ -552,6 +559,32 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 note_cursor_column,
             }
         }
+    };
+    add_permission_source_line(&mut drawer, request);
+    drawer
+}
+
+fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseRequest) {
+    let Some(label) = request.source_agent_label.as_deref() else {
+        return;
+    };
+    if drawer.lines.is_empty() {
+        return;
+    }
+    drawer.lines.insert(
+        1,
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled("From: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+            Span::styled(
+                label.to_string(),
+                Style::default().fg(Color::Rgb(220, 220, 225)),
+            ),
+        ]),
+    );
+    drawer.lines.insert(2, Line::from(""));
+    if let Some(index) = drawer.note_line_index.as_mut() {
+        *index += 2;
     }
 }
 
@@ -659,96 +692,17 @@ fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUs
                 .filter_map(UiMessage::as_message)
                 .flat_map(|m| m.content.iter()),
         )
+        .chain(
+            state
+                .subagents
+                .values()
+                .flat_map(|node| node.messages.iter())
+                .flat_map(|m| m.content.iter()),
+        )
         .find_map(|block| match block {
             ContentBlock::ToolUse(tu) if tu.id == tool_use_id => Some(tu),
             _ => None,
         })
-}
-
-fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect) {
-    if !state.autocomplete.visible || state.autocomplete.filtered.is_empty() {
-        return;
-    }
-
-    let max_items = 6;
-    let total = state.autocomplete.filtered.len();
-    let selected = state.autocomplete.selected.min(total.saturating_sub(1));
-    let start = if selected >= max_items {
-        selected + 1 - max_items
-    } else {
-        0
-    };
-    let count = total.saturating_sub(start).min(max_items);
-    let popup_width = input_area.width;
-
-    let popup_height = count as u16;
-    let y = input_area.y.saturating_sub(popup_height);
-    let popup_area = Rect {
-        x: input_area.x,
-        y,
-        width: popup_width,
-        height: popup_height,
-    };
-
-    frame.render_widget(Clear, popup_area);
-
-    // 整体背景：输入框底色
-    let input_bg = Color::Rgb(65, 69, 76);
-    frame.render_widget(
-        Paragraph::new(Line::from("")).style(Style::default().bg(input_bg)),
-        popup_area,
-    );
-
-    // 边框色
-    let border_clr = Color::Rgb(90, 102, 118);
-    let sel_bg = Color::Rgb(255, 204, 163);
-    let idle_fg = Color::Rgb(165, 172, 182);
-
-    // ┃ + 2spaces + 内容 + 2spaces + ┃
-    let content_width = popup_width.saturating_sub(4) as usize;
-
-    let lines: Vec<Line> = {
-        let cmds: Vec<_> = state.autocomplete.filtered.iter().collect();
-        let max_name_width = cmds
-            .iter()
-            .map(|cmd| format!("/{}", cmd.name).chars().count())
-            .max()
-            .unwrap_or(0);
-        cmds.into_iter()
-            .skip(start)
-            .take(count)
-            .enumerate()
-            .map(|(i, cmd)| {
-                let is_sel = start + i == selected;
-                let row_bg = if is_sel { sel_bg } else { input_bg };
-                let row_fg = idle_fg;
-
-                let left = format!("/{}", cmd.name);
-                let padding = " ".repeat(max_name_width.saturating_sub(left.chars().count()));
-                let text = format!("{}{}  {}", left, padding, cmd.description);
-                let text_w = UnicodeWidthStr::width(&text[..]);
-                let pad = content_width.saturating_sub(text_w);
-
-                // 边框 ┃ 不设 bg，透出 input_bg；内容区用 row_bg（选中时高亮）
-                let content_style = Style::default().fg(row_fg).bg(row_bg);
-                let border_style = Style::default().fg(border_clr);
-
-                let mut spans = vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::styled(text, content_style),
-                ];
-                if pad > 0 {
-                    spans.push(Span::styled(" ".repeat(pad), content_style));
-                }
-                spans.push(Span::styled("  ", content_style));
-                spans.push(Span::styled("\u{2503}", border_style));
-
-                Line::from(spans)
-            })
-            .collect()
-    };
-
-    frame.render_widget(Paragraph::new(ratatui::text::Text::from(lines)), popup_area);
 }
 
 // ===========================================================================
@@ -1284,6 +1238,246 @@ fn truncate_str(s: &str, max_width: usize) -> String {
 // Messages, Input, Footer (原逻辑不变)
 // ===========================================================================
 
+fn render_subagent_tool(
+    tool_use: &ToolUseBlock,
+    result: Option<&ToolResultBlock>,
+    node: Option<&SubagentNode>,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Vec<Line<'static>> {
+    let accent = Color::Rgb(0x42, 0xd9, 0xe8);
+    let dim = Color::Rgb(140, 145, 155);
+    let text = Color::Rgb(220, 220, 225);
+    let label = node
+        .map(|node| node.agent_label.as_str())
+        .or_else(|| tool_use.input.get("name").and_then(|value| value.as_str()))
+        .unwrap_or("Subagent");
+    let label = format_subagent_label(label);
+    let status = node
+        .map(|node| node.status)
+        .unwrap_or(SubagentStatus::Running);
+
+    let mut header = vec![Span::raw("· ")];
+    if matches!(status, SubagentStatus::Running) {
+        header.extend(status::animated_status_spans(&label));
+    } else {
+        header.push(Span::styled(
+            label,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(title) = tool_use
+        .input
+        .get("title")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+    {
+        let used_width: usize = header
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        let title_width = content_width.saturating_sub(used_width + 3);
+        if title_width >= 8 {
+            header.push(Span::styled(" · ", Style::default().fg(dim)));
+            header.push(Span::styled(
+                truncate_to_width(title, title_width),
+                Style::default().fg(dim),
+            ));
+        }
+    }
+
+    let mut lines = vec![Line::from(header)];
+    push_subagent_error_lines(&mut lines, result, content_width);
+
+    let Some(node) = node else {
+        return lines;
+    };
+
+    let mut seen_tools = HashSet::new();
+    let mut child_tools = Vec::new();
+    for message in &node.messages {
+        for block in &message.content {
+            let ContentBlock::ToolUse(child_tool) = block else {
+                continue;
+            };
+            if !seen_tools.insert(child_tool.id.clone()) {
+                continue;
+            }
+            child_tools.push(child_tool);
+        }
+    }
+
+    let total_tools = child_tools.len();
+    let mut rendered_tools = 0usize;
+    for (idx, child_tool) in child_tools.iter().enumerate() {
+        if total_tools > 6 && idx == 3 {
+            lines.push(Line::from(vec![
+                Span::raw("     "),
+                Span::styled("...", Style::default().fg(dim)),
+            ]));
+        }
+        if total_tools > 6 && idx >= 3 && idx < total_tools.saturating_sub(3) {
+            continue;
+        }
+
+        let prefix = if rendered_tools == 0 {
+            "  └─ "
+        } else {
+            "     "
+        };
+        let tool_name = format_tool_label(&child_tool.name);
+        let mut spans = vec![
+            Span::raw(prefix),
+            Span::styled(tool_name, Style::default().fg(text)),
+        ];
+        if let Some(summary) = subagent_tool_summary(child_tool, project_dir) {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                truncate_to_width(&summary, content_width.saturating_sub(10)),
+                Style::default().fg(dim),
+            ));
+        }
+        lines.push(Line::from(spans));
+        rendered_tools += 1;
+    }
+    lines
+}
+
+fn push_subagent_error_lines(
+    lines: &mut Vec<Line<'static>>,
+    result: Option<&ToolResultBlock>,
+    content_width: usize,
+) {
+    let Some(result) = result.filter(|result| result.is_error) else {
+        return;
+    };
+
+    let error_style = Style::default().fg(Color::Rgb(255, 100, 100));
+    let content = if result.content.trim().is_empty() {
+        "Subagent failed"
+    } else {
+        result.content.trim()
+    };
+    let wrapped = crate::tui::widgets::word_wrap(content, content_width.saturating_sub(2).max(1));
+    for line in wrapped {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(line, error_style),
+        ]));
+    }
+}
+
+fn format_subagent_label(label: &str) -> String {
+    let words = label_words(label);
+    if words.is_empty() {
+        return "Subagent".to_string();
+    }
+
+    let mut out = String::new();
+    for word in words {
+        push_capitalized(&mut out, &word);
+    }
+    out
+}
+
+fn format_tool_label(name: &str) -> String {
+    match name {
+        "ask_user" => "AskUser".to_string(),
+        other => {
+            let words = label_words(other);
+            if words.is_empty() {
+                return other.to_string();
+            }
+
+            let mut out = String::new();
+            for word in words {
+                push_capitalized(&mut out, &word);
+            }
+            out
+        }
+    }
+}
+
+fn label_words(label: &str) -> Vec<String> {
+    label_camel_boundaries(label)
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_ascii_lowercase())
+        .collect()
+}
+
+fn label_camel_boundaries(label: &str) -> String {
+    let mut out = String::new();
+    let mut prev: Option<char> = None;
+
+    for ch in label.chars() {
+        if let Some(prev) = prev
+            && prev.is_ascii_lowercase()
+            && ch.is_ascii_uppercase()
+        {
+            out.push('-');
+        }
+        out.push(ch);
+        prev = Some(ch);
+    }
+
+    out
+}
+
+fn push_capitalized(out: &mut String, word: &str) {
+    let mut chars = word.chars();
+    if let Some(first) = chars.next() {
+        out.push(first.to_ascii_uppercase());
+        out.push_str(chars.as_str());
+    }
+}
+
+fn subagent_tool_summary(tool_use: &ToolUseBlock, project_dir: Option<&Path>) -> Option<String> {
+    match tool_use.name.as_str() {
+        "bash" => tool_use
+            .input
+            .get("description")
+            .or_else(|| tool_use.input.get("command"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        "read" => tool_use
+            .input
+            .get("file_path")
+            .and_then(|value| value.as_str())
+            .map(|path| display_path(path, project_dir)),
+        "edit" | "write" => tool_use
+            .input
+            .get("file_path")
+            .and_then(|value| value.as_str())
+            .map(|path| display_path(path, project_dir)),
+        "ask_user" => Some("waiting for user input".to_string()),
+        _ => None,
+    }
+}
+
+fn truncate_to_width(value: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    let width = UnicodeWidthStr::width(value);
+    if width <= max_width {
+        return value.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + ch_width + 1 >= max_width {
+            break;
+        }
+        out.push(ch);
+        used += ch_width;
+    }
+    out.push('…');
+    out
+}
+
 fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     if state.messages.is_empty() && state.pending_assistant.is_none() {
         state.selectable_message_lines.clear();
@@ -1381,7 +1575,35 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::ToolUse(tu) => {
-                    if let Some(positions) = tool_result_map.get(&tu.id) {
+                    if tu.name == "subagent" {
+                        let node = state
+                            .subagents_by_tool_use
+                            .get(&tu.id)
+                            .and_then(|session_id| state.subagents.get(session_id));
+                        let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
+                            positions.first().and_then(|(mi, bi)| {
+                                if let ContentBlock::ToolResult(tr) =
+                                    &rendered_messages[*mi].content[*bi]
+                                {
+                                    Some(tr.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                        });
+                        block_lines.extend(render_subagent_tool(
+                            tu,
+                            tool_result.as_ref(),
+                            node,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        ));
+                        if let Some(positions) = tool_result_map.get(&tu.id) {
+                            for pos in positions {
+                                consumed.insert(*pos);
+                            }
+                        }
+                    } else if let Some(positions) = tool_result_map.get(&tu.id) {
                         let tool_result = positions.first().and_then(|(mi, bi)| {
                             if let ContentBlock::ToolResult(tr) =
                                 &rendered_messages[*mi].content[*bi]
@@ -1473,23 +1695,47 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::ToolUse(tu) => {
-                    // 检查是否有对应的 ToolResult
-                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                    if tu.name == "subagent" {
+                        let node = state
+                            .subagents_by_tool_use
+                            .get(&tu.id)
+                            .and_then(|session_id| state.subagents.get(session_id));
+                        let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                            if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                                Some(tr.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        block_lines.extend(render_subagent_tool(
+                            tu,
+                            tr.as_ref(),
+                            node,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        ));
+                        if let Some(&bi) = tr_indices.get(&tu.id) {
                             consumed_tr.insert(bi);
-                            Some(tr.clone())
-                        } else {
-                            None
                         }
-                    });
-                    let tool_lines = render_tool(
-                        tu,
-                        tr.as_ref(),
-                        None,
-                        content_width,
-                        Some(state.status_bar.cwd.as_path()),
-                    );
-                    block_lines.extend(tool_lines);
+                    } else {
+                        // 检查是否有对应的 ToolResult
+                        let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                            if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                                consumed_tr.insert(bi);
+                                Some(tr.clone())
+                            } else {
+                                None
+                            }
+                        });
+                        let tool_lines = render_tool(
+                            tu,
+                            tr.as_ref(),
+                            None,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        );
+                        block_lines.extend(tool_lines);
+                    }
                 }
                 ContentBlock::ToolResult(tr) => {
                     // 如果没有对应的 ToolUse 来消费它，单独渲染
@@ -1625,375 +1871,4 @@ fn split_by_display_cols(text: &str, start_col: usize, end_col: usize) -> (Strin
 
 fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
-}
-
-fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
-    let bg = Style::default().bg(Color::Rgb(65, 69, 76));
-
-    let bg_widget = Paragraph::new(Line::from("")).style(bg);
-    frame.render_widget(bg_widget, area);
-
-    let drawer_len = queued_drawer_inputs(state).len();
-    let queued_height = if drawer_len == 0 {
-        0
-    } else {
-        drawer_len.min(4) as u16 + 2
-    };
-    let input_area = if queued_height > 0 {
-        let chunks = Layout::vertical([Constraint::Length(queued_height), Constraint::Length(3)])
-            .split(area);
-        render_queued_user_inputs(state, frame, chunks[0]);
-        chunks[1]
-    } else {
-        area
-    };
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(input_area);
-    let input_line = chunks[1];
-
-    let line_bg = Paragraph::new(Line::from(Span::styled(
-        " ".repeat(area.width as usize),
-        bg,
-    )))
-    .style(bg);
-    frame.render_widget(line_bg, input_line);
-
-    let prefix_style = Style::default().fg(Color::Rgb(0xab, 0xab, 0xab));
-    let cmd_color = Style::default().fg(Color::Rgb(0x7c, 0x5c, 0xf6));
-    let placeholder_style = Style::default().fg(Color::DarkGray);
-
-    let command_match = matched_input_command(state, &state.input);
-
-    let content = if state.input.is_empty() {
-        Line::from(vec![
-            Span::styled("\u{276f} ", prefix_style),
-            Span::styled("Type a message...", placeholder_style),
-        ])
-    } else {
-        let input = &state.input;
-        if let Some(cmd) = command_match {
-            let after_cmd = if let Some(space_pos) = input.find(' ') {
-                &input[space_pos..]
-            } else {
-                ""
-            };
-            let mut spans = vec![
-                Span::styled("\u{276f} ", prefix_style),
-                Span::styled(format!("/{}", cmd.name), cmd_color),
-            ];
-            if !after_cmd.is_empty() {
-                spans.push(Span::raw(after_cmd));
-                // 有参数的命令：输入空格后显示 <args_description> 占位提示
-                if cmd.has_args
-                    && after_cmd == " "
-                    && let Some(ref desc) = cmd.args_description
-                {
-                    spans.push(Span::styled(desc.to_string(), placeholder_style));
-                }
-            }
-            Line::from(spans)
-        } else {
-            Line::from(vec![
-                Span::styled("\u{276f} ", prefix_style),
-                Span::raw(input),
-            ])
-        }
-    };
-    let paragraph = Paragraph::new(content);
-    frame.render_widget(paragraph, input_line);
-
-    let cursor_x = if state.input.is_empty() {
-        input_line.x + 2
-    } else if let Some(cmd) = command_match {
-        input_line.x + 2 + rendered_command_input_width(state, cmd) as u16
-    } else {
-        let byte_idx = state.char_to_byte(state.cursor_char);
-        let prefix_width = UnicodeWidthStr::width(&state.input[..byte_idx]);
-        input_line.x + 2 + prefix_width as u16
-    };
-    frame.set_cursor_position((cursor_x, input_line.y));
-}
-
-fn matched_input_command<'a>(
-    state: &'a UiState,
-    input: &str,
-) -> Option<&'a crate::types::events::CommandSummary> {
-    input
-        .starts_with('/')
-        .then(|| {
-            let cmd_raw = if let Some(space_pos) = input.find(' ') {
-                &input[1..space_pos]
-            } else {
-                &input[1..]
-            };
-            state
-                .autocomplete
-                .all_commands
-                .iter()
-                .find(|c| c.name == cmd_raw || c.aliases.iter().any(|a| a == cmd_raw))
-        })
-        .flatten()
-}
-
-fn rendered_command_input_width(
-    state: &UiState,
-    cmd: &crate::types::events::CommandSummary,
-) -> usize {
-    let input = &state.input;
-    let command_end_byte = input.find(' ').unwrap_or(input.len());
-    let command_end_char = input[..command_end_byte].chars().count();
-
-    if state.cursor_char <= command_end_char {
-        let rendered_command = format!("/{}", cmd.name);
-        if state.cursor_char == command_end_char {
-            return UnicodeWidthStr::width(rendered_command.as_str());
-        }
-        let partial = rendered_command
-            .chars()
-            .take(state.cursor_char)
-            .collect::<String>();
-        return UnicodeWidthStr::width(partial.as_str());
-    }
-
-    let rendered_command_width = UnicodeWidthStr::width(format!("/{}", cmd.name).as_str());
-    let suffix_start = state.char_to_byte(command_end_char);
-    let cursor_byte = state.char_to_byte(state.cursor_char);
-    rendered_command_width + UnicodeWidthStr::width(&input[suffix_start..cursor_byte])
-}
-
-fn render_queued_user_inputs(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
-    let bg_color = Color::Rgb(54, 58, 66);
-    let bg = Style::default().bg(bg_color);
-    frame.render_widget(Paragraph::new(Line::from("")).style(bg), area);
-
-    if area.height < 3 {
-        return;
-    }
-
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
-
-    let title_style = Style::default()
-        .fg(Color::Rgb(235, 238, 244))
-        .bg(bg_color)
-        .add_modifier(Modifier::BOLD);
-    let meta_style = Style::default()
-        .fg(Color::Rgb(0xab, 0xab, 0xab))
-        .bg(bg_color);
-    let is_pending = !state.pending_intervention_inputs.is_empty();
-    let inputs = queued_drawer_inputs(state);
-    let title = if is_pending {
-        format!("Inserting next turn ({})", inputs.len())
-    } else {
-        format!("Queued messages ({})", inputs.len())
-    };
-    let title_meta = if is_pending {
-        " - waiting for the current turn boundary"
-    } else {
-        " - sent after the current run"
-    };
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled(title, title_style),
-            Span::styled(title_meta, meta_style),
-        ]))
-        .style(bg),
-        chunks[0],
-    );
-
-    let visible = chunks[1].height as usize;
-    let skip = inputs.len().saturating_sub(visible);
-    let width = area.width as usize;
-    let prefix_style = Style::default()
-        .fg(Color::Rgb(0xab, 0xab, 0xab))
-        .bg(bg_color);
-    let text_style = Style::default().fg(Color::Rgb(205, 210, 218)).bg(bg_color);
-
-    let lines: Vec<Line> = inputs
-        .iter()
-        .skip(skip)
-        .map(|text| {
-            let prefix = "  - ";
-            let available = width.saturating_sub(UnicodeWidthStr::width(prefix));
-            Line::from(vec![
-                Span::styled(prefix, prefix_style),
-                Span::styled(ellipsize_width(text, available), text_style),
-            ])
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines).style(bg), chunks[1]);
-
-    let hint_style = Style::default().fg(Color::Rgb(255, 204, 163)).bg(bg_color);
-    let footer = if is_pending {
-        Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled(
-                "input queue is locked until insertion completes",
-                meta_style,
-            ),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled("Alt+Enter", hint_style),
-            Span::styled(
-                " inserts queued messages before the next LLM turn",
-                meta_style,
-            ),
-        ])
-    };
-    frame.render_widget(Paragraph::new(footer).style(bg), chunks[2]);
-}
-
-fn queued_drawer_inputs(state: &UiState) -> &std::collections::VecDeque<String> {
-    if state.pending_intervention_inputs.is_empty() {
-        &state.queued_user_inputs
-    } else {
-        &state.pending_intervention_inputs
-    }
-}
-
-fn ellipsize_width(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-
-    let mut out = String::new();
-    let mut width = 0;
-    let limit = max_width - 3;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > limit {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    out.push_str("...");
-    out
-}
-
-fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
-    let chars: Vec<char> = text.chars().collect();
-    let n = chars.len();
-    if n == 0 {
-        return vec![];
-    }
-
-    // 基于时间计算波位置：每 ~2s 循环一次
-    let ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as f64;
-    const CYCLE_MS: f64 = 1200.0;
-    let phase = (ms % CYCLE_MS) / CYCLE_MS; // 0.0 → 1.0
-    let wave_pos = phase * n as f64; // 0 → n
-
-    // 亮色（基色 #c8a9ee）
-    const BR: u8 = 200;
-    const BG: u8 = 169;
-    const BB: u8 = 238;
-    // 暗色（灰紫色）
-    const DR: u8 = 55;
-    const DG: u8 = 47;
-    const DB: u8 = 65;
-
-    chars
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| {
-            // 字符 i 到波峰的有向距离（绕环处理）
-            let diff = ((i as f64 - wave_pos + n as f64) % n as f64) - n as f64 / 2.0;
-            let normalized = diff / (n as f64 / 2.0); // -1 … 1
-            // 余弦钟形：中心 1.0，边缘 0.0
-            let bell = (normalized * std::f64::consts::PI).cos().max(0.0);
-            // 保证最暗也有微弱可见度
-            let dim_min = 0.08;
-            let brightness = dim_min + (1.0 - dim_min) * bell;
-
-            let r = (DR as f64 + (BR as f64 - DR as f64) * brightness) as u8;
-            let g = (DG as f64 + (BG as f64 - DG as f64) * brightness) as u8;
-            let b = (DB as f64 + (BB as f64 - DB as f64) * brightness) as u8;
-
-            Span::styled(c.to_string(), Style::default().fg(Color::Rgb(r, g, b)))
-        })
-        .collect()
-}
-
-fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
-    use crate::types::config::ThinkingEffort;
-
-    let path_display = {
-        let cwd_str = state.status_bar.cwd.to_string_lossy();
-        let home = std::env::var("HOME").unwrap_or_default();
-        if !home.is_empty() && cwd_str.starts_with(&home) {
-            format!("~{}", &cwd_str[home.len()..])
-        } else {
-            cwd_str.to_string()
-        }
-    };
-
-    let model_part = if state.status_bar.active_provider.is_empty() {
-        state.status_bar.model.clone()
-    } else {
-        format!(
-            "{}/{}",
-            state.status_bar.active_provider, state.status_bar.model
-        )
-    };
-
-    let model_thinking = match state.status_bar.thinking_effort {
-        Some(ThinkingEffort::Low) => format!("{}  low", model_part),
-        Some(ThinkingEffort::Medium) => format!("{}  medium", model_part),
-        Some(ThinkingEffort::High) => format!("{}  high", model_part),
-        _ => model_part,
-    };
-
-    let mut base_spans: Vec<Span<'static>> = vec![
-        Span::raw(" "),
-        Span::styled(
-            format!(" {} ", model_thinking),
-            Style::default().fg(Color::Rgb(0xf6, 0xe2, 0xb7)),
-        ),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!(" {} ", path_display),
-            Style::default().fg(Color::Rgb(0xab, 0xdf, 0xa7)),
-        ),
-        Span::styled("·", Style::default().fg(Color::DarkGray)),
-    ];
-
-    let line = match &state.agent_status {
-        AgentStatus::Thinking | AgentStatus::Working => {
-            let mut spans = base_spans;
-            spans.push(Span::raw(" "));
-            spans.extend(animated_status_spans(&state.agent_status.to_string()));
-            spans.push(Span::raw(" "));
-            Line::from(spans)
-        }
-        _ => {
-            base_spans.push(Span::styled(
-                format!(" {} ", state.agent_status),
-                Style::default().fg(Color::Rgb(0xc8, 0xa9, 0xee)),
-            ));
-            Line::from(base_spans)
-        }
-    };
-
-    let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(paragraph, area);
 }

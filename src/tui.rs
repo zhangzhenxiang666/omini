@@ -2,13 +2,10 @@ use self::clipboard::copy_to_clipboard;
 use self::selection::{
     selected_text, selection_point_from_mouse, update_text_selection_from_mouse,
 };
-use self::state::{AgentStatus, InteractionStep, TextSelection, UiMessage, UiState};
+use self::state::{AgentStatus, TextSelection, UiMessage, UiState};
 use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
-use crate::tui::state::ModelSelectionEntry;
 use crate::types::config::Settings;
-use crate::types::config::ThinkingEffort;
-use crate::types::events::InteractionRequest::*;
 use crate::types::events::{RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crate::types::message::Message;
 use crossterm::cursor::Hide;
@@ -31,6 +28,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 mod clipboard;
+mod input;
 mod render;
 mod selection;
 mod state;
@@ -65,247 +63,6 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
     terminal.show_cursor()?;
     Ok(())
-}
-
-/// 处理交互模式的键盘事件。
-/// 返回 `true` = 事件已消费；`false` = 调用方应退出交互模式。
-async fn handle_interaction_key(
-    step: &mut InteractionStep,
-    key: KeyCode,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
-) -> bool {
-    match step {
-        InteractionStep::ModelSelection {
-            entries,
-            selected,
-            thinking_idx,
-            ..
-        } => {
-            use ModelSelectionEntry as E;
-            match key {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    // Jump up, skip ProviderHeader
-                    let mut new = selected.saturating_sub(1);
-                    while new > 0 && matches!(&entries[new], E::ProviderHeader { .. }) {
-                        new = new.saturating_sub(1);
-                    }
-                    if !matches!(&entries[new], E::ProviderHeader { .. }) {
-                        *selected = new;
-                    }
-                    true
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    // Jump down, skip ProviderHeader
-                    let max = entries.len().saturating_sub(1);
-                    let mut new = (*selected + 1).min(max);
-                    while new < max && matches!(&entries[new], E::ProviderHeader { .. }) {
-                        new = (new + 1).min(max);
-                    }
-                    if !matches!(&entries[new], E::ProviderHeader { .. }) {
-                        *selected = new;
-                    }
-                    true
-                }
-                KeyCode::Left | KeyCode::Char('h') => {
-                    // Adjust thinking effort (only if model supports it)
-                    if let E::Model { model, .. } = &entries[*selected]
-                        && model.thinking
-                    {
-                        *thinking_idx = thinking_idx.saturating_sub(1);
-                    }
-                    true
-                }
-                KeyCode::Right | KeyCode::Char('l') => {
-                    if let E::Model { model, .. } = &entries[*selected]
-                        && model.thinking
-                    {
-                        *thinking_idx = (*thinking_idx + 1).min(3);
-                    }
-                    true
-                }
-                KeyCode::Enter => {
-                    if let E::Model {
-                        provider_key,
-                        model,
-                    } = &entries[*selected]
-                    {
-                        let pkey = provider_key.clone();
-                        let model_id = model.id.clone();
-                        let te = match *thinking_idx {
-                            1 => Some(crate::types::config::ThinkingEffort::Low),
-                            2 => Some(crate::types::config::ThinkingEffort::Medium),
-                            3 => Some(crate::types::config::ThinkingEffort::High),
-                            _ => None,
-                        };
-                        let _ = request_tx
-                            .send(UiToRuntimeEvent::ModelSelected {
-                                provider: pkey,
-                                model: model_id,
-                                thinking_effort: te,
-                            })
-                            .await;
-                    }
-                    true
-                }
-                KeyCode::Esc => false,
-                _ => true,
-            }
-        }
-        InteractionStep::Session {
-            sessions,
-            all_sessions,
-            search,
-            selected,
-        } => match key {
-            KeyCode::Up => {
-                *selected = selected.saturating_sub(1);
-                true
-            }
-            KeyCode::Down => {
-                *selected = (*selected + 1).min(sessions.len().saturating_sub(1));
-                true
-            }
-            KeyCode::Enter => {
-                if !sessions.is_empty() {
-                    let session_id = sessions[*selected].id.clone();
-                    let _ = request_tx
-                        .send(UiToRuntimeEvent::SessionSelected { session_id })
-                        .await;
-                }
-                true
-            }
-            KeyCode::Char(c) => {
-                search.push(c);
-                let lower = search.to_lowercase();
-                let mut filtered: Vec<_> = all_sessions
-                    .iter()
-                    .filter(|s| s.title.to_lowercase().contains(&lower))
-                    .cloned()
-                    .collect();
-                std::mem::swap(sessions, &mut filtered);
-                *selected = 0;
-                true
-            }
-            KeyCode::Backspace => {
-                search.pop();
-                let lower = search.to_lowercase();
-                if lower.is_empty() {
-                    *sessions = all_sessions.clone();
-                } else {
-                    let mut filtered: Vec<_> = all_sessions
-                        .iter()
-                        .filter(|s| s.title.to_lowercase().contains(&lower))
-                        .cloned()
-                        .collect();
-                    std::mem::swap(sessions, &mut filtered);
-                }
-                *selected = 0;
-                true
-            }
-            KeyCode::Esc => false,
-            _ => true,
-        },
-    }
-}
-
-async fn resolve_active_tool_pause(
-    state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
-) {
-    let Some(req) = state.active_tool_pause().cloned() else {
-        return;
-    };
-
-    let response = match &req.kind {
-        ToolPauseKind::Permission(_) => ToolPauseResponse::Permission {
-            approved: state.permission_selected == 0,
-        },
-        ToolPauseKind::UserInput(preview) => {
-            let mut answers = serde_json::Map::new();
-
-            for (idx, question) in preview.questions.iter().enumerate() {
-                let custom_idx = question.options.len();
-                let selected = state
-                    .user_input_selected
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(0)
-                    .min(custom_idx);
-                let label = if selected == custom_idx {
-                    "None of the above".to_string()
-                } else {
-                    question.options[selected].label.clone()
-                };
-                let note = state
-                    .user_input_notes
-                    .get(idx)
-                    .map(|note| note.trim())
-                    .filter(|note| !note.is_empty());
-
-                answers.insert(
-                    question.id.clone(),
-                    serde_json::json!({
-                        "label": label,
-                        "note": note,
-                    }),
-                );
-            }
-
-            ToolPauseResponse::UserInput {
-                value: serde_json::json!({
-                    "answers": answers,
-                }),
-            }
-        }
-    };
-
-    let _ = request_tx
-        .send(UiToRuntimeEvent::ResolveToolPause {
-            tool_use_id: req.tool_use_id.clone(),
-            response,
-        })
-        .await;
-    state.pending_tool_previews.remove(&req.tool_use_id);
-    if state.pending_tool_previews.is_empty() {
-        state.reset_permission_drawer();
-    }
-}
-
-async fn flush_queued_user_inputs(
-    state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
-) {
-    let Some(msg) = state.take_queued_user_message() else {
-        return;
-    };
-
-    state.messages.push(UiMessage::Message(msg.clone()));
-    state.scroll_offset = 0;
-    state.auto_scroll = true;
-    state.agent_status = AgentStatus::Working;
-    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(msg)).await;
-}
-
-async fn submit_queued_intervention(
-    state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
-) {
-    if state.is_run_active()
-        && state.pending_intervention_inputs.is_empty()
-        && let Some(msg) = state.take_queued_user_message_for_intervention()
-    {
-        let _ = request_tx
-            .send(UiToRuntimeEvent::InterveneMessage(msg))
-            .await;
-    }
-}
-
-fn is_intervention_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    if !modifiers.contains(KeyModifiers::ALT) {
-        return false;
-    }
-
-    matches!(code, KeyCode::Enter)
 }
 
 pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
@@ -361,7 +118,8 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         // 交互模式: 键盘事件由交互步骤处理
                         if let Some(ref mut step) = state.interaction_step {
-                            let consumed = handle_interaction_key(step, key.code, &request_tx).await;
+                            let consumed =
+                                input::handle_interaction_key(step, key.code, &request_tx).await;
                             if consumed {
                                 // 如果 Enter 确认后交互完成，step 被消费
                                 // (handle_interaction_key 内部发送了 UiToRuntimeEvent)
@@ -407,7 +165,8 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     KeyCode::Enter => {
                                         state.mark_current_user_input_answered();
                                         if state.user_input_unanswered_count() == 0 {
-                                            resolve_active_tool_pause(&mut state, &request_tx).await;
+                                            input::resolve_active_tool_pause(&mut state, &request_tx)
+                                                .await;
                                         } else {
                                             state.move_to_next_unanswered_user_input();
                                         }
@@ -461,13 +220,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
                                 {
                                     state.permission_selected = 0;
-                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                    input::resolve_active_tool_pause(&mut state, &request_tx).await;
                                 }
                                 KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
                                     if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
                                 {
                                     state.permission_selected = 1;
-                                    resolve_active_tool_pause(&mut state, &request_tx).await;
+                                    input::resolve_active_tool_pause(&mut state, &request_tx).await;
                                 }
                                 KeyCode::Esc => {
                                     state.permission_selected = 1;
@@ -484,12 +243,17 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) {
                                         state.mark_current_user_input_answered();
                                         if state.user_input_unanswered_count() == 0 {
-                                            resolve_active_tool_pause(&mut state, &request_tx).await;
+                                            input::resolve_active_tool_pause(
+                                                &mut state,
+                                                &request_tx,
+                                            )
+                                            .await;
                                         } else {
                                             state.move_to_next_unanswered_user_input();
                                         }
                                     } else {
-                                        resolve_active_tool_pause(&mut state, &request_tx).await;
+                                        input::resolve_active_tool_pause(&mut state, &request_tx)
+                                            .await;
                                     }
                                 }
                                 _ => {}
@@ -588,8 +352,8 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 state.update_scroll_step(tokio::time::Instant::now());
                                 state.scroll_down(state.scroll_step.max(page_amt));
                             }
-                            (code, modifiers) if is_intervention_key(code, modifiers) => {
-                                submit_queued_intervention(&mut state, &request_tx).await;
+                            (code, modifiers) if input::is_intervention_key(code, modifiers) => {
+                                input::submit_queued_intervention(&mut state, &request_tx).await;
                             }
                             (KeyCode::Enter, _) => {
                                 if !state.pending_intervention_inputs.is_empty() {
@@ -747,55 +511,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
             }
             Some(agent_evt) = agent_rx.recv() => {
                 if let RuntimeToUiEvent::InteractionRequest(ref req) = agent_evt {
-                    state.interaction_step = match req {
-                        ModelSelection { providers, current_provider, current_model } => {
-                            let mut entries: Vec<ModelSelectionEntry> = Vec::new();
-                            let mut selected = 0;
-                            let default_thinking = match state.status_bar.thinking_effort {
-                                Some(ThinkingEffort::Low) => 1,
-                                Some(ThinkingEffort::Medium) => 2,
-                                Some(ThinkingEffort::High) => 3,
-                                Some(ThinkingEffort::None) | None => 0,
-                            };
-                            // 按 provider key 排序
-                            let mut sorted: Vec<_> = providers.clone().into_iter().collect();
-                            sorted.sort_by(|a, b| a.0.cmp(&b.0));
-                            for (pkey, profile) in &sorted {
-                                entries.push(ModelSelectionEntry::ProviderHeader {
-                                    name: profile.name.clone(),
-                                });
-                                for model in &profile.models {
-                                    // 如果是当前使用的 provider + model，标记为选中
-                                    if *pkey == *current_provider && model.id == *current_model {
-                                        selected = entries.len(); // 即将 push 的 model 的索引
-                                    }
-                                    entries.push(ModelSelectionEntry::Model {
-                                        provider_key: pkey.clone(),
-                                        model: model.clone(),
-                                    });
-                                }
-                            }
-                            // 如果没有任何匹配（或列表为空），selected 保持 0（第一个 Model 条目）
-                            Some(InteractionStep::ModelSelection {
-                                entries,
-                                selected,
-                                thinking_idx: default_thinking,
-                                active_provider: current_provider.clone(),
-                                active_model: current_model.clone(),
-                            })
-                        }
-                        SessionSelection { sessions } => {
-                            let mut sorted = sessions.clone();
-                            sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-                            let all_cloned = sorted.clone();
-                            Some(InteractionStep::Session {
-                                sessions: sorted,
-                                all_sessions: all_cloned,
-                                search: String::new(),
-                                selected: 0,
-                            })
-                        }
-                    };
+                    state.open_interaction_request(req);
                 }
 
                 // 检查是否需要退出
@@ -804,20 +520,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                 }
 
                 // SessionChanged → 清空消息区并关闭交互
-                if let RuntimeToUiEvent::SessionChanged { session_id, messages } = agent_evt {
-                    state.current_session_id = session_id;
-                    state.messages = UiMessage::from_messages(messages);
-                    state.pending_assistant = None;
-                    state.queued_user_inputs.clear();
-                    state.agent_status = AgentStatus::Idle;
-                    state.interaction_step = None;
-                    state.interaction_request = None;
-                    state.scroll_to_bottom();
+                if let RuntimeToUiEvent::SessionChanged { session_id, messages, subagents } = agent_evt {
+                    state.apply_session_changed(session_id, messages, subagents);
                 } else {
                     let should_flush_queue = matches!(agent_evt, RuntimeToUiEvent::RunFinished);
                     state.apply_event(agent_evt);
                     if should_flush_queue {
-                        flush_queued_user_inputs(&mut state, &request_tx).await;
+                        input::flush_queued_user_inputs(&mut state, &request_tx).await;
                     }
                 }
             }
@@ -830,20 +539,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         shutdown = true;
                         break;
                     }
-                    if let RuntimeToUiEvent::SessionChanged { session_id, messages } = evt {
-                        state.current_session_id = session_id;
-                        state.messages = UiMessage::from_messages(messages);
-                        state.pending_assistant = None;
-                        state.queued_user_inputs.clear();
-                        state.agent_status = AgentStatus::Idle;
-                        state.interaction_step = None;
-                        state.interaction_request = None;
-                        state.scroll_to_bottom();
+                    if let RuntimeToUiEvent::SessionChanged { session_id, messages, subagents } = evt {
+                        state.apply_session_changed(session_id, messages, subagents);
                     } else {
                         let should_flush_queue = matches!(evt, RuntimeToUiEvent::RunFinished);
                         state.apply_event(evt);
                         if should_flush_queue {
-                            flush_queued_user_inputs(&mut state, &request_tx).await;
+                            input::flush_queued_user_inputs(&mut state, &request_tx).await;
                         }
                     }
                 }
