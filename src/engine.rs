@@ -33,6 +33,7 @@ enum ToolCollection {
 }
 
 struct ToolRunControls {
+    settings: Arc<Settings>,
     pending_tool_pauses: PendingToolPauses,
     permission_policy: Arc<dyn PermissionPolicy>,
     cancelled: Arc<AtomicBool>,
@@ -270,6 +271,7 @@ impl QueryEngine {
                             let cancel_notify = Arc::clone(&self.cancel_notify);
                             let runtime_context = ctx.runtime_context.clone();
                             let controls = ToolRunControls {
+                                settings: Arc::clone(&ctx.settings),
                                 pending_tool_pauses,
                                 permission_policy,
                                 cancelled,
@@ -642,6 +644,7 @@ impl QueryEngine {
                     .map(|runtime| format!("{}:{}", runtime.session_id, tool_use.id))
                     .unwrap_or_else(|| tool_use.id.clone()),
                 tool_name: tool_use.name.clone(),
+                settings: Some(controls.settings),
                 event_tx: event_tx.clone(),
                 pending_tool_pauses: controls.pending_tool_pauses,
                 permission_policy: controls.permission_policy,

@@ -99,27 +99,34 @@ pub(super) fn render(
         let wrapped = word_wrap(&tr.content, content_width.saturating_sub(5).max(1));
         let total = wrapped.len();
         let truncated = total > MAX_OUTPUT_LINES;
-        let display: &[String] = if truncated {
-            &wrapped[..MAX_OUTPUT_LINES]
-        } else {
-            &wrapped[..]
-        };
 
-        for (idx, wl) in display.iter().enumerate() {
-            if idx == 0 && desc.is_empty() {
+        let mut display_indices: Vec<usize> = if truncated {
+            let head_count = MAX_OUTPUT_LINES / 2;
+            let tail_count = MAX_OUTPUT_LINES.saturating_sub(head_count);
+            let mut indices: Vec<usize> = (0..head_count).collect();
+            indices.extend(total.saturating_sub(tail_count)..total);
+            indices
+        } else {
+            (0..total).collect()
+        };
+        display_indices.dedup();
+
+        for (display_idx, line_idx) in display_indices.iter().enumerate() {
+            if truncated && *line_idx == total.saturating_sub(MAX_OUTPUT_LINES / 2) {
+                let omitted = total.saturating_sub(MAX_OUTPUT_LINES);
+                push_indented(
+                    "     ",
+                    "     ",
+                    format!("... {omitted} lines omitted ..."),
+                    Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+                );
+            }
+            let wl = &wrapped[*line_idx];
+            if display_idx == 0 && desc.is_empty() {
                 push_indented("  └─ ", "     ", wl.clone(), out_style);
             } else {
                 push_indented("     ", "     ", wl.clone(), out_style);
             }
-        }
-
-        if truncated {
-            push_indented(
-                "     ",
-                "     ",
-                format!("... ({} more lines)", total - MAX_OUTPUT_LINES),
-                Style::default().fg(dim).add_modifier(Modifier::ITALIC),
-            );
         }
     }
 

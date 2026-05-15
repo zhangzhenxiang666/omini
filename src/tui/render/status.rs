@@ -6,6 +6,14 @@ use ratatui::widgets::Paragraph;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(super) fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
+    animated_status_spans_with_palette(text, Color::Rgb(200, 169, 238), Color::Rgb(55, 47, 65))
+}
+
+pub(super) fn animated_status_spans_with_palette(
+    text: &str,
+    bright: Color,
+    dim: Color,
+) -> Vec<Span<'static>> {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     if n == 0 {
@@ -20,12 +28,8 @@ pub(super) fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
     let phase = (ms % CYCLE_MS) / CYCLE_MS;
     let wave_pos = phase * n as f64;
 
-    const BR: u8 = 200;
-    const BG: u8 = 169;
-    const BB: u8 = 238;
-    const DR: u8 = 55;
-    const DG: u8 = 47;
-    const DB: u8 = 65;
+    let (br, bg, bb) = color_to_rgb(bright);
+    let (dr, dg, db) = color_to_rgb(dim);
 
     chars
         .iter()
@@ -37,13 +41,20 @@ pub(super) fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
             let dim_min = 0.08;
             let brightness = dim_min + (1.0 - dim_min) * bell;
 
-            let r = (DR as f64 + (BR as f64 - DR as f64) * brightness) as u8;
-            let g = (DG as f64 + (BG as f64 - DG as f64) * brightness) as u8;
-            let b = (DB as f64 + (BB as f64 - DB as f64) * brightness) as u8;
+            let r = (dr as f64 + (br as f64 - dr as f64) * brightness) as u8;
+            let g = (dg as f64 + (bg as f64 - dg as f64) * brightness) as u8;
+            let b = (db as f64 + (bb as f64 - db as f64) * brightness) as u8;
 
             Span::styled(c.to_string(), Style::default().fg(Color::Rgb(r, g, b)))
         })
         .collect()
+}
+
+fn color_to_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Rgb(r, g, b) => (r, g, b),
+        _ => (255, 255, 255),
+    }
 }
 
 pub(super) fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {

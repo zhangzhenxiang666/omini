@@ -1259,7 +1259,11 @@ fn render_subagent_tool(
 
     let mut header = vec![Span::raw("· ")];
     if matches!(status, SubagentStatus::Running) {
-        header.extend(status::animated_status_spans(&label));
+        header.extend(status::animated_status_spans_with_palette(
+            &label,
+            accent,
+            Color::Rgb(0x1f, 0x4e, 0x58),
+        ));
     } else {
         header.push(Span::styled(
             label,
@@ -1366,6 +1370,43 @@ fn push_subagent_error_lines(
             Span::styled(line, error_style),
         ]));
     }
+}
+
+enum AlertKind {
+    Notice,
+    Warning,
+    Error,
+}
+
+fn build_alert_lines(text: &str, content_width: usize, kind: AlertKind) -> Vec<Line<'static>> {
+    let (icon, color) = match kind {
+        AlertKind::Notice => ("ℹ", Color::Rgb(0x7a, 0xba, 0xff)),
+        AlertKind::Warning => ("⚠", Color::Rgb(0xd4, 0xb6, 0x6a)),
+        AlertKind::Error => ("✖", Color::Rgb(255, 100, 100)),
+    };
+    let prefix = format!("{icon} ");
+    let wrap_width = content_width
+        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
+        .max(1);
+    let wrapped = crate::tui::widgets::word_wrap(text, wrap_width);
+    let style = Style::default().fg(color);
+    if wrapped.is_empty() {
+        return vec![Line::from(vec![Span::styled(prefix, style)])];
+    }
+
+    let continuation = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let prefix = if idx == 0 {
+                prefix.clone()
+            } else {
+                continuation.clone()
+            };
+            Line::from(vec![Span::styled(format!("{prefix}{line}"), style)])
+        })
+        .collect()
 }
 
 fn format_subagent_label(label: &str) -> String {
@@ -1512,12 +1553,18 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     let mut rendered_msg_idx = 0;
     for ui_message in &state.messages {
         let UiMessage::Message(message) = ui_message else {
-            let (color, text) = match ui_message {
-                UiMessage::Notice { text } => (Color::Rgb(120, 170, 210), text.clone()),
-                UiMessage::Error { text } => (Color::Rgb(255, 100, 100), format!("Error: {text}")),
+            let block_lines = match ui_message {
+                UiMessage::Notice { text } => {
+                    build_alert_lines(text, content_width, AlertKind::Notice)
+                }
+                UiMessage::Warning { text } => {
+                    build_alert_lines(text, content_width, AlertKind::Warning)
+                }
+                UiMessage::Error { text } => {
+                    build_alert_lines(text, content_width, AlertKind::Error)
+                }
                 UiMessage::Message(_) => unreachable!(),
             };
-            let block_lines = build_bordered_lines(&text, content_width, color, false, None);
             if !block_lines.is_empty() {
                 if !all_lines.is_empty() {
                     all_lines.push(Line::from(""));

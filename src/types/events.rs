@@ -109,6 +109,8 @@ pub enum RuntimeToUiEvent {
 
     /// 命令产生的提示信息（显示在消息区，但不作为对话消息）
     CommandNotice(String),
+    /// 运行时产生的警告信息（显示在消息区，但不作为对话消息）
+    Warning(String),
 
     /// 模型已切换（TUI 更新状态栏用）
     ModelChanged {

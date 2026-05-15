@@ -1,4 +1,5 @@
 use crate::config::project::{ProjectDir, SessionDir};
+use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::config::Settings;
 use crate::types::events::{
     EngineToRuntimeEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
@@ -123,6 +124,7 @@ pub struct ToolExecutionContext {
     pub tool_use_id: String,
     pub pause_id: String,
     pub tool_name: String,
+    pub settings: Option<Arc<Settings>>,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_policy: Arc<dyn PermissionPolicy>,
@@ -131,14 +133,28 @@ pub struct ToolExecutionContext {
     pub runtime: Option<Arc<ToolRuntimeContext>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolRuntimeContext {
     pub session_id: String,
     pub session_type: String,
     pub agent_label: Option<String>,
     pub session_dir: SessionDir,
-    pub settings_snapshot: Arc<Settings>,
+    pub subagent_registry: Arc<AgentRegistry>,
+    pub subagent_runner: Option<Arc<RuntimeSubagentRunner>>,
     pub project: ProjectDir,
+}
+
+impl std::fmt::Debug for ToolRuntimeContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolRuntimeContext")
+            .field("session_id", &self.session_id)
+            .field("session_type", &self.session_type)
+            .field("agent_label", &self.agent_label)
+            .field("session_dir", &self.session_dir)
+            .field("subagent_registry", &self.subagent_registry)
+            .field("project", &self.project)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ToolExecutionContext {
@@ -149,6 +165,7 @@ impl ToolExecutionContext {
             tool_use_id: format!("test_{tool_name}"),
             pause_id: format!("test_{tool_name}"),
             tool_name: tool_name.to_string(),
+            settings: None,
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
             permission_policy: Arc::new(DefaultPermissionPolicy),

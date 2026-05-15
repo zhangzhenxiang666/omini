@@ -54,6 +54,7 @@ impl std::fmt::Display for AgentStatus {
 pub enum UiMessage {
     Message(Message),
     Notice { text: String },
+    Warning { text: String },
     Error { text: String },
 }
 
@@ -88,14 +89,14 @@ impl UiMessage {
     pub fn as_message(&self) -> Option<&Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Notice { .. } | Self::Error { .. } => None,
+            Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => None,
         }
     }
 
     pub fn as_message_mut(&mut self) -> Option<&mut Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Notice { .. } | Self::Error { .. } => None,
+            Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => None,
         }
     }
 }
@@ -521,11 +522,17 @@ impl UiState {
             }
             RuntimeToUiEvent::Error(e) => {
                 self.messages.push(UiMessage::Error { text: e });
-                if self.pending_tool_previews.is_empty() {
-                    self.agent_status = AgentStatus::Idle;
-                } else {
+                if !self.pending_tool_previews.is_empty() {
                     self.agent_status = AgentStatus::AwaitingInput;
+                } else if !self.is_run_active() {
+                    self.agent_status = AgentStatus::Idle;
                 }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            RuntimeToUiEvent::Warning(text) => {
+                self.messages.push(UiMessage::Warning { text });
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }

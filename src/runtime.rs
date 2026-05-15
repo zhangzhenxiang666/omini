@@ -5,6 +5,7 @@ use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
 use crate::db::{self, NewMessage};
 use crate::engine::{QueryContext, QueryEngine};
+use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
@@ -16,6 +17,7 @@ use crate::types::message::{Message, Role};
 use chrono::Utc;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -25,6 +27,28 @@ use uuid::Uuid;
 pub(crate) enum PendingInteraction {
     ModelSelect,
     SessionSelect,
+}
+
+#[derive(Debug)]
+struct CapabilityStore {
+    subagents: RwLock<Arc<AgentRegistry>>,
+}
+
+impl CapabilityStore {
+    fn load(settings: &Settings) -> Self {
+        Self {
+            subagents: RwLock::new(Arc::new(crate::subagents::load_agent_registry(
+                &settings.cwd,
+            ))),
+        }
+    }
+
+    fn subagent_registry(&self) -> Arc<AgentRegistry> {
+        self.subagents
+            .read()
+            .expect("subagent registry lock poisoned")
+            .clone()
+    }
 }
 
 /// Agent 运行时。
@@ -53,6 +77,10 @@ pub struct AgentRuntime {
     query_engine: QueryEngine,
     /// 工具注册表（持有所有注册的工具）
     tool_registry: Arc<ToolRegistry>,
+    /// Runtime-side subagent lifecycle service.
+    subagent_runner: Arc<RuntimeSubagentRunner>,
+    /// Runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
+    capabilities: CapabilityStore,
     /// 取消标志（用于 CancelRun）
     cancelled: Arc<AtomicBool>,
     /// 命令注册表
@@ -74,6 +102,8 @@ impl AgentRuntime {
             settings.base_url.clone(),
         );
         let tool_registry = Arc::new(crate::tools::create_main_registry());
+        let subagent_runner = Arc::new(RuntimeSubagentRunner);
+        let capabilities = CapabilityStore::load(&settings);
 
         // 初始化命令注册表并注册内置命令
         let mut command_registry = CommandRegistry::new();
@@ -82,9 +112,10 @@ impl AgentRuntime {
         // 向 UI 推送命令列表（供自动补全使用）
         let summaries = command_registry.summaries();
         let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(summaries));
-        for diagnostic in crate::subagents::load_agent_diagnostics(&settings.cwd) {
-            let _ = event_tx.try_send(RuntimeToUiEvent::CommandNotice(format!(
-                "Subagent warning: {}",
+        let subagent_registry = capabilities.subagent_registry();
+        for diagnostic in &subagent_registry.diagnostics {
+            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+                "Subagent: {}",
                 diagnostic.message()
             )));
         }
@@ -100,6 +131,8 @@ impl AgentRuntime {
             cancelled: Arc::new(AtomicBool::new(false)),
             llm_client,
             tool_registry,
+            subagent_runner,
+            capabilities,
             query_engine: QueryEngine::new(),
             command_registry,
             pending_interaction: None,
@@ -364,7 +397,13 @@ impl AgentRuntime {
         }
 
         {
-            let run_settings = Arc::new(self.settings.clone());
+            let subagent_registry = self.capabilities.subagent_registry();
+            let mut run_settings = self.settings.clone();
+            run_settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
+                &run_settings,
+                &subagent_registry.summaries(),
+            ));
+            let run_settings = Arc::new(run_settings);
             // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
             let ctx = QueryContext {
                 messages: &mut self.messages,
@@ -382,7 +421,8 @@ impl AgentRuntime {
                         .session_dir
                         .clone()
                         .expect("session dir must exist before query"),
-                    settings_snapshot: Arc::clone(&run_settings),
+                    subagent_registry: Arc::clone(&subagent_registry),
+                    subagent_runner: Some(Arc::clone(&self.subagent_runner)),
                     project: self.project.clone(),
                 })),
             };

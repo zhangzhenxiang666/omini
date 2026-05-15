@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 mod builtins;
 mod parser;
+mod runner;
+
+pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentSpec {
@@ -30,44 +33,55 @@ impl AgentSource {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AgentLoadDiagnostic {
+pub struct AgentLoadDiagnostic {
     message: String,
 }
 
 impl AgentLoadDiagnostic {
-    pub(crate) fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         &self.message
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AgentSummary {
-    pub(crate) name: String,
-    pub(crate) description: String,
+pub struct AgentSummary {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AgentRegistry {
+pub struct AgentRegistry {
     pub(crate) agents: HashMap<String, AgentSpec>,
-    pub(crate) diagnostics: Vec<AgentLoadDiagnostic>,
+    pub diagnostics: Vec<AgentLoadDiagnostic>,
 }
 
-pub(crate) fn load_agent_diagnostics(cwd: &Path) -> Vec<AgentLoadDiagnostic> {
-    load_agent_registry(cwd).diagnostics
+impl AgentRegistry {
+    pub fn summaries(&self) -> Vec<AgentSummary> {
+        let mut summaries: Vec<_> = self
+            .agents
+            .values()
+            .map(|agent| AgentSummary {
+                name: agent.name.clone(),
+                description: agent.description.clone(),
+            })
+            .collect();
+        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        summaries
+    }
+
+    pub(crate) fn get(&self, name: &str) -> Option<&AgentSpec> {
+        self.agents.get(name)
+    }
+
+    pub(crate) fn sorted_names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.agents.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 pub(crate) fn load_agent_summaries(cwd: &Path) -> Vec<AgentSummary> {
-    let registry = load_agent_registry(cwd);
-    let mut summaries: Vec<_> = registry
-        .agents
-        .into_values()
-        .map(|agent| AgentSummary {
-            name: agent.name,
-            description: agent.description,
-        })
-        .collect();
-    summaries.sort_by(|a, b| a.name.cmp(&b.name));
-    summaries
+    load_agent_registry(cwd).summaries()
 }
 
 pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {

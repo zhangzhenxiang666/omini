@@ -1,3 +1,4 @@
+use crate::subagents::AgentSummary;
 use crate::types::config::Settings;
 use chrono::Local;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,15 @@ struct InstructionFile {
 
 /// Build the full system prompt for the current request.
 pub fn build_system_prompt(settings: &Settings) -> String {
+    let subagents = crate::subagents::load_agent_summaries(&settings.cwd);
+    build_system_prompt_with_subagents(settings, &subagents)
+}
+
+/// Build the full system prompt with a runtime-provided capability snapshot.
+pub fn build_system_prompt_with_subagents(
+    settings: &Settings,
+    subagents: &[AgentSummary],
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are Omini, a coding agent running in the user's local terminal.\n\n");
     prompt.push_str(&agent_identity_section());
@@ -34,7 +44,7 @@ pub fn build_system_prompt(settings: &Settings) -> String {
     prompt.push('\n');
     prompt.push_str(&tool_instructions_section());
     prompt.push('\n');
-    prompt.push_str(&subagent_section(&settings.cwd));
+    prompt.push_str(&subagent_section(subagents));
     prompt.push('\n');
     // TODO: Add a skills section after the skills registry and loading protocol are implemented.
     prompt.push_str(&project_context_prompt(&settings.cwd));
@@ -156,8 +166,7 @@ fn tool_instructions_section() -> String {
     .to_string()
 }
 
-fn subagent_section(cwd: &Path) -> String {
-    let agents = crate::subagents::load_agent_summaries(cwd);
+fn subagent_section(agents: &[AgentSummary]) -> String {
     let mut section = String::new();
     section.push_str("<delegation_instructions>\n");
     section.push_str("## Delegation Policy\n\n");
