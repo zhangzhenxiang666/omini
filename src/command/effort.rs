@@ -92,7 +92,7 @@ impl Command for EffortCommand {
 
         runtime.settings.thinking_effort = Some(effort);
         CommandResult::Ok(vec![
-            CommandEffect::Emit(RuntimeToUiEvent::ModelChanged {
+            CommandEffect::emit(RuntimeToUiEvent::ModelChanged {
                 provider: runtime.settings.active_provider.clone(),
                 model: runtime.settings.model.clone(),
                 thinking_effort: runtime.settings.thinking_effort,

@@ -1,3 +1,4 @@
+use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -8,6 +9,7 @@ use super::{display_path, spinner, word_wrap};
 pub(super) fn render(
     tool_use: &ToolUseBlock,
     result: Option<&ToolResultBlock>,
+    preview: Option<&ToolPauseRequest>,
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
@@ -22,6 +24,11 @@ pub(super) fn render(
 
     let read_color = Color::Rgb(0x42, 0xb3, 0xc2);
     let mut main_spans = Vec::new();
+    let is_permission_preview = result.is_none()
+        && matches!(
+            preview.map(|req| &req.kind),
+            Some(ToolPauseKind::Permission(PermissionPreview::Read(_)))
+        );
 
     if result.is_none() {
         let spin = spinner();
@@ -32,8 +39,15 @@ pub(super) fn render(
     }
 
     main_spans.push(Span::raw("· "));
-    main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
-    main_spans.push(Span::raw(format!(" {}", display_file_path)));
+    if is_permission_preview {
+        main_spans.push(Span::styled(
+            display_file_path,
+            Style::default().fg(read_color),
+        ));
+    } else {
+        main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
+        main_spans.push(Span::raw(format!(" {}", display_file_path)));
+    }
 
     lines.push(Line::from(main_spans));
 

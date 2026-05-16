@@ -46,7 +46,7 @@ impl Command for RenameCommand {
             return CommandResult::Error(format!("重命名失败: {e}"));
         }
 
-        CommandResult::Ok(vec![CommandEffect::Emit(
+        CommandResult::Ok(vec![CommandEffect::emit(
             RuntimeToUiEvent::SessionTitleChanged { title: Some(title) },
         )])
     }

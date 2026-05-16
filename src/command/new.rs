@@ -23,12 +23,12 @@ impl Command for NewCommand {
         runtime.messages.clear();
 
         CommandResult::Ok(vec![
-            CommandEffect::Emit(RuntimeToUiEvent::SessionChanged {
+            CommandEffect::emit(RuntimeToUiEvent::SessionChanged {
                 session_id: None,
                 messages: vec![],
                 subagents: vec![],
             }),
-            CommandEffect::Emit(RuntimeToUiEvent::SessionTitleChanged { title: None }),
+            CommandEffect::emit(RuntimeToUiEvent::SessionTitleChanged { title: None }),
         ])
     }
 }

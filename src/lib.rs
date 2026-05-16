@@ -3,6 +3,7 @@ pub mod command;
 pub mod config;
 pub mod db;
 pub mod engine;
+pub mod permissions;
 pub mod prompts;
 pub mod runtime;
 pub mod subagents;

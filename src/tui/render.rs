@@ -186,7 +186,7 @@ fn render_permission_drawer(state: &mut UiState, frame: &mut ratatui::Frame, are
             preview.questions.len(),
             state.user_input_unanswered_count()
         ),
-        ToolPauseKind::Permission(_) => " Permission Request ".to_string(),
+        ToolPauseKind::Permission(preview) => format!(" {} ", permission_drawer_title(preview)),
     };
     let divider_line = Line::from(Span::styled(
         "━".repeat(drawer_area.width.saturating_sub(1) as usize),
@@ -370,7 +370,7 @@ fn permission_option_style(selected: bool) -> Style {
     let style = Style::default();
     if selected {
         style
-            .fg(Color::Rgb(135, 135, 255))
+            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
             .add_modifier(Modifier::BOLD)
     } else {
         style
@@ -406,16 +406,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
     let mut drawer = match &request.kind {
         ToolPauseKind::Permission(PermissionPreview::Bash(preview)) => {
             let mut lines = Vec::new();
-            lines.push(Line::from(vec![
-                Span::raw("· "),
-                Span::styled(
-                    "Bash",
-                    Style::default()
-                        .fg(Color::Rgb(0x42, 0xb3, 0xc2))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" command", Style::default().fg(Color::Rgb(165, 172, 182))),
-            ]));
+            lines.push(Line::from(""));
             lines.push(Line::from(""));
 
             if let Some(description) = &preview.description
@@ -488,17 +479,12 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 render_tool(tool_use, None, Some(request), content_width, project_dir)
             } else {
                 vec![Line::from(vec![
-                    Span::raw("· "),
+                    Span::raw("  "),
+                    Span::styled("Path: ", Style::default().fg(Color::Rgb(140, 145, 155))),
                     Span::styled(
-                        "Read",
-                        Style::default()
-                            .fg(Color::Rgb(0x42, 0xb3, 0xc2))
-                            .add_modifier(Modifier::BOLD),
+                        display_path(&preview.file_path, project_dir),
+                        Style::default().fg(Color::Rgb(220, 220, 225)),
                     ),
-                    Span::raw(format!(
-                        " {}",
-                        display_path(&preview.file_path, project_dir)
-                    )),
                 ])]
             };
             DrawerLines {
@@ -507,11 +493,8 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 note_cursor_column: None,
             }
         }
-        ToolPauseKind::Permission(preview) => DrawerLines {
-            lines: vec![Line::from(Span::styled(
-                format!("{} permission requested", permission_name(preview)),
-                Style::default().fg(Color::Rgb(165, 172, 182)),
-            ))],
+        ToolPauseKind::Permission(_preview) => DrawerLines {
+            lines: vec![Line::from("")],
             note_line_index: None,
             note_cursor_column: None,
         },
@@ -565,26 +548,62 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
 }
 
 fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseRequest) {
-    let Some(label) = request.source_agent_label.as_deref() else {
-        return;
-    };
     if drawer.lines.is_empty() {
         return;
+    };
+
+    let mut insert_at = 1usize;
+    if let Some(label) = request.source_agent_label.as_deref() {
+        drawer.lines.insert(
+            insert_at,
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("From: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled(
+                    label.to_string(),
+                    Style::default().fg(Color::Rgb(220, 220, 225)),
+                ),
+            ]),
+        );
+        insert_at += 1;
     }
-    drawer.lines.insert(
-        1,
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled("From: ", Style::default().fg(Color::Rgb(140, 145, 155))),
-            Span::styled(
-                label.to_string(),
-                Style::default().fg(Color::Rgb(220, 220, 225)),
-            ),
-        ]),
-    );
-    drawer.lines.insert(2, Line::from(""));
+
+    if let Some(source) = &request.permission_source {
+        drawer.lines.insert(
+            insert_at,
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("Rule: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled(
+                    source.decision.clone(),
+                    Style::default().fg(Color::Rgb(220, 220, 225)),
+                ),
+            ]),
+        );
+        drawer.lines.insert(
+            insert_at + 1,
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    source.source.clone(),
+                    Style::default().fg(Color::Rgb(165, 172, 182)),
+                ),
+                Span::styled(" -> ", Style::default().fg(Color::Rgb(95, 101, 113))),
+                Span::styled(
+                    source.rule.clone(),
+                    Style::default().fg(Color::Rgb(165, 172, 182)),
+                ),
+            ]),
+        );
+        insert_at += 2;
+    }
+
+    if insert_at == 1 {
+        return;
+    }
+    drawer.lines.insert(insert_at, Line::from(""));
     if let Some(index) = drawer.note_line_index.as_mut() {
-        *index += 2;
+        *index += insert_at;
     }
 }
 
@@ -647,14 +666,14 @@ fn user_input_note_cursor_column(note: &str, cursor_char: usize) -> usize {
 fn user_input_option_line(selected: bool, label: &str, description: &str) -> Line<'static> {
     let marker_style = if selected {
         Style::default()
-            .fg(Color::Rgb(135, 135, 255))
+            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Rgb(85, 92, 105))
     };
     let label_style = if selected {
         Style::default()
-            .fg(Color::Rgb(135, 135, 255))
+            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::Rgb(220, 220, 225))
@@ -670,13 +689,13 @@ fn user_input_option_line(selected: bool, label: &str, description: &str) -> Lin
     ])
 }
 
-fn permission_name(preview: &PermissionPreview) -> &'static str {
+fn permission_drawer_title(preview: &PermissionPreview) -> &'static str {
     match preview {
-        PermissionPreview::Bash(_) => "bash",
-        PermissionPreview::Edit(_) => "edit",
-        PermissionPreview::Write(_) => "write",
-        PermissionPreview::Read(_) => "read",
-        PermissionPreview::Custom { .. } => "custom tool",
+        PermissionPreview::Bash(_) => "Run Command",
+        PermissionPreview::Edit(_) => "Edit File",
+        PermissionPreview::Write(_) => "Write File",
+        PermissionPreview::Read(_) => "Read File",
+        PermissionPreview::Custom { .. } => "Tool Permission",
     }
 }
 
@@ -743,7 +762,7 @@ fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     frame.render_widget(Clear, panel_area);
 
     // ── Header: title + subtitle + thick divider ──
-    let accent = Color::Rgb(135, 135, 255);
+    let accent = Color::Rgb(0x42, 0xd9, 0xe8);
 
     // Line 0: thick divider above the panel (━ characters, accent color)
     let divider_line = Line::from(Span::styled(
@@ -882,7 +901,7 @@ fn render_model_panel(
 
                 let number_str = format!("{}.", model_num);
 
-                let selected_color = Color::Rgb(135, 135, 255);
+                let selected_color = Color::Rgb(0x42, 0xd9, 0xe8);
                 let active_color = Color::Rgb(126, 158, 126);
 
                 if is_sel {
@@ -1338,7 +1357,7 @@ fn render_subagent_tool(
         if let Some(summary) = subagent_tool_summary(child_tool, project_dir) {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                truncate_to_width(&summary, content_width.saturating_sub(10)),
+                truncate_str(&summary, content_width.saturating_sub(10)),
                 Style::default().fg(dim),
             ));
         }
@@ -1478,8 +1497,7 @@ fn subagent_tool_summary(tool_use: &ToolUseBlock, project_dir: Option<&Path>) ->
     match tool_use.name.as_str() {
         "bash" => tool_use
             .input
-            .get("description")
-            .or_else(|| tool_use.input.get("command"))
+            .get("command")
             .and_then(|value| value.as_str())
             .map(str::to_string),
         "read" => tool_use

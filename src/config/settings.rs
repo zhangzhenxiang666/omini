@@ -1,3 +1,4 @@
+use crate::permissions::RawPermissionConfig;
 pub use crate::types::config::{
     ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
 };
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 pub struct UserConfig {
     /// 供应商配置表，key 为供应商名称
     pub providers: HashMap<String, ProviderConfig>,
+    /// Optional tool permission rules.
+    pub permissions: Option<RawPermissionConfig>,
 }
 
 /// 单个供应商配置（用户配置文件中）
@@ -112,6 +115,7 @@ impl UserConfig {
             max_turns: None,
             cwd: std::env::current_dir()?,
             thinking_effort,
+            permissions: self.permissions.clone(),
         })
     }
 

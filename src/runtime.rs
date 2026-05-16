@@ -5,6 +5,7 @@ use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
 use crate::db::{self, NewMessage};
 use crate::engine::{QueryContext, QueryEngine};
+use crate::permissions::PermissionEngine;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
@@ -104,6 +105,11 @@ impl AgentRuntime {
         let tool_registry = Arc::new(crate::tools::create_main_registry());
         let subagent_runner = Arc::new(RuntimeSubagentRunner);
         let capabilities = CapabilityStore::load(&settings);
+        let permission_engine = Arc::new(PermissionEngine::load(
+            settings.cwd.clone(),
+            dirs::home_dir(),
+            settings.permissions.clone(),
+        ));
 
         // 初始化命令注册表并注册内置命令
         let mut command_registry = CommandRegistry::new();
@@ -117,6 +123,11 @@ impl AgentRuntime {
             let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
                 "Subagent: {}",
                 diagnostic.message()
+            )));
+        }
+        for diagnostic in permission_engine.diagnostics() {
+            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+                "Permission: {diagnostic}"
             )));
         }
 
@@ -133,7 +144,7 @@ impl AgentRuntime {
             tool_registry,
             subagent_runner,
             capabilities,
-            query_engine: QueryEngine::new(),
+            query_engine: QueryEngine::new(permission_engine),
             command_registry,
             pending_interaction: None,
         }
@@ -244,7 +255,7 @@ impl AgentRuntime {
                 self.process_run().await;
             }
             CommandEffect::Emit(event) => {
-                self.send_event(event).await;
+                self.send_event(*event).await;
             }
         }
     }

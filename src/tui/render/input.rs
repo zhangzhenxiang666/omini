@@ -42,7 +42,7 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
     frame.render_widget(line_bg, input_line);
 
     let prefix_style = Style::default().fg(Color::Rgb(0xab, 0xab, 0xab));
-    let cmd_color = Style::default().fg(Color::Rgb(0x7c, 0x5c, 0xf6));
+    let cmd_color = Style::default().fg(Color::Rgb(0x42, 0xd9, 0xe8));
     let placeholder_style = Style::default().fg(Color::DarkGray);
 
     let command_match = matched_input_command(state, &state.input);

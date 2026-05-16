@@ -287,7 +287,13 @@ pub fn render_tool(
 ) -> Vec<Line<'static>> {
     match tool_use.name.as_str() {
         "bash" => bash::render(tool_use, tool_result, content_width),
-        "read" => read::render(tool_use, tool_result, content_width, project_dir),
+        "read" => read::render(
+            tool_use,
+            tool_result,
+            tool_preview,
+            content_width,
+            project_dir,
+        ),
         "edit" => file_mutation::render_edit(
             tool_use,
             tool_result,

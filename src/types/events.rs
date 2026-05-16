@@ -273,7 +273,13 @@ pub enum CommandEffect {
     /// 注入一条用户消息并立即启动 query。
     InjectUserMessage(Message),
     /// 复用已有 Runtime → UI 事件表达非命令专属的生命周期变更。
-    Emit(RuntimeToUiEvent),
+    Emit(Box<RuntimeToUiEvent>),
+}
+
+impl CommandEffect {
+    pub fn emit(event: RuntimeToUiEvent) -> Self {
+        Self::Emit(Box::new(event))
+    }
 }
 
 // ===========================================================================
@@ -288,10 +294,20 @@ pub struct ToolPauseRequest {
     pub preview_tool_use_id: Option<String>,
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_source: Option<PermissionSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_label: Option<String>,
     pub kind: ToolPauseKind,
+}
+
+/// Explains which configured permission rule made a decision visible to the UI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PermissionSource {
+    pub decision: String,
+    pub source: String,
+    pub rule: String,
 }
 
 /// 工具暂停类型。

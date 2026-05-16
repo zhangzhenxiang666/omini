@@ -1,9 +1,10 @@
 use crate::config::project::{ProjectDir, SessionDir};
+use crate::permissions::{PermissionDecision, PermissionEngine};
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::config::Settings;
 use crate::types::events::{
-    EngineToRuntimeEvent, PermissionPreview, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
-    UserInputPreview,
+    EngineToRuntimeEvent, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
+    ToolPauseResponse, UserInputPreview,
 };
 use crate::types::message::ToolResultBlock;
 use crate::types::tool::ToolDefinition;
@@ -95,30 +96,6 @@ pub enum PendingToolPause {
     UserInput(oneshot::Sender<ToolPauseResponse>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionPolicyDecision {
-    AutoAllow,
-    AskUser,
-    AutoDeny,
-}
-
-pub trait PermissionPolicy: Send + Sync + 'static {
-    fn decide(&self, tool_name: &str, preview: &PermissionPreview) -> PermissionPolicyDecision;
-}
-
-#[derive(Debug, Default)]
-pub struct DefaultPermissionPolicy;
-
-impl PermissionPolicy for DefaultPermissionPolicy {
-    fn decide(&self, tool_name: &str, _preview: &PermissionPreview) -> PermissionPolicyDecision {
-        match tool_name {
-            "read" => PermissionPolicyDecision::AutoAllow,
-            "bash" | "edit" | "write" => PermissionPolicyDecision::AskUser,
-            _ => PermissionPolicyDecision::AskUser,
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct ToolExecutionContext {
     pub tool_use_id: String,
@@ -127,7 +104,7 @@ pub struct ToolExecutionContext {
     pub settings: Option<Arc<Settings>>,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
-    pub permission_policy: Arc<dyn PermissionPolicy>,
+    pub permission_engine: Arc<PermissionEngine>,
     pub cancelled: Arc<AtomicBool>,
     pub cancel_notify: Arc<Notify>,
     pub runtime: Option<Arc<ToolRuntimeContext>>,
@@ -168,14 +145,20 @@ impl ToolExecutionContext {
             settings: None,
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
-            permission_policy: Arc::new(DefaultPermissionPolicy),
+            permission_engine: Arc::new(PermissionEngine::empty(
+                std::env::current_dir().unwrap_or_else(|_| ".".into()),
+            )),
             cancelled: Arc::new(AtomicBool::new(false)),
             cancel_notify: Arc::new(Notify::new()),
             runtime: None,
         }
     }
 
-    pub async fn request_permission(&self, preview: PermissionPreview) -> ToolPauseResponse {
+    pub async fn request_permission(
+        &self,
+        preview: PermissionPreview,
+        permission_source: Option<PermissionSource>,
+    ) -> ToolPauseResponse {
         if self.cancelled.load(Ordering::Relaxed) {
             return ToolPauseResponse::Cancelled;
         }
@@ -196,6 +179,7 @@ impl ToolExecutionContext {
             tool_use_id: self.pause_id.clone(),
             preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
+            permission_source,
             source_session_id: self
                 .runtime
                 .as_ref()
@@ -244,6 +228,7 @@ impl ToolExecutionContext {
             tool_use_id: self.pause_id.clone(),
             preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
+            permission_source: None,
             source_session_id: self
                 .runtime
                 .as_ref()
@@ -332,8 +317,8 @@ impl RegisteredTool {
             move |input: HashMap<String, Value>, ctx: ToolExecutionContext| {
                 let tool = Arc::clone(&tool);
                 Box::pin(async move {
-                    let value = Value::Object(input.into_iter().collect());
-                    let input: T::Input = match serde_json::from_value(value) {
+                    let raw_input = Value::Object(input.clone().into_iter().collect());
+                    let input: T::Input = match serde_json::from_value(raw_input.clone()) {
                         Ok(i) => i,
                         Err(e) => {
                             return ToolResult::error(format!(
@@ -347,32 +332,36 @@ impl RegisteredTool {
                         Err(result) => return result,
                     };
 
-                    if let Some(preview) = tool.permission_preview(&prepared) {
-                        match ctx.permission_policy.decide(tool.name(), &preview) {
-                            PermissionPolicyDecision::AutoAllow => {}
-                            PermissionPolicyDecision::AutoDeny => {
-                                return ToolResult::error(format!(
-                                    "Permission denied for tool: {}",
-                                    tool.name()
-                                ));
-                            }
-                            PermissionPolicyDecision::AskUser => {
-                                match ctx.request_permission(preview).await {
-                                    ToolPauseResponse::Permission { approved: true } => {}
-                                    ToolPauseResponse::Permission { approved: false } => {
-                                        return ToolResult::error(format!(
-                                            "Permission denied for tool: {}",
-                                            tool.name()
-                                        ));
-                                    }
-                                    ToolPauseResponse::Cancelled => {
-                                        return ToolResult::error("Tool execution cancelled");
-                                    }
-                                    ToolPauseResponse::UserInput { .. } => {
-                                        return ToolResult::error(
-                                            "Received user input response for permission request",
-                                        );
-                                    }
+                    let preview = tool.permission_preview(&prepared);
+                    let permission_check =
+                        ctx.permission_engine
+                            .check(tool.name(), preview.as_ref(), &raw_input);
+                    match permission_check.decision {
+                        PermissionDecision::Allow => {}
+                        PermissionDecision::Deny { reason } => return ToolResult::error(reason),
+                        PermissionDecision::Ask => {
+                            let preview = preview.unwrap_or_else(|| PermissionPreview::Custom {
+                                tool_name: tool.name().to_string(),
+                                payload: raw_input.as_object().cloned().unwrap_or_default(),
+                            });
+                            match ctx
+                                .request_permission(preview, permission_check.source)
+                                .await
+                            {
+                                ToolPauseResponse::Permission { approved: true } => {}
+                                ToolPauseResponse::Permission { approved: false } => {
+                                    return ToolResult::error(format!(
+                                        "Permission denied for tool: {}",
+                                        tool.name()
+                                    ));
+                                }
+                                ToolPauseResponse::Cancelled => {
+                                    return ToolResult::error("Tool execution cancelled");
+                                }
+                                ToolPauseResponse::UserInput { .. } => {
+                                    return ToolResult::error(
+                                        "Received user input response for permission request",
+                                    );
                                 }
                             }
                         }

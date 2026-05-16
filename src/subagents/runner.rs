@@ -143,7 +143,7 @@ async fn run_subagent(
 
     let engine = QueryEngine::with_shared_tool_controls(
         ctx.pending_tool_pauses.clone(),
-        ctx.permission_policy.clone(),
+        ctx.permission_engine.clone(),
         ctx.cancel_notify.clone(),
     );
     let result = engine

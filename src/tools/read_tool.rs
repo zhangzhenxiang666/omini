@@ -1,4 +1,5 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
+use crate::types::events::{PermissionPreview, ReadPermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -58,6 +59,12 @@ impl Tool for ReadTool {
             )));
         }
         Ok(input)
+    }
+
+    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
+        Some(PermissionPreview::Read(ReadPermissionPreview {
+            file_path: prepared.file_path.clone(),
+        }))
     }
 
     async fn execute_prepared(

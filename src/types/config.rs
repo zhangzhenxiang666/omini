@@ -1,4 +1,5 @@
 use crate::db::DbError;
+use crate::permissions::RawPermissionConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -84,6 +85,7 @@ pub struct Settings {
 
     pub cwd: PathBuf,
     pub thinking_effort: Option<ThinkingEffort>,
+    pub permissions: Option<RawPermissionConfig>,
 }
 
 // 配置错误

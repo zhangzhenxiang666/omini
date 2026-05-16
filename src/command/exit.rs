@@ -17,6 +17,6 @@ impl Command for ExitCommand {
         "退出程序"
     }
     async fn execute(&self, _runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
-        CommandResult::Ok(vec![CommandEffect::Emit(RuntimeToUiEvent::Shutdown)])
+        CommandResult::Ok(vec![CommandEffect::emit(RuntimeToUiEvent::Shutdown)])
     }
 }

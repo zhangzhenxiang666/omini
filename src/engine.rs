@@ -1,7 +1,8 @@
 use crate::api::{ApiRequest, FinishReason, LlmClient};
+use crate::permissions::PermissionEngine;
 use crate::tools::{
-    DefaultPermissionPolicy, PendingToolPause, PendingToolPauses, PermissionPolicy,
-    ToolExecutionContext, ToolRegistry, ToolResult, ToolRuntimeContext,
+    PendingToolPause, PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult,
+    ToolRuntimeContext,
 };
 use crate::types::config::Settings;
 use crate::types::events::{EngineToRuntimeEvent, ToolPauseResponse};
@@ -35,7 +36,7 @@ enum ToolCollection {
 struct ToolRunControls {
     settings: Arc<Settings>,
     pending_tool_pauses: PendingToolPauses,
-    permission_policy: Arc<dyn PermissionPolicy>,
+    permission_engine: Arc<PermissionEngine>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
     runtime_context: Option<Arc<ToolRuntimeContext>>,
@@ -57,17 +58,17 @@ pub struct QueryContext<'a> {
 /// 查询引擎。
 pub struct QueryEngine {
     pending_tool_pauses: PendingToolPauses,
-    permission_policy: Arc<dyn PermissionPolicy>,
+    permission_engine: Arc<PermissionEngine>,
     cancel_notify: Arc<Notify>,
     pending_user_messages: Mutex<VecDeque<Message>>,
 }
 
 impl QueryEngine {
     /// 创建新的查询引擎。
-    pub fn new() -> Self {
+    pub fn new(permission_engine: Arc<PermissionEngine>) -> Self {
         Self {
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
-            permission_policy: Arc::new(DefaultPermissionPolicy),
+            permission_engine,
             cancel_notify: Arc::new(Notify::new()),
             pending_user_messages: Mutex::new(VecDeque::new()),
         }
@@ -75,12 +76,12 @@ impl QueryEngine {
 
     pub fn with_shared_tool_controls(
         pending_tool_pauses: PendingToolPauses,
-        permission_policy: Arc<dyn PermissionPolicy>,
+        permission_engine: Arc<PermissionEngine>,
         cancel_notify: Arc<Notify>,
     ) -> Self {
         Self {
             pending_tool_pauses,
-            permission_policy,
+            permission_engine,
             cancel_notify,
             pending_user_messages: Mutex::new(VecDeque::new()),
         }
@@ -267,13 +268,13 @@ impl QueryEngine {
                             let cancelled = cancelled.clone();
                             let tool_registry = ctx.tool_registry.clone();
                             let pending_tool_pauses = Arc::clone(&self.pending_tool_pauses);
-                            let permission_policy = Arc::clone(&self.permission_policy);
+                            let permission_engine = Arc::clone(&self.permission_engine);
                             let cancel_notify = Arc::clone(&self.cancel_notify);
                             let runtime_context = ctx.runtime_context.clone();
                             let controls = ToolRunControls {
                                 settings: Arc::clone(&ctx.settings),
                                 pending_tool_pauses,
-                                permission_policy,
+                                permission_engine,
                                 cancelled,
                                 cancel_notify,
                                 runtime_context,
@@ -647,7 +648,7 @@ impl QueryEngine {
                 settings: Some(controls.settings),
                 event_tx: event_tx.clone(),
                 pending_tool_pauses: controls.pending_tool_pauses,
-                permission_policy: controls.permission_policy,
+                permission_engine: controls.permission_engine,
                 cancelled: controls.cancelled,
                 cancel_notify: controls.cancel_notify,
                 runtime: runtime_context,
@@ -667,6 +668,8 @@ impl QueryEngine {
 
 impl Default for QueryEngine {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(PermissionEngine::empty(
+            std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        )))
     }
 }

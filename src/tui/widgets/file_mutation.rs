@@ -116,6 +116,11 @@ pub(super) fn render_edit(
 
     let mut header_spans: Vec<Span<'static>> = Vec::new();
     let is_running_without_preview = result.is_none() && preview.is_none();
+    let edit_preview = preview.and_then(|req| match &req.kind {
+        ToolPauseKind::Permission(PermissionPreview::Edit(preview)) => Some(preview),
+        _ => None,
+    });
+    let is_permission_preview = result.is_none() && edit_preview.is_some();
     if is_running_without_preview {
         header_spans.push(Span::styled(
             format!("{} ", spinner()),
@@ -130,8 +135,19 @@ pub(super) fn render_edit(
         let hdr_green = Style::default().fg(green_fg).bg(header_bg);
         let hdr_red = Style::default().fg(red_fg).bg(header_bg);
         header_spans.push(Span::styled("· ", hdr_plain));
-        header_spans.push(Span::styled("Edit", hdr_accent));
-        header_spans.push(Span::styled(format!(" {} (", display_file_path), hdr_plain));
+        if is_permission_preview {
+            header_spans.push(Span::styled(
+                format!("Matches: {}", replacement_count),
+                hdr_accent,
+            ));
+            header_spans.push(Span::styled(
+                format!(" in {} (", display_file_path),
+                hdr_plain,
+            ));
+        } else {
+            header_spans.push(Span::styled("Edit", hdr_accent));
+            header_spans.push(Span::styled(format!(" {} (", display_file_path), hdr_plain));
+        }
         header_spans.push(Span::styled(format!("+{}", total_added), hdr_green));
         header_spans.push(Span::styled(" ", hdr_plain));
         header_spans.push(Span::styled(format!("-{}", total_removed), hdr_red));
@@ -475,13 +491,25 @@ pub(super) fn render_write(
     let hdr_plain = Style::default().bg(header_bg);
     let hdr_accent = Style::default().fg(accent).bg(header_bg);
     let hdr_green = Style::default().fg(green_fg).bg(header_bg);
-    let mut header_spans: Vec<Span<'static>> = vec![
-        Span::styled("· ", hdr_plain),
-        Span::styled("Write", hdr_accent),
+    let write_preview = preview.and_then(|req| match &req.kind {
+        ToolPauseKind::Permission(PermissionPreview::Write(preview)) => Some(preview),
+        _ => None,
+    });
+    let is_permission_preview = result.is_none() && write_preview.is_some();
+    let mut header_spans: Vec<Span<'static>> = vec![Span::styled("· ", hdr_plain)];
+    if is_permission_preview {
+        let action = write_preview
+            .and_then(|preview| preview.summary.split_once(' ').map(|(action, _)| action))
+            .unwrap_or("Update");
+        header_spans.push(Span::styled(action.to_string(), hdr_accent));
+    } else {
+        header_spans.push(Span::styled("Write", hdr_accent));
+    }
+    header_spans.extend([
         Span::styled(format!(" {} (", display_file_path), hdr_plain),
         Span::styled(format!("+{}", added_lines), hdr_green),
         Span::styled(" -0)", hdr_plain),
-    ];
+    ]);
     let total_w: usize = header_spans.iter().map(|s| s.width()).sum();
     if w > total_w {
         header_spans.push(Span::styled(
