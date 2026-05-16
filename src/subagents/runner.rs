@@ -360,4 +360,22 @@ mod tests {
 
         assert_eq!(extract_final_text(&messages), "(no final text)");
     }
+
+    #[test]
+    fn extract_final_text_uses_partial_interrupted_assistant_message() {
+        let messages = vec![
+            Message::from_user_text("explore the repository".to_string()),
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_text(
+                    "partial findings before stream interruption".to_string(),
+                )],
+            ),
+        ];
+
+        assert_eq!(
+            extract_final_text(&messages),
+            "partial findings before stream interruption"
+        );
+    }
 }

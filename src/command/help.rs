@@ -17,6 +17,9 @@ impl Command for HelpCommand {
     fn description(&self) -> &'static str {
         "显示帮助"
     }
+    fn sort_weight(&self) -> i32 {
+        900
+    }
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         let cmds = runtime.command_registry.all_commands();
         // 计算左半部分（"/name" + 可选别名）的最大宽度

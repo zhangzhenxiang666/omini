@@ -24,17 +24,7 @@ pub(super) async fn invoke_openai(
     map.insert("messages".to_string(), Value::Array(openai_messages));
     map.insert("stream".to_string(), Value::Bool(true));
 
-    // 当启用思考时，确保 max_tokens 足够大（thinking tokens 也消耗 max_tokens）
-    let max_tokens = request.max_tokens.unwrap_or(
-        if request
-            .thinking_effort
-            .is_some_and(|e| e != ThinkingEffort::None)
-        {
-            16384
-        } else {
-            8192
-        },
-    );
+    let max_tokens = request.max_tokens.unwrap_or(32768);
     map.insert("max_tokens".to_string(), Value::Number(max_tokens.into()));
 
     if let Some(effort) = request.thinking_effort

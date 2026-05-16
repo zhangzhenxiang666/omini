@@ -210,11 +210,11 @@ impl QueryEngine {
             let mut stream = match ctx.llm_client.invoke(request).await {
                 Ok(s) => s,
                 Err(e) => {
-                    let _ = event_tx
-                        .send(EngineToRuntimeEvent::Error(format!(
-                            "LLM request failed: {e}"
-                        )))
-                        .await;
+                    let error = format!("LLM request failed: {e}");
+                    finish_reason = FinishReason::Error(error.clone());
+                    let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
+                    let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                    turns += 1;
                     break;
                 }
             };
@@ -222,6 +222,7 @@ impl QueryEngine {
             let mut stream_completion = None;
             let mut partial_blocks: Vec<ContentBlock> = Vec::new();
             let mut query_cancelled = false;
+            let mut stream_error = None;
 
             loop {
                 let next_event = tokio::select! {
@@ -288,11 +289,7 @@ impl QueryEngine {
                         }
                     },
                     Err(stream_err) => {
-                        let _ = event_tx
-                            .send(EngineToRuntimeEvent::Error(format!(
-                                "Stream error: {stream_err}"
-                            )))
-                            .await;
+                        stream_error = Some(format!("Stream error: {stream_err}"));
                         break;
                     }
                 }
@@ -344,13 +341,19 @@ impl QueryEngine {
             let completion = match stream_completion {
                 Some(c) => c,
                 None => {
-                    if !cancelled.load(Ordering::Relaxed) {
-                        let _ = event_tx
-                            .send(EngineToRuntimeEvent::Error(
-                                "Stream ended unexpectedly".into(),
-                            ))
-                            .await;
-                    }
+                    let error =
+                        stream_error.unwrap_or_else(|| "Stream ended unexpectedly".to_string());
+                    finish_reason = FinishReason::Error(error.clone());
+                    had_tool_use |= self
+                        .finish_interrupted_turn(
+                            ctx.messages,
+                            partial_blocks,
+                            &mut tool_tasks,
+                            &event_tx,
+                            error,
+                        )
+                        .await;
+                    turns += 1;
                     break;
                 }
             };
@@ -437,6 +440,56 @@ impl QueryEngine {
             finish_reason,
             had_tool_use,
         }
+    }
+
+    async fn finish_interrupted_turn(
+        &self,
+        messages: &mut Vec<Message>,
+        partial_blocks: Vec<ContentBlock>,
+        tool_tasks: &mut JoinSet<ToolResultBlock>,
+        event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
+        error: String,
+    ) -> bool {
+        let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
+
+        let mut had_tool_use = false;
+        if !partial_blocks.is_empty() {
+            let msg = Message::new(Role::Assistant, partial_blocks);
+            let _ = event_tx
+                .send(EngineToRuntimeEvent::MessageProduced(msg.clone()))
+                .await;
+            messages.push(msg);
+
+            self.drain_pending_tool_pauses();
+            let tool_results = Self::cancel_and_collect_tool_results(
+                tool_tasks,
+                messages.last().expect("assistant message just pushed"),
+                event_tx,
+            )
+            .await;
+
+            if !tool_results.is_empty() {
+                had_tool_use = true;
+                let tool_msg = Message::new(
+                    Role::User,
+                    tool_results
+                        .into_iter()
+                        .map(ContentBlock::ToolResult)
+                        .collect(),
+                );
+                let _ = event_tx
+                    .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
+                    .await;
+                messages.push(tool_msg);
+            }
+        } else {
+            self.drain_pending_tool_pauses();
+            tool_tasks.abort_all();
+            while tool_tasks.join_next().await.is_some() {}
+        }
+
+        let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+        had_tool_use
     }
 
     async fn drain_pending_user_messages(
@@ -671,5 +724,158 @@ impl Default for QueryEngine {
         Self::new(Arc::new(PermissionEngine::empty(
             std::env::current_dir().unwrap_or_else(|_| ".".into()),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::message::ToolUseBlock;
+
+    fn text_from_message(msg: &Message) -> String {
+        msg.content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_preserves_partial_text() {
+        let engine = QueryEngine::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut messages = Vec::new();
+        let mut tool_tasks = JoinSet::new();
+
+        let had_tool_use = engine
+            .finish_interrupted_turn(
+                &mut messages,
+                vec![ContentBlock::from_text("partial answer".to_string())],
+                &mut tool_tasks,
+                &tx,
+                "Stream ended unexpectedly".to_string(),
+            )
+            .await;
+
+        assert!(!had_tool_use);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, Role::Assistant);
+        assert_eq!(text_from_message(&messages[0]), "partial answer");
+
+        let mut saw_error = false;
+        let mut saw_message = false;
+        let mut saw_turn_end = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineToRuntimeEvent::Error(error) => {
+                    saw_error = error == "Stream ended unexpectedly";
+                }
+                EngineToRuntimeEvent::MessageProduced(msg) => {
+                    saw_message = text_from_message(&msg) == "partial answer";
+                }
+                EngineToRuntimeEvent::TurnEnded => {
+                    saw_turn_end = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_error);
+        assert!(saw_message);
+        assert!(saw_turn_end);
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_without_partial_text_does_not_create_message() {
+        let engine = QueryEngine::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut messages = Vec::new();
+        let mut tool_tasks = JoinSet::new();
+
+        let had_tool_use = engine
+            .finish_interrupted_turn(
+                &mut messages,
+                Vec::new(),
+                &mut tool_tasks,
+                &tx,
+                "Stream ended unexpectedly".to_string(),
+            )
+            .await;
+
+        assert!(!had_tool_use);
+        assert!(messages.is_empty());
+
+        let mut saw_message = false;
+        let mut saw_turn_end = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineToRuntimeEvent::MessageProduced(_) => saw_message = true,
+                EngineToRuntimeEvent::TurnEnded => saw_turn_end = true,
+                _ => {}
+            }
+        }
+
+        assert!(!saw_message);
+        assert!(saw_turn_end);
+    }
+
+    #[tokio::test]
+    async fn interrupted_turn_fills_cancelled_tool_results() {
+        let engine = QueryEngine::default();
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut messages = Vec::new();
+        let mut tool_tasks = JoinSet::new();
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "read".to_string(),
+            input: HashMap::new(),
+        };
+
+        let had_tool_use = engine
+            .finish_interrupted_turn(
+                &mut messages,
+                vec![ContentBlock::ToolUse(tool_use)],
+                &mut tool_tasks,
+                &tx,
+                "Stream ended unexpectedly".to_string(),
+            )
+            .await;
+
+        assert!(had_tool_use);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, Role::Assistant);
+        assert_eq!(messages[1].role, Role::User);
+
+        let tool_result = messages[1]
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::ToolResult(result) => Some(result),
+                _ => None,
+            })
+            .expect("cancelled tool result should be appended");
+        assert_eq!(tool_result.tool_use_id, "toolu_1");
+        assert!(tool_result.is_error);
+        assert_eq!(tool_result.content, "Execution cancelled");
+
+        let mut saw_tool_result_event = false;
+        let mut saw_tool_results_message = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                EngineToRuntimeEvent::ToolResult(result) => {
+                    saw_tool_result_event = result.tool_use_id == "toolu_1";
+                }
+                EngineToRuntimeEvent::ToolResultsProduced(msg) => {
+                    saw_tool_results_message = msg.role == Role::User;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_tool_result_event);
+        assert!(saw_tool_results_message);
     }
 }

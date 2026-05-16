@@ -18,6 +18,9 @@ impl Command for ModelCommand {
     fn description(&self) -> &'static str {
         "切换模型"
     }
+    fn sort_weight(&self) -> i32 {
+        30
+    }
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         let providers: HashMap<String, ProviderProfile> = runtime.settings.providers.clone();
         let current_provider = runtime.settings.active_provider.clone();

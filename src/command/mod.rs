@@ -1,6 +1,7 @@
 pub mod effort;
 pub mod exit;
 pub mod help;
+pub mod init;
 pub mod model;
 pub mod new;
 pub mod rename;
@@ -49,6 +50,10 @@ pub trait Command: Send + Sync {
     fn has_args(&self) -> bool {
         false
     }
+    /// 命令抽屉排序权重，数值越小越靠前。
+    fn sort_weight(&self) -> i32 {
+        100
+    }
     /// 执行命令。
     async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult;
 }
@@ -91,6 +96,11 @@ impl CommandRegistry {
                 cmds.push(cmd.as_ref());
             }
         }
+        cmds.sort_by(|a, b| {
+            a.sort_weight()
+                .cmp(&b.sort_weight())
+                .then_with(|| a.name().cmp(b.name()))
+        });
         cmds
     }
 
@@ -102,6 +112,7 @@ impl CommandRegistry {
                 name: cmd.name().to_string(),
                 aliases: cmd.aliases().iter().map(|s| s.to_string()).collect(),
                 description: cmd.description().to_string(),
+                sort_weight: cmd.sort_weight(),
                 has_args: cmd.has_args(),
                 args_description: cmd.args_description(),
             })
@@ -117,5 +128,30 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));
     registry.register(Arc::new(rename::RenameCommand));
+    registry.register(Arc::new(init::InitCommand));
     registry.register(Arc::new(help::HelpCommand));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn command_summaries_are_sorted_by_weight_then_name() {
+        let mut registry = CommandRegistry::new();
+        register_default_commands(&mut registry);
+
+        let names: Vec<_> = registry
+            .summaries()
+            .into_iter()
+            .map(|cmd| cmd.name)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "sessions", "new", "model", "effort", "init", "rename", "help", "exit"
+            ]
+        );
+    }
 }

@@ -16,6 +16,9 @@ impl Command for ExitCommand {
     fn description(&self) -> &'static str {
         "退出程序"
     }
+    fn sort_weight(&self) -> i32 {
+        1000
+    }
     async fn execute(&self, _runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         CommandResult::Ok(vec![CommandEffect::emit(RuntimeToUiEvent::Shutdown)])
     }

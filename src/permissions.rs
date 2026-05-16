@@ -257,8 +257,8 @@ impl PermissionEngine {
                 Some(_) => PermissionDecision::Ask,
                 None => PermissionDecision::Ask,
             },
-            "edit" | "write" | "ask_user" => PermissionDecision::Ask,
-            "subagent" => PermissionDecision::Allow,
+            "edit" | "write" => PermissionDecision::Ask,
+            "ask_user" | "subagent" => PermissionDecision::Allow,
             _ => PermissionDecision::Ask,
         }
     }
@@ -1359,6 +1359,26 @@ prefix_rule(
         let input = serde_json::json!({"name": "explorer"});
         assert_eq!(
             engine.decide("subagent", None, &input),
+            PermissionDecision::Allow
+        );
+    }
+
+    #[test]
+    fn ask_user_defaults_to_allow() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &[]));
+        let input = serde_json::json!({
+            "questions": [{
+                "id": "choice",
+                "header": "Choice",
+                "question": "Which option should be used?",
+                "options": [
+                    {"label": "A", "description": "Use A."},
+                    {"label": "B", "description": "Use B."}
+                ]
+            }]
+        });
+        assert_eq!(
+            engine.decide("ask_user", None, &input),
             PermissionDecision::Allow
         );
     }

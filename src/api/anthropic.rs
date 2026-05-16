@@ -28,42 +28,35 @@ pub(super) async fn invoke_anthropic(
     );
     map.insert(
         "messages".to_string(),
-        serde_json::to_value(request.messages)?,
+        messages_with_cache_control(request.messages)?,
     );
     map.insert("stream".to_string(), Value::Bool(true));
 
-    let mut budget_tokens: Option<u32> = None;
-    if let Some(effort) = request.thinking_effort {
-        match effort {
-            ThinkingEffort::None => {}
-            ThinkingEffort::Low => budget_tokens = Some(4096),
-            ThinkingEffort::Medium => budget_tokens = Some(16384),
-            ThinkingEffort::High => budget_tokens = Some(32768),
-        }
-    }
-    if let Some(budget) = budget_tokens {
-        // Anthropic 要求 max_tokens 必须大于 budget_tokens
-        let raw_max = request.max_tokens.unwrap_or(8192);
-        let adjusted_max = raw_max.max(budget as u64 + 1024);
+    if let Some(effort) = request.thinking_effort
+        && effort != ThinkingEffort::None
+    {
         map.insert(
             "thinking".to_string(),
             serde_json::json!({
-                "type": "enabled",
-                "budget_tokens": budget,
+                "type": "adaptive",
             }),
         );
-        map.insert("max_tokens".to_string(), Value::Number(adjusted_max.into()));
-    } else {
         map.insert(
-            "max_tokens".to_string(),
-            Value::Number(request.max_tokens.unwrap_or(8192).into()),
+            "output_config".to_string(),
+            serde_json::json!({
+                "effort": effort,
+            }),
         );
     }
+    map.insert(
+        "max_tokens".to_string(),
+        Value::Number(request.max_tokens.unwrap_or(32768).into()),
+    );
 
     if let Some(system_prompt) = request.system_prompt {
         map.insert(
             "system".to_string(),
-            Value::String(system_prompt.to_string()),
+            system_with_cache_control(system_prompt),
         );
     }
 
@@ -354,4 +347,31 @@ pub(super) async fn invoke_anthropic(
         tracing::debug!("SSE stream task finished, channel closed");
     });
     Ok(result_stream)
+}
+
+fn cache_control() -> Value {
+    serde_json::json!({ "type": "ephemeral" })
+}
+
+fn system_with_cache_control(system_prompt: &str) -> Value {
+    Value::Array(vec![serde_json::json!({
+        "type": "text",
+        "text": system_prompt,
+        "cache_control": cache_control(),
+    })])
+}
+
+fn messages_with_cache_control(messages: &[Message]) -> Result<Value, serde_json::Error> {
+    let mut value = serde_json::to_value(messages)?;
+    if let Some(content_block) = value
+        .as_array_mut()
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|content| content.last_mut())
+        .and_then(Value::as_object_mut)
+    {
+        content_block.insert("cache_control".to_string(), cache_control());
+    }
+    Ok(value)
 }

@@ -35,6 +35,11 @@ impl CommandAutocomplete {
             })
             .cloned()
             .collect();
+        self.filtered.sort_by(|a, b| {
+            a.sort_weight
+                .cmp(&b.sort_weight)
+                .then_with(|| a.name.cmp(&b.name))
+        });
 
         let max = self.filtered.len().saturating_sub(1);
         self.selected = self.selected.min(max);

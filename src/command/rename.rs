@@ -17,6 +17,9 @@ impl Command for RenameCommand {
     fn description(&self) -> &'static str {
         "重命名当前会话"
     }
+    fn sort_weight(&self) -> i32 {
+        60
+    }
     fn has_args(&self) -> bool {
         true
     }

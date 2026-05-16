@@ -10,6 +10,7 @@ use crate::types::message::ToolResultBlock;
 use crate::types::tool::ToolDefinition;
 use async_trait::async_trait;
 use schemars::JsonSchema;
+use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -280,7 +281,18 @@ pub trait Tool: Send + Sync + 'static {
 
     /// 自动从 Self::Input 生成 JSON Schema
     fn input_schema(&self) -> Value {
-        serde_json::to_value(schemars::schema_for!(Self::Input)).unwrap()
+        let mut schema = serde_json::to_value(
+            SchemaSettings::default()
+                .with(|settings| {
+                    settings.meta_schema = None;
+                    settings.inline_subschemas = true;
+                })
+                .into_generator()
+                .into_root_schema_for::<Self::Input>(),
+        )
+        .unwrap();
+        sanitize_tool_schema(&mut schema);
+        schema
     }
 
     /// 预检查工具调用，生成内部强类型执行计划。
@@ -297,6 +309,40 @@ pub trait Tool: Send + Sync + 'static {
         prepared: Self::Prepared,
         ctx: ToolExecutionContext,
     ) -> ToolResult;
+}
+
+fn sanitize_tool_schema(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            map.remove("$schema");
+            map.remove("default");
+            map.remove("format");
+            map.remove("title");
+
+            if let Some(Value::Array(types)) = map.get("type") {
+                let mut types = types.clone();
+                types.retain(|ty| ty.as_str() != Some("null"));
+                if types.len() == 1 {
+                    map.insert("type".to_string(), types[0].clone());
+                }
+            }
+
+            if map.get("type").and_then(Value::as_str) == Some("object") {
+                map.entry("additionalProperties".to_string())
+                    .or_insert(Value::Bool(false));
+            }
+
+            for value in map.values_mut() {
+                sanitize_tool_schema(value);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                sanitize_tool_schema(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// 注册表中存的「已擦除类型」的工具。

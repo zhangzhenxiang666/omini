@@ -1311,9 +1311,9 @@ fn render_subagent_tool(
     }
 
     let mut lines = vec![Line::from(header)];
-    push_subagent_error_lines(&mut lines, result, content_width);
 
     let Some(node) = node else {
+        push_subagent_error_lines(&mut lines, result, content_width, "  ");
         return lines;
     };
 
@@ -1364,6 +1364,8 @@ fn render_subagent_tool(
         lines.push(Line::from(spans));
         rendered_tools += 1;
     }
+
+    push_subagent_error_lines(&mut lines, result, content_width, "  ");
     lines
 }
 
@@ -1371,6 +1373,7 @@ fn push_subagent_error_lines(
     lines: &mut Vec<Line<'static>>,
     result: Option<&ToolResultBlock>,
     content_width: usize,
+    indent: &'static str,
 ) {
     let Some(result) = result.filter(|result| result.is_error) else {
         return;
@@ -1382,10 +1385,12 @@ fn push_subagent_error_lines(
     } else {
         result.content.trim()
     };
-    let wrapped = crate::tui::widgets::word_wrap(content, content_width.saturating_sub(2).max(1));
+    let indent_width = UnicodeWidthStr::width(indent);
+    let wrapped =
+        crate::tui::widgets::word_wrap(content, content_width.saturating_sub(indent_width).max(1));
     for line in wrapped {
         lines.push(Line::from(vec![
-            Span::raw("  "),
+            Span::raw(indent),
             Span::styled(line, error_style),
         ]));
     }

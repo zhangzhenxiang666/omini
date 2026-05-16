@@ -250,6 +250,7 @@ pub struct CommandSummary {
     pub name: String,
     pub aliases: Vec<String>,
     pub description: String,
+    pub sort_weight: i32,
     /// true = 需要额外参数，选中后只补全命令名+空格
     /// false = 无参数，选中后直接执行
     pub has_args: bool,
@@ -272,6 +273,13 @@ pub enum CommandEffect {
     ShowInteraction(InteractionRequest),
     /// 注入一条用户消息并立即启动 query。
     InjectUserMessage(Message),
+    /// 注入一条 LLM 消息并用另一条消息作为 UI/数据库回显。
+    InjectUserQuery {
+        llm_message: Message,
+        display_message: Message,
+    },
+    /// 不新增用户消息，直接基于当前历史继续启动 query。
+    ContinueQuery,
     /// 复用已有 Runtime → UI 事件表达非命令专属的生命周期变更。
     Emit(Box<RuntimeToUiEvent>),
 }
@@ -279,6 +287,13 @@ pub enum CommandEffect {
 impl CommandEffect {
     pub fn emit(event: RuntimeToUiEvent) -> Self {
         Self::Emit(Box::new(event))
+    }
+
+    pub fn inject_user_query(llm_message: Message, display_message: Message) -> Self {
+        Self::InjectUserQuery {
+            llm_message,
+            display_message,
+        }
     }
 }
 

@@ -21,6 +21,10 @@ impl Command for EffortCommand {
         "调整当前模型的思考程度"
     }
 
+    fn sort_weight(&self) -> i32 {
+        40
+    }
+
     fn has_args(&self) -> bool {
         true
     }

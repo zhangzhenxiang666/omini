@@ -16,6 +16,9 @@ impl Command for NewCommand {
     fn description(&self) -> &'static str {
         "清空当前会话，开始新对话"
     }
+    fn sort_weight(&self) -> i32 {
+        20
+    }
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         // 清空 runtime 状态
         runtime.session_id = None;

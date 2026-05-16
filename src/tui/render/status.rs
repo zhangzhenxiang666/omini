@@ -100,6 +100,17 @@ pub(super) fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: R
         Span::styled("·", Style::default().fg(Color::DarkGray)),
     ];
 
+    #[cfg(debug_assertions)]
+    if let Some(session_id) = state.current_session_id.as_deref() {
+        base_spans.extend([
+            Span::styled(
+                format!(" session:{} ", session_id),
+                Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98)),
+            ),
+            Span::styled("·", Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+
     let line = match &state.agent_status {
         AgentStatus::Thinking | AgentStatus::Working => {
             let mut spans = base_spans;

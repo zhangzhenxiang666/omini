@@ -31,6 +31,16 @@ pub(crate) enum PendingInteraction {
 }
 
 #[derive(Debug)]
+enum RunStart {
+    /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
+    UserMessage,
+    /// 启动前将最新 runtime 消息写入 JSONL，将指定消息写入 SQLite/UI 历史。
+    SplitUserMessage { display_message: Message },
+    /// 基于现有历史继续运行，不新增用户消息。
+    Continue,
+}
+
+#[derive(Debug)]
 struct CapabilityStore {
     subagents: RwLock<Arc<AgentRegistry>>,
 }
@@ -49,6 +59,13 @@ impl CapabilityStore {
             .read()
             .expect("subagent registry lock poisoned")
             .clone()
+    }
+}
+
+fn initial_display_message(start: &RunStart) -> Option<&Message> {
+    match start {
+        RunStart::SplitUserMessage { display_message } => Some(display_message),
+        RunStart::UserMessage | RunStart::Continue => None,
     }
 }
 
@@ -159,7 +176,7 @@ impl AgentRuntime {
                         match req {
                             UiToRuntimeEvent::SendMessage(msg) => {
                                 self.messages.push(msg);
-                                self.process_run().await;
+                                self.process_run(RunStart::UserMessage).await;
                             }
                             UiToRuntimeEvent::SendCommand(text) => {
                                 if let Some(parsed) = command::parse(&text) {
@@ -252,7 +269,22 @@ impl AgentRuntime {
                 self.messages.push(msg.clone());
                 self.send_event(RuntimeToUiEvent::UserMessageInjected(msg))
                     .await;
-                self.process_run().await;
+                self.process_run(RunStart::UserMessage).await;
+            }
+            CommandEffect::InjectUserQuery {
+                llm_message,
+                display_message,
+            } => {
+                self.messages.push(llm_message);
+                self.send_event(RuntimeToUiEvent::UserMessageInjected(
+                    display_message.clone(),
+                ))
+                .await;
+                self.process_run(RunStart::SplitUserMessage { display_message })
+                    .await;
+            }
+            CommandEffect::ContinueQuery => {
+                self.process_run(RunStart::Continue).await;
             }
             CommandEffect::Emit(event) => {
                 self.send_event(*event).await;
@@ -351,14 +383,23 @@ impl AgentRuntime {
             .and_then(|s| s.parse::<ThinkingEffort>().ok());
         self.settings.thinking_effort = thinking_effort;
 
-        // 从数据库加载消息（而非 JSONL）
+        // UI 展示使用数据库消息；LLM 上下文使用 JSONL 历史。
         let blocks_dir = session_dir.path().join("blocks");
-        let messages = load_messages_from_db(session_id, &blocks_dir).await;
+        let ui_messages = load_messages_from_db(session_id, &blocks_dir).await;
+        let runtime_messages = match session_dir.load_history() {
+            Ok(messages) => messages,
+            Err(e) => {
+                self.send_event(RuntimeToUiEvent::Warning(format!(
+                    "加载 JSONL 历史失败，已降级使用数据库消息: {e}"
+                )))
+                .await;
+                ui_messages.clone()
+            }
+        };
         let subagents = load_subagents_for_session(session_id, &self.project).await;
 
-        let count = messages.len() as i64;
-        let ui_messages = messages.clone();
-        self.messages = messages;
+        let count = ui_messages.len() as i64;
+        self.messages = runtime_messages;
 
         let _ = db::global_db()
             .update_session_msg_count(session_id, count)
@@ -385,14 +426,16 @@ impl AgentRuntime {
     }
 
     /// 处理一次完整的用户请求（可能含多轮 LLM 调用）。
-    async fn process_run(&mut self) {
+    async fn process_run(&mut self, start: RunStart) {
         if self.session_id.is_none() {
-            self.create_session().await;
+            self.create_session(initial_display_message(&start)).await;
         } else {
             // 已有 session，更新 updated_at 时间戳
             let id = self.session_id.as_ref().expect("session_id should exist");
             let _ = db::global_db().update_session_updated_at(id).await;
         }
+
+        self.persist_initial_user_message(start).await;
 
         self.send_event(RuntimeToUiEvent::RunStarted).await;
 
@@ -401,11 +444,6 @@ impl AgentRuntime {
 
         // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
         let processor = self.spawn_event_processor(engine_rx).await;
-        if let Some(msg) = self.messages.last().cloned() {
-            let _ = engine_tx
-                .send(EngineToRuntimeEvent::UserMessageProduced(msg))
-                .await;
-        }
 
         {
             let subagent_registry = self.capabilities.subagent_registry();
@@ -498,6 +536,36 @@ impl AgentRuntime {
         self.send_event(RuntimeToUiEvent::RunFinished).await;
     }
 
+    async fn persist_initial_user_message(&self, start: RunStart) {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+        let Some(llm_message) = self.messages.last().cloned() else {
+            return;
+        };
+
+        let blocks_dir = session_dir.path().join("blocks");
+        match start {
+            RunStart::UserMessage => {
+                persist_one(session_dir, session_id, &blocks_dir, llm_message).await;
+            }
+            RunStart::SplitUserMessage { display_message } => {
+                persist_split_message(
+                    session_dir,
+                    session_id,
+                    &blocks_dir,
+                    llm_message,
+                    display_message,
+                )
+                .await;
+            }
+            RunStart::Continue => {}
+        }
+    }
+
     /// 启动事件处理器
     async fn spawn_event_processor(
         &self,
@@ -519,8 +587,10 @@ impl AgentRuntime {
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
-                    EngineToRuntimeEvent::UserMessageProduced(msg)
-                    | EngineToRuntimeEvent::MessageProduced(msg)
+                    EngineToRuntimeEvent::UserMessageProduced(msg) => {
+                        persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
+                    }
+                    EngineToRuntimeEvent::MessageProduced(msg)
                     | EngineToRuntimeEvent::ToolResultsProduced(msg) => {
                         persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
                     }
@@ -592,7 +662,7 @@ impl AgentRuntime {
     }
 
     /// 首次提交时创建 session：生成 UUID、建目录、写 DB。
-    async fn create_session(&mut self) {
+    async fn create_session(&mut self, initial_display_message: Option<&Message>) {
         let id = Uuid::new_v4().to_string();
         self.session_id = Some(id.clone());
 
@@ -605,7 +675,8 @@ impl AgentRuntime {
         let now = Utc::now();
         let project_path = sanitize(&self.settings.cwd);
         // 从第一条用户消息中提取标题
-        let title = self.messages.last().and_then(|msg| {
+        let title_source = initial_display_message.or_else(|| self.messages.last());
+        let title = title_source.and_then(|msg| {
             msg.content.first().and_then(|block| {
                 if let crate::types::message::ContentBlock::Text(t) = block {
                     let text = t.text.trim().to_string();
@@ -645,7 +716,9 @@ impl AgentRuntime {
             .await;
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id_out),
-            messages: self.messages.clone(),
+            messages: initial_display_message
+                .map(|msg| vec![msg.clone()])
+                .unwrap_or_else(|| self.messages.clone()),
             subagents: Vec::new(),
         })
         .await;
@@ -728,14 +801,23 @@ async fn load_subagents_for_session(
 
 /// 持久化单条消息到 JSONL + SQLite。
 async fn persist_one(session_dir: &SessionDir, session_id: &str, blocks_dir: &Path, msg: Message) {
-    // JSONL
     let _ = session_dir.append_history(&msg);
+    persist_db_only(session_id, blocks_dir, &msg).await;
+}
 
-    // SQLite
+/// 持久化命令注入消息，其中 JSONL 面向 LLM，SQLite 面向 UI。
+async fn persist_split_message(
+    session_dir: &SessionDir,
+    session_id: &str,
+    blocks_dir: &Path,
+    llm_msg: Message,
+    display_msg: Message,
+) {
+    let _ = session_dir.append_history(&llm_msg);
     let new_msg = NewMessage {
         session_id: session_id.to_string(),
-        role: msg.role.to_string(),
-        blocks: msg.content,
+        role: display_msg.role.to_string(),
+        blocks: display_msg.content,
         kind: "normal".to_string(),
         created_at: Utc::now(),
         blocks_dir: blocks_dir.to_path_buf(),

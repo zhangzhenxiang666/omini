@@ -17,6 +17,9 @@ impl Command for SessionsCommand {
     fn description(&self) -> &'static str {
         "切换会话"
     }
+    fn sort_weight(&self) -> i32 {
+        10
+    }
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         let project_path = crate::config::project::sanitize(&runtime.settings.cwd);
         let sessions = match db::global_db().list_sessions(&project_path).await {

@@ -406,6 +406,14 @@ impl UiState {
                 self.agent_status = AgentStatus::Working;
             }
             RuntimeToUiEvent::ToolResult(tr) => {
+                if let Some(session_id) = self.subagents_by_tool_use.get(&tr.tool_use_id)
+                    && let Some(node) = self.subagents.get_mut(session_id)
+                    && node.status == SubagentStatus::Running
+                    && tr.is_error
+                    && tr.content.trim() == "Execution cancelled"
+                {
+                    node.status = SubagentStatus::Cancelled;
+                }
                 self.running_tools.remove(&tr.tool_use_id);
                 self.pending_tool_previews.remove(&tr.tool_use_id);
                 if self.pending_tool_previews.is_empty() {
