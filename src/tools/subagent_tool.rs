@@ -39,7 +39,7 @@ impl Tool for SubagentTool {
             "You may call this tool multiple times in one assistant turn to run subagents in parallel.\n",
             "\n",
             "Built-in subagents: default, explorer, worker. Custom subagents are loaded from ",
-            ".omini/agents/*.md in the current workspace."
+            "~/.omini/agents/*.md and .omini/agents/*.md in the current workspace."
         )
     }
 

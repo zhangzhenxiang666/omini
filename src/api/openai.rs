@@ -1,6 +1,6 @@
 use crate::api::{
-    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, Usage, api_channel,
-    send_with_retry, sse::IntoSseStream,
+    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, StreamError, Usage,
+    api_channel, send_with_retry, sse::IntoSseStream,
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
@@ -23,6 +23,10 @@ pub(super) async fn invoke_openai(
     let openai_messages = convert_messages_to_openai(request.messages, request.system_prompt);
     map.insert("messages".to_string(), Value::Array(openai_messages));
     map.insert("stream".to_string(), Value::Bool(true));
+    map.insert(
+        "stream_options".to_string(),
+        serde_json::json!({ "include_usage": true }),
+    );
 
     let max_tokens = request.max_tokens.unwrap_or(32768);
     map.insert("max_tokens".to_string(), Value::Number(max_tokens.into()));
@@ -81,15 +85,14 @@ pub(super) async fn invoke_openai(
         let mut accumulated_reasoning: Option<String> = None;
         // 工具调用累积（按 tool_call.index 索引）
         let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
-        // 当前正在累积的 tool_call index（用于检测 index 切换）
-        let mut active_tool_call_index: Option<usize> = None;
-        // 下一个期望发送的 tool_call index，用于保证顺序
-        let mut next_expected_index: usize = 0;
+        let mut next_expected_tool_index: usize = 0;
         // 最终组装
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
         let mut prompt_tokens: u32 = 0;
         let mut completion_tokens: u32 = 0;
         let mut finish_reason: FinishReason = FinishReason::Stop;
+        let mut saw_finish_reason = false;
+        let mut saw_done = false;
 
         let mut stream = Box::pin(
             response
@@ -109,6 +112,7 @@ pub(super) async fn invoke_openai(
 
                     // OpenAI 用 [DONE] 结尾
                     if sse_event.data == "[DONE]" {
+                        saw_done = true;
                         break 'stream;
                     }
 
@@ -120,7 +124,8 @@ pub(super) async fn invoke_openai(
                         Ok(v) => v,
                         Err(e) => {
                             tracing::warn!(msg = "Failed to parse SSE data", error = %e);
-                            continue;
+                            let _ = tx.send(Err(StreamError::Json(e))).await;
+                            return;
                         }
                     };
 
@@ -139,6 +144,7 @@ pub(super) async fn invoke_openai(
                         .and_then(|v| v.as_str())
                         .filter(|r| !r.is_empty());
                     if let Some(reason) = current_finish_reason {
+                        saw_finish_reason = true;
                         finish_reason = match reason {
                             "stop" => FinishReason::Stop,
                             "length" => FinishReason::Length,
@@ -159,107 +165,115 @@ pub(super) async fn invoke_openai(
                             .unwrap_or(0) as u32;
                     }
 
-                    let delta = match choice.get("delta") {
-                        Some(d) => d,
-                        None => continue,
-                    };
-
-                    // content delta
-                    if let Some(text) = delta
-                        .get("content")
-                        .and_then(|v| v.as_str())
-                        .filter(|t| !t.is_empty())
-                    {
-                        accumulated_text
-                            .get_or_insert_with(String::new)
-                            .push_str(text);
-
-                        if tx.send(Ok(ApiEvent::Text(text.to_string()))).await.is_err() {
-                            break 'stream;
-                        }
-                    }
-
-                    // reasoning_content delta
-                    if let Some(thinking) = delta
-                        .get("reasoning_content")
-                        .or_else(|| delta.get("reasoning"))
-                        .and_then(|v| v.as_str())
-                        .filter(|t| !t.is_empty())
-                    {
-                        accumulated_reasoning
-                            .get_or_insert_with(String::new)
-                            .push_str(thinking);
-
-                        if tx
-                            .send(Ok(ApiEvent::Thinking(thinking.to_string())))
-                            .await
-                            .is_err()
+                    if let Some(delta) = choice.get("delta") {
+                        // content delta
+                        if let Some(text) = delta
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .filter(|t| !t.is_empty())
                         {
-                            break 'stream;
-                        }
-                    }
+                            accumulated_text
+                                .get_or_insert_with(String::new)
+                                .push_str(text);
 
-                    // tool_calls delta
-                    if let Some(tc_array) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-                        // 收集这一批 chunk 中的所有 index
-                        let mut seen_indices: Vec<usize> = Vec::new();
-
-                        for tc in tc_array {
-                            let idx =
-                                tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                            seen_indices.push(idx);
-
-                            let entry = tool_calls.entry(idx).or_insert_with(|| ToolCallAcc {
-                                id: None,
-                                name: None,
-                                arguments: String::new(),
-                                emitted: false,
-                            });
-
-                            if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                entry.id = Some(id.to_string());
-                            }
-
-                            if let Some(name) = tc
-                                .get("function")
-                                .and_then(|f| f.get("name"))
-                                .and_then(|v| v.as_str())
-                            {
-                                entry.name = Some(name.to_string());
-                            }
-
-                            if let Some(args) = tc
-                                .get("function")
-                                .and_then(|f| f.get("arguments"))
-                                .and_then(|v| v.as_str())
-                            {
-                                entry.arguments.push_str(args);
+                            if tx.send(Ok(ApiEvent::Text(text.to_string()))).await.is_err() {
+                                return;
                             }
                         }
 
-                        // 检测 index 切换：当活跃的 tool_call 不再出现在当前 chunk 中时，
-                        // 说明前一个 tool_call 已结束，发送它
-                        if let Some(active) = active_tool_call_index
-                            && !seen_indices.contains(&active)
-                            && let Some(tc) = tool_calls.remove(&active)
-                            && tc.id.is_some()
+                        // reasoning_content delta
+                        if let Some(thinking) = delta
+                            .get("reasoning_content")
+                            .or_else(|| delta.get("reasoning"))
+                            .and_then(|v| v.as_str())
+                            .filter(|t| !t.is_empty())
                         {
-                            send_tool_use(tc, &mut content_blocks, &tx).await;
+                            accumulated_reasoning
+                                .get_or_insert_with(String::new)
+                                .push_str(thinking);
+
+                            if tx
+                                .send(Ok(ApiEvent::Thinking(thinking.to_string())))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
 
-                        // 更新活跃 index 为这批中的最后一个
-                        active_tool_call_index = seen_indices.last().copied();
+                        // tool_calls delta
+                        if let Some(tc_array) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+                            let mut min_seen_index: Option<usize> = None;
+                            for tc in tc_array {
+                                let idx =
+                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                                min_seen_index =
+                                    Some(min_seen_index.map_or(idx, |min| min.min(idx)));
+
+                                let entry = tool_calls.entry(idx).or_insert_with(ToolCallAcc::new);
+
+                                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                    entry.id = Some(id.to_string());
+                                }
+
+                                if let Some(name) = tc
+                                    .get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    entry.name = Some(name.to_string());
+                                }
+
+                                if let Some(args) = tc
+                                    .get("function")
+                                    .and_then(|f| f.get("arguments"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    entry.arguments.push_str(args);
+                                }
+                            }
+
+                            if let Some(min_seen_index) = min_seen_index
+                                && min_seen_index > next_expected_tool_index
+                            {
+                                push_accumulated_blocks(
+                                    &mut accumulated_text,
+                                    &mut accumulated_reasoning,
+                                    &mut content_blocks,
+                                );
+                                if let Err(err) = emit_tool_calls_before_index(
+                                    &mut tool_calls,
+                                    &mut next_expected_tool_index,
+                                    min_seen_index,
+                                    &mut content_blocks,
+                                    &tx,
+                                )
+                                .await
+                                {
+                                    let _ = tx.send(Err(err)).await;
+                                    return;
+                                }
+                            }
+                        }
                     }
 
-                    // 当 finish_reason 为 tool_calls 时，按序发送所有 tool_use
                     if current_finish_reason == Some("tool_calls") {
-                        flush_ready_tool_calls(
+                        push_accumulated_blocks(
+                            &mut accumulated_text,
+                            &mut accumulated_reasoning,
+                            &mut content_blocks,
+                        );
+                        if let Err(err) = emit_all_pending_tool_calls(
                             &mut tool_calls,
-                            &mut next_expected_index,
+                            &mut next_expected_tool_index,
                             &mut content_blocks,
                             &tx,
                         )
-                        .await;
+                        .await
+                        {
+                            let _ = tx.send(Err(err)).await;
+                            return;
+                        }
                     }
                 }
 
@@ -268,36 +282,42 @@ pub(super) async fn invoke_openai(
                     tracing::warn!(msg = "SSE parse error", error = %err, consecutive_errors, max = MAX_CONSECUTIVE_ERRORS);
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                         tracing::error!("Too many consecutive SSE errors, stopping stream");
-                        break 'stream;
+                        let _ = tx.send(Err(StreamError::Sse(err.to_string()))).await;
+                        return;
                     }
                     continue;
                 }
 
                 Err(_elapsed) => {
                     tracing::warn!("SSE stream timed out after 90s");
-                    break 'stream;
+                    let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
+                    return;
                 }
             }
         }
 
-        // 关闭文本块
-        if let Some(text) = accumulated_text.take() {
-            content_blocks.push(ContentBlock::from_text(text));
+        if !saw_done && !saw_finish_reason {
+            let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
+            return;
         }
 
-        // 关闭思考块
-        if let Some(thinking) = accumulated_reasoning.take() {
-            content_blocks.push(ContentBlock::from_thinking(thinking));
-        }
+        push_accumulated_blocks(
+            &mut accumulated_text,
+            &mut accumulated_reasoning,
+            &mut content_blocks,
+        );
 
-        // 流结束，发送所有剩余的 tool_calls
-        flush_ready_tool_calls(
+        if let Err(err) = emit_all_pending_tool_calls(
             &mut tool_calls,
-            &mut next_expected_index,
+            &mut next_expected_tool_index,
             &mut content_blocks,
             &tx,
         )
-        .await;
+        .await
+        {
+            let _ = tx.send(Err(err)).await;
+            return;
+        }
 
         // 发送 Done
         let completion = ApiCompletion {
@@ -323,53 +343,89 @@ struct ToolCallAcc {
     emitted: bool,
 }
 
-/// 发送单个 tool_call 的 ApiEvent::ToolUse
-async fn send_tool_use(
-    tc: ToolCallAcc,
-    content_blocks: &mut Vec<ContentBlock>,
-    tx: &tokio::sync::mpsc::Sender<Result<ApiEvent, crate::api::StreamError>>,
-) {
-    let input: HashMap<String, Value> = serde_json::from_str(&tc.arguments).unwrap_or_default();
-    let tool_use = ToolUseBlock {
-        id: tc.id.unwrap_or_default(),
-        name: tc.name.unwrap_or_default(),
-        input,
-    };
-    content_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
-    let _ = tx.send(Ok(ApiEvent::ToolUse(tool_use))).await;
-}
-
-/// 将所有剩余的 tool_call 发送（用于 finish_reason 或流结束时）
-/// 按照 index 顺序发送所有就绪的 tool_call。
-///
-/// 从 `next_expected_index` 开始连续扫描，遇到已初始化且未发出的就发送，
-/// 遇到空缺（数据还没到、或未初始化）就停止等待，确保顺序不乱。
-async fn flush_ready_tool_calls(
-    tool_calls: &mut HashMap<usize, ToolCallAcc>,
-    next_expected: &mut usize,
-    content_blocks: &mut Vec<ContentBlock>,
-    tx: &tokio::sync::mpsc::Sender<Result<ApiEvent, crate::api::StreamError>>,
-) {
-    loop {
-        match tool_calls.get_mut(next_expected) {
-            Some(tc) if !tc.emitted && tc.id.is_some() => {
-                tc.emitted = true;
-                let input: HashMap<String, Value> =
-                    serde_json::from_str(&tc.arguments).unwrap_or_default();
-                let tool_use = ToolUseBlock {
-                    id: tc.id.clone().unwrap_or_default(),
-                    name: tc.name.clone().unwrap_or_default(),
-                    input,
-                };
-                content_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
-                if tx.send(Ok(ApiEvent::ToolUse(tool_use))).await.is_err() {
-                    break;
-                }
-                *next_expected += 1;
-            }
-            _ => break,
+impl ToolCallAcc {
+    fn new() -> Self {
+        Self {
+            id: None,
+            name: None,
+            arguments: String::new(),
+            emitted: false,
         }
     }
+}
+
+fn push_accumulated_blocks(
+    accumulated_text: &mut Option<String>,
+    accumulated_reasoning: &mut Option<String>,
+    content_blocks: &mut Vec<ContentBlock>,
+) {
+    if let Some(text) = accumulated_text.take() {
+        content_blocks.push(ContentBlock::from_text(text));
+    }
+
+    if let Some(thinking) = accumulated_reasoning.take() {
+        content_blocks.push(ContentBlock::from_thinking(thinking));
+    }
+}
+
+async fn emit_all_pending_tool_calls(
+    tool_calls: &mut HashMap<usize, ToolCallAcc>,
+    next_expected_index: &mut usize,
+    content_blocks: &mut Vec<ContentBlock>,
+    tx: &tokio::sync::mpsc::Sender<Result<ApiEvent, StreamError>>,
+) -> Result<(), StreamError> {
+    let Some(upper_bound) = tool_calls.keys().copied().max().map(|index| index + 1) else {
+        return Ok(());
+    };
+
+    emit_tool_calls_before_index(
+        tool_calls,
+        next_expected_index,
+        upper_bound,
+        content_blocks,
+        tx,
+    )
+    .await
+}
+
+/// Emit completed tool calls in index order.
+///
+/// OpenAI does not send an explicit per-tool stop event. When a higher index starts,
+/// lower indexes are complete enough to dispatch, while still preserving order.
+async fn emit_tool_calls_before_index(
+    tool_calls: &mut HashMap<usize, ToolCallAcc>,
+    next_expected_index: &mut usize,
+    upper_bound_exclusive: usize,
+    content_blocks: &mut Vec<ContentBlock>,
+    tx: &tokio::sync::mpsc::Sender<Result<ApiEvent, StreamError>>,
+) -> Result<(), StreamError> {
+    while *next_expected_index < upper_bound_exclusive {
+        let Some(tc) = tool_calls.get_mut(next_expected_index) else {
+            return Err(StreamError::UnexpectedEnd);
+        };
+        if tc.emitted {
+            *next_expected_index += 1;
+            continue;
+        }
+
+        let (Some(id), Some(name)) = (&tc.id, &tc.name) else {
+            return Err(StreamError::UnexpectedEnd);
+        };
+        let input: HashMap<String, Value> = serde_json::from_str(&tc.arguments)?;
+        let tool_use = ToolUseBlock {
+            id: id.clone(),
+            name: name.clone(),
+            input,
+        };
+        content_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
+        if tx.send(Ok(ApiEvent::ToolUse(tool_use))).await.is_err() {
+            return Err(StreamError::ChannelClosed);
+        }
+        tc.emitted = true;
+        *next_expected_index += 1;
+    }
+
+    Ok(())
 }
 
 fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>) -> Vec<Value> {
@@ -498,4 +554,92 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::StreamExt;
+
+    fn tool_call(id: &str, name: &str, arguments: &str) -> ToolCallAcc {
+        ToolCallAcc {
+            id: Some(id.to_string()),
+            name: Some(name.to_string()),
+            arguments: arguments.to_string(),
+            emitted: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn emits_tool_calls_as_next_index_starts_in_order() {
+        let (tx, mut rx) = api_channel(4);
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(0, tool_call("call_0", "first", r#"{"a":1}"#));
+        tool_calls.insert(1, tool_call("call_1", "second", r#"{"b":2}"#));
+        let mut next_expected_index = 0;
+        let mut content_blocks = Vec::new();
+
+        emit_tool_calls_before_index(
+            &mut tool_calls,
+            &mut next_expected_index,
+            1,
+            &mut content_blocks,
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(next_expected_index, 1);
+        assert_eq!(content_blocks.len(), 1);
+        match rx.next().await.unwrap().unwrap() {
+            ApiEvent::ToolUse(tool_use) => {
+                assert_eq!(tool_use.id, "call_0");
+                assert_eq!(tool_use.name, "first");
+                assert_eq!(tool_use.input.get("a"), Some(&serde_json::json!(1)));
+            }
+            other => panic!("expected tool use, got {other:?}"),
+        }
+
+        emit_all_pending_tool_calls(
+            &mut tool_calls,
+            &mut next_expected_index,
+            &mut content_blocks,
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(next_expected_index, 2);
+        assert_eq!(content_blocks.len(), 2);
+        match rx.next().await.unwrap().unwrap() {
+            ApiEvent::ToolUse(tool_use) => {
+                assert_eq!(tool_use.id, "call_1");
+                assert_eq!(tool_use.name, "second");
+                assert_eq!(tool_use.input.get("b"), Some(&serde_json::json!(2)));
+            }
+            other => panic!("expected tool use, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_arguments_return_json_error() {
+        let (tx, _rx) = api_channel(4);
+        let mut tool_calls = HashMap::new();
+        tool_calls.insert(0, tool_call("call_0", "broken", r#"{"a":"#));
+        let mut next_expected_index = 0;
+        let mut content_blocks = Vec::new();
+
+        let err = emit_all_pending_tool_calls(
+            &mut tool_calls,
+            &mut next_expected_index,
+            &mut content_blocks,
+            &tx,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, StreamError::Json(_)));
+        assert!(content_blocks.is_empty());
+        assert_eq!(next_expected_index, 0);
+    }
 }

@@ -98,6 +98,15 @@ pub(crate) fn load_agent_summaries(cwd: &Path) -> Vec<AgentSummary> {
 }
 
 pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
+    let mut agent_dirs = Vec::new();
+    if let Some(home_dir) = dirs::home_dir().filter(|path| !path.as_os_str().is_empty()) {
+        agent_dirs.push(home_dir.join(".omini").join("agents"));
+    }
+    agent_dirs.push(cwd.join(".omini").join("agents"));
+    load_agent_registry_from_dirs(agent_dirs)
+}
+
+fn load_agent_registry_from_dirs(agent_dirs: impl IntoIterator<Item = PathBuf>) -> AgentRegistry {
     let mut registry = AgentRegistry {
         agents: HashMap::new(),
         diagnostics: Vec::new(),
@@ -107,10 +116,17 @@ pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
         insert_agent(&mut registry, spec);
     }
 
-    let agents_dir = cwd.join(".omini").join("agents");
-    let entries = match fs::read_dir(&agents_dir) {
+    for agents_dir in agent_dirs {
+        load_agents_from_dir(&mut registry, &agents_dir);
+    }
+
+    registry
+}
+
+fn load_agents_from_dir(registry: &mut AgentRegistry, agents_dir: &Path) {
+    let entries = match fs::read_dir(agents_dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return registry,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
         Err(e) => {
             registry.diagnostics.push(AgentLoadDiagnostic {
                 message: format!(
@@ -118,7 +134,7 @@ pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
                     agents_dir.display()
                 ),
             });
-            return registry;
+            return;
         }
     };
 
@@ -140,14 +156,12 @@ pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
 
     for path in paths {
         match parser::parse_agent_file(&path) {
-            Ok(spec) => insert_agent(&mut registry, spec),
+            Ok(spec) => insert_agent(registry, spec),
             Err(e) => registry.diagnostics.push(AgentLoadDiagnostic {
                 message: format!("skipped {}: {e}", path.display()),
             }),
         }
     }
-
-    registry
 }
 
 fn insert_agent(registry: &mut AgentRegistry, spec: AgentSpec) {
@@ -180,6 +194,10 @@ mod tests {
         fs::write(cwd.join(".omini").join("agents").join(file_name), content).unwrap();
     }
 
+    fn load_project_agent_registry(cwd: &Path) -> AgentRegistry {
+        load_agent_registry_from_dirs([cwd.join(".omini").join("agents")])
+    }
+
     #[test]
     fn parses_custom_agent_with_string_tools() {
         let cwd = temp_project();
@@ -195,7 +213,7 @@ Translate comments without changing code.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("code-comment-translator").unwrap();
 
         assert!(registry.diagnostics.is_empty());
@@ -226,7 +244,7 @@ Inspect files and report findings.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("reader").unwrap();
 
         assert!(registry.diagnostics.is_empty());
@@ -250,7 +268,7 @@ Handle the assigned task.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("general").unwrap();
 
         assert!(agent.tool_policy.allow.is_none());
@@ -272,7 +290,7 @@ Inspect and report.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("safe-worker").unwrap();
 
         assert!(registry.diagnostics.is_empty());
@@ -305,7 +323,7 @@ Handle the task.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("modelled").unwrap();
 
         assert!(registry.diagnostics.is_empty());
@@ -332,7 +350,7 @@ This should be skipped.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("default").unwrap();
 
         assert_eq!(agent.description, "General purpose isolated coding agent.");
@@ -358,7 +376,7 @@ This should be skipped.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
 
         assert!(!registry.agents.contains_key("bad"));
         assert!(
@@ -382,7 +400,7 @@ This should be skipped.
 "#,
         );
 
-        let registry = load_agent_registry(&cwd);
+        let registry = load_project_agent_registry(&cwd);
 
         assert!(!registry.agents.contains_key("missing-description"));
         assert!(registry.diagnostics.iter().any(|diagnostic| {
@@ -390,5 +408,40 @@ This should be skipped.
                 .message()
                 .contains("missing required frontmatter field 'description'")
         }));
+    }
+
+    #[test]
+    fn loads_global_and_project_agent_directories() {
+        let global = temp_project();
+        let project = temp_project();
+        write_agent(
+            &global,
+            "global.md",
+            r#"---
+name: global-helper
+description: Global helper
+---
+Help across projects.
+"#,
+        );
+        write_agent(
+            &project,
+            "project.md",
+            r#"---
+name: project-helper
+description: Project helper
+---
+Help in this project.
+"#,
+        );
+
+        let registry = load_agent_registry_from_dirs([
+            global.join(".omini").join("agents"),
+            project.join(".omini").join("agents"),
+        ]);
+
+        assert!(registry.diagnostics.is_empty());
+        assert!(registry.agents.contains_key("global-helper"));
+        assert!(registry.agents.contains_key("project-helper"));
     }
 }

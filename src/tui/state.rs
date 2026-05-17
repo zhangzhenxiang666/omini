@@ -4,7 +4,7 @@ use crate::types::events::{
     InteractionRequest, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus, ToolPauseKind,
     ToolPauseRequest,
 };
-use crate::types::message::{ContentBlock, Message, Role};
+use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -438,14 +438,7 @@ impl UiState {
                 self.agent_status = AgentStatus::Working;
             }
             RuntimeToUiEvent::ToolResult(tr) => {
-                if let Some(session_id) = self.subagents_by_tool_use.get(&tr.tool_use_id)
-                    && let Some(node) = self.subagents.get_mut(session_id)
-                    && node.status == SubagentStatus::Running
-                    && tr.is_error
-                    && tr.content.trim() == "Execution cancelled"
-                {
-                    node.status = SubagentStatus::Cancelled;
-                }
+                self.finish_subagent_for_tool_result(&tr);
                 self.running_tools.remove(&tr.tool_use_id);
                 self.pending_tool_previews.remove(&tr.tool_use_id);
                 if self.pending_tool_previews.is_empty() {
@@ -561,6 +554,7 @@ impl UiState {
             }
             RuntimeToUiEvent::Error(e) => {
                 self.messages.push(UiMessage::Error { text: e });
+                self.fail_running_subagents();
                 if !self.pending_tool_previews.is_empty() {
                     self.agent_status = AgentStatus::AwaitingInput;
                 } else if !self.is_run_active() {
@@ -609,6 +603,36 @@ impl UiState {
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
             RuntimeToUiEvent::SessionChanged { .. } => {}
+        }
+    }
+
+    fn finish_subagent_for_tool_result(&mut self, result: &ToolResultBlock) {
+        let Some(session_id) = self.subagents_by_tool_use.get(&result.tool_use_id) else {
+            return;
+        };
+        let Some(node) = self.subagents.get_mut(session_id) else {
+            return;
+        };
+        if node.status != SubagentStatus::Running {
+            return;
+        }
+
+        node.status = if result.is_error {
+            if result.content.trim() == "Execution cancelled" {
+                SubagentStatus::Cancelled
+            } else {
+                SubagentStatus::Failed
+            }
+        } else {
+            SubagentStatus::Completed
+        };
+    }
+
+    fn fail_running_subagents(&mut self) {
+        for node in self.subagents.values_mut() {
+            if node.status == SubagentStatus::Running {
+                node.status = SubagentStatus::Failed;
+            }
         }
     }
 
@@ -938,6 +962,7 @@ fn combined_user_draft(drafts: &[&UserDraft]) -> UserDraft {
 mod tests {
     use super::*;
     use crate::types::display::MentionKind;
+    use crate::types::events::SubagentStartedEvent;
 
     fn state_with_mention(cursor_char: usize) -> UiState {
         let mut state = UiState::new();
@@ -952,6 +977,44 @@ mod tests {
             description: "directory".to_string(),
         });
         state
+    }
+
+    fn start_subagent(state: &mut UiState) {
+        state.apply_event(RuntimeToUiEvent::SubagentStarted(SubagentStartedEvent {
+            session_id: "sub_1".to_string(),
+            parent_session_id: "parent".to_string(),
+            spawn_tool_use_id: "tool_1".to_string(),
+            agent_label: "explorer".to_string(),
+        }));
+    }
+
+    #[test]
+    fn subagent_spawn_tool_error_finishes_running_state() {
+        let mut state = UiState::new();
+        start_subagent(&mut state);
+
+        state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+            tool_use_id: "tool_1".to_string(),
+            is_error: true,
+            content: "Stream error: Stream ended unexpectedly".to_string(),
+            metadata: None,
+        }));
+
+        let node = state.subagents.get("sub_1").unwrap();
+        assert_eq!(node.status, SubagentStatus::Failed);
+    }
+
+    #[test]
+    fn runtime_error_fails_running_subagent_state() {
+        let mut state = UiState::new();
+        start_subagent(&mut state);
+
+        state.apply_event(RuntimeToUiEvent::Error(
+            "Stream error: Stream ended unexpectedly".to_string(),
+        ));
+
+        let node = state.subagents.get("sub_1").unwrap();
+        assert_eq!(node.status, SubagentStatus::Failed);
     }
 
     #[test]
