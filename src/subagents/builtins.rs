@@ -1,5 +1,4 @@
-use super::{AgentSource, AgentSpec};
-use crate::tools::inherited_subagent_tool_names;
+use super::{AgentSource, AgentSpec, AgentToolPolicy};
 
 pub(super) fn built_in_agents() -> Vec<AgentSpec> {
     vec![default_agent(), explorer_agent(), worker_agent()]
@@ -17,7 +16,8 @@ When the task is investigative, return the key findings with concrete file/funct
 
 Return a concise final result for the parent agent. Do not attempt to spawn subagents."#
             .to_string(),
-        allowed_tools: inherited_subagent_tool_names(),
+        tool_policy: AgentToolPolicy::default(),
+        model: None,
         source: AgentSource::BuiltIn,
     }
 }
@@ -34,7 +34,11 @@ Do not edit files. Do not run commands whose purpose is to mutate source, genera
 
 Return a concise final report for the parent agent: findings first, then uncertainty or follow-up checks if any."#
             .to_string(),
-        allowed_tools: vec!["read".to_string(), "bash".to_string()],
+        tool_policy: AgentToolPolicy {
+            allow: Some(vec!["read".to_string(), "bash".to_string()]),
+            deny: None,
+        },
+        model: None,
         source: AgentSource::BuiltIn,
     }
 }
@@ -51,7 +55,8 @@ When changing behavior, consider the nearest useful verification path: targeted 
 
 Return a concise final result for the parent agent with changed files, verification performed, and any notable caveats. Do not attempt to spawn subagents."#
             .to_string(),
-        allowed_tools: inherited_subagent_tool_names(),
+        tool_policy: AgentToolPolicy::default(),
+        model: None,
         source: AgentSource::BuiltIn,
     }
 }

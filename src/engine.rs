@@ -40,6 +40,7 @@ struct ToolRunControls {
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
     runtime_context: Option<Arc<ToolRuntimeContext>>,
+    tool_registry: Arc<ToolRegistry>,
 }
 
 /// 一次查询的上下文。
@@ -279,6 +280,7 @@ impl QueryEngine {
                                 cancelled,
                                 cancel_notify,
                                 runtime_context,
+                                tool_registry: Arc::clone(&tool_registry),
                             };
                             tool_tasks.spawn(async move {
                                 Self::execute_tool(&tool_registry, &tool_use, &tx, controls).await
@@ -699,6 +701,7 @@ impl QueryEngine {
                     .unwrap_or_else(|| tool_use.id.clone()),
                 tool_name: tool_use.name.clone(),
                 settings: Some(controls.settings),
+                tool_registry: Some(controls.tool_registry),
                 event_tx: event_tx.clone(),
                 pending_tool_pauses: controls.pending_tool_pauses,
                 permission_engine: controls.permission_engine,

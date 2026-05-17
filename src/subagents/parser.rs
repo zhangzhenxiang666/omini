@@ -1,6 +1,5 @@
-use super::{AgentSource, AgentSpec};
-use crate::tools::inherited_subagent_tool_names;
-use std::collections::{HashMap, HashSet};
+use super::{AgentModelSpec, AgentSource, AgentSpec, AgentToolPolicy};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -11,13 +10,20 @@ pub(super) fn parse_agent_file(path: &Path) -> Result<AgentSpec, String> {
 
     let name = required_field(&raw, "name")?;
     let description = required_field(&raw, "description")?;
-    let tools = match raw.get("tools") {
-        Some(value) => parse_tools_value(value).and_then(|tools| normalize_tools(&tools))?,
-        None => inherited_subagent_tool_names(),
+    let allow = match raw.get("tools") {
+        Some(value) => {
+            Some(parse_tools_value(value).and_then(|tools| normalize_allow_tools(&tools))?)
+        }
+        None => None,
     };
-    if tools.is_empty() {
-        return Err("tools must allow at least one non-subagent tool".to_string());
-    }
+    let deny = match raw.get("disallow_tools") {
+        Some(value) => Some(parse_tools_value(value).and_then(|tools| normalize_tools(&tools))?),
+        None => None,
+    };
+    let model = match raw.get("model") {
+        Some(value) => Some(parse_model_spec(&parse_scalar(value)?)?),
+        None => None,
+    };
 
     let instructions = body.trim().to_string();
     if instructions.is_empty() {
@@ -28,7 +34,8 @@ pub(super) fn parse_agent_file(path: &Path) -> Result<AgentSpec, String> {
         name,
         description,
         instructions,
-        allowed_tools: tools,
+        tool_policy: AgentToolPolicy { allow, deny },
+        model,
         source: AgentSource::File(path.to_path_buf()),
     })
 }
@@ -129,18 +136,9 @@ fn parse_tools_value(value: &str) -> Result<Vec<String>, String> {
 }
 
 fn normalize_tools(tools: &[String]) -> Result<Vec<String>, String> {
-    let allowed: HashSet<String> = inherited_subagent_tool_names().into_iter().collect();
     let mut normalized = Vec::new();
     for tool in tools {
-        let Some(name) = normalize_tool_name(tool) else {
-            return Err(format!("unknown tool '{tool}'"));
-        };
-        if name == "subagent" {
-            continue;
-        }
-        if !allowed.contains(&name) {
-            return Err(format!("unknown tool '{tool}'"));
-        }
+        let name = normalize_tool_name(tool)?;
         if !normalized.iter().any(|existing| existing == &name) {
             normalized.push(name);
         }
@@ -148,15 +146,42 @@ fn normalize_tools(tools: &[String]) -> Result<Vec<String>, String> {
     Ok(normalized)
 }
 
-fn normalize_tool_name(tool: &str) -> Option<String> {
-    let normalized = match tool.trim() {
+fn normalize_allow_tools(tools: &[String]) -> Result<Vec<String>, String> {
+    let tools = normalize_tools(tools)?;
+    Ok(tools
+        .into_iter()
+        .filter(|tool| tool != "subagent")
+        .collect())
+}
+
+fn normalize_tool_name(tool: &str) -> Result<String, String> {
+    let trimmed = tool.trim();
+    if trimmed.is_empty() {
+        return Err("tool name must not be empty".to_string());
+    }
+    let normalized = match trimmed {
         "AskUser" | "ask_user" => "ask_user",
         "Bash" | "bash" => "bash",
         "Read" | "read" => "read",
         "Edit" | "edit" => "edit",
         "Write" | "write" => "write",
         "Subagent" | "subagent" => "subagent",
-        _ => return None,
+        _ => trimmed,
     };
-    Some(normalized.to_string())
+    Ok(normalized.to_ascii_lowercase())
+}
+
+fn parse_model_spec(value: &str) -> Result<AgentModelSpec, String> {
+    let Some((provider, model)) = value.split_once('/') else {
+        return Err("model must use 'provider/model-name' format".to_string());
+    };
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return Err("model must use 'provider/model-name' format".to_string());
+    }
+    Ok(AgentModelSpec {
+        provider: provider.to_string(),
+        model: model.to_string(),
+    })
 }

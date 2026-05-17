@@ -111,7 +111,7 @@ impl AgentRuntime {
     pub fn new(
         event_tx: mpsc::Sender<RuntimeToUiEvent>,
         request_rx: mpsc::Receiver<UiToRuntimeEvent>,
-        settings: Settings,
+        mut settings: Settings,
         project: ProjectDir,
     ) -> Self {
         let llm_client = LlmClient::new(
@@ -122,6 +122,11 @@ impl AgentRuntime {
         let tool_registry = Arc::new(crate::tools::create_main_registry());
         let subagent_runner = Arc::new(RuntimeSubagentRunner);
         let capabilities = CapabilityStore::load(&settings);
+        let subagent_registry = capabilities.subagent_registry();
+        settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
+            &settings,
+            &subagent_registry.summaries(),
+        ));
         let permission_engine = Arc::new(PermissionEngine::load(
             settings.cwd.clone(),
             dirs::home_dir(),
@@ -135,7 +140,6 @@ impl AgentRuntime {
         // 向 UI 推送命令列表（供自动补全使用）
         let summaries = command_registry.summaries();
         let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(summaries));
-        let subagent_registry = capabilities.subagent_registry();
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
                 "Subagent: {}",
@@ -447,11 +451,7 @@ impl AgentRuntime {
 
         {
             let subagent_registry = self.capabilities.subagent_registry();
-            let mut run_settings = self.settings.clone();
-            run_settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
-                &run_settings,
-                &subagent_registry.summaries(),
-            ));
+            let run_settings = self.settings.clone();
             let run_settings = Arc::new(run_settings);
             // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
             let ctx = QueryContext {
@@ -650,6 +650,9 @@ impl AgentRuntime {
                     }
                     EngineToRuntimeEvent::Error(e) => {
                         let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
+                    }
+                    EngineToRuntimeEvent::Warning(warning) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::Warning(warning)).await;
                     }
                 }
             }

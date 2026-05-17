@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -103,6 +103,7 @@ pub struct ToolExecutionContext {
     pub pause_id: String,
     pub tool_name: String,
     pub settings: Option<Arc<Settings>>,
+    pub tool_registry: Option<Arc<ToolRegistry>>,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_engine: Arc<PermissionEngine>,
@@ -144,6 +145,7 @@ impl ToolExecutionContext {
             pause_id: format!("test_{tool_name}"),
             tool_name: tool_name.to_string(),
             settings: None,
+            tool_registry: None,
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
             permission_engine: Arc::new(PermissionEngine::empty(
@@ -350,7 +352,18 @@ pub struct RegisteredTool {
     pub name: String,
     pub description: String,
     pub input_schema: Value,
-    executor: Box<ToolExecutor>,
+    executor: Arc<ToolExecutor>,
+}
+
+impl Clone for RegisteredTool {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+            executor: Arc::clone(&self.executor),
+        }
+    }
 }
 
 impl RegisteredTool {
@@ -359,7 +372,7 @@ impl RegisteredTool {
         let description = tool.description().to_string();
         let input_schema = tool.input_schema();
         let tool = Arc::new(tool);
-        let executor: Box<ToolExecutor> = Box::new(
+        let executor: Arc<ToolExecutor> = Arc::new(
             move |input: HashMap<String, Value>, ctx: ToolExecutionContext| {
                 let tool = Arc::clone(&tool);
                 Box::pin(async move {
@@ -449,6 +462,14 @@ pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
 }
 
+impl Clone for ToolRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+        }
+    }
+}
+
 impl std::fmt::Debug for ToolRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRegistry")
@@ -487,6 +508,17 @@ impl ToolRegistry {
         names.sort();
         names
     }
+
+    pub fn filtered(&self, allowed_tools: &[String]) -> Self {
+        let allowed: HashSet<&str> = allowed_tools.iter().map(String::as_str).collect();
+        let tools = self
+            .tools
+            .iter()
+            .filter(|(name, _)| allowed.contains(name.as_str()))
+            .map(|(name, tool)| (name.clone(), tool.clone()))
+            .collect();
+        Self { tools }
+    }
 }
 
 /// 创建默认的工具注册表，注册所有内置工具。
@@ -502,6 +534,68 @@ pub fn create_main_registry() -> ToolRegistry {
 
 pub fn create_subagent_registry(allowed_tools: &[String]) -> ToolRegistry {
     create_registry_with_allowed(Some(allowed_tools), false)
+}
+
+pub fn create_subagent_registry_from_parent(
+    parent: &ToolRegistry,
+    allow: Option<&[String]>,
+    deny: &[String],
+) -> Result<(ToolRegistry, Vec<String>), String> {
+    let mut warnings = Vec::new();
+    let parent_names: HashSet<String> = parent.tool_names().into_iter().collect();
+    let deny_names: HashSet<&str> = deny.iter().map(String::as_str).collect();
+    let mut selected = Vec::new();
+
+    match allow {
+        Some(allow) => {
+            for name in allow {
+                if name == "subagent" {
+                    continue;
+                }
+                if deny_names.contains(name.as_str()) {
+                    continue;
+                }
+                if parent_names.contains(name) {
+                    selected.push(name.clone());
+                } else {
+                    warnings.push(format!(
+                        "tool '{name}' is not available to the parent agent"
+                    ));
+                }
+            }
+        }
+        None => {
+            selected.extend(
+                parent_names
+                    .iter()
+                    .filter(|name| name.as_str() != "subagent")
+                    .filter(|name| !deny_names.contains(name.as_str()))
+                    .cloned(),
+            );
+        }
+    }
+
+    for name in deny {
+        if name != "subagent" && !parent_names.contains(name) {
+            warnings.push(format!(
+                "disallowed tool '{name}' is not available to the parent agent"
+            ));
+        }
+    }
+
+    selected.sort();
+    selected.dedup();
+    if selected.is_empty() {
+        if !warnings.is_empty() {
+            return Err(format!(
+                "subagent tool policy leaves no available tools: {}",
+                warnings.join("; ")
+            ));
+        }
+        return Err("subagent tool policy leaves no available tools".to_string());
+    }
+
+    Ok((parent.filtered(&selected), warnings))
 }
 
 pub fn inherited_subagent_tool_names() -> Vec<String> {
@@ -543,4 +637,41 @@ fn create_registry_with_allowed(
 
 fn tool_allowed(allowed: Option<&[String]>, name: &str) -> bool {
     allowed.is_none_or(|tools| tools.iter().any(|tool| tool == name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn subagent_registry_inherits_parent_tools_without_subagent() {
+        let parent = create_main_registry();
+
+        let (child, warnings) =
+            create_subagent_registry_from_parent(&parent, None, &[]).expect("policy should work");
+
+        assert!(warnings.is_empty());
+        assert!(child.contains("read"));
+        assert!(child.contains("write"));
+        assert!(!child.contains("subagent"));
+    }
+
+    #[test]
+    fn subagent_registry_applies_allow_then_deny() {
+        let parent = create_main_registry();
+        let allow = vec![
+            "read".to_string(),
+            "write".to_string(),
+            "subagent".to_string(),
+        ];
+        let deny = vec!["write".to_string()];
+
+        let (child, warnings) = create_subagent_registry_from_parent(&parent, Some(&allow), &deny)
+            .expect("policy should leave read available");
+
+        assert!(warnings.is_empty());
+        assert!(child.contains("read"));
+        assert!(!child.contains("write"));
+        assert!(!child.contains("subagent"));
+    }
 }

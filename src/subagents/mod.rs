@@ -13,8 +13,21 @@ pub(crate) struct AgentSpec {
     pub(crate) name: String,
     pub(crate) description: String,
     pub(crate) instructions: String,
-    pub(crate) allowed_tools: Vec<String>,
+    pub(crate) tool_policy: AgentToolPolicy,
+    pub(crate) model: Option<AgentModelSpec>,
     source: AgentSource,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AgentToolPolicy {
+    pub(crate) allow: Option<Vec<String>>,
+    pub(crate) deny: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentModelSpec {
+    pub(crate) provider: String,
+    pub(crate) model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -187,7 +200,11 @@ Translate comments without changing code.
 
         assert!(registry.diagnostics.is_empty());
         assert_eq!(agent.description, "Translate code comments");
-        assert_eq!(agent.allowed_tools, vec!["bash", "read"]);
+        assert_eq!(
+            agent.tool_policy.allow.as_deref(),
+            Some(["bash".to_string(), "read".to_string()].as_slice())
+        );
+        assert!(agent.tool_policy.deny.is_none());
         assert_eq!(
             agent.instructions,
             "Translate comments without changing code."
@@ -213,11 +230,14 @@ Inspect files and report findings.
         let agent = registry.agents.get("reader").unwrap();
 
         assert!(registry.diagnostics.is_empty());
-        assert_eq!(agent.allowed_tools, vec!["read", "bash"]);
+        assert_eq!(
+            agent.tool_policy.allow.as_deref(),
+            Some(["read".to_string(), "bash".to_string()].as_slice())
+        );
     }
 
     #[test]
-    fn inherits_non_recursive_tools_when_tools_missing() {
+    fn leaves_allowlist_unset_when_tools_missing() {
         let cwd = temp_project();
         write_agent(
             &cwd,
@@ -233,12 +253,69 @@ Handle the assigned task.
         let registry = load_agent_registry(&cwd);
         let agent = registry.agents.get("general").unwrap();
 
-        assert!(agent.allowed_tools.contains(&"ask_user".to_string()));
-        assert!(agent.allowed_tools.contains(&"bash".to_string()));
-        assert!(agent.allowed_tools.contains(&"read".to_string()));
-        assert!(agent.allowed_tools.contains(&"edit".to_string()));
-        assert!(agent.allowed_tools.contains(&"write".to_string()));
-        assert!(!agent.allowed_tools.contains(&"subagent".to_string()));
+        assert!(agent.tool_policy.allow.is_none());
+        assert!(agent.tool_policy.deny.is_none());
+    }
+
+    #[test]
+    fn parses_custom_agent_with_disallowed_tools() {
+        let cwd = temp_project();
+        write_agent(
+            &cwd,
+            "safe-worker.md",
+            r#"---
+name: safe-worker
+description: Worker without writes
+disallow_tools: "Write, Edit, Subagent"
+---
+Inspect and report.
+"#,
+        );
+
+        let registry = load_agent_registry(&cwd);
+        let agent = registry.agents.get("safe-worker").unwrap();
+
+        assert!(registry.diagnostics.is_empty());
+        assert!(agent.tool_policy.allow.is_none());
+        assert_eq!(
+            agent.tool_policy.deny.as_deref(),
+            Some(
+                [
+                    "write".to_string(),
+                    "edit".to_string(),
+                    "subagent".to_string()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn parses_custom_agent_model() {
+        let cwd = temp_project();
+        write_agent(
+            &cwd,
+            "modelled.md",
+            r#"---
+name: modelled
+description: Uses a selected model
+model: "openai/gpt-5.4"
+---
+Handle the task.
+"#,
+        );
+
+        let registry = load_agent_registry(&cwd);
+        let agent = registry.agents.get("modelled").unwrap();
+
+        assert!(registry.diagnostics.is_empty());
+        assert_eq!(
+            agent.model,
+            Some(AgentModelSpec {
+                provider: "openai".to_string(),
+                model: "gpt-5.4".to_string()
+            })
+        );
     }
 
     #[test]
@@ -267,15 +344,15 @@ This should be skipped.
     }
 
     #[test]
-    fn invalid_unknown_tool_is_skipped_with_diagnostic() {
+    fn invalid_model_is_skipped_with_diagnostic() {
         let cwd = temp_project();
         write_agent(
             &cwd,
             "bad.md",
             r#"---
 name: bad
-description: Bad tools
-tools: "Read, Nope"
+description: Bad model
+model: "missing-separator"
 ---
 This should be skipped.
 "#,
@@ -288,7 +365,7 @@ This should be skipped.
             registry
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message().contains("unknown tool 'Nope'"))
+                .any(|diagnostic| diagnostic.message().contains("model must use"))
         );
     }
 

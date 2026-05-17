@@ -4,9 +4,9 @@ use crate::db::{self, Session};
 use crate::engine::{QueryContext, QueryEngine};
 use crate::subagents::AgentSpec;
 use crate::tools::{
-    ToolExecutionContext, ToolResult, ToolRuntimeContext, create_subagent_registry,
+    ToolExecutionContext, ToolResult, ToolRuntimeContext, create_subagent_registry_from_parent,
 };
-use crate::types::config::Settings;
+use crate::types::config::{ProviderProfile, Settings};
 use crate::types::events::{
     EngineToRuntimeEvent, SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent,
     SubagentStatus, SubagentToolResultEvent, SubagentToolUseEvent,
@@ -66,6 +66,21 @@ async fn run_subagent(
     runtime: Arc<ToolRuntimeContext>,
     parent_settings: Arc<Settings>,
 ) -> ToolResult {
+    let Some(parent_tool_registry) = ctx.tool_registry.clone() else {
+        return ToolResult::error("subagent requires parent tool registry");
+    };
+    let (tool_registry, mut warnings) = match create_subagent_registry_from_parent(
+        &parent_tool_registry,
+        spec.tool_policy.allow.as_deref(),
+        spec.tool_policy.deny.as_deref().unwrap_or(&[]),
+    ) {
+        Ok(result) => result,
+        Err(e) => return ToolResult::error(e),
+    };
+
+    let (settings, model_warnings) = resolve_subagent_settings(&parent_settings, &spec);
+    warnings.extend(model_warnings);
+
     let session_id = Uuid::new_v4().to_string();
     let session_dir = match runtime.session_dir.create_subagent(&session_id) {
         Ok(dir) => dir,
@@ -73,18 +88,16 @@ async fn run_subagent(
     };
 
     let now = Utc::now();
-    let model = parent_settings.model.clone();
-    let thinking_effort = parent_settings.thinking_effort;
     let session = Session {
         id: session_id.clone(),
-        project_path: sanitize(&parent_settings.cwd),
+        project_path: sanitize(&settings.cwd),
         parent_session_id: Some(runtime.session_id.clone()),
         spawn_tool_use_id: Some(ctx.tool_use_id.clone()),
         session_type: "subagent".to_string(),
         agent_label: Some(spec.name.clone()),
-        provider: parent_settings.active_provider.clone(),
-        model: model.clone(),
-        thinking_effort: thinking_effort.map(|e| e.to_string()),
+        provider: settings.active_provider.clone(),
+        model: settings.model.clone(),
+        thinking_effort: settings.thinking_effort.map(|e| e.to_string()),
         title: request.title.clone(),
         message_count: 0,
         created_at: now,
@@ -106,10 +119,18 @@ async fn run_subagent(
         ))
         .await;
 
-    let tool_registry = Arc::new(create_subagent_registry(&spec.allowed_tools));
-    let mut settings = (*parent_settings).clone();
-    settings.model = model;
-    settings.thinking_effort = thinking_effort;
+    for warning in &warnings {
+        let _ = ctx
+            .event_tx
+            .send(EngineToRuntimeEvent::Warning(format!(
+                "Subagent '{}': {warning}",
+                spec.name
+            )))
+            .await;
+    }
+
+    let tool_registry = Arc::new(tool_registry);
+    let mut settings = settings;
     settings.system_prompt = Some(subagent_system_prompt(&parent_settings, &spec));
     let settings = Arc::new(settings);
     let llm_client = LlmClient::new(
@@ -194,6 +215,7 @@ async fn run_subagent(
             SubagentStatus::Cancelled => "cancelled",
         },
         "summary": summary,
+        "warnings": warnings,
         "error": match result.finish_reason {
             FinishReason::Error(e) => Some(e),
             _ => None,
@@ -205,6 +227,60 @@ async fn run_subagent(
     } else {
         ToolResult::ok(payload.to_string())
     }
+}
+
+fn resolve_subagent_settings(
+    parent_settings: &Settings,
+    spec: &AgentSpec,
+) -> (Settings, Vec<String>) {
+    let mut settings = parent_settings.clone();
+    let mut warnings = Vec::new();
+    let Some(model_spec) = &spec.model else {
+        return (settings, warnings);
+    };
+
+    let Some(provider) = parent_settings.providers.get(&model_spec.provider) else {
+        warnings.push(format!(
+            "provider '{}' is not configured; falling back to {}/{}",
+            model_spec.provider, parent_settings.active_provider, parent_settings.model
+        ));
+        return (settings, warnings);
+    };
+    if !provider
+        .models
+        .iter()
+        .any(|model| model.id == model_spec.model)
+    {
+        warnings.push(format!(
+            "model '{}' is not configured for provider '{}'; falling back to {}/{}",
+            model_spec.model,
+            model_spec.provider,
+            parent_settings.active_provider,
+            parent_settings.model
+        ));
+        return (settings, warnings);
+    }
+
+    apply_provider(
+        &mut settings,
+        &model_spec.provider,
+        &model_spec.model,
+        provider,
+    );
+    (settings, warnings)
+}
+
+fn apply_provider(
+    settings: &mut Settings,
+    provider_name: &str,
+    model_name: &str,
+    provider: &ProviderProfile,
+) {
+    settings.active_provider = provider_name.to_string();
+    settings.model = model_name.to_string();
+    settings.endpoint = provider.endpoint;
+    settings.api_key = provider.api_key.clone();
+    settings.base_url = provider.base_url.clone();
 }
 
 fn spawn_subagent_bridge(
@@ -273,6 +349,9 @@ fn spawn_subagent_bridge(
                 EngineToRuntimeEvent::Error(e) => {
                     let _ = parent_tx.send(EngineToRuntimeEvent::Error(e)).await;
                 }
+                EngineToRuntimeEvent::Warning(warning) => {
+                    let _ = parent_tx.send(EngineToRuntimeEvent::Warning(warning)).await;
+                }
                 EngineToRuntimeEvent::TurnStarted
                 | EngineToRuntimeEvent::TurnEnded
                 | EngineToRuntimeEvent::ThinkingDelta(_)
@@ -327,6 +406,69 @@ fn extract_final_text(messages: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagents::{AgentModelSpec, AgentSource, AgentToolPolicy};
+    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType, Settings};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn test_spec(model: Option<AgentModelSpec>) -> AgentSpec {
+        AgentSpec {
+            name: "test".to_string(),
+            description: "Test agent".to_string(),
+            instructions: "Do the task.".to_string(),
+            tool_policy: AgentToolPolicy::default(),
+            model,
+            source: AgentSource::BuiltIn,
+        }
+    }
+
+    fn test_settings() -> Settings {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderProfile {
+                name: "OpenAI".to_string(),
+                endpoint: ProviderType::OpenAI,
+                api_key: "openai-key".to_string(),
+                base_url: "https://openai.example".to_string(),
+                models: vec![ModelConfig {
+                    id: "gpt-5.4".to_string(),
+                    name: None,
+                    limit: 256000,
+                    thinking: true,
+                }],
+            },
+        );
+        providers.insert(
+            "anthropic".to_string(),
+            ProviderProfile {
+                name: "Anthropic".to_string(),
+                endpoint: ProviderType::Anthropic,
+                api_key: "anthropic-key".to_string(),
+                base_url: "https://anthropic.example".to_string(),
+                models: vec![ModelConfig {
+                    id: "claude-test".to_string(),
+                    name: None,
+                    limit: 200000,
+                    thinking: false,
+                }],
+            },
+        );
+
+        Settings {
+            api_key: "openai-key".to_string(),
+            base_url: "https://openai.example".to_string(),
+            model: "gpt-5.4".to_string(),
+            endpoint: ProviderType::OpenAI,
+            providers,
+            active_provider: "openai".to_string(),
+            system_prompt: None,
+            max_turns: None,
+            cwd: PathBuf::from("/tmp"),
+            thinking_effort: None,
+            permissions: None,
+        }
+    }
 
     #[test]
     fn extract_final_text_uses_only_last_assistant_message() {
@@ -377,5 +519,39 @@ mod tests {
             extract_final_text(&messages),
             "partial findings before stream interruption"
         );
+    }
+
+    #[test]
+    fn resolve_subagent_settings_switches_to_configured_model() {
+        let parent = test_settings();
+        let spec = test_spec(Some(AgentModelSpec {
+            provider: "anthropic".to_string(),
+            model: "claude-test".to_string(),
+        }));
+
+        let (settings, warnings) = resolve_subagent_settings(&parent, &spec);
+
+        assert!(warnings.is_empty());
+        assert_eq!(settings.active_provider, "anthropic");
+        assert_eq!(settings.model, "claude-test");
+        assert_eq!(settings.endpoint, ProviderType::Anthropic);
+        assert_eq!(settings.api_key, "anthropic-key");
+    }
+
+    #[test]
+    fn resolve_subagent_settings_falls_back_when_model_missing() {
+        let parent = test_settings();
+        let spec = test_spec(Some(AgentModelSpec {
+            provider: "anthropic".to_string(),
+            model: "missing".to_string(),
+        }));
+
+        let (settings, warnings) = resolve_subagent_settings(&parent, &spec);
+
+        assert_eq!(settings.active_provider, "openai");
+        assert_eq!(settings.model, "gpt-5.4");
+        assert_eq!(settings.endpoint, ProviderType::OpenAI);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("falling back"));
     }
 }
