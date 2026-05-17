@@ -3,25 +3,27 @@ use crate::command::{self, CommandRegistry};
 use crate::config::project::ProjectDir;
 use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
-use crate::db::{self, NewMessage};
+use crate::db;
 use crate::engine::{QueryContext, QueryEngine};
 use crate::permissions::PermissionEngine;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
+use crate::types::display::{DisplayMessage, HistoryItem};
 use crate::types::events::{
     CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest, RuntimeToUiEvent,
-    SubagentSnapshot, SubagentStatus, UiToRuntimeEvent,
+    UiToRuntimeEvent,
 };
-use crate::types::message::{Message, Role};
+use crate::types::message::Message;
 use chrono::Utc;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+use super::history;
 
 /// 待处理的交互类型（等待 UI 回传选择结果）。
 #[derive(Debug, Clone, PartialEq)]
@@ -31,11 +33,11 @@ pub(crate) enum PendingInteraction {
 }
 
 #[derive(Debug)]
-enum RunStart {
+pub(super) enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
-    /// 启动前将最新 runtime 消息写入 JSONL，将指定消息写入 SQLite/UI 历史。
-    SplitUserMessage { display_message: Message },
+    /// 启动前将最新 runtime 消息写入 JSONL，将 UI-only display 消息写入 SQLite/UI 历史。
+    SplitDisplayMessage { display_message: DisplayMessage },
     /// 基于现有历史继续运行，不新增用户消息。
     Continue,
 }
@@ -62,9 +64,11 @@ impl CapabilityStore {
     }
 }
 
-fn initial_display_message(start: &RunStart) -> Option<&Message> {
+fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
     match start {
-        RunStart::SplitUserMessage { display_message } => Some(display_message),
+        RunStart::SplitDisplayMessage { display_message } => {
+            Some(HistoryItem::Display(display_message.clone()))
+        }
         RunStart::UserMessage | RunStart::Continue => None,
     }
 }
@@ -178,17 +182,22 @@ impl AgentRuntime {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            UiToRuntimeEvent::SendMessage(msg) => {
-                                self.messages.push(msg);
-                                self.process_run(RunStart::UserMessage).await;
+                            UiToRuntimeEvent::SendMessage(draft) => {
+                                let submission = draft.into_submission();
+                                self.messages.push(submission.llm_message);
+                                if let Some(display_message) = submission.display_message {
+                                    self.process_run(RunStart::SplitDisplayMessage { display_message }).await;
+                                } else {
+                                    self.process_run(RunStart::UserMessage).await;
+                                }
                             }
                             UiToRuntimeEvent::SendCommand(text) => {
                                 if let Some(parsed) = command::parse(&text) {
                                     self.handle_command(&parsed).await;
                                 }
                             }
-                            UiToRuntimeEvent::InterveneMessage(msg) => {
-                                let _ = msg;
+                            UiToRuntimeEvent::InterveneMessage(draft) => {
+                                let _ = draft;
                                 self.send_event(RuntimeToUiEvent::Error(
                                     "Cannot intervene because no run is active".to_string(),
                                 ))
@@ -271,8 +280,10 @@ impl AgentRuntime {
             }
             CommandEffect::InjectUserMessage(msg) => {
                 self.messages.push(msg.clone());
-                self.send_event(RuntimeToUiEvent::UserMessageInjected(msg))
-                    .await;
+                self.send_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
+                    msg,
+                )))
+                .await;
                 self.process_run(RunStart::UserMessage).await;
             }
             CommandEffect::InjectUserQuery {
@@ -280,11 +291,11 @@ impl AgentRuntime {
                 display_message,
             } => {
                 self.messages.push(llm_message);
-                self.send_event(RuntimeToUiEvent::UserMessageInjected(
+                self.send_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Display(
                     display_message.clone(),
-                ))
+                )))
                 .await;
-                self.process_run(RunStart::SplitUserMessage { display_message })
+                self.process_run(RunStart::SplitDisplayMessage { display_message })
                     .await;
             }
             CommandEffect::ContinueQuery => {
@@ -389,7 +400,7 @@ impl AgentRuntime {
 
         // UI 展示使用数据库消息；LLM 上下文使用 JSONL 历史。
         let blocks_dir = session_dir.path().join("blocks");
-        let ui_messages = load_messages_from_db(session_id, &blocks_dir).await;
+        let ui_messages = history::load_messages_from_db(session_id, &blocks_dir).await;
         let runtime_messages = match session_dir.load_history() {
             Ok(messages) => messages,
             Err(e) => {
@@ -397,10 +408,16 @@ impl AgentRuntime {
                     "加载 JSONL 历史失败，已降级使用数据库消息: {e}"
                 )))
                 .await;
-                ui_messages.clone()
+                ui_messages
+                    .iter()
+                    .filter_map(|item| match item {
+                        HistoryItem::Message(message) => Some(message.clone()),
+                        HistoryItem::Display(_) => None,
+                    })
+                    .collect()
             }
         };
-        let subagents = load_subagents_for_session(session_id, &self.project).await;
+        let subagents = history::load_subagents_for_session(session_id, &self.project).await;
 
         let count = ui_messages.len() as i64;
         self.messages = runtime_messages;
@@ -439,7 +456,13 @@ impl AgentRuntime {
             let _ = db::global_db().update_session_updated_at(id).await;
         }
 
-        self.persist_initial_user_message(start).await;
+        history::persist_initial_user_message(
+            self.session_id.as_deref(),
+            self.session_dir.as_ref(),
+            self.messages.last().cloned(),
+            start,
+        )
+        .await;
 
         self.send_event(RuntimeToUiEvent::RunStarted).await;
 
@@ -502,8 +525,10 @@ impl AgentRuntime {
                                     let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
                                 }
                             }
-                            UiToRuntimeEvent::InterveneMessage(msg) => {
-                                self.query_engine.enqueue_user_message(msg);
+                            UiToRuntimeEvent::InterveneMessage(draft) => {
+                                let submission = draft.into_submission();
+                                self.query_engine
+                                    .enqueue_user_message(submission.llm_message);
                             }
                             UiToRuntimeEvent::SendMessage(_)
                             | UiToRuntimeEvent::SendCommand(_)
@@ -536,36 +561,6 @@ impl AgentRuntime {
         self.send_event(RuntimeToUiEvent::RunFinished).await;
     }
 
-    async fn persist_initial_user_message(&self, start: RunStart) {
-        let Some(session_id) = self.session_id.as_deref() else {
-            return;
-        };
-        let Some(session_dir) = self.session_dir.as_ref() else {
-            return;
-        };
-        let Some(llm_message) = self.messages.last().cloned() else {
-            return;
-        };
-
-        let blocks_dir = session_dir.path().join("blocks");
-        match start {
-            RunStart::UserMessage => {
-                persist_one(session_dir, session_id, &blocks_dir, llm_message).await;
-            }
-            RunStart::SplitUserMessage { display_message } => {
-                persist_split_message(
-                    session_dir,
-                    session_id,
-                    &blocks_dir,
-                    llm_message,
-                    display_message,
-                )
-                .await;
-            }
-            RunStart::Continue => {}
-        }
-    }
-
     /// 启动事件处理器
     async fn spawn_event_processor(
         &self,
@@ -588,11 +583,11 @@ impl AgentRuntime {
                 match event {
                     // ===== 需要持久化的事件 =====
                     EngineToRuntimeEvent::UserMessageProduced(msg) => {
-                        persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
+                        history::persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
                     }
                     EngineToRuntimeEvent::MessageProduced(msg)
                     | EngineToRuntimeEvent::ToolResultsProduced(msg) => {
-                        persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
+                        history::persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
                     }
                     // ===== 透传事件 =====
                     EngineToRuntimeEvent::TurnStarted => {
@@ -627,8 +622,12 @@ impl AgentRuntime {
                         let parent_dir = project.session(&session_id);
                         let subagent_dir = parent_dir.subagent(&event.session_id);
                         let subagent_blocks_dir = subagent_dir.path().join("blocks");
-                        persist_db_only(&event.session_id, &subagent_blocks_dir, &event.message)
-                            .await;
+                        history::persist_db_only(
+                            &event.session_id,
+                            &subagent_blocks_dir,
+                            &event.message,
+                        )
+                        .await;
                         let _ = event_tx
                             .send(RuntimeToUiEvent::SubagentMessageProduced(event))
                             .await;
@@ -665,7 +664,7 @@ impl AgentRuntime {
     }
 
     /// 首次提交时创建 session：生成 UUID、建目录、写 DB。
-    async fn create_session(&mut self, initial_display_message: Option<&Message>) {
+    async fn create_session(&mut self, initial_display_message: Option<HistoryItem>) {
         let id = Uuid::new_v4().to_string();
         self.session_id = Some(id.clone());
 
@@ -678,21 +677,9 @@ impl AgentRuntime {
         let now = Utc::now();
         let project_path = sanitize(&self.settings.cwd);
         // 从第一条用户消息中提取标题
-        let title_source = initial_display_message.or_else(|| self.messages.last());
-        let title = title_source.and_then(|msg| {
-            msg.content.first().and_then(|block| {
-                if let crate::types::message::ContentBlock::Text(t) = block {
-                    let text = t.text.trim().to_string();
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(text.chars().take(300).collect())
-                    }
-                } else {
-                    None
-                }
-            })
-        });
+        let title_text =
+            history::title_text(initial_display_message.as_ref(), self.messages.last());
+        let title = title_text.map(|text| text.chars().take(300).collect());
         let session = crate::db::Session {
             id,
             project_path,
@@ -720,122 +707,16 @@ impl AgentRuntime {
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id_out),
             messages: initial_display_message
-                .map(|msg| vec![msg.clone()])
-                .unwrap_or_else(|| self.messages.clone()),
+                .map(|item| vec![item])
+                .unwrap_or_else(|| {
+                    self.messages
+                        .clone()
+                        .into_iter()
+                        .map(HistoryItem::Message)
+                        .collect()
+                }),
             subagents: Vec::new(),
         })
         .await;
     }
-}
-
-/// 从数据库加载会话消息，解析 ContentBlock（含大块溢出文件）。
-async fn load_messages_from_db(session_id: &str, blocks_dir: &std::path::Path) -> Vec<Message> {
-    let stored = match db::global_db().get_messages(session_id).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("load_messages_from_db: {e}");
-            return Vec::new();
-        }
-    };
-
-    let mut messages = Vec::with_capacity(stored.len());
-    for sm in stored {
-        let role = match sm.role.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            _ => continue,
-        };
-        let content_json: Vec<serde_json::Value> = match serde_json::from_str(&sm.content) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("load_messages_from_db: parse content failed: {e}");
-                continue;
-            }
-        };
-        let blocks = match db::load_blocks(&content_json, blocks_dir) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("load_messages_from_db: load_blocks failed: {e}");
-                continue;
-            }
-        };
-        messages.push(Message::new(role, blocks));
-    }
-    messages
-}
-
-async fn load_subagents_for_session(
-    session_id: &str,
-    project: &ProjectDir,
-) -> Vec<SubagentSnapshot> {
-    let sessions = match db::global_db().list_child_sessions(session_id).await {
-        Ok(sessions) => sessions,
-        Err(e) => {
-            eprintln!("load_subagents_for_session: {e}");
-            return Vec::new();
-        }
-    };
-
-    let mut subagents = Vec::with_capacity(sessions.len());
-    for session in sessions {
-        let Some(parent_session_id) = session.parent_session_id.clone() else {
-            continue;
-        };
-        let Some(spawn_tool_use_id) = session.spawn_tool_use_id.clone() else {
-            continue;
-        };
-        let parent_dir = project.session(&parent_session_id);
-        let session_dir = parent_dir.subagent(&session.id);
-        let blocks_dir = session_dir.path().join("blocks");
-        let messages = load_messages_from_db(&session.id, &blocks_dir).await;
-        subagents.push(SubagentSnapshot {
-            session_id: session.id,
-            parent_session_id,
-            spawn_tool_use_id,
-            agent_label: session
-                .agent_label
-                .unwrap_or_else(|| "Subagent".to_string()),
-            status: SubagentStatus::Completed,
-            messages,
-        });
-    }
-    subagents
-}
-
-/// 持久化单条消息到 JSONL + SQLite。
-async fn persist_one(session_dir: &SessionDir, session_id: &str, blocks_dir: &Path, msg: Message) {
-    let _ = session_dir.append_history(&msg);
-    persist_db_only(session_id, blocks_dir, &msg).await;
-}
-
-/// 持久化命令注入消息，其中 JSONL 面向 LLM，SQLite 面向 UI。
-async fn persist_split_message(
-    session_dir: &SessionDir,
-    session_id: &str,
-    blocks_dir: &Path,
-    llm_msg: Message,
-    display_msg: Message,
-) {
-    let _ = session_dir.append_history(&llm_msg);
-    let new_msg = NewMessage {
-        session_id: session_id.to_string(),
-        role: display_msg.role.to_string(),
-        blocks: display_msg.content,
-        kind: "normal".to_string(),
-        created_at: Utc::now(),
-        blocks_dir: blocks_dir.to_path_buf(),
-    };
-    let _ = db::global_db().insert_message(&new_msg).await;
-}
-
-async fn persist_db_only(session_id: &str, blocks_dir: &Path, msg: &Message) {
-    let new_msg = NewMessage {
-        session_id: session_id.to_string(),
-        role: msg.role.to_string(),
-        blocks: msg.content.clone(),
-        kind: "normal".to_string(),
-        created_at: Utc::now(),
-        blocks_dir: blocks_dir.to_path_buf(),
-    };
-    let _ = db::global_db().insert_message(&new_msg).await;
 }

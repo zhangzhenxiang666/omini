@@ -1,3 +1,4 @@
+use crate::types::display::DisplayMessage;
 use crate::types::message::ContentBlock;
 use chrono::{DateTime, Utc};
 use serde_json;
@@ -371,6 +372,26 @@ impl Database {
         Ok(())
     }
 
+    pub async fn insert_display_message(
+        &self,
+        session_id: &str,
+        display: &DisplayMessage,
+    ) -> Result<(), DbError> {
+        let content = serde_json::to_string(display)?;
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, kind, created_at)
+            VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind(display.role.to_string())
+        .bind(content)
+        .bind("display")
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, DbError> {
         let rows = sqlx::query_as::<_, StoredMessage>(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
@@ -417,6 +438,10 @@ impl Database {
 /// 从存储的消息 content JSON（ContentBlock 数组）中提取纯文本。
 /// 跳过 file 引用的大块、tool_use、thinking 等非文本块。
 pub fn extract_message_text(content_json: &str) -> String {
+    if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
+        return display.text.replace('\n', " ").replace('\r', "");
+    }
+
     if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(content_json) {
         let texts: Vec<String> = values
             .iter()

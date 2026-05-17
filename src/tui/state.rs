@@ -1,4 +1,5 @@
 use crate::types::config::ThinkingEffort;
+use crate::types::display::{DisplayMention, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
     InteractionRequest, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus, ToolPauseKind,
     ToolPauseRequest,
@@ -10,10 +11,12 @@ use std::path::PathBuf;
 
 mod autocomplete;
 mod interaction;
+mod mention;
 mod permission;
 
 pub use autocomplete::CommandAutocomplete;
 pub use interaction::{InteractionStep, ModelSelectionEntry};
+pub use mention::{InputMention, MentionAutocomplete, MentionCandidate, load_mention_candidates};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
@@ -53,6 +56,7 @@ impl std::fmt::Display for AgentStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiMessage {
     Message(Message),
+    Display(DisplayMessage),
     Notice { text: String },
     Warning { text: String },
     Error { text: String },
@@ -82,21 +86,31 @@ impl From<SubagentSnapshot> for SubagentNode {
 }
 
 impl UiMessage {
-    pub fn from_messages(messages: Vec<Message>) -> Vec<Self> {
-        messages.into_iter().map(Self::Message).collect()
+    pub fn from_history_items(items: Vec<HistoryItem>) -> Vec<Self> {
+        items
+            .into_iter()
+            .map(|item| match item {
+                HistoryItem::Message(message) => Self::Message(message),
+                HistoryItem::Display(display) => Self::Display(display),
+            })
+            .collect()
     }
 
     pub fn as_message(&self) -> Option<&Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => None,
+            Self::Display(_) | Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => {
+                None
+            }
         }
     }
 
     pub fn as_message_mut(&mut self) -> Option<&mut Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => None,
+            Self::Display(_) | Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => {
+                None
+            }
         }
     }
 }
@@ -142,10 +156,11 @@ pub struct UiState {
     pub text_selection: Option<TextSelection>,
     pub is_selecting_text: bool,
     pub input: String,
+    pub input_mentions: Vec<InputMention>,
     /// 当前 query 运行期间由普通 Enter 暂存在 UI 侧的用户输入。
-    pub queued_user_inputs: VecDeque<String>,
+    pub queued_user_inputs: VecDeque<UserDraft>,
     /// 已提交给 engine、等待当前轮结束后插入历史的用户输入。
-    pub pending_intervention_inputs: VecDeque<String>,
+    pub pending_intervention_inputs: VecDeque<UserDraft>,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
@@ -193,6 +208,8 @@ pub struct UiState {
     pub status_bar: StatusBar,
     /// 命令自动补全
     pub autocomplete: CommandAutocomplete,
+    /// @ mention 自动补全
+    pub mention_autocomplete: MentionAutocomplete,
     /// 当前会话标题（显示在头部栏）
     pub current_session_title: Option<String>,
     /// 当前会话 ID（新建或切换时设置）
@@ -221,6 +238,7 @@ impl UiState {
             text_selection: None,
             is_selecting_text: false,
             input: String::new(),
+            input_mentions: Vec::new(),
             queued_user_inputs: VecDeque::new(),
             pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
@@ -247,6 +265,7 @@ impl UiState {
             permission_drawer_content_len: 0,
             status_bar: StatusBar::default(),
             autocomplete: CommandAutocomplete::default(),
+            mention_autocomplete: MentionAutocomplete::default(),
             current_session_title: None,
             current_session_id: None,
             interaction_request: None,
@@ -267,38 +286,47 @@ impl UiState {
         )
     }
 
-    pub fn take_queued_user_message(&mut self) -> Option<Message> {
-        Self::message_from_inputs(&mut self.queued_user_inputs)
+    pub fn take_queued_user_draft(&mut self) -> Option<UserDraft> {
+        Self::draft_from_inputs(&mut self.queued_user_inputs)
     }
 
-    pub fn take_queued_user_message_for_intervention(&mut self) -> Option<Message> {
+    pub fn take_queued_user_draft_for_intervention(&mut self) -> Option<UserDraft> {
         if !self.pending_intervention_inputs.is_empty() {
             return None;
         }
 
-        let msg = Self::message_from_inputs(&mut self.queued_user_inputs)?;
-        self.pending_intervention_inputs = msg
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text(tb) => Some(tb.text.clone()),
-                _ => None,
+        let pending = self.queued_user_inputs.drain(..).collect::<VecDeque<_>>();
+        let draft = Self::draft_from_input_iter(pending.iter())?;
+        self.pending_intervention_inputs = pending;
+        Some(draft)
+    }
+
+    fn take_pending_intervention_ui_messages(&mut self) -> Vec<UiMessage> {
+        self.pending_intervention_inputs
+            .drain(..)
+            .map(|draft| match draft.history_item() {
+                HistoryItem::Message(message) => UiMessage::Message(message),
+                HistoryItem::Display(display) => UiMessage::Display(display),
             })
-            .collect();
-        Some(msg)
+            .collect()
     }
 
-    fn take_pending_intervention_message(&mut self) -> Option<Message> {
-        Self::message_from_inputs(&mut self.pending_intervention_inputs)
-    }
-
-    fn message_from_inputs(inputs: &mut VecDeque<String>) -> Option<Message> {
+    fn draft_from_inputs(inputs: &mut VecDeque<UserDraft>) -> Option<UserDraft> {
         if inputs.is_empty() {
             return None;
         }
 
-        let content = inputs.drain(..).map(ContentBlock::from_text).collect();
-        Some(Message::new(Role::User, content))
+        let drafts = inputs.drain(..).collect::<Vec<_>>();
+        Self::draft_from_input_iter(drafts.iter())
+    }
+
+    fn draft_from_input_iter<'a>(inputs: impl Iterator<Item = &'a UserDraft>) -> Option<UserDraft> {
+        let drafts = inputs.collect::<Vec<_>>();
+        if drafts.is_empty() {
+            return None;
+        }
+
+        Some(combined_user_draft(&drafts))
     }
 
     pub fn open_interaction_request(&mut self, req: &InteractionRequest) {
@@ -360,8 +388,12 @@ impl UiState {
                 self.pending_assistant = None;
                 self.agent_status = AgentStatus::Thinking;
             }
-            RuntimeToUiEvent::UserMessageInjected(msg) => {
-                self.messages.push(UiMessage::Message(msg));
+            RuntimeToUiEvent::UserMessageInjected(item) => {
+                let ui_message = match item {
+                    HistoryItem::Message(message) => UiMessage::Message(message),
+                    HistoryItem::Display(display) => UiMessage::Display(display),
+                };
+                self.messages.push(ui_message);
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -444,9 +476,8 @@ impl UiState {
                 {
                     self.messages.push(UiMessage::Message(msg));
                 }
-                if let Some(msg) = self.take_pending_intervention_message() {
-                    self.messages.push(UiMessage::Message(msg));
-                }
+                let pending_inputs = self.take_pending_intervention_ui_messages();
+                self.messages.extend(pending_inputs);
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -584,11 +615,11 @@ impl UiState {
     pub fn apply_session_changed(
         &mut self,
         session_id: Option<String>,
-        messages: Vec<Message>,
+        messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,
     ) {
         self.current_session_id = session_id;
-        self.messages = UiMessage::from_messages(messages);
+        self.messages = UiMessage::from_history_items(messages);
         self.subagents.clear();
         self.subagents_by_tool_use.clear();
         for subagent in subagents {
@@ -606,35 +637,60 @@ impl UiState {
     }
 
     pub fn char_to_byte(&self, char_idx: usize) -> usize {
-        self.input.chars().take(char_idx).map(char::len_utf8).sum()
+        char_to_byte(&self.input, char_idx)
     }
 
     pub fn insert_char(&mut self, c: char) {
         let byte_idx = self.char_to_byte(self.cursor_char);
         self.input.insert(byte_idx, c);
+        self.apply_input_edit(self.cursor_char, 0, 1);
         self.cursor_char += 1;
     }
 
     pub fn delete_before(&mut self) {
         if self.cursor_char > 0 {
+            if let Some((start, end)) = self.mention_before_cursor() {
+                self.delete_input_range(start, end);
+                self.cursor_char = start;
+                return;
+            }
+
             self.cursor_char -= 1;
             let byte_idx = self.char_to_byte(self.cursor_char);
             self.input.remove(byte_idx);
+            self.apply_input_edit(self.cursor_char, 1, 0);
         }
     }
 
     pub fn delete_after(&mut self) {
+        if let Some((start, end)) = self.mention_after_cursor() {
+            self.delete_input_range(start, end);
+            self.cursor_char = start;
+            return;
+        }
+
         let byte_idx = self.char_to_byte(self.cursor_char);
         if byte_idx < self.input.len() {
             self.input.remove(byte_idx);
+            self.apply_input_edit(self.cursor_char, 1, 0);
         }
     }
 
     pub fn cursor_left(&mut self) {
+        if let Some((start, _)) = self.mention_before_cursor() {
+            self.cursor_char = start;
+            return;
+        }
+
         self.cursor_char = self.cursor_char.saturating_sub(1);
     }
 
     pub fn cursor_right(&mut self) {
+        if let Some((_, end)) = self.mention_after_cursor() {
+            self.cursor_char = end;
+            return;
+        }
+
         let max_chars = self.input.chars().count();
         if self.cursor_char < max_chars {
             self.cursor_char += 1;
@@ -647,6 +703,147 @@ impl UiState {
 
     pub fn cursor_end(&mut self) {
         self.cursor_char = self.input.chars().count();
+    }
+
+    pub fn update_input_autocomplete(&mut self) {
+        self.autocomplete.update(&self.input);
+        if self.autocomplete.visible {
+            if self.mention_autocomplete.visible {
+                self.mention_autocomplete.clear_session_cache();
+            }
+            self.mention_autocomplete.visible = false;
+        } else {
+            self.mention_autocomplete
+                .update(&self.input, self.cursor_char);
+        }
+    }
+
+    pub fn set_mention_context(&mut self, cwd: PathBuf, candidates: Vec<MentionCandidate>) {
+        self.mention_autocomplete.set_cwd(cwd);
+        self.mention_autocomplete.set_candidates(candidates);
+        self.update_input_autocomplete();
+    }
+
+    pub fn insert_selected_mention(&mut self) -> bool {
+        let Some(candidate) = self.mention_autocomplete.selected_candidate().cloned() else {
+            return false;
+        };
+        let start = self.mention_autocomplete.active_start;
+        let end = self.mention_autocomplete.active_end;
+        let display = candidate.insert_display();
+        let replacement = format!("{display} ");
+        let start_byte = char_to_byte(&self.input, start);
+        let end_byte = char_to_byte(&self.input, end);
+        self.input.replace_range(start_byte..end_byte, &replacement);
+
+        let old_len = end.saturating_sub(start);
+        let new_len = replacement.chars().count();
+        self.apply_input_edit(start, old_len, new_len);
+        let mention_len = replacement.chars().count();
+        self.input_mentions.push(InputMention {
+            start_char: start,
+            end_char: start + mention_len,
+            kind: candidate.kind,
+            label: candidate.label,
+            target: candidate.target,
+            description: candidate.description,
+        });
+        self.input_mentions
+            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        self.cursor_char = start + new_len;
+        self.mention_autocomplete.visible = false;
+        self.mention_autocomplete.clear_session_cache();
+        self.autocomplete.visible = false;
+        true
+    }
+
+    pub fn expand_selected_mention_directory(&mut self) -> bool {
+        let Some(candidate) = self.mention_autocomplete.selected_candidate().cloned() else {
+            return false;
+        };
+        if !candidate.is_directory() {
+            return self.insert_selected_mention();
+        }
+
+        let start = self.mention_autocomplete.active_start;
+        let end = self.mention_autocomplete.active_end;
+        let replacement = format!("@{}/", candidate.target.trim_end_matches('/'));
+        let start_byte = char_to_byte(&self.input, start);
+        let end_byte = char_to_byte(&self.input, end);
+        self.input.replace_range(start_byte..end_byte, &replacement);
+
+        let old_len = end.saturating_sub(start);
+        let new_len = replacement.chars().count();
+        self.apply_input_edit(start, old_len, new_len);
+        self.cursor_char = start + new_len;
+        self.autocomplete.visible = false;
+        self.mention_autocomplete
+            .update(&self.input, self.cursor_char);
+        true
+    }
+
+    pub fn cancel_mention_autocomplete(&mut self) {
+        self.mention_autocomplete.visible = false;
+        self.mention_autocomplete.clear_session_cache();
+    }
+
+    pub fn take_input_draft(&mut self) -> Option<UserDraft> {
+        if self.input.is_empty() {
+            return None;
+        }
+
+        let text = std::mem::take(&mut self.input);
+        let mentions = std::mem::take(&mut self.input_mentions);
+        self.cursor_char = 0;
+        self.autocomplete.visible = false;
+        self.mention_autocomplete.visible = false;
+        self.mention_autocomplete.clear_session_cache();
+
+        Some(UserDraft {
+            text,
+            mentions: mentions.iter().map(InputMention::display_mention).collect(),
+        })
+    }
+
+    fn apply_input_edit(&mut self, start: usize, old_len: usize, new_len: usize) {
+        let end = start + old_len;
+        let delta = new_len as isize - old_len as isize;
+        self.input_mentions.retain_mut(|mention| {
+            if mention.end_char <= start {
+                true
+            } else if mention.start_char >= end {
+                mention.start_char = shift_char(mention.start_char, delta);
+                mention.end_char = shift_char(mention.end_char, delta);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    fn mention_before_cursor(&self) -> Option<(usize, usize)> {
+        self.input_mentions
+            .iter()
+            .find(|mention| {
+                self.cursor_char > mention.start_char && self.cursor_char <= mention.end_char
+            })
+            .map(|mention| (mention.start_char, mention.end_char))
+    }
+
+    fn mention_after_cursor(&self) -> Option<(usize, usize)> {
+        self.input_mentions
+            .iter()
+            .find(|mention| {
+                self.cursor_char >= mention.start_char && self.cursor_char < mention.end_char
+            })
+            .map(|mention| (mention.start_char, mention.end_char))
+    }
+
+    fn delete_input_range(&mut self, start: usize, end: usize) {
+        let start_byte = char_to_byte(&self.input, start);
+        let end_byte = char_to_byte(&self.input, end);
+        self.input.replace_range(start_byte..end_byte, "");
+        self.apply_input_edit(start, end.saturating_sub(start), 0);
     }
 
     /// 根据滚动速度动态调整步长
@@ -697,5 +894,177 @@ impl UiState {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.auto_scroll = true;
+    }
+}
+
+fn char_to_byte(input: &str, char_idx: usize) -> usize {
+    input.chars().take(char_idx).map(char::len_utf8).sum()
+}
+
+fn shift_char(value: usize, delta: isize) -> usize {
+    if delta.is_negative() {
+        value.saturating_sub(delta.unsigned_abs())
+    } else {
+        value.saturating_add(delta as usize)
+    }
+}
+
+fn combined_user_draft(drafts: &[&UserDraft]) -> UserDraft {
+    let mut text = String::new();
+    let mut mentions = Vec::new();
+    let mut offset = 0usize;
+    for (idx, draft) in drafts.iter().enumerate() {
+        if idx > 0 {
+            text.push('\n');
+            offset += 1;
+        }
+
+        mentions.extend(draft.mentions.iter().map(|mention| DisplayMention {
+            start_char: mention.start_char + offset,
+            end_char: mention.end_char + offset,
+            kind: mention.kind,
+            label: mention.label.clone(),
+            target: mention.target.clone(),
+            description: mention.description.clone(),
+        }));
+        offset += draft.text.chars().count();
+        text.push_str(&draft.text);
+    }
+
+    UserDraft { text, mentions }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::display::MentionKind;
+
+    fn state_with_mention(cursor_char: usize) -> UiState {
+        let mut state = UiState::new();
+        state.input = "see @src now".to_string();
+        state.cursor_char = cursor_char;
+        state.input_mentions.push(InputMention {
+            start_char: 4,
+            end_char: 9,
+            kind: MentionKind::Directory,
+            label: "src".to_string(),
+            target: "src".to_string(),
+            description: "directory".to_string(),
+        });
+        state
+    }
+
+    #[test]
+    fn backspace_deletes_whole_mention_at_end() {
+        let mut state = state_with_mention(9);
+        state.delete_before();
+        assert_eq!(state.input, "see now");
+        assert_eq!(state.cursor_char, 4);
+        assert!(state.input_mentions.is_empty());
+    }
+
+    #[test]
+    fn backspace_deletes_whole_mention_from_inside() {
+        let mut state = state_with_mention(6);
+        state.delete_before();
+        assert_eq!(state.input, "see now");
+        assert_eq!(state.cursor_char, 4);
+        assert!(state.input_mentions.is_empty());
+    }
+
+    #[test]
+    fn delete_deletes_whole_mention_at_start() {
+        let mut state = state_with_mention(4);
+        state.delete_after();
+        assert_eq!(state.input, "see now");
+        assert_eq!(state.cursor_char, 4);
+        assert!(state.input_mentions.is_empty());
+    }
+
+    #[test]
+    fn delete_deletes_whole_mention_from_inside() {
+        let mut state = state_with_mention(6);
+        state.delete_after();
+        assert_eq!(state.input, "see now");
+        assert_eq!(state.cursor_char, 4);
+        assert!(state.input_mentions.is_empty());
+    }
+
+    #[test]
+    fn cursor_left_skips_whole_mention_at_end() {
+        let mut state = state_with_mention(9);
+        state.cursor_left();
+        assert_eq!(state.cursor_char, 4);
+    }
+
+    #[test]
+    fn cursor_left_skips_whole_mention_from_inside() {
+        let mut state = state_with_mention(6);
+        state.cursor_left();
+        assert_eq!(state.cursor_char, 4);
+    }
+
+    #[test]
+    fn cursor_right_skips_whole_mention_at_start() {
+        let mut state = state_with_mention(4);
+        state.cursor_right();
+        assert_eq!(state.cursor_char, 9);
+    }
+
+    #[test]
+    fn cursor_right_skips_whole_mention_from_inside() {
+        let mut state = state_with_mention(6);
+        state.cursor_right();
+        assert_eq!(state.cursor_char, 9);
+    }
+
+    #[test]
+    fn cursor_movement_in_plain_text_stays_character_based() {
+        let mut state = state_with_mention(3);
+        state.cursor_left();
+        assert_eq!(state.cursor_char, 2);
+
+        state.cursor_char = 9;
+        state.cursor_right();
+        assert_eq!(state.cursor_char, 10);
+    }
+
+    #[test]
+    fn inserted_mention_range_includes_trailing_space() {
+        let mut state = UiState::new();
+        state.input = "@sr".to_string();
+        state.cursor_char = 3;
+        state.mention_autocomplete.visible = true;
+        state.mention_autocomplete.active_start = 0;
+        state.mention_autocomplete.active_end = 3;
+        state.mention_autocomplete.filtered.push(MentionCandidate {
+            kind: MentionKind::Directory,
+            label: "src".to_string(),
+            target: "src".to_string(),
+            description: "directory".to_string(),
+        });
+
+        assert!(state.insert_selected_mention());
+        assert_eq!(state.input, "@src ");
+        assert_eq!(state.cursor_char, 5);
+        assert_eq!(state.input_mentions[0].start_char, 0);
+        assert_eq!(state.input_mentions[0].end_char, 5);
+    }
+
+    #[test]
+    fn typed_at_text_without_selection_remains_plain_text() {
+        let mut state = UiState::new();
+        for c in "@src ".chars() {
+            state.insert_char(c);
+            state.update_input_autocomplete();
+        }
+
+        assert_eq!(state.input, "@src ");
+        assert!(state.input_mentions.is_empty());
+
+        state.cursor_left();
+        assert_eq!(state.cursor_char, 4);
+        state.delete_before();
+        assert_eq!(state.input, "@sr ");
     }
 }

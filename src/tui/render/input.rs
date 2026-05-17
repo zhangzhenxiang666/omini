@@ -1,4 +1,5 @@
 use crate::tui::state::UiState;
+use crate::types::display::UserDraft;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -75,10 +76,9 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
             }
             Line::from(spans)
         } else {
-            Line::from(vec![
-                Span::styled("\u{276f} ", prefix_style),
-                Span::raw(input),
-            ])
+            let mut spans = vec![Span::styled("\u{276f} ", prefix_style)];
+            spans.extend(input_spans(state));
+            Line::from(spans)
         }
     };
     let paragraph = Paragraph::new(content);
@@ -94,6 +94,41 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
         input_line.x + 2 + prefix_width as u16
     };
     frame.set_cursor_position((cursor_x, input_line.y));
+}
+
+fn input_spans(state: &UiState) -> Vec<Span<'static>> {
+    let mention_style = Style::default()
+        .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    for mention in &state.input_mentions {
+        if mention.start_char > cursor {
+            spans.push(Span::raw(chars_slice(
+                &state.input,
+                cursor,
+                mention.start_char,
+            )));
+        }
+        spans.push(Span::styled(
+            chars_slice(&state.input, mention.start_char, mention.end_char),
+            mention_style,
+        ));
+        cursor = mention.end_char;
+    }
+    let total = state.input.chars().count();
+    if cursor < total {
+        spans.push(Span::raw(chars_slice(&state.input, cursor, total)));
+    }
+    spans
+}
+
+fn chars_slice(input: &str, start: usize, end: usize) -> String {
+    input
+        .chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 fn matched_input_command<'a>(
@@ -199,12 +234,12 @@ fn render_queued_user_inputs(state: &UiState, frame: &mut ratatui::Frame, area: 
     let lines: Vec<Line> = inputs
         .iter()
         .skip(skip)
-        .map(|text| {
+        .map(|draft| {
             let prefix = "  - ";
             let available = width.saturating_sub(UnicodeWidthStr::width(prefix));
             Line::from(vec![
                 Span::styled(prefix, prefix_style),
-                Span::styled(ellipsize_width(text, available), text_style),
+                Span::styled(ellipsize_width(&draft.text, available), text_style),
             ])
         })
         .collect();
@@ -233,7 +268,7 @@ fn render_queued_user_inputs(state: &UiState, frame: &mut ratatui::Frame, area: 
     frame.render_widget(Paragraph::new(footer).style(bg), chunks[2]);
 }
 
-pub(super) fn queued_drawer_inputs(state: &UiState) -> &std::collections::VecDeque<String> {
+pub(super) fn queued_drawer_inputs(state: &UiState) -> &std::collections::VecDeque<UserDraft> {
     if state.pending_intervention_inputs.is_empty() {
         &state.queued_user_inputs
     } else {

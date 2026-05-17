@@ -7,7 +7,6 @@ use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
 use crate::types::config::Settings;
 use crate::types::events::{RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
-use crate::types::message::Message;
 use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
@@ -80,6 +79,10 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.thinking_effort = settings.thinking_effort;
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
+    state.set_mention_context(
+        settings.cwd.clone(),
+        state::load_mention_candidates(&settings.cwd),
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
@@ -271,10 +274,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                         if cmd.has_args {
                                             // 只补全命令名 + 空格
                                             state.input = format!("/{} ", cmd.name);
+                                            state.input_mentions.clear();
                                             state.cursor_char = state.input.chars().count();
                                         } else {
                                             // 先用完整命令名替换输入，再发送
                                             state.input = format!("/{}", cmd.name);
+                                            state.input_mentions.clear();
                                             let msg = std::mem::take(&mut state.input);
                                             state.cursor_char = 0;
                                             state.autocomplete.visible = false;
@@ -291,11 +296,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     if let Some(cmd) = state.autocomplete.selected_command().cloned() {
                                         if cmd.has_args {
                                             state.input = format!("/{} ", cmd.name);
+                                            state.input_mentions.clear();
                                             state.cursor_char = state.input.chars().count();
                                             state.autocomplete.visible = false;
                                         } else {
                                             state.autocomplete.visible = false;
                                             state.input = format!("/{}", cmd.name);
+                                            state.input_mentions.clear();
                                             let msg = std::mem::take(&mut state.input);
                                             state.cursor_char = 0;
                                             if !msg.is_empty() {
@@ -316,20 +323,79 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                 }
                                 KeyCode::Backspace => {
                                     state.delete_before();
-                                    state.autocomplete.update(&state.input);
+                                    state.update_input_autocomplete();
                                 }
                                 KeyCode::Delete => {
                                     state.delete_after();
-                                    state.autocomplete.update(&state.input);
+                                    state.update_input_autocomplete();
                                 }
                                 KeyCode::Char(c) => {
                                     state.insert_char(c);
-                                    state.autocomplete.update(&state.input);
+                                    state.update_input_autocomplete();
                                 }
-                                KeyCode::Left => state.cursor_left(),
-                                KeyCode::Right => state.cursor_right(),
-                                KeyCode::Home => state.cursor_home(),
-                                KeyCode::End => state.cursor_end(),
+                                KeyCode::Left => {
+                                    state.cursor_left();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Right => {
+                                    state.cursor_right();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Home => {
+                                    state.cursor_home();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::End => {
+                                    state.cursor_end();
+                                    state.update_input_autocomplete();
+                                }
+                                _ => {}
+                            }
+                            last_tick = tokio::time::Instant::now();
+                            terminal.draw(|frame| render::render(&mut state, frame))?;
+                            continue;
+                        }
+
+                        // @ mention 自动补全模式
+                        if state.mention_autocomplete.visible {
+                            match key.code {
+                                KeyCode::Enter => {
+                                    state.insert_selected_mention();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Tab | KeyCode::Right => {
+                                    state.expand_selected_mention_directory();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Down => state.mention_autocomplete.select_next(),
+                                KeyCode::Up => state.mention_autocomplete.select_prev(),
+                                KeyCode::Esc => {
+                                    state.cancel_mention_autocomplete();
+                                }
+                                KeyCode::Backspace => {
+                                    state.delete_before();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Delete => {
+                                    state.delete_after();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Char(c) => {
+                                    state.insert_char(c);
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Left => {
+                                    state.cursor_left();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::Home => {
+                                    state.cursor_home();
+                                    state.update_input_autocomplete();
+                                }
+                                KeyCode::End => {
+                                    state.cursor_end();
+                                    state.update_input_autocomplete();
+                                }
                                 _ => {}
                             }
                             last_tick = tokio::time::Instant::now();
@@ -362,42 +428,63 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                     continue;
                                 }
 
-                                let msg = std::mem::take(&mut state.input);
-                                state.cursor_char = 0;
-                                if !msg.is_empty() {
-                                    if msg.starts_with('/') {
+                                if let Some(draft) = state.take_input_draft() {
+                                    if draft.text.starts_with('/') {
                                         // 命令：不添加消息，不切换工作模式，仅发送到 runtime
-                                        let _ = request_tx.send(UiToRuntimeEvent::SendCommand(msg)).await;
+                                        let _ = request_tx
+                                            .send(UiToRuntimeEvent::SendCommand(draft.text))
+                                            .await;
                                     } else if state.is_run_active() {
-                                        state.queued_user_inputs.push_back(msg);
+                                        state.queued_user_inputs.push_back(draft);
                                     } else {
-                                        let msg = Message::from_user_text(msg);
-                                        state.messages.push(UiMessage::Message(msg.clone()));
+                                        let ui_message = match draft.clone().history_item() {
+                                            crate::types::display::HistoryItem::Message(message) => {
+                                                UiMessage::Message(message)
+                                            }
+                                            crate::types::display::HistoryItem::Display(display) => {
+                                                UiMessage::Display(display)
+                                            }
+                                        };
+                                        state.messages.push(ui_message);
+                                        let _ = request_tx
+                                            .send(UiToRuntimeEvent::SendMessage(draft))
+                                            .await;
                                         state.scroll_offset = 0;
                                         state.auto_scroll = true;
                                         state.agent_status = AgentStatus::Working;
-                                        let _ = request_tx.send(UiToRuntimeEvent::SendMessage(msg)).await;
                                     }
                                 }
                             }
                             (KeyCode::Backspace, _) => {
                                 state.delete_before();
-                                state.autocomplete.update(&state.input);
+                                state.update_input_autocomplete();
                             }
                             (KeyCode::Delete, _) => {
                                 state.delete_after();
-                                state.autocomplete.update(&state.input);
+                                state.update_input_autocomplete();
                             }
                             (KeyCode::Char(c), _) => {
                                 state.insert_char(c);
-                                state.autocomplete.update(&state.input);
+                                state.update_input_autocomplete();
                             }
-                            (KeyCode::Left, _) => state.cursor_left(),
-                            (KeyCode::Right, _) => state.cursor_right(),
+                            (KeyCode::Left, _) => {
+                                state.cursor_left();
+                                state.update_input_autocomplete();
+                            }
+                            (KeyCode::Right, _) => {
+                                state.cursor_right();
+                                state.update_input_autocomplete();
+                            }
                             (KeyCode::Home, KeyModifiers::CONTROL) => state.scroll_to_top(),
                             (KeyCode::End, KeyModifiers::CONTROL) => state.scroll_to_bottom(),
-                            (KeyCode::Home, _) => state.cursor_home(),
-                            (KeyCode::End, _) => state.cursor_end(),
+                            (KeyCode::Home, _) => {
+                                state.cursor_home();
+                                state.update_input_autocomplete();
+                            }
+                            (KeyCode::End, _) => {
+                                state.cursor_end();
+                                state.update_input_autocomplete();
+                            }
                             _ => {}
                         }
                     }

@@ -1,7 +1,8 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
+use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::events::{CommandEffect, CommandResult};
-use crate::types::message::Message;
+use crate::types::message::{Message, Role};
 use async_trait::async_trait;
 
 const INIT_PROMPT: &str = r#"Analyze this repository and create or update an AGENTS.md file for future omini agents working in this project.
@@ -22,6 +23,36 @@ How to write it:
 - Prefer concrete commands and concrete architecture notes over broad descriptions.
 
 Before finishing, report whether AGENTS.md was created or updated and summarize the most important changes."#;
+
+fn build_init_query(args: &str, description: &str) -> (Message, DisplayMessage) {
+    let mut prompt = INIT_PROMPT.to_string();
+    let args = args.trim();
+    if !args.is_empty() {
+        prompt.push_str("\n\nAdditional user notes for this initialization:\n");
+        prompt.push_str(args);
+    }
+    let display_text = if args.is_empty() {
+        "/init".to_string()
+    } else {
+        format!("/init {args}")
+    };
+
+    (
+        Message::from_user_text(prompt),
+        DisplayMessage {
+            role: Role::User,
+            text: display_text,
+            mentions: vec![DisplayMention {
+                start_char: 0,
+                end_char: 5,
+                kind: MentionKind::Command,
+                label: "init".to_string(),
+                target: "init".to_string(),
+                description: description.to_string(),
+            }],
+        },
+    )
+}
 
 pub struct InitCommand;
 
@@ -44,16 +75,37 @@ impl Command for InitCommand {
     }
 
     async fn execute(&self, _runtime: &mut AgentRuntime, args: &str) -> CommandResult {
-        let mut prompt = INIT_PROMPT.to_string();
-        let args = args.trim();
-        if !args.is_empty() {
-            prompt.push_str("\n\nAdditional user notes for this initialization:\n");
-            prompt.push_str(args);
-        }
-
+        let (llm_message, display_message) = build_init_query(args, self.description());
         CommandResult::Ok(vec![CommandEffect::inject_user_query(
-            Message::from_user_text(prompt),
-            Message::from_user_text("/init".to_string()),
+            llm_message,
+            display_message,
         )])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::message::ContentBlock;
+
+    #[test]
+    fn init_query_uses_display_message_for_command_echo() {
+        let (llm_message, display_message) = build_init_query("focus on tests", "description");
+        assert_eq!(display_message.text, "/init focus on tests");
+        assert_eq!(display_message.mentions[0].kind, MentionKind::Command);
+        assert_eq!(display_message.mentions[0].start_char, 0);
+        assert_eq!(display_message.mentions[0].end_char, 5);
+
+        let llm_text = llm_message
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(llm_text.contains(INIT_PROMPT));
+        assert!(llm_text.contains("Additional user notes"));
+        assert!(llm_text.contains("focus on tests"));
     }
 }

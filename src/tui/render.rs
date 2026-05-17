@@ -4,8 +4,9 @@ use crate::tui::state::{
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, display_path, render_tool,
 };
+use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::events::{PermissionPreview, SubagentStatus, ToolPauseKind, ToolPauseRequest};
-use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
+use crate::types::message::{ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock};
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -1253,6 +1254,138 @@ fn truncate_str(s: &str, max_width: usize) -> String {
     result
 }
 
+fn styled_wrapped_text(
+    text_block: &TextBlock,
+    content_width: usize,
+    base_style: Style,
+) -> Vec<Line<'static>> {
+    styled_wrapped_ranges(&text_block.text, &[], content_width, base_style)
+}
+
+fn styled_wrapped_display(
+    display: &DisplayMessage,
+    content_width: usize,
+    base_style: Style,
+) -> Vec<Line<'static>> {
+    styled_wrapped_ranges(&display.text, &display.mentions, content_width, base_style)
+}
+
+fn styled_wrapped_ranges(
+    text: &str,
+    mentions: &[DisplayMention],
+    content_width: usize,
+    base_style: Style,
+) -> Vec<Line<'static>> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+
+    let mention_ranges = mentions
+        .iter()
+        .map(|mention| (mention.start_char, mention.end_char, mention.kind))
+        .collect::<Vec<_>>();
+    let mention_style = base_style
+        .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+        .add_modifier(Modifier::BOLD);
+    let normal_style = base_style;
+    let width_limit = content_width.max(1);
+    let mut lines = Vec::new();
+
+    for logical in split_with_char_offsets(text) {
+        let mut spans = Vec::new();
+        let mut current_width = 0usize;
+        for (char_idx, ch) in logical {
+            let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width > 0 && current_width + ch_width > width_limit {
+                lines.push(Line::from(spans));
+                spans = Vec::new();
+                current_width = 0;
+            }
+            let style = if let Some((_, _, kind)) = mention_ranges
+                .iter()
+                .find(|(start, end, _)| char_idx >= *start && char_idx < *end)
+            {
+                match kind {
+                    MentionKind::Subagent
+                    | MentionKind::File
+                    | MentionKind::Directory
+                    | MentionKind::Command => mention_style,
+                }
+            } else {
+                normal_style
+            };
+            push_char_span(&mut spans, ch, style);
+            current_width += ch_width;
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines
+}
+
+fn split_with_char_offsets(text: &str) -> Vec<Vec<(usize, char)>> {
+    let mut lines: Vec<Vec<(usize, char)>> = vec![Vec::new()];
+    for (idx, ch) in text.chars().enumerate() {
+        if ch == '\n' {
+            lines.push(Vec::new());
+        } else if let Some(line) = lines.last_mut() {
+            line.push((idx, ch));
+        }
+    }
+    lines
+}
+
+fn push_char_span(spans: &mut Vec<Span<'static>>, ch: char, style: Style) {
+    if let Some(last) = spans.last_mut()
+        && last.style == style
+    {
+        last.content.to_mut().push(ch);
+        return;
+    }
+    spans.push(Span::styled(ch.to_string(), style));
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    line.spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum()
+}
+
+fn build_display_message_lines(
+    display: &DisplayMessage,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let user_bg = Color::Rgb(65, 69, 76);
+    let bg_style = Style::default().bg(user_bg);
+    let mut lines = vec![Line::from(Span::styled(
+        " ".repeat(content_width),
+        bg_style,
+    ))];
+
+    let wrapped = styled_wrapped_display(display, content_width.saturating_sub(2), bg_style);
+    if wrapped.is_empty() {
+        let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
+        lines.push(Line::from(Span::styled(text, bg_style)));
+    } else {
+        for (idx, wl) in wrapped.into_iter().enumerate() {
+            let prefix = if idx == 0 { "❯ " } else { "  " };
+            let text_width = UnicodeWidthStr::width(prefix) + line_width(&wl);
+            let remaining = content_width.saturating_sub(text_width);
+            let mut spans = vec![Span::styled(prefix, bg_style)];
+            spans.extend(wl.spans);
+            spans.push(Span::styled(" ".repeat(remaining), bg_style));
+            lines.push(Line::from(spans));
+        }
+    }
+
+    lines.push(Line::from(Span::styled(
+        " ".repeat(content_width),
+        bg_style,
+    )));
+    lines
+}
+
 // ===========================================================================
 // Messages, Input, Footer (原逻辑不变)
 // ===========================================================================
@@ -1575,6 +1708,19 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
 
     let mut rendered_msg_idx = 0;
     for ui_message in &state.messages {
+        if let UiMessage::Display(display) = ui_message {
+            let block_lines = build_display_message_lines(display, content_width);
+            if !block_lines.is_empty() {
+                if !all_lines.is_empty() {
+                    all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
+                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+                all_lines.extend(block_lines);
+            }
+            continue;
+        }
+
         let UiMessage::Message(message) = ui_message else {
             let block_lines = match ui_message {
                 UiMessage::Notice { text } => {
@@ -1586,6 +1732,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                 UiMessage::Error { text } => {
                     build_alert_lines(text, content_width, AlertKind::Error)
                 }
+                UiMessage::Display(_) => unreachable!(),
                 UiMessage::Message(_) => unreachable!(),
             };
             if !block_lines.is_empty() {
@@ -1619,19 +1766,23 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                         bg_style,
                     )));
 
-                    let wrapped =
-                        crate::tui::widgets::word_wrap(&tb.text, content_width.saturating_sub(2));
+                    let wrapped = styled_wrapped_text(
+                        tb,
+                        content_width.saturating_sub(2),
+                        Style::default().bg(user_bg),
+                    );
                     if wrapped.is_empty() {
                         let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
                         block_lines.push(Line::from(Span::styled(text, bg_style)));
                     } else {
-                        for (idx, wl) in wrapped.iter().enumerate() {
+                        for (idx, wl) in wrapped.into_iter().enumerate() {
                             let prefix = if idx == 0 { "❯ " } else { "  " };
-                            let text = format!("{}{}", prefix, wl);
-                            let text_width = UnicodeWidthStr::width(&*text);
+                            let text_width = UnicodeWidthStr::width(prefix) + line_width(&wl);
                             let remaining = content_width.saturating_sub(text_width);
-                            let full_line = format!("{}{}", text, " ".repeat(remaining));
-                            block_lines.push(Line::from(Span::styled(full_line, bg_style)));
+                            let mut spans = vec![Span::styled(prefix, bg_style)];
+                            spans.extend(wl.spans);
+                            spans.push(Span::styled(" ".repeat(remaining), bg_style));
+                            block_lines.push(Line::from(spans));
                         }
                     }
 

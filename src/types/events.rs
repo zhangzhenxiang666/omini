@@ -1,5 +1,6 @@
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
+use crate::types::display::{DisplayMessage, HistoryItem, UserDraft};
 use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -16,11 +17,11 @@ pub enum UiToRuntimeEvent {
     /// 用户取消当前正在运行的对话
     CancelRun,
     /// 用户发送一条消息给 runtime
-    SendMessage(Message),
+    SendMessage(UserDraft),
     /// 用户执行一条命令
     SendCommand(String),
     /// 用户发送一条消息插入正在运行的 query，在下一轮 LLM 调用前生效
-    InterveneMessage(Message),
+    InterveneMessage(UserDraft),
     /// 用户在模型选择页中确认选择
     ModelSelected {
         provider: String,
@@ -102,7 +103,7 @@ pub enum RuntimeToUiEvent {
     /// 用户输入已提交，运行时开始处理
     RunStarted,
     /// Runtime 注入了一条用户消息，UI 需要显示到消息区
-    UserMessageInjected(Message),
+    UserMessageInjected(HistoryItem),
     /// 所有轮次完成，运行结束
     RunFinished,
 
@@ -123,7 +124,7 @@ pub enum RuntimeToUiEvent {
     /// 会话已切换
     SessionChanged {
         session_id: Option<String>,
-        messages: Vec<Message>,
+        messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,
     },
 
@@ -278,7 +279,7 @@ pub enum CommandEffect {
     /// 注入一条 LLM 消息并用另一条消息作为 UI/数据库回显。
     InjectUserQuery {
         llm_message: Message,
-        display_message: Message,
+        display_message: DisplayMessage,
     },
     /// 不新增用户消息，直接基于当前历史继续启动 query。
     ContinueQuery,
@@ -291,7 +292,7 @@ impl CommandEffect {
         Self::Emit(Box::new(event))
     }
 
-    pub fn inject_user_query(llm_message: Message, display_message: Message) -> Self {
+    pub fn inject_user_query(llm_message: Message, display_message: DisplayMessage) -> Self {
         Self::InjectUserQuery {
             llm_message,
             display_message,

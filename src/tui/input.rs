@@ -206,15 +206,24 @@ pub(super) async fn flush_queued_user_inputs(
     state: &mut UiState,
     request_tx: &mpsc::Sender<UiToRuntimeEvent>,
 ) {
-    let Some(msg) = state.take_queued_user_message() else {
+    let ui_messages = state
+        .queued_user_inputs
+        .iter()
+        .cloned()
+        .map(|draft| match draft.clone().history_item() {
+            crate::types::display::HistoryItem::Message(message) => UiMessage::Message(message),
+            crate::types::display::HistoryItem::Display(display) => UiMessage::Display(display),
+        })
+        .collect::<Vec<_>>();
+    let Some(draft) = state.take_queued_user_draft() else {
         return;
     };
 
-    state.messages.push(UiMessage::Message(msg.clone()));
+    state.messages.extend(ui_messages);
     state.scroll_offset = 0;
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
-    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(msg)).await;
+    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;
 }
 
 pub(super) async fn submit_queued_intervention(
@@ -223,10 +232,10 @@ pub(super) async fn submit_queued_intervention(
 ) {
     if state.is_run_active()
         && state.pending_intervention_inputs.is_empty()
-        && let Some(msg) = state.take_queued_user_message_for_intervention()
+        && let Some(draft) = state.take_queued_user_draft_for_intervention()
     {
         let _ = request_tx
-            .send(UiToRuntimeEvent::InterveneMessage(msg))
+            .send(UiToRuntimeEvent::InterveneMessage(draft))
             .await;
     }
 }
