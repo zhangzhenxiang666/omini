@@ -11,8 +11,9 @@ use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
 use crossterm::event::{
-    self, Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
-    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+    KeyboardEnhancementFlags, MouseButton, MouseEventKind, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -36,6 +37,7 @@ mod widgets;
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
     enable_raw_mode()?;
     execute!(stderr(), EnterAlternateScreen)?;
+    execute!(stderr(), EnableBracketedPaste)?;
     execute!(
         stderr(),
         PushKeyboardEnhancementFlags(
@@ -51,6 +53,7 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
 fn safe_restore_terminal() {
     let _ = disable_raw_mode();
     let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
+    let _ = execute!(io::stderr(), DisableBracketedPaste);
     let _ = execute!(io::stderr(), LeaveAlternateScreen);
     let _ = execute!(io::stderr(), DisableMouseCapture);
 }
@@ -58,6 +61,7 @@ fn safe_restore_terminal() {
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io::Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    execute!(terminal.backend_mut(), DisableBracketedPaste)?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     execute!(terminal.backend_mut(), DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -268,6 +272,15 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
                         // 自动补全模式
                         if state.autocomplete.visible {
+                            if key.code == KeyCode::Enter
+                                && key.modifiers.contains(KeyModifiers::SHIFT)
+                            {
+                                state.insert_text("\n");
+                                state.update_input_autocomplete();
+                                last_tick = tokio::time::Instant::now();
+                                terminal.draw(|frame| render::render(&mut state, frame))?;
+                                continue;
+                            }
                             match key.code {
                                 KeyCode::Enter => {
                                     if let Some(cmd) = state.autocomplete.selected_command().cloned() {
@@ -275,11 +288,15 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                             // 只补全命令名 + 空格
                                             state.input = format!("/{} ", cmd.name);
                                             state.input_mentions.clear();
+                                            state.input_paste_markers.clear();
+                                            state.input_scroll_line = 0;
                                             state.cursor_char = state.input.chars().count();
                                         } else {
                                             // 先用完整命令名替换输入，再发送
                                             state.input = format!("/{}", cmd.name);
                                             state.input_mentions.clear();
+                                            state.input_paste_markers.clear();
+                                            state.input_scroll_line = 0;
                                             let msg = std::mem::take(&mut state.input);
                                             state.cursor_char = 0;
                                             state.autocomplete.visible = false;
@@ -297,12 +314,16 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                                         if cmd.has_args {
                                             state.input = format!("/{} ", cmd.name);
                                             state.input_mentions.clear();
+                                            state.input_paste_markers.clear();
+                                            state.input_scroll_line = 0;
                                             state.cursor_char = state.input.chars().count();
                                             state.autocomplete.visible = false;
                                         } else {
                                             state.autocomplete.visible = false;
                                             state.input = format!("/{}", cmd.name);
                                             state.input_mentions.clear();
+                                            state.input_paste_markers.clear();
+                                            state.input_scroll_line = 0;
                                             let msg = std::mem::take(&mut state.input);
                                             state.cursor_char = 0;
                                             if !msg.is_empty() {
@@ -358,6 +379,15 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
                         // @ mention 自动补全模式
                         if state.mention_autocomplete.visible {
+                            if key.code == KeyCode::Enter
+                                && key.modifiers.contains(KeyModifiers::SHIFT)
+                            {
+                                state.insert_text("\n");
+                                state.update_input_autocomplete();
+                                last_tick = tokio::time::Instant::now();
+                                terminal.draw(|frame| render::render(&mut state, frame))?;
+                                continue;
+                            }
                             match key.code {
                                 KeyCode::Enter => {
                                     state.insert_selected_mention();
@@ -408,8 +438,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         match (key.code, key.modifiers) {
                             (KeyCode::Char('c'), KeyModifiers::CONTROL) => break Ok(()),
                             (KeyCode::Char('\x03'), _) => break Ok(()),
-                            (KeyCode::Up, _) => state.scroll_up(1),
-                            (KeyCode::Down, _) => state.scroll_down(1),
+                            (KeyCode::Up, _) => {
+                                state.cursor_up_in_input();
+                            }
+                            (KeyCode::Down, _) => {
+                                state.cursor_down_in_input();
+                            }
                             (KeyCode::PageUp, _) => {
                                 state.update_scroll_step(tokio::time::Instant::now());
                                 state.scroll_up(state.scroll_step.max(page_amt));
@@ -420,6 +454,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                             }
                             (code, modifiers) if input::is_intervention_key(code, modifiers) => {
                                 input::submit_queued_intervention(&mut state, &request_tx).await;
+                            }
+                            (KeyCode::Enter, modifiers)
+                                if modifiers.contains(KeyModifiers::SHIFT) =>
+                            {
+                                state.insert_text("\n");
+                                state.update_input_autocomplete();
                             }
                             (KeyCode::Enter, _) => {
                                 if !state.pending_intervention_inputs.is_empty() {
@@ -487,6 +527,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                             }
                             _ => {}
                         }
+                    }
+                    Event::Paste(text)
+                        if state.interaction_step.is_none() && state.active_tool_pause().is_none() =>
+                    {
+                        state.insert_paste(text);
+                        state.update_input_autocomplete();
                     }
                     Event::Resize(_, _) => {}
                     Event::Mouse(mouse) => {

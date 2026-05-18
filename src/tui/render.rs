@@ -67,7 +67,8 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     } else {
         drawer_len.min(4) as u16 + 2
     };
-    let input_height = 3 + queued_height;
+    state.set_input_wrap_width(area.width as usize);
+    let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -1284,6 +1285,7 @@ fn styled_wrapped_ranges(
         .iter()
         .map(|mention| (mention.start_char, mention.end_char, mention.kind))
         .collect::<Vec<_>>();
+    let image_ranges = image_marker_ranges(text);
     let mention_style = base_style
         .fg(Color::Rgb(0x42, 0xd9, 0xe8))
         .add_modifier(Modifier::BOLD);
@@ -1311,6 +1313,11 @@ fn styled_wrapped_ranges(
                     | MentionKind::Directory
                     | MentionKind::Command => mention_style,
                 }
+            } else if image_ranges
+                .iter()
+                .any(|(start, end)| char_idx >= *start && char_idx < *end)
+            {
+                mention_style
             } else {
                 normal_style
             };
@@ -1321,6 +1328,35 @@ fn styled_wrapped_ranges(
     }
 
     lines
+}
+
+fn image_marker_ranges(text: &str) -> Vec<(usize, usize)> {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut ranges = Vec::new();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        if chars[idx] != '[' {
+            idx += 1;
+            continue;
+        }
+        let prefix = ['[', 'I', 'm', 'a', 'g', 'e', '#'];
+        if idx + prefix.len() >= chars.len() || chars[idx..idx + prefix.len()] != prefix {
+            idx += 1;
+            continue;
+        }
+        let mut end = idx + prefix.len();
+        let digit_start = end;
+        while end < chars.len() && chars[end].is_ascii_digit() {
+            end += 1;
+        }
+        if end > digit_start && chars.get(end) == Some(&']') {
+            ranges.push((idx, end + 1));
+            idx = end + 1;
+        } else {
+            idx += 1;
+        }
+    }
+    ranges
 }
 
 fn split_with_char_offsets(text: &str) -> Vec<Vec<(usize, char)>> {
@@ -1358,15 +1394,13 @@ fn build_display_message_lines(
 ) -> Vec<Line<'static>> {
     let user_bg = Color::Rgb(65, 69, 76);
     let bg_style = Style::default().bg(user_bg);
-    let mut lines = vec![Line::from(Span::styled(
-        " ".repeat(content_width),
-        bg_style,
-    ))];
+    let mut lines =
+        vec![Line::from(Span::styled(" ".repeat(content_width), bg_style)).style(bg_style)];
 
     let wrapped = styled_wrapped_display(display, content_width.saturating_sub(2), bg_style);
     if wrapped.is_empty() {
         let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
-        lines.push(Line::from(Span::styled(text, bg_style)));
+        lines.push(Line::from(Span::styled(text, bg_style)).style(bg_style));
     } else {
         for (idx, wl) in wrapped.into_iter().enumerate() {
             let prefix = if idx == 0 { "❯ " } else { "  " };
@@ -1375,14 +1409,11 @@ fn build_display_message_lines(
             let mut spans = vec![Span::styled(prefix, bg_style)];
             spans.extend(wl.spans);
             spans.push(Span::styled(" ".repeat(remaining), bg_style));
-            lines.push(Line::from(spans));
+            lines.push(Line::from(spans).style(bg_style));
         }
     }
 
-    lines.push(Line::from(Span::styled(
-        " ".repeat(content_width),
-        bg_style,
-    )));
+    lines.push(Line::from(Span::styled(" ".repeat(content_width), bg_style)).style(bg_style));
     lines
 }
 
@@ -1761,10 +1792,10 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                 ContentBlock::Text(tb) if message.role == crate::types::message::Role::User => {
                     let user_bg = Color::Rgb(65, 69, 76);
                     let bg_style = Style::default().bg(user_bg);
-                    block_lines.push(Line::from(Span::styled(
-                        " ".repeat(content_width),
-                        bg_style,
-                    )));
+                    block_lines.push(
+                        Line::from(Span::styled(" ".repeat(content_width), bg_style))
+                            .style(bg_style),
+                    );
 
                     let wrapped = styled_wrapped_text(
                         tb,
@@ -1773,7 +1804,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                     );
                     if wrapped.is_empty() {
                         let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
-                        block_lines.push(Line::from(Span::styled(text, bg_style)));
+                        block_lines.push(Line::from(Span::styled(text, bg_style)).style(bg_style));
                     } else {
                         for (idx, wl) in wrapped.into_iter().enumerate() {
                             let prefix = if idx == 0 { "❯ " } else { "  " };
@@ -1782,19 +1813,20 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                             let mut spans = vec![Span::styled(prefix, bg_style)];
                             spans.extend(wl.spans);
                             spans.push(Span::styled(" ".repeat(remaining), bg_style));
-                            block_lines.push(Line::from(spans));
+                            block_lines.push(Line::from(spans).style(bg_style));
                         }
                     }
 
-                    block_lines.push(Line::from(Span::styled(
-                        " ".repeat(content_width),
-                        bg_style,
-                    )));
+                    block_lines.push(
+                        Line::from(Span::styled(" ".repeat(content_width), bg_style))
+                            .style(bg_style),
+                    );
                 }
                 ContentBlock::Text(tb) => {
                     let mut lines = build_plain_lines(&tb.text, content_width);
                     block_lines.append(&mut lines);
                 }
+                ContentBlock::Image(_) => {}
                 ContentBlock::ToolUse(tu) => {
                     if tu.name == "subagent" {
                         let node = state
@@ -1911,6 +1943,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
                     let mut lines = build_plain_lines(&tb.text, content_width);
                     block_lines.append(&mut lines);
                 }
+                ContentBlock::Image(_) => {}
                 ContentBlock::Thinking(tb) => {
                     let mut lines = build_thinking_lines(&tb.thinking, content_width);
                     block_lines.append(&mut lines);
@@ -2001,7 +2034,28 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     state.selectable_message_lines = selectable_lines;
     state.message_scroll_y = scroll_y;
 
+    let user_bg = Color::Rgb(65, 69, 76);
+    let user_line_bg = Style::default().bg(user_bg);
+    let user_line_rows = all_lines
+        .iter()
+        .map(|line| line.style.bg == Some(user_bg))
+        .collect::<Vec<_>>();
+
     apply_text_selection_highlight(state, &mut all_lines);
+
+    for (idx, is_user_line) in user_line_rows.iter().copied().enumerate().skip(scroll_y) {
+        if !is_user_line {
+            continue;
+        }
+        let visible_row = idx - scroll_y;
+        if visible_row >= visible_height {
+            break;
+        }
+        frame.buffer_mut().set_style(
+            Rect::new(area.x, area.y + visible_row as u16, area.width, 1),
+            user_line_bg,
+        );
+    }
 
     let paragraph =
         Paragraph::new(ratatui::text::Text::from(all_lines)).scroll((scroll_y as u16, 0));

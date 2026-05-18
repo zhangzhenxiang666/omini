@@ -464,29 +464,38 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
                     continue;
                 }
 
-                // 普通 user 消息：提取文本
-                let texts: Vec<&str> = msg
+                // 普通 user 消息：OpenAI 的图片块需要转换为 image_url data URL。
+                let content_parts: Vec<Value> = msg
                     .content
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text(t) => Some(t.text.as_str()),
+                    .filter_map(|block| match block {
+                        ContentBlock::Text(t) => Some(serde_json::json!({
+                            "type": "text",
+                            "text": t.text,
+                        })),
+                        ContentBlock::Image(image) => Some(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!(
+                                    "data:{};base64,{}",
+                                    image.source.media_type, image.source.data
+                                ),
+                            },
+                        })),
                         _ => None,
                     })
                     .collect();
 
-                if texts.is_empty() {
+                if content_parts.is_empty() {
                     continue;
                 }
 
-                let content = if texts.len() == 1 {
-                    Value::String(texts[0].to_string())
+                let content = if content_parts.len() == 1
+                    && let Some(text) = content_parts[0].get("text").and_then(Value::as_str)
+                {
+                    Value::String(text.to_string())
                 } else {
-                    Value::Array(
-                        texts
-                            .iter()
-                            .map(|t| serde_json::json!({"type": "text", "text": t}))
-                            .collect(),
-                    )
+                    Value::Array(content_parts)
                 };
 
                 result.push(serde_json::json!({
@@ -619,6 +628,38 @@ mod tests {
             }
             other => panic!("expected tool use, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn openai_user_message_converts_image_blocks_to_data_urls() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::from_text("look [Image#1]".to_string()),
+                ContentBlock::from_base64_image("image/png".to_string(), "abc123".to_string()),
+            ],
+        )];
+
+        let converted = convert_messages_to_openai(&messages, None);
+
+        assert_eq!(
+            converted,
+            vec![serde_json::json!({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "look [Image#1]",
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,abc123",
+                        },
+                    },
+                ],
+            })]
+        );
     }
 
     #[tokio::test]

@@ -393,12 +393,30 @@ fn directory_self_candidate(relative: &str) -> MentionCandidate {
 }
 
 fn file_candidate(relative: String) -> MentionCandidate {
+    let description = if is_supported_image_file_name(&relative) {
+        "image"
+    } else {
+        "file"
+    };
     MentionCandidate {
         kind: MentionKind::File,
         label: relative.clone(),
         target: relative.clone(),
-        description: "file".to_string(),
+        description: description.to_string(),
     }
+}
+
+fn is_supported_image_file_name(file_name: &str) -> bool {
+    Path::new(file_name)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -520,6 +538,32 @@ mod tests {
             .map(|candidate| candidate.target.as_str())
             .collect();
         assert_eq!(targets, vec!["src/types"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn image_files_are_described_as_images() {
+        let root = temp_dir();
+        fs::write(root.join("photo.png"), "").unwrap();
+        fs::write(root.join("notes.txt"), "").unwrap();
+
+        let mut autocomplete = MentionAutocomplete::default();
+        autocomplete.set_cwd(root.clone());
+        autocomplete.update("@", 1);
+
+        let image = autocomplete
+            .filtered
+            .iter()
+            .find(|candidate| candidate.target == "photo.png")
+            .unwrap();
+        let text = autocomplete
+            .filtered
+            .iter()
+            .find(|candidate| candidate.target == "notes.txt")
+            .unwrap();
+        assert_eq!(image.description, "image");
+        assert_eq!(text.description, "file");
 
         let _ = fs::remove_dir_all(root);
     }

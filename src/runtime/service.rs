@@ -183,7 +183,13 @@ impl AgentRuntime {
                     Some(req) = self.request_rx.recv() => {
                         match req {
                             UiToRuntimeEvent::SendMessage(draft) => {
-                                let submission = draft.into_submission();
+                                let submission = match draft.into_submission() {
+                                    Ok(submission) => submission,
+                                    Err(error) => {
+                                        self.send_event(RuntimeToUiEvent::Error(error)).await;
+                                        continue;
+                                    }
+                                };
                                 self.messages.push(submission.llm_message);
                                 if let Some(display_message) = submission.display_message {
                                     self.process_run(RunStart::SplitDisplayMessage { display_message }).await;
@@ -526,7 +532,13 @@ impl AgentRuntime {
                                 }
                             }
                             UiToRuntimeEvent::InterveneMessage(draft) => {
-                                let submission = draft.into_submission();
+                                let submission = match draft.into_submission() {
+                                    Ok(submission) => submission,
+                                    Err(error) => {
+                                        let _ = event_tx.send(RuntimeToUiEvent::Error(error)).await;
+                                        continue;
+                                    }
+                                };
                                 self.query_engine
                                     .enqueue_user_message(submission.llm_message);
                             }

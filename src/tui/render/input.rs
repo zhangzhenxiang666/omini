@@ -1,7 +1,7 @@
 use crate::tui::state::UiState;
 use crate::types::display::UserDraft;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
@@ -11,6 +11,7 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
 
     let bg_widget = Paragraph::new(Line::from("")).style(bg);
     frame.render_widget(bg_widget, area);
+    let visible_line_count = state.input_visible_line_count();
 
     let drawer_len = queued_drawer_inputs(state).len();
     let queued_height = if drawer_len == 0 {
@@ -19,8 +20,11 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
         drawer_len.min(4) as u16 + 2
     };
     let input_area = if queued_height > 0 {
-        let chunks = Layout::vertical([Constraint::Length(queued_height), Constraint::Length(3)])
-            .split(area);
+        let chunks = Layout::vertical([
+            Constraint::Length(queued_height),
+            Constraint::Length(2 + visible_line_count as u16),
+        ])
+        .split(area);
         render_queued_user_inputs(state, frame, chunks[0]);
         chunks[1]
     } else {
@@ -29,98 +33,164 @@ pub(super) fn render_input(state: &UiState, frame: &mut ratatui::Frame, area: Re
 
     let chunks = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(1),
+        Constraint::Length(visible_line_count as u16),
         Constraint::Length(1),
     ])
     .split(input_area);
-    let input_line = chunks[1];
+    let input_body = chunks[1];
 
     let line_bg = Paragraph::new(Line::from(Span::styled(
         " ".repeat(area.width as usize),
         bg,
     )))
     .style(bg);
-    frame.render_widget(line_bg, input_line);
+    frame.render_widget(line_bg, input_body);
 
     let prefix_style = Style::default().fg(Color::Rgb(0xab, 0xab, 0xab));
     let cmd_color = Style::default().fg(Color::Rgb(0x42, 0xd9, 0xe8));
     let placeholder_style = Style::default().fg(Color::DarkGray);
 
-    let command_match = matched_input_command(state, &state.input);
-
-    let content = if state.input.is_empty() {
-        Line::from(vec![
+    let lines = if state.input.is_empty() {
+        vec![Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
             Span::styled("Type a message...", placeholder_style),
-        ])
+        ])]
     } else {
-        let input = &state.input;
-        if let Some(cmd) = command_match {
-            let after_cmd = if let Some(space_pos) = input.find(' ') {
-                &input[space_pos..]
-            } else {
-                ""
-            };
-            let mut spans = vec![
-                Span::styled("\u{276f} ", prefix_style),
-                Span::styled(format!("/{}", cmd.name), cmd_color),
-            ];
-            if !after_cmd.is_empty() {
-                spans.push(Span::raw(after_cmd));
-                if cmd.has_args
-                    && after_cmd == " "
-                    && let Some(ref desc) = cmd.args_description
-                {
-                    spans.push(Span::styled(desc.to_string(), placeholder_style));
-                }
-            }
-            Line::from(spans)
-        } else {
-            let mut spans = vec![Span::styled("\u{276f} ", prefix_style)];
-            spans.extend(input_spans(state));
-            Line::from(spans)
-        }
+        input_lines(state, prefix_style, cmd_color)
     };
-    let paragraph = Paragraph::new(content);
-    frame.render_widget(paragraph, input_line);
+    let paragraph = Paragraph::new(lines).style(bg);
+    frame.render_widget(paragraph, input_body);
 
-    let cursor_x = if state.input.is_empty() {
-        input_line.x + 2
-    } else if let Some(cmd) = command_match {
-        input_line.x + 2 + rendered_command_input_width(state, cmd) as u16
+    let (cursor_x, cursor_y) = if state.input.is_empty() {
+        (input_body.x + 2, input_body.y)
     } else {
-        let byte_idx = state.char_to_byte(state.cursor_char);
-        let prefix_width = UnicodeWidthStr::width(&state.input[..byte_idx]);
-        input_line.x + 2 + prefix_width as u16
+        let (line_idx, col) = state.input_cursor_line_col().unwrap_or((0, 0));
+        let visible_line = line_idx.saturating_sub(state.input_scroll_line);
+        let x_offset = state.input_visual_line_prefix_width(line_idx) as u16;
+        (
+            input_body.x + x_offset + col_width(state, line_idx, col) as u16,
+            input_body.y + visible_line as u16,
+        )
     };
-    frame.set_cursor_position((cursor_x, input_line.y));
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn input_spans(state: &UiState) -> Vec<Span<'static>> {
+fn input_lines(state: &UiState, prefix_style: Style, cmd_color: Style) -> Vec<Line<'static>> {
+    let command_end_char = command_highlight_end(state);
+    state
+        .input_line_bounds()
+        .into_iter()
+        .enumerate()
+        .skip(state.input_scroll_line)
+        .take(state.input_visible_line_count())
+        .map(|(idx, (start, end))| {
+            let mut spans = Vec::new();
+            if idx == 0 {
+                spans.push(Span::styled("\u{276f} ", prefix_style));
+            } else {
+                spans.push(Span::raw("  "));
+            }
+            spans.extend(input_spans(state, start, end, command_end_char, cmd_color));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+fn input_spans(
+    state: &UiState,
+    start: usize,
+    end: usize,
+    command_end_char: Option<usize>,
+    command_style: Style,
+) -> Vec<Span<'static>> {
     let mention_style = Style::default()
         .fg(Color::Rgb(0x42, 0xd9, 0xe8))
-        .add_modifier(ratatui::style::Modifier::BOLD);
+        .add_modifier(Modifier::BOLD);
+    let paste_marker_style = Style::default()
+        .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+        .add_modifier(Modifier::BOLD);
+    let image_style = Style::default()
+        .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+        .add_modifier(Modifier::BOLD);
+
     let mut spans = Vec::new();
-    let mut cursor = 0usize;
-    for mention in &state.input_mentions {
-        if mention.start_char > cursor {
-            spans.push(Span::raw(chars_slice(
-                &state.input,
+    let mut cursor = start;
+    while cursor < end {
+        if let Some(marker) = state.paste_marker_at(cursor) {
+            let marker_end = marker.end_char.min(end);
+            spans.push(Span::styled(
+                chars_slice(&state.input, cursor, marker_end),
+                paste_marker_style,
+            ));
+            cursor = marker.end_char;
+        } else if let Some(image) = state.image_at(cursor) {
+            let image_end = image.end_char.min(end);
+            spans.push(Span::styled(
+                chars_slice(&state.input, cursor, image_end),
+                image_style,
+            ));
+            cursor = image.end_char;
+        } else if let Some(mention) = state.mention_at(cursor) {
+            let mention_end = mention.end_char.min(end);
+            spans.push(Span::styled(
+                chars_slice(&state.input, cursor, mention_end),
+                mention_style,
+            ));
+            cursor = mention.end_char;
+        } else {
+            let next_special = (cursor + 1..end)
+                .find(|idx| {
+                    state.paste_marker_at(*idx).is_some()
+                        || state.image_at(*idx).is_some()
+                        || state.mention_at(*idx).is_some()
+                })
+                .unwrap_or(end);
+            push_plain_input_segment(
+                state,
+                &mut spans,
                 cursor,
-                mention.start_char,
-            )));
+                next_special,
+                command_end_char,
+                command_style,
+            );
+            cursor = next_special;
         }
-        spans.push(Span::styled(
-            chars_slice(&state.input, mention.start_char, mention.end_char),
-            mention_style,
-        ));
-        cursor = mention.end_char;
-    }
-    let total = state.input.chars().count();
-    if cursor < total {
-        spans.push(Span::raw(chars_slice(&state.input, cursor, total)));
     }
     spans
+}
+
+fn col_width(state: &UiState, line_idx: usize, col: usize) -> usize {
+    let Some((start, end)) = state.input_line_bounds().get(line_idx).copied() else {
+        return 0;
+    };
+    state.input_display_width(start, end).min(col)
+}
+
+fn push_plain_input_segment(
+    state: &UiState,
+    spans: &mut Vec<Span<'static>>,
+    start: usize,
+    end: usize,
+    command_end_char: Option<usize>,
+    command_style: Style,
+) {
+    let Some(command_end) = command_end_char else {
+        spans.push(Span::raw(chars_slice(&state.input, start, end)));
+        return;
+    };
+
+    if start < command_end {
+        let styled_end = end.min(command_end);
+        spans.push(Span::styled(
+            chars_slice(&state.input, start, styled_end),
+            command_style,
+        ));
+        if styled_end < end {
+            spans.push(Span::raw(chars_slice(&state.input, styled_end, end)));
+        }
+    } else {
+        spans.push(Span::raw(chars_slice(&state.input, start, end)));
+    }
 }
 
 fn chars_slice(input: &str, start: usize, end: usize) -> String {
@@ -152,30 +222,16 @@ fn matched_input_command<'a>(
         .flatten()
 }
 
-fn rendered_command_input_width(
-    state: &UiState,
-    cmd: &crate::types::events::CommandSummary,
-) -> usize {
+fn command_highlight_end(state: &UiState) -> Option<usize> {
     let input = &state.input;
+    let cmd = matched_input_command(state, input)?;
     let command_end_byte = input.find(' ').unwrap_or(input.len());
     let command_end_char = input[..command_end_byte].chars().count();
-
-    if state.cursor_char <= command_end_char {
-        let rendered_command = format!("/{}", cmd.name);
-        if state.cursor_char == command_end_char {
-            return UnicodeWidthStr::width(rendered_command.as_str());
-        }
-        let partial = rendered_command
-            .chars()
-            .take(state.cursor_char)
-            .collect::<String>();
-        return UnicodeWidthStr::width(partial.as_str());
+    if cmd.name.is_empty() {
+        None
+    } else {
+        Some(command_end_char)
     }
-
-    let rendered_command_width = UnicodeWidthStr::width(format!("/{}", cmd.name).as_str());
-    let suffix_start = state.char_to_byte(command_end_char);
-    let cursor_byte = state.char_to_byte(state.cursor_char);
-    rendered_command_width + UnicodeWidthStr::width(&input[suffix_start..cursor_byte])
 }
 
 fn render_queued_user_inputs(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {

@@ -1,5 +1,8 @@
 use crate::types::message::{ContentBlock, Message, Role};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayMessage {
@@ -18,6 +21,16 @@ pub struct DisplayMention {
     pub target: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DisplayImageAttachment {
+    pub start_char: usize,
+    pub end_char: usize,
+    pub marker: String,
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -45,6 +58,7 @@ pub struct UserSubmission {
 pub struct UserDraft {
     pub text: String,
     pub mentions: Vec<DisplayMention>,
+    pub images: Vec<DisplayImageAttachment>,
 }
 
 impl UserDraft {
@@ -52,27 +66,24 @@ impl UserDraft {
         Self {
             text,
             mentions: Vec::new(),
+            images: Vec::new(),
         }
     }
 
-    pub fn into_submission(self) -> UserSubmission {
+    pub fn into_submission(self) -> Result<UserSubmission, String> {
         let llm_text = build_llm_text(&self.text, &self.mentions);
-        let llm_message = Message::new(
-            Role::User,
-            vec![ContentBlock::from_text(
-                llm_text.unwrap_or_else(|| self.text.clone()),
-            )],
-        );
+        let content = build_llm_content(llm_text.as_deref().unwrap_or(&self.text), &self.images)?;
+        let llm_message = Message::new(Role::User, content);
         let display_message = (!self.mentions.is_empty()).then_some(DisplayMessage {
             role: Role::User,
             text: self.text,
             mentions: self.mentions,
         });
 
-        UserSubmission {
+        Ok(UserSubmission {
             llm_message,
             display_message,
-        }
+        })
     }
 
     pub fn history_item(self) -> HistoryItem {
@@ -123,6 +134,51 @@ fn build_llm_text(text: &str, mentions: &[DisplayMention]) -> Option<String> {
     Some(output)
 }
 
+fn build_llm_content(
+    text: &str,
+    images: &[DisplayImageAttachment],
+) -> Result<Vec<ContentBlock>, String> {
+    let mut images = images.iter().collect::<Vec<_>>();
+    images.sort_by_key(|image| image.start_char);
+
+    let mut blocks = vec![ContentBlock::from_text(text.to_string())];
+    for image in images {
+        blocks.push(load_image_block(image)?);
+    }
+
+    Ok(blocks)
+}
+
+fn load_image_block(image: &DisplayImageAttachment) -> Result<ContentBlock, String> {
+    let path = Path::new(&image.source_path);
+    if !path.is_file() {
+        return Err(format!("Image file does not exist: {}", image.source_path));
+    }
+    let media_type = image_media_type(path)
+        .ok_or_else(|| format!("Unsupported image type: {}", image.source_path))?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("Failed to read image {}: {err}", image.source_path))?;
+    Ok(ContentBlock::from_base64_image(
+        media_type.to_string(),
+        BASE64_STANDARD.encode(bytes),
+    ))
+}
+
+fn image_media_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        _ => None,
+    }
+}
+
 fn mention_llm_text(mention: &DisplayMention) -> String {
     match mention.kind {
         MentionKind::Subagent => {
@@ -163,9 +219,10 @@ mod tests {
                 target: "src/main.rs".to_string(),
                 description: "file".to_string(),
             }],
+            images: Vec::new(),
         };
 
-        let submission = draft.into_submission();
+        let submission = draft.into_submission().unwrap();
         let display = submission.display_message.unwrap();
         assert_eq!(display.text, "check @src/main.rs");
         assert_eq!(display.mentions[0].target, "src/main.rs");
@@ -185,7 +242,9 @@ mod tests {
 
     #[test]
     fn plain_draft_builds_plain_submission() {
-        let submission = UserDraft::plain("hello".to_string()).into_submission();
+        let submission = UserDraft::plain("hello".to_string())
+            .into_submission()
+            .unwrap();
         assert!(submission.display_message.is_none());
         assert_eq!(
             submission.llm_message,
@@ -205,8 +264,10 @@ mod tests {
                 target: "init".to_string(),
                 description: String::new(),
             }],
+            images: Vec::new(),
         }
         .into_submission();
+        let submission = submission.unwrap();
 
         assert_eq!(
             submission.llm_message,
@@ -214,5 +275,40 @@ mod tests {
         );
         let display = submission.display_message.unwrap();
         assert_eq!(display.mentions[0].kind, MentionKind::Command);
+    }
+
+    #[test]
+    fn draft_with_image_builds_text_and_image_blocks() {
+        let dir =
+            std::env::temp_dir().join(format!("omini_display_image_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("image.png");
+        std::fs::write(&path, b"image-bytes").unwrap();
+
+        let submission = UserDraft {
+            text: "look [Image#1] please".to_string(),
+            mentions: Vec::new(),
+            images: vec![DisplayImageAttachment {
+                start_char: 5,
+                end_char: 14,
+                marker: "[Image#1]".to_string(),
+                source_path: path.to_string_lossy().to_string(),
+                file_name: "image.png".to_string(),
+            }],
+        }
+        .into_submission()
+        .unwrap();
+
+        assert_eq!(submission.llm_message.content.len(), 2);
+        assert!(matches!(
+            &submission.llm_message.content[0],
+            ContentBlock::Text(text) if text.text == "look [Image#1] please"
+        ));
+        assert!(matches!(
+            &submission.llm_message.content[1],
+            ContentBlock::Image(image)
+                if image.source.media_type == "image/png"
+                    && image.source.data == BASE64_STANDARD.encode(b"image-bytes")
+        ));
     }
 }

@@ -15,6 +15,25 @@ pub struct TextBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ImageBlock {
+    pub source: ImageSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ImageSource {
+    #[serde(rename = "type")]
+    pub source_type: ImageSourceType,
+    pub media_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSourceType {
+    Base64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ToolUseBlock {
     pub id: String,
     pub name: String,
@@ -40,6 +59,7 @@ pub struct ThinkingBlock {
 pub enum ContentBlock {
     Thinking(ThinkingBlock),
     Text(TextBlock),
+    Image(ImageBlock),
     ToolUse(ToolUseBlock),
     ToolResult(ToolResultBlock),
 }
@@ -68,6 +88,16 @@ impl ContentBlock {
         Self::Text(TextBlock { text })
     }
 
+    pub fn from_base64_image(media_type: String, data: String) -> Self {
+        Self::Image(ImageBlock {
+            source: ImageSource {
+                source_type: ImageSourceType::Base64,
+                media_type,
+                data,
+            },
+        })
+    }
+
     pub fn from_tool_use(id: String, name: String, input: HashMap<String, Value>) -> Self {
         Self::ToolUse(ToolUseBlock { id, name, input })
     }
@@ -83,6 +113,10 @@ impl ContentBlock {
 
     pub fn is_text(&self) -> bool {
         matches!(self, ContentBlock::Text(_))
+    }
+
+    pub fn is_image(&self) -> bool {
+        matches!(self, ContentBlock::Image(_))
     }
 
     pub fn is_tool_use(&self) -> bool {
@@ -108,5 +142,53 @@ impl Message {
             role: Role::User,
             content: vec![ContentBlock::Text(TextBlock { text })],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn image_block_serializes_as_anthropic_shape() {
+        let block = ContentBlock::from_base64_image("image/png".to_string(), "abc123".to_string());
+
+        assert_eq!(
+            serde_json::to_value(&block).unwrap(),
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "abc123",
+                },
+            })
+        );
+        assert!(block.is_image());
+    }
+
+    #[test]
+    fn image_block_deserializes_from_anthropic_shape() {
+        let block: ContentBlock = serde_json::from_value(json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/jpeg",
+                "data": "def456",
+            },
+        }))
+        .unwrap();
+
+        assert_eq!(
+            block,
+            ContentBlock::Image(ImageBlock {
+                source: ImageSource {
+                    source_type: ImageSourceType::Base64,
+                    media_type: "image/jpeg".to_string(),
+                    data: "def456".to_string(),
+                },
+            })
+        );
     }
 }

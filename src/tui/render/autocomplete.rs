@@ -168,6 +168,9 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
             let kind = match candidate.kind {
                 crate::types::display::MentionKind::Subagent => "agent",
                 crate::types::display::MentionKind::Directory => "dir",
+                crate::types::display::MentionKind::File if candidate.description == "image" => {
+                    "image"
+                }
                 crate::types::display::MentionKind::File => "file",
                 crate::types::display::MentionKind::Command => "cmd",
             };

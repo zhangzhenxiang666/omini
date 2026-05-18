@@ -1,5 +1,7 @@
 use crate::types::config::ThinkingEffort;
-use crate::types::display::{DisplayMention, DisplayMessage, HistoryItem, UserDraft};
+use crate::types::display::{
+    DisplayImageAttachment, DisplayMention, DisplayMessage, HistoryItem, MentionKind, UserDraft,
+};
 use crate::types::events::{
     InteractionRequest, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus, ToolPauseKind,
     ToolPauseRequest,
@@ -7,7 +9,8 @@ use crate::types::events::{
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use unicode_width::UnicodeWidthChar;
 
 mod autocomplete;
 mod interaction;
@@ -17,6 +20,48 @@ mod permission;
 pub use autocomplete::CommandAutocomplete;
 pub use interaction::{InteractionStep, ModelSelectionEntry};
 pub use mention::{InputMention, MentionAutocomplete, MentionCandidate, load_mention_candidates};
+
+pub const PASTE_MARKER_THRESHOLD_CHARS: usize = 512;
+pub const PASTE_MARKER_THRESHOLD_NEWLINES: usize = 2;
+pub const MAX_INPUT_VISIBLE_LINES: usize = 3;
+const DEFAULT_INPUT_WRAP_WIDTH: usize = 80;
+const INPUT_PROMPT_WIDTH: usize = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputPasteMarker {
+    pub start_char: usize,
+    pub end_char: usize,
+    pub marker: String,
+    pub full_text: String,
+    pub full_char_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputImageAttachment {
+    pub start_char: usize,
+    pub end_char: usize,
+    pub marker: String,
+    pub source_path: String,
+    pub file_name: String,
+}
+
+impl InputImageAttachment {
+    pub fn display_attachment(&self) -> DisplayImageAttachment {
+        DisplayImageAttachment {
+            start_char: self.start_char,
+            end_char: self.end_char,
+            marker: self.marker.clone(),
+            source_path: self.source_path.clone(),
+            file_name: self.file_name.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputVisualLine {
+    pub start_char: usize,
+    pub end_char: usize,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
@@ -157,6 +202,10 @@ pub struct UiState {
     pub is_selecting_text: bool,
     pub input: String,
     pub input_mentions: Vec<InputMention>,
+    pub input_images: Vec<InputImageAttachment>,
+    pub input_paste_markers: Vec<InputPasteMarker>,
+    pub input_scroll_line: usize,
+    pub input_wrap_width: usize,
     /// 当前 query 运行期间由普通 Enter 暂存在 UI 侧的用户输入。
     pub queued_user_inputs: VecDeque<UserDraft>,
     /// 已提交给 engine、等待当前轮结束后插入历史的用户输入。
@@ -239,6 +288,10 @@ impl UiState {
             is_selecting_text: false,
             input: String::new(),
             input_mentions: Vec::new(),
+            input_images: Vec::new(),
+            input_paste_markers: Vec::new(),
+            input_scroll_line: 0,
+            input_wrap_width: DEFAULT_INPUT_WRAP_WIDTH,
             queued_user_inputs: VecDeque::new(),
             pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
@@ -654,6 +707,12 @@ impl UiState {
         }
         self.pending_assistant = None;
         self.queued_user_inputs.clear();
+        self.input.clear();
+        self.input_mentions.clear();
+        self.input_images.clear();
+        self.input_paste_markers.clear();
+        self.cursor_char = 0;
+        self.input_scroll_line = 0;
         self.agent_status = AgentStatus::Idle;
         self.interaction_step = None;
         self.interaction_request = None;
@@ -664,18 +723,180 @@ impl UiState {
         char_to_byte(&self.input, char_idx)
     }
 
+    pub fn set_input_wrap_width(&mut self, width: usize) {
+        let width = width.max(1);
+        if self.input_wrap_width != width {
+            self.input_wrap_width = width;
+            self.ensure_input_cursor_visible();
+        }
+    }
+
     pub fn insert_char(&mut self, c: char) {
+        self.insert_text(&c.to_string());
+        if matches!(c, '\'' | '"') {
+            self.replace_quoted_absolute_image_path_before_cursor(c);
+        }
+    }
+
+    pub fn insert_paste(&mut self, text: String) {
+        if let Some(path) = self.existing_image_path_from_pasted_text(&text) {
+            self.insert_image_attachment(path);
+            self.ensure_input_cursor_visible();
+            return;
+        }
+
+        let full_char_count = text.chars().count();
+        let newline_count = text.chars().filter(|ch| *ch == '\n').count();
+        if full_char_count > PASTE_MARKER_THRESHOLD_CHARS
+            || newline_count >= PASTE_MARKER_THRESHOLD_NEWLINES
+        {
+            let marker = format!("[Pasted Content {full_char_count} chars]");
+            let start = self.cursor_char;
+            self.insert_text(&marker);
+            let marker_len = marker.chars().count();
+            self.input_paste_markers.push(InputPasteMarker {
+                start_char: start,
+                end_char: start + marker_len,
+                marker,
+                full_text: text,
+                full_char_count,
+            });
+            self.input_paste_markers
+                .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        } else {
+            self.insert_text(&text);
+        }
+        self.ensure_input_cursor_visible();
+    }
+
+    pub fn insert_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+
         let byte_idx = self.char_to_byte(self.cursor_char);
-        self.input.insert(byte_idx, c);
-        self.apply_input_edit(self.cursor_char, 0, 1);
-        self.cursor_char += 1;
+        self.input.insert_str(byte_idx, text);
+        let inserted_len = text.chars().count();
+        self.apply_input_edit(self.cursor_char, 0, inserted_len);
+        self.cursor_char += inserted_len;
+        self.ensure_input_cursor_visible();
+    }
+
+    fn insert_image_attachment(&mut self, path: PathBuf) {
+        let start = self.cursor_char;
+        let marker = self.next_image_marker();
+        let replacement = format!("{marker} ");
+        self.insert_text(&replacement);
+        self.input_images.push(InputImageAttachment {
+            start_char: start,
+            end_char: start + replacement.chars().count(),
+            marker,
+            source_path: path.to_string_lossy().to_string(),
+            file_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+        self.input_images
+            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+    }
+
+    fn replace_range_with_image_attachment(&mut self, start: usize, end: usize, path: PathBuf) {
+        let marker = self.next_image_marker();
+        let replacement = format!("{marker} ");
+        let start_byte = char_to_byte(&self.input, start);
+        let end_byte = char_to_byte(&self.input, end);
+        self.input.replace_range(start_byte..end_byte, &replacement);
+
+        let old_len = end.saturating_sub(start);
+        let new_len = replacement.chars().count();
+        self.apply_input_edit(start, old_len, new_len);
+        self.input_images.push(InputImageAttachment {
+            start_char: start,
+            end_char: start + new_len,
+            marker,
+            source_path: path.to_string_lossy().to_string(),
+            file_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_string(),
+        });
+        self.input_images
+            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        self.cursor_char = start + new_len;
+    }
+
+    fn replace_quoted_absolute_image_path_before_cursor(&mut self, quote: char) -> bool {
+        if self.cursor_char < 2 {
+            return false;
+        }
+
+        let chars = self.input.chars().collect::<Vec<_>>();
+        let closing_idx = self.cursor_char.saturating_sub(1);
+        if chars.get(closing_idx).copied() != Some(quote) {
+            return false;
+        }
+
+        let Some(opening_idx) = chars[..closing_idx].iter().rposition(|ch| *ch == quote) else {
+            return false;
+        };
+        if opening_idx + 1 == closing_idx {
+            return false;
+        }
+
+        let path_text = chars[opening_idx + 1..closing_idx]
+            .iter()
+            .collect::<String>();
+        if path_text.contains('\n') || path_text.contains('\r') {
+            return false;
+        }
+
+        let path = PathBuf::from(&path_text);
+        if !path.is_absolute() {
+            return false;
+        }
+
+        let Some(path) = existing_image_path(path) else {
+            return false;
+        };
+
+        self.replace_range_with_image_attachment(opening_idx, closing_idx + 1, path);
+        true
+    }
+
+    fn next_image_marker(&self) -> String {
+        format!("[Image#{}]", self.input_images.len() + 1)
+    }
+
+    fn existing_image_path_for_target(&self, target: &str) -> Option<PathBuf> {
+        let path = PathBuf::from(target);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.status_bar.cwd.join(path)
+        };
+        existing_image_path(path)
+    }
+
+    fn existing_image_path_from_pasted_text(&self, text: &str) -> Option<PathBuf> {
+        let path_text = unquote_single_pasted_path(text)?;
+        let path = PathBuf::from(path_text);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.status_bar.cwd.join(path)
+        };
+        existing_image_path(path)
     }
 
     pub fn delete_before(&mut self) {
         if self.cursor_char > 0 {
-            if let Some((start, end)) = self.mention_before_cursor() {
+            if let Some((start, end)) = self.input_atom_before_cursor() {
                 self.delete_input_range(start, end);
                 self.cursor_char = start;
+                self.ensure_input_cursor_visible();
                 return;
             }
 
@@ -683,13 +904,15 @@ impl UiState {
             let byte_idx = self.char_to_byte(self.cursor_char);
             self.input.remove(byte_idx);
             self.apply_input_edit(self.cursor_char, 1, 0);
+            self.ensure_input_cursor_visible();
         }
     }
 
     pub fn delete_after(&mut self) {
-        if let Some((start, end)) = self.mention_after_cursor() {
+        if let Some((start, end)) = self.input_atom_after_cursor() {
             self.delete_input_range(start, end);
             self.cursor_char = start;
+            self.ensure_input_cursor_visible();
             return;
         }
 
@@ -697,21 +920,25 @@ impl UiState {
         if byte_idx < self.input.len() {
             self.input.remove(byte_idx);
             self.apply_input_edit(self.cursor_char, 1, 0);
+            self.ensure_input_cursor_visible();
         }
     }
 
     pub fn cursor_left(&mut self) {
-        if let Some((start, _)) = self.mention_before_cursor() {
+        if let Some((start, _)) = self.input_atom_before_cursor() {
             self.cursor_char = start;
+            self.ensure_input_cursor_visible();
             return;
         }
 
         self.cursor_char = self.cursor_char.saturating_sub(1);
+        self.ensure_input_cursor_visible();
     }
 
     pub fn cursor_right(&mut self) {
-        if let Some((_, end)) = self.mention_after_cursor() {
+        if let Some((_, end)) = self.input_atom_after_cursor() {
             self.cursor_char = end;
+            self.ensure_input_cursor_visible();
             return;
         }
 
@@ -719,14 +946,65 @@ impl UiState {
         if self.cursor_char < max_chars {
             self.cursor_char += 1;
         }
+        self.ensure_input_cursor_visible();
     }
 
     pub fn cursor_home(&mut self) {
         self.cursor_char = 0;
+        self.ensure_input_cursor_visible();
     }
 
     pub fn cursor_end(&mut self) {
         self.cursor_char = self.input.chars().count();
+        self.ensure_input_cursor_visible();
+    }
+
+    pub fn cursor_up_in_input(&mut self) -> bool {
+        let Some((line_idx, col)) = self.input_cursor_line_col() else {
+            return false;
+        };
+        if line_idx == 0 {
+            return false;
+        }
+        self.cursor_char = self.input_line_col_to_char(line_idx - 1, col);
+        self.ensure_input_cursor_visible();
+        true
+    }
+
+    pub fn cursor_down_in_input(&mut self) -> bool {
+        let Some((line_idx, col)) = self.input_cursor_line_col() else {
+            return false;
+        };
+        let line_count = self.input_line_count();
+        if line_idx + 1 >= line_count {
+            return false;
+        }
+        self.cursor_char = self.input_line_col_to_char(line_idx + 1, col);
+        self.ensure_input_cursor_visible();
+        true
+    }
+
+    pub fn input_line_count(&self) -> usize {
+        self.input_visual_lines().len()
+    }
+
+    pub fn input_visible_line_count(&self) -> usize {
+        self.input_line_count().clamp(1, MAX_INPUT_VISIBLE_LINES)
+    }
+
+    pub fn ensure_input_cursor_visible(&mut self) {
+        let line_idx = self
+            .input_cursor_line_col()
+            .map(|(line_idx, _)| line_idx)
+            .unwrap_or(0);
+        let visible = self.input_visible_line_count();
+        if line_idx < self.input_scroll_line {
+            self.input_scroll_line = line_idx;
+        } else if line_idx >= self.input_scroll_line + visible {
+            self.input_scroll_line = line_idx + 1 - visible;
+        }
+        let max_scroll = self.input_line_count().saturating_sub(visible);
+        self.input_scroll_line = self.input_scroll_line.min(max_scroll);
     }
 
     pub fn update_input_autocomplete(&mut self) {
@@ -754,6 +1032,18 @@ impl UiState {
         };
         let start = self.mention_autocomplete.active_start;
         let end = self.mention_autocomplete.active_end;
+
+        if candidate.kind == MentionKind::File
+            && let Some(path) = self.existing_image_path_for_target(&candidate.target)
+        {
+            self.replace_range_with_image_attachment(start, end, path);
+            self.mention_autocomplete.visible = false;
+            self.mention_autocomplete.clear_session_cache();
+            self.autocomplete.visible = false;
+            self.ensure_input_cursor_visible();
+            return true;
+        }
+
         let display = candidate.insert_display();
         let replacement = format!("{display} ");
         let start_byte = char_to_byte(&self.input, start);
@@ -775,6 +1065,7 @@ impl UiState {
         self.input_mentions
             .sort_by(|a, b| a.start_char.cmp(&b.start_char));
         self.cursor_char = start + new_len;
+        self.ensure_input_cursor_visible();
         self.mention_autocomplete.visible = false;
         self.mention_autocomplete.clear_session_cache();
         self.autocomplete.visible = false;
@@ -800,6 +1091,7 @@ impl UiState {
         let new_len = replacement.chars().count();
         self.apply_input_edit(start, old_len, new_len);
         self.cursor_char = start + new_len;
+        self.ensure_input_cursor_visible();
         self.autocomplete.visible = false;
         self.mention_autocomplete
             .update(&self.input, self.cursor_char);
@@ -818,14 +1110,22 @@ impl UiState {
 
         let text = std::mem::take(&mut self.input);
         let mentions = std::mem::take(&mut self.input_mentions);
+        let images = std::mem::take(&mut self.input_images);
+        let paste_markers = std::mem::take(&mut self.input_paste_markers);
         self.cursor_char = 0;
+        self.input_scroll_line = 0;
         self.autocomplete.visible = false;
         self.mention_autocomplete.visible = false;
         self.mention_autocomplete.clear_session_cache();
 
+        let (text, mentions) = expand_paste_markers(text, mentions, paste_markers);
         Some(UserDraft {
             text,
             mentions: mentions.iter().map(InputMention::display_mention).collect(),
+            images: images
+                .iter()
+                .map(InputImageAttachment::display_attachment)
+                .collect(),
         })
     }
 
@@ -843,24 +1143,190 @@ impl UiState {
                 false
             }
         });
+        self.input_images.retain_mut(|image| {
+            if image.end_char <= start {
+                true
+            } else if image.start_char >= end {
+                image.start_char = shift_char(image.start_char, delta);
+                image.end_char = shift_char(image.end_char, delta);
+                true
+            } else {
+                false
+            }
+        });
+        self.input_paste_markers.retain_mut(|marker| {
+            if marker.end_char <= start {
+                true
+            } else if marker.start_char >= end {
+                marker.start_char = shift_char(marker.start_char, delta);
+                marker.end_char = shift_char(marker.end_char, delta);
+                true
+            } else {
+                false
+            }
+        });
     }
 
-    fn mention_before_cursor(&self) -> Option<(usize, usize)> {
+    fn input_atom_before_cursor(&self) -> Option<(usize, usize)> {
         self.input_mentions
             .iter()
-            .find(|mention| {
-                self.cursor_char > mention.start_char && self.cursor_char <= mention.end_char
-            })
             .map(|mention| (mention.start_char, mention.end_char))
+            .chain(
+                self.input_images
+                    .iter()
+                    .map(|image| (image.start_char, image.end_char)),
+            )
+            .chain(
+                self.input_paste_markers
+                    .iter()
+                    .map(|marker| (marker.start_char, marker.end_char)),
+            )
+            .filter(|(start, end)| self.cursor_char > *start && self.cursor_char <= *end)
+            .max_by_key(|(start, _)| *start)
     }
 
-    fn mention_after_cursor(&self) -> Option<(usize, usize)> {
+    fn input_atom_after_cursor(&self) -> Option<(usize, usize)> {
         self.input_mentions
             .iter()
-            .find(|mention| {
-                self.cursor_char >= mention.start_char && self.cursor_char < mention.end_char
-            })
             .map(|mention| (mention.start_char, mention.end_char))
+            .chain(
+                self.input_images
+                    .iter()
+                    .map(|image| (image.start_char, image.end_char)),
+            )
+            .chain(
+                self.input_paste_markers
+                    .iter()
+                    .map(|marker| (marker.start_char, marker.end_char)),
+            )
+            .filter(|(start, end)| self.cursor_char >= *start && self.cursor_char < *end)
+            .min_by_key(|(start, _)| *start)
+    }
+
+    pub fn input_cursor_line_col(&self) -> Option<(usize, usize)> {
+        let lines = self.input_visual_lines();
+        for (line_idx, line) in lines.iter().enumerate() {
+            if self.cursor_char >= line.start_char && self.cursor_char <= line.end_char {
+                return Some((
+                    line_idx,
+                    self.input_display_width(line.start_char, self.cursor_char),
+                ));
+            }
+        }
+        lines.last().map(|line| {
+            (
+                lines.len().saturating_sub(1),
+                self.input_display_width(line.start_char, line.end_char),
+            )
+        })
+    }
+
+    fn input_line_col_to_char(&self, target_line: usize, target_col: usize) -> usize {
+        let Some(line) = self.input_visual_lines().get(target_line).copied() else {
+            return self.input.chars().count();
+        };
+
+        let mut col = 0usize;
+        for (idx, ch) in self
+            .input
+            .chars()
+            .enumerate()
+            .skip(line.start_char)
+            .take(line.end_char.saturating_sub(line.start_char))
+        {
+            if col >= target_col {
+                return idx;
+            }
+            col += char_display_width(ch);
+        }
+        line.end_char
+    }
+
+    pub fn input_line_bounds(&self) -> Vec<(usize, usize)> {
+        self.input_visual_lines()
+            .into_iter()
+            .map(|line| (line.start_char, line.end_char))
+            .collect()
+    }
+
+    pub fn input_visual_lines(&self) -> Vec<InputVisualLine> {
+        let chars = self.input.chars().collect::<Vec<_>>();
+        if chars.is_empty() {
+            return vec![InputVisualLine {
+                start_char: 0,
+                end_char: 0,
+            }];
+        }
+
+        let mut lines = Vec::new();
+        let mut start = 0usize;
+        let mut width = 0usize;
+        for (idx, ch) in chars.iter().copied().enumerate() {
+            if ch == '\n' {
+                lines.push(InputVisualLine {
+                    start_char: start,
+                    end_char: idx,
+                });
+                start = idx + 1;
+                width = 0;
+                continue;
+            }
+
+            let char_width = char_display_width(ch);
+            let capacity = self.input_visual_line_capacity(lines.len());
+            if width > 0 && width + char_width > capacity {
+                lines.push(InputVisualLine {
+                    start_char: start,
+                    end_char: idx,
+                });
+                start = idx;
+                width = 0;
+            }
+            width += char_width;
+        }
+        lines.push(InputVisualLine {
+            start_char: start,
+            end_char: chars.len(),
+        });
+        lines
+    }
+
+    pub fn input_visual_line_prefix_width(&self, line_idx: usize) -> usize {
+        let _ = line_idx;
+        INPUT_PROMPT_WIDTH
+    }
+
+    pub fn input_display_width(&self, start: usize, end: usize) -> usize {
+        self.input
+            .chars()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(char_display_width)
+            .sum()
+    }
+
+    fn input_visual_line_capacity(&self, line_idx: usize) -> usize {
+        self.input_wrap_width
+            .saturating_sub(self.input_visual_line_prefix_width(line_idx))
+            .max(1)
+    }
+
+    pub fn paste_marker_at(&self, start_char: usize) -> Option<&InputPasteMarker> {
+        self.input_paste_markers
+            .iter()
+            .find(|marker| marker.start_char == start_char)
+    }
+
+    pub fn image_at(&self, start_char: usize) -> Option<&InputImageAttachment> {
+        self.input_images
+            .iter()
+            .find(|image| image.start_char == start_char)
+    }
+
+    pub fn mention_at(&self, start_char: usize) -> Option<&InputMention> {
+        self.input_mentions
+            .iter()
+            .find(|mention| mention.start_char == start_char)
     }
 
     fn delete_input_range(&mut self, start: usize, end: usize) {
@@ -868,6 +1334,7 @@ impl UiState {
         let end_byte = char_to_byte(&self.input, end);
         self.input.replace_range(start_byte..end_byte, "");
         self.apply_input_edit(start, end.saturating_sub(start), 0);
+        self.ensure_input_cursor_visible();
     }
 
     /// 根据滚动速度动态调整步长
@@ -933,9 +1400,99 @@ fn shift_char(value: usize, delta: isize) -> usize {
     }
 }
 
+fn char_display_width(ch: char) -> usize {
+    UnicodeWidthChar::width(ch).unwrap_or(0)
+}
+
+fn unquote_single_pasted_path(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('\n') || trimmed.contains('\r') {
+        return None;
+    }
+
+    if let Some(stripped) = trimmed
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return Some(stripped);
+    }
+    if let Some(stripped) = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+    {
+        return Some(stripped);
+    }
+    Some(trimmed)
+}
+
+fn existing_image_path(path: PathBuf) -> Option<PathBuf> {
+    if path.is_file() && is_supported_image_path(&path) {
+        Some(path)
+    } else {
+        None
+    }
+}
+
+fn is_supported_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn expand_paste_markers(
+    text: String,
+    mut mentions: Vec<InputMention>,
+    mut markers: Vec<InputPasteMarker>,
+) -> (String, Vec<InputMention>) {
+    if markers.is_empty() {
+        return (text, mentions);
+    }
+
+    markers.sort_by(|a, b| a.start_char.cmp(&b.start_char));
+    mentions.sort_by(|a, b| a.start_char.cmp(&b.start_char));
+
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut expanded = String::new();
+    let mut cursor = 0usize;
+    let mut delta: isize = 0;
+    let mut marker_iter = markers.iter().peekable();
+
+    for mention in &mut mentions {
+        while let Some(marker) = marker_iter.peek() {
+            if marker.end_char > mention.start_char {
+                break;
+            }
+            delta += marker.full_char_count as isize - marker.marker.chars().count() as isize;
+            marker_iter.next();
+        }
+        mention.start_char = shift_char(mention.start_char, delta);
+        mention.end_char = shift_char(mention.end_char, delta);
+    }
+
+    for marker in markers {
+        for ch in &chars[cursor..marker.start_char] {
+            expanded.push(*ch);
+        }
+        expanded.push_str(&marker.full_text);
+        cursor = marker.end_char;
+    }
+    for ch in &chars[cursor..] {
+        expanded.push(*ch);
+    }
+
+    (expanded, mentions)
+}
+
 fn combined_user_draft(drafts: &[&UserDraft]) -> UserDraft {
     let mut text = String::new();
     let mut mentions = Vec::new();
+    let mut images = Vec::new();
     let mut offset = 0usize;
     for (idx, draft) in drafts.iter().enumerate() {
         if idx > 0 {
@@ -951,11 +1508,22 @@ fn combined_user_draft(drafts: &[&UserDraft]) -> UserDraft {
             target: mention.target.clone(),
             description: mention.description.clone(),
         }));
+        images.extend(draft.images.iter().map(|image| DisplayImageAttachment {
+            start_char: image.start_char + offset,
+            end_char: image.end_char + offset,
+            marker: image.marker.clone(),
+            source_path: image.source_path.clone(),
+            file_name: image.file_name.clone(),
+        }));
         offset += draft.text.chars().count();
         text.push_str(&draft.text);
     }
 
-    UserDraft { text, mentions }
+    UserDraft {
+        text,
+        mentions,
+        images,
+    }
 }
 
 #[cfg(test)]
@@ -977,6 +1545,19 @@ mod tests {
             description: "directory".to_string(),
         });
         state
+    }
+
+    fn long_paste_text() -> String {
+        "x".repeat(PASTE_MARKER_THRESHOLD_CHARS + 1)
+    }
+
+    fn temp_image_path(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("omini_image_input_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, b"image").unwrap();
+        path
     }
 
     fn start_subagent(state: &mut UiState) {
@@ -1115,6 +1696,109 @@ mod tests {
     }
 
     #[test]
+    fn selected_image_mention_inserts_image_marker() {
+        let image = temp_image_path("image.png");
+        let cwd = image.parent().unwrap().to_path_buf();
+        let mut state = UiState::new();
+        state.status_bar.cwd = cwd;
+        state.input = "@ima".to_string();
+        state.cursor_char = 4;
+        state.mention_autocomplete.visible = true;
+        state.mention_autocomplete.active_start = 0;
+        state.mention_autocomplete.active_end = 4;
+        state.mention_autocomplete.filtered.push(MentionCandidate {
+            kind: MentionKind::File,
+            label: "image.png".to_string(),
+            target: "image.png".to_string(),
+            description: "file".to_string(),
+        });
+
+        assert!(state.insert_selected_mention());
+        assert_eq!(state.input, "[Image#1] ");
+        assert!(state.input_mentions.is_empty());
+        assert_eq!(state.input_images.len(), 1);
+        assert_eq!(state.input_images[0].source_path, image.to_string_lossy());
+    }
+
+    #[test]
+    fn quoted_existing_image_path_paste_inserts_image_marker() {
+        let image = temp_image_path("dragged.jpg");
+        let mut state = UiState::new();
+
+        state.insert_paste(format!("'{}'", image.display()));
+
+        assert_eq!(state.input, "[Image#1] ");
+        assert_eq!(state.input_images.len(), 1);
+        assert_eq!(state.input_images[0].source_path, image.to_string_lossy());
+    }
+
+    #[test]
+    fn nonexistent_image_path_paste_remains_text() {
+        let mut state = UiState::new();
+        let path = "/tmp/omini_missing_image.png";
+
+        state.insert_paste(format!("'{path}'"));
+
+        assert_eq!(state.input, format!("'{path}'"));
+        assert!(state.input_images.is_empty());
+    }
+
+    #[test]
+    fn typed_quoted_existing_absolute_image_path_inserts_image_marker() {
+        let image = temp_image_path("typed.png");
+        let mut state = UiState::new();
+
+        for ch in format!("'{}'", image.display()).chars() {
+            state.insert_char(ch);
+        }
+
+        assert_eq!(state.input, "[Image#1] ");
+        assert_eq!(state.input_images.len(), 1);
+        assert_eq!(state.input_images[0].source_path, image.to_string_lossy());
+    }
+
+    #[test]
+    fn typed_quoted_image_path_with_spaces_inserts_image_marker() {
+        let image = temp_image_path("typed image.png");
+        let mut state = UiState::new();
+
+        for ch in format!("\"{}\"", image.display()).chars() {
+            state.insert_char(ch);
+        }
+
+        assert_eq!(state.input, "[Image#1] ");
+        assert_eq!(state.input_images.len(), 1);
+        assert_eq!(state.input_images[0].source_path, image.to_string_lossy());
+    }
+
+    #[test]
+    fn typed_quoted_nonexistent_image_path_remains_text() {
+        let mut state = UiState::new();
+        let text = "'/tmp/omini_missing_typed_image.png'";
+
+        for ch in text.chars() {
+            state.insert_char(ch);
+        }
+
+        assert_eq!(state.input, text);
+        assert!(state.input_images.is_empty());
+    }
+
+    #[test]
+    fn typed_quoted_non_image_path_remains_text() {
+        let file = temp_image_path("not-image.txt");
+        let mut state = UiState::new();
+        let text = format!("'{}'", file.display());
+
+        for ch in text.chars() {
+            state.insert_char(ch);
+        }
+
+        assert_eq!(state.input, text);
+        assert!(state.input_images.is_empty());
+    }
+
+    #[test]
     fn typed_at_text_without_selection_remains_plain_text() {
         let mut state = UiState::new();
         for c in "@src ".chars() {
@@ -1129,5 +1813,191 @@ mod tests {
         assert_eq!(state.cursor_char, 4);
         state.delete_before();
         assert_eq!(state.input, "@sr ");
+    }
+
+    #[test]
+    fn short_paste_inserts_literal_newlines() {
+        let mut state = UiState::new();
+        state.insert_paste("one\ntwo".to_string());
+
+        assert_eq!(state.input, "one\ntwo");
+        assert!(state.input_paste_markers.is_empty());
+        assert_eq!(state.input_line_count(), 2);
+    }
+
+    #[test]
+    fn paste_over_two_lines_inserts_marker_even_when_short() {
+        let mut state = UiState::new();
+        let pasted = "a\nb\nc".to_string();
+        state.insert_paste(pasted.clone());
+
+        assert_eq!(state.input, format!("[Pasted Content {} chars]", 5));
+        assert_eq!(state.input_paste_markers.len(), 1);
+
+        let draft = state.take_input_draft().unwrap();
+        assert_eq!(draft.text, pasted);
+    }
+
+    #[test]
+    fn long_paste_inserts_marker_and_submit_expands_original_text() {
+        let mut state = UiState::new();
+        let pasted = long_paste_text();
+        state.insert_paste(pasted.clone());
+
+        assert_eq!(state.input_paste_markers.len(), 1);
+        assert_eq!(
+            state.input,
+            format!(
+                "[Pasted Content {} chars]",
+                PASTE_MARKER_THRESHOLD_CHARS + 1
+            )
+        );
+
+        let draft = state.take_input_draft().unwrap();
+        assert_eq!(draft.text, pasted);
+        assert!(draft.mentions.is_empty());
+        assert!(state.input.is_empty());
+        assert!(state.input_paste_markers.is_empty());
+    }
+
+    #[test]
+    fn cursor_skips_whole_paste_marker() {
+        let mut state = UiState::new();
+        state.insert_paste(long_paste_text());
+        let marker_len = state.input.chars().count();
+
+        state.cursor_left();
+        assert_eq!(state.cursor_char, 0);
+
+        state.cursor_right();
+        assert_eq!(state.cursor_char, marker_len);
+    }
+
+    #[test]
+    fn delete_removes_whole_paste_marker() {
+        let mut state = UiState::new();
+        state.insert_paste(long_paste_text());
+        state.cursor_home();
+        state.delete_after();
+
+        assert!(state.input.is_empty());
+        assert!(state.input_paste_markers.is_empty());
+    }
+
+    #[test]
+    fn backspace_removes_whole_paste_marker() {
+        let mut state = UiState::new();
+        state.insert_paste(long_paste_text());
+        state.delete_before();
+
+        assert!(state.input.is_empty());
+        assert!(state.input_paste_markers.is_empty());
+        assert_eq!(state.cursor_char, 0);
+    }
+
+    #[test]
+    fn mention_offsets_shift_after_paste_marker_expansion() {
+        let mut state = UiState::new();
+        let pasted = long_paste_text();
+        state.insert_paste(pasted.clone());
+        state.insert_char(' ');
+        let mention_start = state.cursor_char;
+        state.insert_text("@src ");
+        state.input_mentions.push(InputMention {
+            start_char: mention_start,
+            end_char: mention_start + 5,
+            kind: MentionKind::Directory,
+            label: "src".to_string(),
+            target: "src".to_string(),
+            description: "directory".to_string(),
+        });
+
+        let draft = state.take_input_draft().unwrap();
+        assert_eq!(draft.text, format!("{pasted} @src "));
+        assert_eq!(draft.mentions[0].start_char, pasted.chars().count() + 1);
+        assert_eq!(draft.mentions[0].end_char, pasted.chars().count() + 6);
+    }
+
+    #[test]
+    fn input_visible_lines_caps_at_three_and_cursor_scrolls() {
+        let mut state = UiState::new();
+        state.insert_text("a\nb\nc\nd");
+
+        assert_eq!(state.input_line_count(), 4);
+        assert_eq!(state.input_visible_line_count(), 3);
+        assert_eq!(state.input_scroll_line, 1);
+
+        assert!(state.cursor_up_in_input());
+        assert_eq!(state.input_scroll_line, 1);
+        assert!(state.cursor_up_in_input());
+        assert_eq!(state.input_scroll_line, 1);
+        assert!(state.cursor_up_in_input());
+        assert_eq!(state.input_scroll_line, 0);
+    }
+
+    #[test]
+    fn input_soft_wraps_by_width_without_mutating_text() {
+        let mut state = UiState::new();
+        state.set_input_wrap_width(6);
+        state.insert_text("abcdefghi");
+
+        assert_eq!(state.input, "abcdefghi");
+        assert_eq!(state.input_line_bounds(), vec![(0, 4), (4, 8), (8, 9)]);
+        assert_eq!(state.input_line_count(), 3);
+        assert_eq!(state.input_visible_line_count(), 3);
+    }
+
+    #[test]
+    fn input_soft_wraps_wide_characters_by_display_width() {
+        let mut state = UiState::new();
+        state.set_input_wrap_width(6);
+        state.insert_text("你好吗x");
+
+        assert_eq!(state.input_line_bounds(), vec![(0, 2), (2, 4)]);
+        assert_eq!(state.input_display_width(0, 2), 4);
+        assert_eq!(state.input_display_width(2, 4), 3);
+    }
+
+    #[test]
+    fn input_soft_wrap_scrolls_after_three_visible_lines() {
+        let mut state = UiState::new();
+        state.set_input_wrap_width(6);
+        state.insert_text("abcdefghijklmnopqrst");
+
+        assert_eq!(
+            state.input_line_bounds(),
+            vec![(0, 4), (4, 8), (8, 12), (12, 16), (16, 20)]
+        );
+        assert_eq!(state.input_visible_line_count(), 3);
+        assert_eq!(state.input_scroll_line, 2);
+    }
+
+    #[test]
+    fn cursor_moves_vertically_across_soft_wrapped_lines() {
+        let mut state = UiState::new();
+        state.set_input_wrap_width(6);
+        state.insert_text("abcdefghijklmnopqrst");
+
+        assert_eq!(state.input_cursor_line_col(), Some((4, 4)));
+        assert!(state.cursor_up_in_input());
+        assert_eq!(state.input_cursor_line_col(), Some((3, 4)));
+        assert_eq!(state.cursor_char, 16);
+
+        assert!(state.cursor_down_in_input());
+        assert_eq!(state.input_cursor_line_col(), Some((4, 4)));
+        assert_eq!(state.cursor_char, 20);
+    }
+
+    #[test]
+    fn manual_newlines_remain_real_line_breaks_with_soft_wrap() {
+        let mut state = UiState::new();
+        state.set_input_wrap_width(6);
+        state.insert_text("ab\ncdefghi");
+
+        assert_eq!(state.input, "ab\ncdefghi");
+        assert_eq!(state.input_line_bounds(), vec![(0, 2), (3, 7), (7, 10)]);
+
+        let draft = state.take_input_draft().unwrap();
+        assert_eq!(draft.text, "ab\ncdefghi");
     }
 }
