@@ -1,3 +1,4 @@
+use crate::tui::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::tui::state::{AgentStatus, UiState};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -57,7 +58,7 @@ fn color_to_rgb(color: Color) -> (u8, u8, u8) {
     }
 }
 
-pub(super) fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
+pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     use crate::types::config::ThinkingEffort;
 
     let path_display = {
@@ -111,7 +112,7 @@ pub(super) fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: R
         ]);
     }
 
-    let line = match &state.agent_status {
+    let mut line = match &state.agent_status {
         AgentStatus::Thinking | AgentStatus::Working => {
             let mut spans = base_spans;
             spans.push(Span::raw(" "));
@@ -127,7 +128,29 @@ pub(super) fn render_footer(state: &UiState, frame: &mut ratatui::Frame, area: R
             Line::from(base_spans)
         }
     };
+    state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
+    apply_selection_highlight(state, area, &mut line);
 
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);
+}
+
+fn apply_selection_highlight(state: &UiState, area: Rect, line: &mut Line<'static>) {
+    let text = line_to_plain_text(line);
+    let Some((start_col, end_col)) = selected_cols_for_screen_line(state, area.y, &text) else {
+        return;
+    };
+
+    let highlight = Style::default()
+        .fg(Color::Rgb(40, 44, 52))
+        .bg(Color::Rgb(180, 210, 255))
+        .add_modifier(ratatui::style::Modifier::BOLD);
+    *line = highlighted_line(&text, start_col, end_col, highlight);
+}
+
+fn line_to_plain_text(line: &Line<'_>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>()
 }

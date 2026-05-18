@@ -1,6 +1,5 @@
-use crate::tui::state::{
-    InteractionStep, ModelSelectionEntry, SelectionPoint, SubagentNode, UiMessage, UiState,
-};
+use crate::tui::selection::{highlighted_line, selected_cols_for_screen_line};
+use crate::tui::state::{InteractionStep, ModelSelectionEntry, SubagentNode, UiMessage, UiState};
 use crate::tui::widgets::{
     build_bordered_lines, build_plain_lines, build_thinking_lines, display_path, render_tool,
 };
@@ -49,6 +48,7 @@ struct PermissionDrawerLinesInput<'a> {
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
+    state.clear_selectable_screen_lines();
     // 整体背景色 #282c34
     frame.render_widget(
         Paragraph::new(Line::from("")).style(Style::default().bg(Color::Rgb(40, 44, 52))),
@@ -730,7 +730,7 @@ fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUs
 // 交互选择页
 // ===========================================================================
 
-fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
+fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     // ThinkingEffort is now inlined inside ModelSelection
     let Some(InteractionStep::ModelSelection {
         entries,
@@ -738,14 +738,14 @@ fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
         thinking_idx,
         active_provider,
         active_model,
-    }) = &state.interaction_step
+    }) = state.interaction_step.clone()
     else {
         return;
     };
 
     // Panel height
     let has_thinking = entries
-        .get(*selected)
+        .get(selected)
         .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
     // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
     let extra: u16 = if has_thinking { 6 } else { 4 };
@@ -767,52 +767,53 @@ fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     let accent = Color::Rgb(0x42, 0xd9, 0xe8);
 
     // Line 0: thick divider above the panel (━ characters, accent color)
-    let divider_line = Line::from(Span::styled(
+    let mut divider_line = Line::from(Span::styled(
         "━".repeat(panel_area.width.saturating_sub(1) as usize),
         Style::default().fg(accent),
     ));
+    let divider_area = Rect {
+        x: panel_area.x,
+        y: panel_area.y.saturating_sub(1),
+        width: panel_area.width,
+        height: 1,
+    };
+    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
 
-    frame.render_widget(
-        Paragraph::new(divider_line),
-        Rect {
-            x: panel_area.x,
-            y: panel_area.y.saturating_sub(1),
-            width: panel_area.width,
-            height: 1,
-        },
-    );
+    frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // Line 1: "Select model" in accent color, bold
-    let title_line = Line::from(Span::styled(
+    let mut title_line = Line::from(Span::styled(
         " Select model",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     ));
+    let title_area = Rect {
+        x: panel_area.x,
+        y: panel_area.y + 1,
+        width: panel_area.width,
+        height: 1,
+    };
+    register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
 
-    frame.render_widget(
-        Paragraph::new(title_line),
-        Rect {
-            x: panel_area.x,
-            y: panel_area.y + 1,
-            width: panel_area.width,
-            height: 1,
-        },
-    );
+    frame.render_widget(Paragraph::new(title_line), title_area);
 
     // Line 2: Chinese subtitle in gray
-    let subtitle_line = Line::from(Span::styled(
+    let mut subtitle_line = Line::from(Span::styled(
         " 切换模型，适用于当前会话和未来会话。",
         Style::default().fg(Color::Rgb(140, 145, 155)),
     ));
-
-    frame.render_widget(
-        Paragraph::new(subtitle_line),
-        Rect {
-            x: panel_area.x,
-            y: panel_area.y + 2,
-            width: panel_area.width,
-            height: 1,
-        },
+    let subtitle_area = Rect {
+        x: panel_area.x,
+        y: panel_area.y + 2,
+        width: panel_area.width,
+        height: 1,
+    };
+    register_and_highlight_lines(
+        state,
+        subtitle_area,
+        std::slice::from_mut(&mut subtitle_line),
     );
+
+    frame.render_widget(Paragraph::new(subtitle_line), subtitle_area);
 
     // Content area below divider
     let content_area = Rect {
@@ -823,27 +824,36 @@ fn render_interaction(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
     };
 
     render_model_panel(
+        state,
         frame,
         content_area,
-        entries,
-        *selected,
-        *thinking_idx,
-        active_provider,
-        active_model,
+        ModelPanelParams {
+            entries: &entries,
+            selected,
+            thinking_idx,
+            active_provider: &active_provider,
+            active_model: &active_model,
+        },
     );
 }
 
-fn render_model_panel(
-    frame: &mut ratatui::Frame,
-    area: Rect,
-    entries: &[ModelSelectionEntry],
+struct ModelPanelParams<'a> {
+    entries: &'a [ModelSelectionEntry],
     selected: usize,
     thinking_idx: usize,
-    active_provider: &str,
-    active_model: &str,
+    active_provider: &'a str,
+    active_model: &'a str,
+}
+
+fn render_model_panel(
+    state: &mut UiState,
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    params: ModelPanelParams<'_>,
 ) {
-    let has_thinking = entries
-        .get(selected)
+    let has_thinking = params
+        .entries
+        .get(params.selected)
         .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
 
     // Layout: entries list + [thinking row] + hint
@@ -865,7 +875,7 @@ fn render_model_panel(
     let mut lines: Vec<Line> = Vec::new();
     let mut model_num: usize = 0;
 
-    for (i, entry) in entries.iter().enumerate() {
+    for (i, entry) in params.entries.iter().enumerate() {
         if lines.len() >= list_h as usize {
             break;
         }
@@ -883,7 +893,7 @@ fn render_model_panel(
                 model,
             } => {
                 model_num += 1;
-                let is_sel = i == selected;
+                let is_sel = i == params.selected;
                 let display = model.name.as_deref().unwrap_or(&model.id);
 
                 // Build description from model config
@@ -898,7 +908,8 @@ fn render_model_panel(
                 let desc = desc_parts.join(" · ");
 
                 // Checkmark for non-standard providers (custom models)
-                let is_active = provider_key == active_provider && model.id == active_model;
+                let is_active =
+                    provider_key == params.active_provider && model.id == params.active_model;
                 let checkmark = if is_active { " ✔" } else { "" };
 
                 let number_str = format!("{}.", model_num);
@@ -952,6 +963,7 @@ fn render_model_panel(
         }
     }
 
+    register_and_highlight_lines(state, list_area, &mut lines);
     frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
 
     // Thinking effort row
@@ -964,7 +976,7 @@ fn render_model_panel(
             Color::Rgb(220, 185, 145),
             Color::Rgb(255, 200, 120),
         ];
-        let ti = thinking_idx.min(EFFORT_ICONS.len() - 1);
+        let ti = params.thinking_idx.min(EFFORT_ICONS.len() - 1);
         let icon = EFFORT_ICONS[ti];
         let label = EFFORT_LABELS[ti];
         let color = EFFORT_COLORS[ti];
@@ -975,7 +987,7 @@ fn render_model_panel(
             Modifier::empty()
         });
 
-        let thinking_line = Line::from(vec![
+        let mut thinking_line = Line::from(vec![
             Span::raw("  "),
             Span::styled(format!("{} {} effort", icon, label), thinking_style),
             Span::raw("   "),
@@ -984,16 +996,19 @@ fn render_model_panel(
                 Style::default().fg(Color::Rgb(140, 145, 155)),
             ),
         ]);
-
-        frame.render_widget(
-            Paragraph::new(thinking_line),
-            Rect {
-                x: area.x,
-                y: thinking_y,
-                width: area.width,
-                height: 1,
-            },
+        let thinking_area = Rect {
+            x: area.x,
+            y: thinking_y,
+            width: area.width,
+            height: 1,
+        };
+        register_and_highlight_lines(
+            state,
+            thinking_area,
+            std::slice::from_mut(&mut thinking_line),
         );
+
+        frame.render_widget(Paragraph::new(thinking_line), thinking_area);
     }
 
     // Hint
@@ -1002,28 +1017,27 @@ fn render_model_panel(
     } else {
         "  ↑↓ select  ·  Enter confirm  ·  Esc cancel"
     };
-    let hint = Line::from(Span::styled(
+    let mut hint = Line::from(Span::styled(
         hint_text,
         Style::default().fg(Color::Rgb(140, 145, 155)),
     ));
-    frame.render_widget(
-        Paragraph::new(hint),
-        Rect {
-            x: area.x,
-            y: hint_y,
-            width: area.width,
-            height: 1,
-        },
-    );
+    let hint_area = Rect {
+        x: area.x,
+        y: hint_y,
+        width: area.width,
+        height: 1,
+    };
+    register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
+    frame.render_widget(Paragraph::new(hint), hint_area);
 }
 
-fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
+fn render_session_list(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     let Some(InteractionStep::Session {
         sessions,
         selected,
         search,
         ..
-    }) = &state.interaction_step
+    }) = state.interaction_step.clone()
     else {
         return;
     };
@@ -1049,7 +1063,7 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
 
     // ── Header ──
     let header_style = Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6));
-    let header_lines: Vec<Line> = vec![
+    let mut header_lines: Vec<Line> = vec![
         Line::from(Span::styled("  Sessions", header_style)),
         if search.is_empty() {
             Line::from(Span::styled(
@@ -1063,6 +1077,7 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
             ))
         },
     ];
+    register_and_highlight_lines(state, header_area, &mut header_lines);
     frame.render_widget(Paragraph::new(header_lines), header_area);
 
     // ── Content ──
@@ -1080,26 +1095,22 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
                 Style::default(),
             )));
         }
+        register_and_highlight_lines(state, content_area, &mut lines);
         frame.render_widget(Paragraph::new(lines), content_area);
 
         // Divider (empty)
         let divider_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(content_w),
-                divider_style,
-            ))),
-            divider_area,
-        );
+        let mut divider_line = Line::from(Span::styled("─".repeat(content_w), divider_style));
+        register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+        frame.render_widget(Paragraph::new(divider_line), divider_area);
 
         // Footer
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "  Esc back · Type to search",
-                Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
-            ))),
-            footer_area,
-        );
+        let mut footer_line = Line::from(Span::styled(
+            "  Esc back · Type to search",
+            Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
+        ));
+        register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
+        frame.render_widget(Paragraph::new(footer_line), footer_area);
         return;
     }
 
@@ -1137,7 +1148,7 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
     for i in 0..max_visible {
         let actual_idx = scroll_off + i;
         let session = &sessions[actual_idx];
-        let is_selected = actual_idx == *selected;
+        let is_selected = actual_idx == selected;
 
         let bg = if is_selected {
             Color::Rgb(0x41, 0x45, 0x4c)
@@ -1186,27 +1197,26 @@ fn render_session_list(state: &UiState, frame: &mut ratatui::Frame, area: Rect) 
         )));
     }
 
+    register_and_highlight_lines(state, content_area, &mut lines);
     frame.render_widget(Paragraph::new(lines), content_area);
 
     // ── Divider ──
-    let current = *selected + 1;
+    let current = selected + 1;
     let indicator = format!(" {}/{} ", current, total);
     let dashes_count = content_w.saturating_sub(indicator.len());
     let divider_line = format!("{}{}", "─".repeat(dashes_count), indicator);
     let divider_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(divider_line, divider_style))),
-        divider_area,
-    );
+    let mut divider_line = Line::from(Span::styled(divider_line, divider_style));
+    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+    frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // ── Footer ──
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "  ↑/↓ navigate · Enter select · Esc back · Type to filter",
-            Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
-        ))),
-        footer_area,
-    );
+    let mut footer_line = Line::from(Span::styled(
+        "  ↑/↓ navigate · Enter select · Esc back · Type to filter",
+        Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
+    ));
+    register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
+    frame.render_widget(Paragraph::new(footer_line), footer_area);
 }
 
 /// 将 UTC 时间格式化为相对时间（如 "3m ago", "2h ago", "5d ago"）。
@@ -2033,6 +2043,21 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     let scroll_y = max_scroll.saturating_sub(capped_offset);
     state.selectable_message_lines = selectable_lines;
     state.message_scroll_y = scroll_y;
+    let visible_selectable_lines = state
+        .selectable_message_lines
+        .iter()
+        .skip(scroll_y)
+        .take(visible_height)
+        .cloned()
+        .collect::<Vec<_>>();
+    for (visible_row, text) in visible_selectable_lines.into_iter().enumerate() {
+        state.register_selectable_screen_line(
+            area.y + visible_row as u16,
+            area.x,
+            area.width,
+            text,
+        );
+    }
 
     let user_bg = Color::Rgb(65, 69, 76);
     let user_line_bg = Style::default().bg(user_bg);
@@ -2041,7 +2066,7 @@ fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
         .map(|line| line.style.bg == Some(user_bg))
         .collect::<Vec<_>>();
 
-    apply_text_selection_highlight(state, &mut all_lines);
+    apply_text_selection_highlight(state, &mut all_lines, area, scroll_y, visible_height);
 
     for (idx, is_user_line) in user_line_rows.iter().copied().enumerate().skip(scroll_y) {
         if !is_user_line {
@@ -2070,12 +2095,14 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
-fn apply_text_selection_highlight(state: &UiState, lines: &mut [Line<'static>]) {
-    let Some((start, end)) = normalized_selection(state) else {
-        return;
-    };
-    if start == end {
-        return;
+fn register_and_highlight_lines(state: &mut UiState, area: Rect, lines: &mut [Line<'static>]) {
+    for (idx, line) in lines.iter().enumerate() {
+        state.register_selectable_screen_line(
+            area.y + idx as u16,
+            area.x,
+            area.width,
+            line_to_plain_text(line),
+        );
     }
 
     let highlight = Style::default()
@@ -2083,67 +2110,43 @@ fn apply_text_selection_highlight(state: &UiState, lines: &mut [Line<'static>]) 
         .bg(Color::Rgb(180, 210, 255))
         .add_modifier(Modifier::BOLD);
 
-    for row in start.row..=end.row {
-        let Some(text) = state.selectable_message_lines.get(row) else {
+    for (idx, line) in lines.iter_mut().enumerate() {
+        let text = line_to_plain_text(line);
+        let screen_row = area.y + idx as u16;
+        if let Some((start_col, end_col)) = selected_cols_for_screen_line(state, screen_row, &text)
+        {
+            *line = highlighted_line(&text, start_col, end_col, highlight);
+        }
+    }
+}
+
+fn apply_text_selection_highlight(
+    state: &UiState,
+    lines: &mut [Line<'static>],
+    area: Rect,
+    scroll_y: usize,
+    visible_height: usize,
+) {
+    let highlight = Style::default()
+        .fg(Color::Rgb(40, 44, 52))
+        .bg(Color::Rgb(180, 210, 255))
+        .add_modifier(Modifier::BOLD);
+
+    for content_row in scroll_y
+        ..state
+            .selectable_message_lines
+            .len()
+            .min(scroll_y.saturating_add(visible_height))
+    {
+        let Some(text) = state.selectable_message_lines.get(content_row) else {
             continue;
         };
-        let start_col = if row == start.row { start.col } else { 0 };
-        let end_col = if row == end.row {
-            end.col.saturating_add(1)
-        } else {
-            display_width(text)
-        };
-        if let Some(line) = lines.get_mut(row) {
+        let screen_row = area.y + (content_row - scroll_y) as u16;
+        if let (Some((start_col, end_col)), Some(line)) = (
+            selected_cols_for_screen_line(state, screen_row, text),
+            lines.get_mut(content_row),
+        ) {
             *line = highlighted_line(text, start_col, end_col, highlight);
         }
     }
-}
-
-fn normalized_selection(state: &UiState) -> Option<(SelectionPoint, SelectionPoint)> {
-    let selection = state.text_selection.as_ref()?;
-    if selection.start <= selection.end {
-        Some((selection.start, selection.end))
-    } else {
-        Some((selection.end, selection.start))
-    }
-}
-
-fn highlighted_line(
-    text: &str,
-    start_col: usize,
-    end_col: usize,
-    highlight: Style,
-) -> Line<'static> {
-    let (before, selected, after) = split_by_display_cols(text, start_col, end_col);
-    Line::from(vec![
-        Span::raw(before),
-        Span::styled(selected, highlight),
-        Span::raw(after),
-    ])
-}
-
-fn split_by_display_cols(text: &str, start_col: usize, end_col: usize) -> (String, String, String) {
-    let mut before = String::new();
-    let mut selected = String::new();
-    let mut after = String::new();
-    let mut col = 0;
-
-    for ch in text.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        let next_col = col + width;
-        if next_col <= start_col {
-            before.push(ch);
-        } else if col >= end_col {
-            after.push(ch);
-        } else {
-            selected.push(ch);
-        }
-        col = next_col;
-    }
-
-    (before, selected, after)
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
 }

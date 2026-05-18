@@ -1,4 +1,4 @@
-use crate::subagents;
+use crate::subagents::AgentSummary;
 use crate::types::display::{DisplayMention, MentionKind};
 use std::collections::HashMap;
 use std::fs;
@@ -332,15 +332,14 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
         .all(|needle| chars.by_ref().any(|ch| ch == needle))
 }
 
-pub fn load_mention_candidates(cwd: &Path) -> Vec<MentionCandidate> {
+pub fn agent_summaries_to_mention_candidates(agents: Vec<AgentSummary>) -> Vec<MentionCandidate> {
     let mut candidates = Vec::new();
-
-    for agent in subagents::load_agent_summaries(cwd) {
+    for agent in agents {
         candidates.push(MentionCandidate {
             kind: MentionKind::Subagent,
             label: agent.name.clone(),
-            target: agent.name.clone(),
-            description: agent.description.clone(),
+            target: agent.name,
+            description: agent.description,
         });
     }
 

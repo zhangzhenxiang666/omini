@@ -243,3 +243,27 @@ pub(super) async fn submit_queued_intervention(
 pub(super) fn is_intervention_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
     modifiers.contains(KeyModifiers::ALT) && matches!(code, KeyCode::Enter)
 }
+
+pub(super) fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    matches!(code, KeyCode::Enter) && modifiers.contains(KeyModifiers::SHIFT)
+        || matches!(code, KeyCode::Char('\n'))
+        || matches!(code, KeyCode::Char('j')) && modifiers == KeyModifiers::CONTROL
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn newline_key_accepts_shift_enter_and_ctrl_j_forms() {
+        assert!(is_newline_key(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert!(is_newline_key(KeyCode::Char('\n'), KeyModifiers::empty()));
+        assert!(is_newline_key(KeyCode::Char('j'), KeyModifiers::CONTROL));
+    }
+
+    #[test]
+    fn newline_key_rejects_plain_enter_and_intervention_key() {
+        assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::empty()));
+        assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::ALT));
+    }
+}

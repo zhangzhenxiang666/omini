@@ -1,3 +1,4 @@
+use crate::subagents::AgentSummary;
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, HistoryItem, UserDraft};
@@ -135,6 +136,8 @@ pub enum RuntimeToUiEvent {
 
     /// Runtime 启动时推送命令列表（供自动补全使用）
     CommandList(Vec<CommandSummary>),
+    /// Runtime 启动时推送 subagent 列表（供 @ mention 自动补全使用）
+    AgentList(Vec<AgentSummary>),
 
     /// 新一轮 LLM 调用开始
     TurnStarted,

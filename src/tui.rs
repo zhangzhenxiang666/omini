@@ -83,10 +83,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.thinking_effort = settings.thinking_effort;
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
-    state.set_mention_context(
-        settings.cwd.clone(),
-        state::load_mention_candidates(&settings.cwd),
-    );
+    state.set_mention_context(settings.cwd.clone(), Vec::new());
 
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
@@ -272,9 +269,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
                         // 自动补全模式
                         if state.autocomplete.visible {
-                            if key.code == KeyCode::Enter
-                                && key.modifiers.contains(KeyModifiers::SHIFT)
-                            {
+                            if input::is_newline_key(key.code, key.modifiers) {
                                 state.insert_text("\n");
                                 state.update_input_autocomplete();
                                 last_tick = tokio::time::Instant::now();
@@ -379,9 +374,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
                         // @ mention 自动补全模式
                         if state.mention_autocomplete.visible {
-                            if key.code == KeyCode::Enter
-                                && key.modifiers.contains(KeyModifiers::SHIFT)
-                            {
+                            if input::is_newline_key(key.code, key.modifiers) {
                                 state.insert_text("\n");
                                 state.update_input_autocomplete();
                                 last_tick = tokio::time::Instant::now();
@@ -436,8 +429,12 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                         //  普通输入模式
                         let page_amt = 1.max(state.messages_area.height as usize / 2);
                         match (key.code, key.modifiers) {
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) => break Ok(()),
-                            (KeyCode::Char('\x03'), _) => break Ok(()),
+                            (KeyCode::Char('c'), KeyModifiers::CONTROL)
+                            | (KeyCode::Char('\x03'), _) => {
+                                if !state.clear_input() {
+                                    break Ok(());
+                                }
+                            }
                             (KeyCode::Up, _) => {
                                 state.cursor_up_in_input();
                             }
@@ -455,9 +452,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
                             (code, modifiers) if input::is_intervention_key(code, modifiers) => {
                                 input::submit_queued_intervention(&mut state, &request_tx).await;
                             }
-                            (KeyCode::Enter, modifiers)
-                                if modifiers.contains(KeyModifiers::SHIFT) =>
-                            {
+                            (code, modifiers) if input::is_newline_key(code, modifiers) => {
                                 state.insert_text("\n");
                                 state.update_input_autocomplete();
                             }

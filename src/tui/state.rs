@@ -19,7 +19,7 @@ mod permission;
 
 pub use autocomplete::CommandAutocomplete;
 pub use interaction::{InteractionStep, ModelSelectionEntry};
-pub use mention::{InputMention, MentionAutocomplete, MentionCandidate, load_mention_candidates};
+pub use mention::{InputMention, MentionAutocomplete, MentionCandidate};
 
 pub const PASTE_MARKER_THRESHOLD_CHARS: usize = 512;
 pub const PASTE_MARKER_THRESHOLD_NEWLINES: usize = 2;
@@ -65,7 +65,9 @@ pub struct InputVisualLine {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
+    /// Absolute terminal row for the selectable rendered line.
     pub row: usize,
+    /// Display column within the selectable rendered line.
     pub col: usize,
 }
 
@@ -73,6 +75,14 @@ pub struct SelectionPoint {
 pub struct TextSelection {
     pub start: SelectionPoint,
     pub end: SelectionPoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectableScreenLine {
+    pub row: u16,
+    pub col: u16,
+    pub width: u16,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -197,6 +207,8 @@ pub struct UiState {
     pub selectable_message_lines: Vec<String>,
     /// 当前消息视口顶部对应 selectable_message_lines 的行号。
     pub message_scroll_y: usize,
+    /// 当前屏幕上可由鼠标拖选复制的文本行。
+    pub selectable_screen_lines: Vec<SelectableScreenLine>,
     /// 鼠标拖选状态。
     pub text_selection: Option<TextSelection>,
     pub is_selecting_text: bool,
@@ -284,6 +296,7 @@ impl UiState {
             messages_area: Rect::default(),
             selectable_message_lines: Vec::new(),
             message_scroll_y: 0,
+            selectable_screen_lines: Vec::new(),
             text_selection: None,
             is_selecting_text: false,
             input: String::new(),
@@ -330,6 +343,28 @@ impl UiState {
         self.pending_tool_previews
             .values()
             .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
+    }
+
+    pub fn clear_selectable_screen_lines(&mut self) {
+        self.selectable_screen_lines.clear();
+    }
+
+    pub fn register_selectable_screen_line(
+        &mut self,
+        row: u16,
+        col: u16,
+        width: u16,
+        text: String,
+    ) {
+        if width == 0 {
+            return;
+        }
+        self.selectable_screen_lines.push(SelectableScreenLine {
+            row,
+            col,
+            width,
+            text,
+        });
     }
 
     pub fn is_run_active(&self) -> bool {
@@ -653,6 +688,11 @@ impl UiState {
             }
             RuntimeToUiEvent::CommandList(cmds) => {
                 self.autocomplete.all_commands = cmds;
+            }
+            RuntimeToUiEvent::AgentList(agents) => {
+                self.mention_autocomplete
+                    .set_candidates(mention::agent_summaries_to_mention_candidates(agents));
+                self.update_input_autocomplete();
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
             RuntimeToUiEvent::SessionChanged { .. } => {}
@@ -1103,6 +1143,23 @@ impl UiState {
         self.mention_autocomplete.clear_session_cache();
     }
 
+    pub fn clear_input(&mut self) -> bool {
+        if self.input.is_empty() {
+            return false;
+        }
+
+        self.input.clear();
+        self.input_mentions.clear();
+        self.input_images.clear();
+        self.input_paste_markers.clear();
+        self.cursor_char = 0;
+        self.input_scroll_line = 0;
+        self.autocomplete.visible = false;
+        self.mention_autocomplete.visible = false;
+        self.mention_autocomplete.clear_session_cache();
+        true
+    }
+
     pub fn take_input_draft(&mut self) -> Option<UserDraft> {
         if self.input.is_empty() {
             return None;
@@ -1529,6 +1586,7 @@ fn combined_user_draft(drafts: &[&UserDraft]) -> UserDraft {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagents::AgentSummary;
     use crate::types::display::MentionKind;
     use crate::types::events::SubagentStartedEvent;
 
@@ -1596,6 +1654,48 @@ mod tests {
 
         let node = state.subagents.get("sub_1").unwrap();
         assert_eq!(node.status, SubagentStatus::Failed);
+    }
+
+    #[test]
+    fn agent_list_event_updates_subagent_mention_candidates() {
+        let mut state = UiState::new();
+        state.input = "@wo".to_string();
+        state.cursor_char = 3;
+
+        state.apply_event(RuntimeToUiEvent::AgentList(vec![
+            AgentSummary {
+                name: "explorer".to_string(),
+                description: "Read-only codebase exploration agent.".to_string(),
+            },
+            AgentSummary {
+                name: "worker".to_string(),
+                description: "Implementation agent for focused coding tasks.".to_string(),
+            },
+        ]));
+
+        assert!(state.mention_autocomplete.visible);
+        let candidates: Vec<_> = state
+            .mention_autocomplete
+            .filtered
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.kind,
+                    candidate.label.as_str(),
+                    candidate.target.as_str(),
+                    candidate.description.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            candidates,
+            vec![(
+                MentionKind::Subagent,
+                "worker",
+                "worker",
+                "Implementation agent for focused coding tasks."
+            )]
+        );
     }
 
     #[test]
@@ -1893,6 +1993,47 @@ mod tests {
         assert!(state.input.is_empty());
         assert!(state.input_paste_markers.is_empty());
         assert_eq!(state.cursor_char, 0);
+    }
+
+    #[test]
+    fn clear_input_resets_text_and_attachment_state() {
+        let image = temp_image_path("clear.png");
+        let mut state = UiState::new();
+        state.status_bar.cwd = image.parent().unwrap().to_path_buf();
+        state.insert_paste(long_paste_text());
+        state.insert_char(' ');
+        let mention_start = state.cursor_char;
+        state.insert_text("@src ");
+        state.input_mentions.push(InputMention {
+            start_char: mention_start,
+            end_char: mention_start + 5,
+            kind: MentionKind::Directory,
+            label: "src".to_string(),
+            target: "src".to_string(),
+            description: "directory".to_string(),
+        });
+        state.insert_image_attachment(image);
+        state.autocomplete.visible = true;
+        state.mention_autocomplete.visible = true;
+        state.input_scroll_line = 1;
+
+        assert!(state.clear_input());
+
+        assert!(state.input.is_empty());
+        assert!(state.input_mentions.is_empty());
+        assert!(state.input_images.is_empty());
+        assert!(state.input_paste_markers.is_empty());
+        assert_eq!(state.cursor_char, 0);
+        assert_eq!(state.input_scroll_line, 0);
+        assert!(!state.autocomplete.visible);
+        assert!(!state.mention_autocomplete.visible);
+    }
+
+    #[test]
+    fn clear_input_returns_false_when_input_is_empty() {
+        let mut state = UiState::new();
+
+        assert!(!state.clear_input());
     }
 
     #[test]

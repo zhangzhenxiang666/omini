@@ -141,9 +141,9 @@ impl AgentRuntime {
         let mut command_registry = CommandRegistry::new();
         command::register_default_commands(&mut command_registry);
 
-        // 向 UI 推送命令列表（供自动补全使用）
-        let summaries = command_registry.summaries();
-        let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(summaries));
+        // 向 UI 推送 runtime 侧能力快照（供自动补全使用）
+        let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(command_registry.summaries()));
+        let _ = event_tx.try_send(RuntimeToUiEvent::AgentList(subagent_registry.summaries()));
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
                 "Subagent: {}",
