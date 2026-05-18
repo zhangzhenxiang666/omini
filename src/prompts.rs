@@ -44,11 +44,28 @@ pub fn build_system_prompt_with_subagents(
     prompt.push('\n');
     prompt.push_str(&tool_instructions_section());
     prompt.push('\n');
+    if let Some(section) = language_preference_section(settings) {
+        prompt.push_str(&section);
+        prompt.push('\n');
+    }
     prompt.push_str(&subagent_section(subagents));
     prompt.push('\n');
     // TODO: Add a skills section after the skills registry and loading protocol are implemented.
     prompt.push_str(&project_context_prompt(&settings.cwd));
     prompt
+}
+
+pub fn language_preference_section(settings: &Settings) -> Option<String> {
+    let language = settings.language.as_deref()?.trim();
+    if language.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        r#"<language_preference>
+- Use `{language}` for user-facing responses unless the latest user request asks for another language.
+</language_preference>"#
+    ))
 }
 
 pub fn project_context_prompt(cwd: &Path) -> String {
@@ -375,4 +392,64 @@ fn detect_kernel() -> Option<String> {
 
 fn is_git_repository(cwd: &Path) -> bool {
     cwd.ancestors().any(|path| path.join(".git").exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::config::{ProviderType, Settings};
+    use std::collections::HashMap;
+
+    fn test_settings(language: Option<&str>) -> Settings {
+        Settings {
+            api_key: "test-key".to_string(),
+            base_url: "https://openai.example".to_string(),
+            model: "gpt-test".to_string(),
+            endpoint: ProviderType::OpenAI,
+            providers: HashMap::new(),
+            active_provider: "openai".to_string(),
+            system_prompt: None,
+            language: language.map(str::to_string),
+            max_turns: None,
+            cwd: std::env::temp_dir(),
+            thinking_effort: None,
+            permissions: None,
+        }
+    }
+
+    #[test]
+    fn language_preference_section_trims_for_prompt_only() {
+        let settings = test_settings(Some("  en  "));
+
+        let section = language_preference_section(&settings).unwrap();
+
+        assert!(section.contains("`en`"));
+        assert!(!section.contains("`  en  `"));
+    }
+
+    #[test]
+    fn language_preference_section_omits_blank_values() {
+        let settings = test_settings(Some("   "));
+
+        assert!(language_preference_section(&settings).is_none());
+    }
+
+    #[test]
+    fn main_system_prompt_includes_language_preference_when_configured() {
+        let settings = test_settings(Some("简体中文"));
+
+        let prompt = build_system_prompt_with_subagents(&settings, &[]);
+
+        assert!(prompt.contains("<language_preference>"));
+        assert!(prompt.contains("`简体中文`"));
+    }
+
+    #[test]
+    fn main_system_prompt_omits_language_preference_when_unset() {
+        let settings = test_settings(None);
+
+        let prompt = build_system_prompt_with_subagents(&settings, &[]);
+
+        assert!(!prompt.contains("<language_preference>"));
+    }
 }

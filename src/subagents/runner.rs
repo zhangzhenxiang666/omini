@@ -369,6 +369,10 @@ fn spawn_subagent_bridge(
 fn subagent_system_prompt(parent: &crate::types::config::Settings, spec: &AgentSpec) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are running as an isolated subagent for Omini.\n\n");
+    if let Some(section) = crate::prompts::language_preference_section(parent) {
+        prompt.push_str(&section);
+        prompt.push_str("\n\n");
+    }
     prompt.push_str(&crate::prompts::project_context_prompt(&parent.cwd));
     prompt.push_str("\n\n<subagent_instructions>\n");
     prompt.push_str(
@@ -463,6 +467,7 @@ mod tests {
             providers,
             active_provider: "openai".to_string(),
             system_prompt: None,
+            language: None,
             max_turns: None,
             cwd: PathBuf::from("/tmp"),
             thinking_effort: None,
@@ -553,5 +558,18 @@ mod tests {
         assert_eq!(settings.endpoint, ProviderType::OpenAI);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("falling back"));
+    }
+
+    #[test]
+    fn subagent_system_prompt_includes_parent_language_preference() {
+        let mut parent = test_settings();
+        parent.language = Some("  en  ".to_string());
+        let spec = test_spec(None);
+
+        let prompt = subagent_system_prompt(&parent, &spec);
+
+        assert!(prompt.contains("<language_preference>"));
+        assert!(prompt.contains("`en`"));
+        assert!(prompt.contains("<subagent_instructions>"));
     }
 }

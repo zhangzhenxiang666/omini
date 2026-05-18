@@ -12,6 +12,8 @@ use std::path::PathBuf;
 pub struct UserConfig {
     /// 供应商配置表，key 为供应商名称
     pub providers: HashMap<String, ProviderConfig>,
+    /// Optional user-facing response language preference.
+    pub language: Option<String>,
     /// Optional tool permission rules.
     pub permissions: Option<RawPermissionConfig>,
 }
@@ -112,6 +114,7 @@ impl UserConfig {
             providers,
             active_provider: active_name.to_owned(),
             system_prompt: None,
+            language: self.language.clone(),
             max_turns: None,
             cwd: std::env::current_dir()?,
             thinking_effort,
@@ -202,5 +205,46 @@ impl OminiRoot {
         config: &UserConfig,
     ) -> Result<super::project::ProjectDir, ConfigError> {
         self.projects_dir().for_cwd(cwd, config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_from_toml(content: &str) -> UserConfig {
+        toml::from_str(content).expect("config should parse")
+    }
+
+    fn minimal_config(language_line: &str) -> UserConfig {
+        config_from_toml(&format!(
+            r#"{language_line}
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+gpt-test = {{ name = "GPT Test" }}
+"#
+        ))
+    }
+
+    #[test]
+    fn language_reaches_runtime_settings_without_normalization() {
+        let config = minimal_config(r#"language = "  简体中文  ""#);
+
+        let settings = config.to_settings(None, None, None).unwrap();
+
+        assert_eq!(settings.language.as_deref(), Some("  简体中文  "));
+    }
+
+    #[test]
+    fn missing_language_stays_unset() {
+        let config = minimal_config("");
+
+        let settings = config.to_settings(None, None, None).unwrap();
+
+        assert_eq!(settings.language, None);
     }
 }

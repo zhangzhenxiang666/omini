@@ -199,6 +199,51 @@ mod tests {
     }
 
     #[test]
+    fn built_in_explorer_returns_parent_agent_evidence_summary() {
+        let registry = load_agent_registry_from_dirs(std::iter::empty());
+        let explorer = registry.agents.get("explorer").unwrap();
+
+        assert!(explorer.instructions.contains("parent agent"));
+        assert!(
+            explorer
+                .instructions
+                .contains("compact, actionable evidence")
+        );
+        assert!(explorer.instructions.contains("Findings:"));
+        assert!(explorer.instructions.contains("Key references:"));
+        assert!(explorer.instructions.contains("Uncertainty:"));
+    }
+
+    #[test]
+    fn built_in_explorer_avoids_broad_project_tours_by_default() {
+        let registry = load_agent_registry_from_dirs(std::iter::empty());
+        let explorer = registry.agents.get("explorer").unwrap();
+
+        assert!(
+            explorer
+                .instructions
+                .contains("Do not scan the whole repository")
+        );
+        assert!(
+            explorer
+                .instructions
+                .contains("Stop once the parent task can be answered")
+        );
+        assert!(
+            explorer
+                .instructions
+                .contains("Do not output directory trees")
+        );
+        assert!(explorer.instructions.contains("project maps"));
+        assert!(
+            explorer
+                .instructions
+                .contains("exhaustive module inventories")
+        );
+        assert!(explorer.instructions.contains("broad project-tour prose"));
+    }
+
+    #[test]
     fn parses_custom_agent_with_string_tools() {
         let cwd = temp_project();
         write_agent(

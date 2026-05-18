@@ -81,6 +81,7 @@ pub struct Settings {
     pub active_provider: String,
 
     pub system_prompt: Option<String>,
+    pub language: Option<String>,
     pub max_turns: Option<usize>,
 
     pub cwd: PathBuf,
