@@ -11,6 +11,7 @@ mod ask_user;
 mod bash;
 mod file_mutation;
 mod read;
+mod search;
 
 pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
@@ -287,6 +288,7 @@ pub fn render_tool(
 ) -> Vec<Line<'static>> {
     match tool_use.name.as_str() {
         "bash" => bash::render(tool_use, tool_result, content_width),
+        "search" => search::render(tool_use, tool_result, content_width, project_dir),
         "read" => read::render(
             tool_use,
             tool_result,

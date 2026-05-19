@@ -7,8 +7,10 @@ use crate::types::events::{ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
-const AGENT_TOOL_ROW_COUNT: usize = 13;
-const AGENT_TOOL_NAMES: [&str; 5] = ["read", "bash", "edit", "write", "ask_user"];
+const AGENT_TOOL_ROW_COUNT: usize = 15;
+const AGENT_TOOL_NAMES: [&str; 6] = ["search", "read", "bash", "edit", "write", "ask_user"];
+const AGENT_ALLOW_TOOL_START: usize = 3;
+const AGENT_DENY_TOOL_START: usize = AGENT_ALLOW_TOOL_START + AGENT_TOOL_NAMES.len();
 const AGENT_EDIT_ACTION_COUNT: usize = 4;
 
 /// 处理交互模式的键盘事件。
@@ -659,10 +661,10 @@ fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState
             manager.draft.tools.clear();
             manager.draft.disallow_tools.clear();
         }
-        1 => toggle_allow_group(manager, &["read"]),
+        1 => toggle_allow_group(manager, &["search", "read"]),
         2 => toggle_allow_group(manager, &["bash", "edit", "write"]),
-        3..=7 => {
-            let tool = AGENT_TOOL_NAMES[manager.tool_selected - 3];
+        AGENT_ALLOW_TOOL_START..=8 => {
+            let tool = AGENT_TOOL_NAMES[manager.tool_selected - AGENT_ALLOW_TOOL_START];
             if manager.draft.tools.is_empty() {
                 toggle_tool(&mut manager.draft.disallow_tools, tool);
             } else {
@@ -670,8 +672,8 @@ fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState
                 manager.draft.disallow_tools.retain(|item| item != tool);
             }
         }
-        8..=12 => {
-            let tool = AGENT_TOOL_NAMES[manager.tool_selected - 8];
+        AGENT_DENY_TOOL_START..=14 => {
+            let tool = AGENT_TOOL_NAMES[manager.tool_selected - AGENT_DENY_TOOL_START];
             if manager.draft.disallow_tools.iter().any(|item| item == tool) {
                 manager.draft.disallow_tools.retain(|item| item != tool);
             } else {

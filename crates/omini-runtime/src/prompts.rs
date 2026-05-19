@@ -17,6 +17,7 @@ struct EnvironmentContext {
     kernel: Option<String>,
     architecture: String,
     is_git_repo: bool,
+    git_branch: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +86,7 @@ pub fn project_context_prompt(cwd: &Path) -> String {
 
 impl EnvironmentContext {
     fn detect(cwd: &Path) -> Self {
+        let git_metadata_dir = git_metadata_dir(cwd);
         Self {
             cwd: cwd.to_path_buf(),
             command_shell: COMMAND_SHELL.to_string(),
@@ -95,7 +97,8 @@ impl EnvironmentContext {
             os: detect_os_pretty_name(),
             kernel: detect_kernel(),
             architecture: std::env::consts::ARCH.to_string(),
-            is_git_repo: is_git_repository(cwd),
+            is_git_repo: git_metadata_dir.is_some(),
+            git_branch: git_metadata_dir.as_deref().and_then(detect_git_branch),
         }
     }
 }
@@ -161,11 +164,17 @@ fn core_behavior_section() -> String {
 
 fn tool_instructions_section() -> String {
     r#"<tool_instructions>
+## Search
+
+- Use the `search` tool for local file content search and filename lookup.
+- Use `read` after search when you need a larger code window.
+- Prefer `search` over `bash` for project exploration, symbol lookup, file discovery, and code matching.
+- Use shell search commands only when the user explicitly asks for a shell command or the `search` tool cannot express the needed query. Briefly explain why.
+
 ## Shell
 
 - Commands are executed with `sh -c`.
 - Run commands relative to the current working directory unless another directory is specified.
-- Prefer `rg` for searching text or files.
 - Avoid destructive commands unless the user explicitly requested them.
 
 ## Git Safety
@@ -173,10 +182,6 @@ fn tool_instructions_section() -> String {
 - Before git write operations, inspect the current repository state.
 - Do not use destructive git operations such as `git reset --hard`, forced checkout, or forced clean unless the user explicitly asks for them.
 - Do not revert unrelated changes.
-
-## Python
-
-- Use `uv run` instead of invoking `python` or `python3` directly.
 </tool_instructions>
 "#
     .trim()
@@ -310,6 +315,13 @@ fn environment_context_section(env: &EnvironmentContext) -> String {
     }
     section.push_str(&format!("- Architecture: `{}`\n", env.architecture));
     section.push_str(&format!("- Git repository: `{}`\n", env.is_git_repo));
+    if env.is_git_repo {
+        if let Some(branch) = &env.git_branch {
+            section.push_str(&format!("- Git branch: `{branch}`\n"));
+        } else {
+            section.push_str("- Git branch: `unknown`\n");
+        }
+    }
     section.push_str("\n## Notes\n\n");
     section.push_str("- Paths are local filesystem paths.\n");
     section.push_str("- Commands run relative to the working directory unless stated otherwise.\n");
@@ -390,8 +402,50 @@ fn detect_kernel() -> Option<String> {
     Some(format!("{os} {release}"))
 }
 
-fn is_git_repository(cwd: &Path) -> bool {
-    cwd.ancestors().any(|path| path.join(".git").exists())
+fn git_metadata_dir(cwd: &Path) -> Option<PathBuf> {
+    for path in cwd.ancestors() {
+        let dot_git = path.join(".git");
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file()
+            && let Some(git_dir) = read_gitdir_file(path, &dot_git)
+        {
+            return Some(git_dir);
+        }
+    }
+    None
+}
+
+fn read_gitdir_file(worktree_root: &Path, dot_git: &Path) -> Option<PathBuf> {
+    let content = std::fs::read_to_string(dot_git).ok()?;
+    let gitdir = content.trim().strip_prefix("gitdir:")?.trim();
+    if gitdir.is_empty() {
+        return None;
+    }
+    let gitdir = PathBuf::from(gitdir);
+    Some(if gitdir.is_absolute() {
+        gitdir
+    } else {
+        worktree_root.join(gitdir)
+    })
+}
+
+fn detect_git_branch(git_dir: &Path) -> Option<String> {
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        return Some(
+            reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_string(),
+        );
+    }
+    if head.len() >= 7 {
+        return Some(format!("detached {}", &head[..7]));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -399,6 +453,8 @@ mod tests {
     use super::*;
     use crate::types::config::{ProviderType, Settings};
     use std::collections::HashMap;
+    use std::fs;
+    use uuid::Uuid;
 
     fn test_settings(language: Option<&str>) -> Settings {
         Settings {
@@ -415,6 +471,12 @@ mod tests {
             thinking_effort: None,
             permissions: None,
         }
+    }
+
+    fn temp_prompt_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!("omini-prompt-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&path).expect("create temp prompt dir");
+        path
     }
 
     #[test]
@@ -451,5 +513,42 @@ mod tests {
         let prompt = build_system_prompt_with_subagents(&settings, &[]);
 
         assert!(!prompt.contains("<language_preference>"));
+    }
+
+    #[test]
+    fn tool_instructions_do_not_hardcode_python_runner_policy() {
+        let section = tool_instructions_section();
+
+        assert!(!section.contains("uv run"));
+        assert!(!section.contains("python3"));
+    }
+
+    #[test]
+    fn environment_context_includes_git_branch_when_available() {
+        let dir = temp_prompt_dir();
+        let git_dir = dir.join(".git");
+        fs::create_dir_all(&git_dir).expect("create .git dir");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/search\n").expect("write HEAD");
+
+        let env = EnvironmentContext::detect(&dir);
+        let section = environment_context_section(&env);
+
+        assert!(section.contains("- Git repository: `true`"));
+        assert!(section.contains("- Git branch: `feature/search`"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn environment_context_reads_worktree_gitdir_file() {
+        let dir = temp_prompt_dir();
+        let git_dir = dir.join(".git-worktree");
+        fs::create_dir_all(&git_dir).expect("create worktree git dir");
+        fs::write(dir.join(".git"), "gitdir: .git-worktree\n").expect("write .git file");
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/worktree-branch\n").expect("write HEAD");
+
+        let env = EnvironmentContext::detect(&dir);
+
+        assert_eq!(env.git_branch.as_deref(), Some("worktree-branch"));
+        let _ = fs::remove_dir_all(dir);
     }
 }

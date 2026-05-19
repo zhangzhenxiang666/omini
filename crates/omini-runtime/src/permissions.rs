@@ -249,6 +249,7 @@ impl PermissionEngine {
                 None => PermissionDecision::Ask,
             },
             "edit" | "write" => PermissionDecision::Ask,
+            "search" => PermissionDecision::Allow,
             "ask_user" | "subagent" => PermissionDecision::Allow,
             _ => PermissionDecision::Ask,
         }
@@ -617,7 +618,10 @@ fn parse_tool_rule_parts(
 }
 
 fn is_supported_permission_tool(tool: &str) -> bool {
-    matches!(tool, "read" | "edit" | "write" | "subagent" | "ask_user")
+    matches!(
+        tool,
+        "read" | "search" | "edit" | "write" | "subagent" | "ask_user"
+    )
 }
 
 #[cfg(test)]
@@ -1095,6 +1099,7 @@ fn normalize_tool_name(tool: &str) -> String {
     match tool.trim() {
         "AskUser" | "ask_user" => "ask_user".to_string(),
         "Bash" | "bash" => "bash".to_string(),
+        "Search" | "search" => "search".to_string(),
         "Read" | "read" => "read".to_string(),
         "Edit" | "edit" => "edit".to_string(),
         "Write" | "write" => "write".to_string(),
@@ -1372,6 +1377,22 @@ prefix_rule(
             engine.decide("ask_user", None, &input),
             PermissionDecision::Allow
         );
+    }
+
+    #[test]
+    fn search_defaults_to_allow_but_honors_deny_rules() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &[]));
+        let input = serde_json::json!({"query": "ToolRegistry", "mode": "content"});
+        assert_eq!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Allow
+        );
+
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Search"]));
+        assert!(matches!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Deny { .. }
+        ));
     }
 
     #[test]

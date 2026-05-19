@@ -739,6 +739,25 @@ fn subagent_tool_summary(tool_use: &ToolUseBlock, project_dir: Option<&Path>) ->
             .get("command")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        "search" => {
+            let query = tool_use
+                .input
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let path = tool_use
+                .input
+                .get("path")
+                .and_then(|value| value.as_str())
+                .map(|path| display_path(path, project_dir))
+                .unwrap_or_else(|| ".".to_string());
+            Some(if query.is_empty() {
+                format!("files in {path}")
+            } else {
+                format!("{query} in {path}")
+            })
+        }
         "read" => tool_use
             .input
             .get("file_path")

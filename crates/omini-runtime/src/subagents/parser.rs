@@ -162,6 +162,7 @@ fn normalize_tool_name(tool: &str) -> Result<String, String> {
     let normalized = match trimmed {
         "AskUser" | "ask_user" => "ask_user",
         "Bash" | "bash" => "bash",
+        "Search" | "search" => "search",
         "Read" | "read" => "read",
         "Edit" | "edit" => "edit",
         "Write" | "write" => "write",

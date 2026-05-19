@@ -24,6 +24,7 @@ pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod edit_tool;
 pub mod read_tool;
+pub mod search_tool;
 pub mod subagent_tool;
 pub mod write_tool;
 
@@ -496,7 +497,9 @@ impl ToolRegistry {
 
     /// 返回所有已注册工具的 `ToolDefinition` 列表（供 LLM API 注册使用）
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.values().map(|t| t.definition()).collect()
+        let mut definitions: Vec<_> = self.tools.values().map(|t| t.definition()).collect();
+        definitions.sort_by_key(|definition| tool_definition_priority(&definition.name));
+        definitions
     }
 
     pub fn contains(&self, name: &str) -> bool {
@@ -602,6 +605,7 @@ pub fn inherited_subagent_tool_names() -> Vec<String> {
     create_subagent_registry(&[
         "ask_user".to_string(),
         "bash".to_string(),
+        "search".to_string(),
         "read".to_string(),
         "edit".to_string(),
         "write".to_string(),
@@ -619,6 +623,9 @@ fn create_registry_with_allowed(
     }
     if tool_allowed(allowed, "bash") {
         registry.register(bash_tool::BashTool);
+    }
+    if tool_allowed(allowed, "search") {
+        registry.register(search_tool::SearchTool);
     }
     if tool_allowed(allowed, "read") {
         registry.register(read_tool::ReadTool);
@@ -639,6 +646,19 @@ fn tool_allowed(allowed: Option<&[String]>, name: &str) -> bool {
     allowed.is_none_or(|tools| tools.iter().any(|tool| tool == name))
 }
 
+fn tool_definition_priority(name: &str) -> usize {
+    match name {
+        "search" => 0,
+        "read" => 1,
+        "edit" => 2,
+        "write" => 3,
+        "bash" => 4,
+        "ask_user" => 5,
+        "subagent" => 6,
+        _ => 100,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,6 +671,7 @@ mod tests {
             create_subagent_registry_from_parent(&parent, None, &[]).expect("policy should work");
 
         assert!(warnings.is_empty());
+        assert!(child.contains("search"));
         assert!(child.contains("read"));
         assert!(child.contains("write"));
         assert!(!child.contains("subagent"));
@@ -661,6 +682,7 @@ mod tests {
         let parent = create_main_registry();
         let allow = vec![
             "read".to_string(),
+            "search".to_string(),
             "write".to_string(),
             "subagent".to_string(),
         ];
@@ -670,8 +692,29 @@ mod tests {
             .expect("policy should leave read available");
 
         assert!(warnings.is_empty());
+        assert!(child.contains("search"));
         assert!(child.contains("read"));
         assert!(!child.contains("write"));
         assert!(!child.contains("subagent"));
+    }
+
+    #[test]
+    fn main_registry_contains_search() {
+        let registry = create_main_registry();
+
+        assert!(registry.contains("search"));
+    }
+
+    #[test]
+    fn tool_definitions_prioritize_search_over_bash() {
+        let names: Vec<_> = create_main_registry()
+            .definitions()
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect();
+
+        let search = names.iter().position(|name| name == "search").unwrap();
+        let bash = names.iter().position(|name| name == "bash").unwrap();
+        assert!(search < bash, "{names:?}");
     }
 }

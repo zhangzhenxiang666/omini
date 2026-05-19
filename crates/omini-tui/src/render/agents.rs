@@ -1156,12 +1156,13 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
     );
     lines.push(Line::from(""));
     let allow_rows = [
-        ("读工具组", "read", &["read"][..]),
+        ("读工具组", "search, read", &["search", "read"][..]),
         (
             "写工具组",
             "bash, edit, write",
             &["bash", "edit", "write"][..],
         ),
+        ("search", "搜索文件", &["search"][..]),
         ("read", "读取文件", &["read"][..]),
         ("bash", "执行命令", &["bash"][..]),
         ("edit", "编辑文件", &["edit"][..]),
@@ -1179,6 +1180,7 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
     push_agent_section(lines, "禁用");
     lines.push(Line::from(""));
     let deny_rows = [
+        ("search", "不搜索文件"),
         ("read", "不读取文件"),
         ("bash", "不执行命令"),
         ("edit", "不编辑文件"),
@@ -1186,7 +1188,7 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
         ("ask_user", "不询问用户"),
     ];
     for (offset, (label, desc)) in deny_rows.iter().enumerate() {
-        let idx = offset + 8;
+        let idx = offset + 9;
         let enabled = manager
             .draft
             .disallow_tools

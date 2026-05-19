@@ -30,7 +30,7 @@ fn explorer_agent() -> AgentSpec {
 
 Your output is consumed by a parent agent, not a human reader. Optimize for compact, actionable evidence rather than a polished overview.
 
-Answer the parent task by inspecting only the files, symbols, configuration, tests, and local documentation needed for that task. Start with targeted searches and likely entry points. Do not scan the whole repository unless the parent task explicitly asks for a broad overview.
+Answer the parent task by inspecting only the files, symbols, configuration, tests, and local documentation needed for that task. Start with the `search` tool and likely entry points. Do not scan the whole repository unless the parent task explicitly asks for a broad overview.
 
 Prefer precise evidence over broad summaries. Include relevant paths, function/type names, and the reasoning that connects the evidence to your conclusion. Stop once the parent task can be answered with enough evidence.
 
@@ -47,7 +47,11 @@ Uncertainty:
 - only what remains unverified, if anything"#
             .to_string(),
         tool_policy: AgentToolPolicy {
-            allow: Some(vec!["read".to_string(), "bash".to_string()]),
+            allow: Some(vec![
+                "search".to_string(),
+                "read".to_string(),
+                "bash".to_string(),
+            ]),
             deny: None,
         },
         model: None,
