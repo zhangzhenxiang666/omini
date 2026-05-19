@@ -3,9 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 mod builtins;
+mod generator;
 mod parser;
 mod runner;
 
+pub use generator::{generate_agent_draft, parse_generated_agent};
 pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,46 @@ impl AgentSource {
             AgentSource::File(path) => path.display().to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentSourceKind {
+    BuiltIn,
+    Project,
+    User,
+}
+
+impl AgentSourceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentSourceKind::BuiltIn => "内置",
+            AgentSourceKind::Project => "项目",
+            AgentSourceKind::User => "用户",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentRecord {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub tools: Vec<String>,
+    pub disallow_tools: Vec<String>,
+    pub model: Option<String>,
+    pub source_kind: AgentSourceKind,
+    pub path: Option<PathBuf>,
+    pub editable: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentDraft {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+    pub tools: Vec<String>,
+    pub disallow_tools: Vec<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +146,232 @@ pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
     }
     agent_dirs.push(cwd.join(".omini").join("agents"));
     load_agent_registry_from_dirs(agent_dirs)
+}
+
+pub fn list_agent_records(cwd: &Path) -> Vec<AgentRecord> {
+    let mut records = Vec::new();
+    for spec in builtins::built_in_agents() {
+        records.push(record_from_spec(
+            &spec,
+            AgentSourceKind::BuiltIn,
+            None,
+            false,
+        ));
+    }
+
+    if let Some(home_dir) = dirs::home_dir().filter(|path| !path.as_os_str().is_empty()) {
+        records.extend(list_agent_records_from_dir(
+            &home_dir.join(".omini").join("agents"),
+            AgentSourceKind::User,
+        ));
+    }
+    records.extend(list_agent_records_from_dir(
+        &cwd.join(".omini").join("agents"),
+        AgentSourceKind::Project,
+    ));
+
+    records.sort_by(|a, b| {
+        source_sort(a.source_kind)
+            .cmp(&source_sort(b.source_kind))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    records
+}
+
+pub fn write_agent_file(
+    cwd: &Path,
+    source_kind: AgentSourceKind,
+    draft: &AgentDraft,
+) -> Result<PathBuf, String> {
+    if source_kind == AgentSourceKind::BuiltIn {
+        return Err("内置 agent 不能写入".to_string());
+    }
+    validate_agent_draft(draft)?;
+    let dir = agent_dir(cwd, source_kind)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("创建 agent 目录失败: {e}"))?;
+    let path = dir.join(format!("{}.md", slugify_agent_name(&draft.name)));
+    let content = render_agent_file(draft);
+    fs::write(&path, content).map_err(|e| format!("写入 agent 文件失败: {e}"))?;
+    Ok(path)
+}
+
+pub fn delete_agent_file(path: &Path) -> Result<(), String> {
+    fs::remove_file(path).map_err(|e| format!("删除 agent 文件失败: {e}"))
+}
+
+pub fn agent_name_exists(cwd: &Path, name: &str, except_path: Option<&Path>) -> bool {
+    list_agent_records(cwd).into_iter().any(|record| {
+        record.name == name
+            && except_path.is_none_or(|except| record.path.as_deref() != Some(except))
+    })
+}
+
+fn list_agent_records_from_dir(
+    agents_dir: &Path,
+    source_kind: AgentSourceKind,
+) -> Vec<AgentRecord> {
+    let entries = match fs::read_dir(agents_dir) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut paths = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            parser::parse_agent_file(&path)
+                .ok()
+                .map(|spec| record_from_spec(&spec, source_kind, Some(path), true))
+        })
+        .collect()
+}
+
+fn record_from_spec(
+    spec: &AgentSpec,
+    source_kind: AgentSourceKind,
+    path: Option<PathBuf>,
+    editable: bool,
+) -> AgentRecord {
+    let tools = spec
+        .tool_policy
+        .allow
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tool| tool != "subagent")
+        .collect();
+    let disallow_tools = spec
+        .tool_policy
+        .deny
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|tool| tool != "subagent")
+        .collect();
+    let model = spec
+        .model
+        .as_ref()
+        .map(|model| format!("{}/{}", model.provider, model.model));
+    AgentRecord {
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        instructions: spec.instructions.clone(),
+        tools,
+        disallow_tools,
+        model,
+        source_kind,
+        path,
+        editable,
+    }
+}
+
+fn agent_dir(cwd: &Path, source_kind: AgentSourceKind) -> Result<PathBuf, String> {
+    match source_kind {
+        AgentSourceKind::BuiltIn => Err("内置 agent 没有文件目录".to_string()),
+        AgentSourceKind::Project => Ok(cwd.join(".omini").join("agents")),
+        AgentSourceKind::User => dirs::home_dir()
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.join(".omini").join("agents"))
+            .ok_or_else(|| "无法定位用户目录".to_string()),
+    }
+}
+
+fn validate_agent_draft(draft: &AgentDraft) -> Result<(), String> {
+    if draft.name.trim().is_empty() {
+        return Err("agent 名称不能为空".to_string());
+    }
+    if draft.description.trim().is_empty() {
+        return Err("agent 描述不能为空".to_string());
+    }
+    if draft.instructions.trim().is_empty() {
+        return Err("系统指令不能为空".to_string());
+    }
+    Ok(())
+}
+
+fn render_agent_file(draft: &AgentDraft) -> String {
+    let tools = draft
+        .tools
+        .iter()
+        .filter(|tool| tool.as_str() != "subagent")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let disallow_tools = draft
+        .disallow_tools
+        .iter()
+        .filter(|tool| tool.as_str() != "subagent")
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut content = String::new();
+    content.push_str("---\n");
+    content.push_str(&format!("name: {}\n", quote_scalar(&draft.name)));
+    content.push_str(&format!(
+        "description: {}\n",
+        quote_scalar(&draft.description)
+    ));
+    if !tools.is_empty() {
+        content.push_str(&format!("tools: {}\n", quote_scalar(&tools)));
+    }
+    if !disallow_tools.is_empty() {
+        content.push_str(&format!(
+            "disallow_tools: {}\n",
+            quote_scalar(&disallow_tools)
+        ));
+    }
+    if let Some(model) = draft
+        .model
+        .as_ref()
+        .filter(|model| !model.trim().is_empty())
+    {
+        content.push_str(&format!("model: {}\n", quote_scalar(model)));
+    }
+    content.push_str("---\n");
+    content.push_str(draft.instructions.trim());
+    content.push('\n');
+    content
+}
+
+fn quote_scalar(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
+}
+
+fn slugify_agent_name(name: &str) -> String {
+    let mut slug = String::new();
+    for ch in name.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            slug.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "agent".to_string()
+    } else {
+        slug.to_string()
+    }
+}
+
+fn source_sort(kind: AgentSourceKind) -> u8 {
+    match kind {
+        AgentSourceKind::BuiltIn => 0,
+        AgentSourceKind::Project => 1,
+        AgentSourceKind::User => 2,
+    }
 }
 
 fn load_agent_registry_from_dirs(agent_dirs: impl IntoIterator<Item = PathBuf>) -> AgentRegistry {
@@ -488,5 +756,62 @@ Help in this project.
         assert!(registry.diagnostics.is_empty());
         assert!(registry.agents.contains_key("global-helper"));
         assert!(registry.agents.contains_key("project-helper"));
+    }
+
+    #[test]
+    fn writes_agent_file_that_parser_can_load() {
+        let cwd = temp_project();
+        let draft = AgentDraft {
+            name: "comment-helper".to_string(),
+            description: "Help with comments".to_string(),
+            instructions: "Translate comments carefully.".to_string(),
+            tools: vec![
+                "read".to_string(),
+                "write".to_string(),
+                "subagent".to_string(),
+            ],
+            disallow_tools: vec!["edit".to_string()],
+            model: Some("openai/gpt-test".to_string()),
+        };
+
+        let path = write_agent_file(&cwd, AgentSourceKind::Project, &draft).unwrap();
+        let parsed = parser::parse_agent_file(&path).unwrap();
+
+        assert_eq!(parsed.name, "comment-helper");
+        assert_eq!(parsed.description, "Help with comments");
+        assert_eq!(
+            parsed.tool_policy.allow.as_deref(),
+            Some(&["read".to_string(), "write".to_string()][..])
+        );
+        assert_eq!(
+            parsed.tool_policy.deny.as_deref(),
+            Some(&["edit".to_string()][..])
+        );
+        assert_eq!(
+            parsed.model,
+            Some(AgentModelSpec {
+                provider: "openai".to_string(),
+                model: "gpt-test".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn agent_name_exists_checks_builtins_and_custom_agents() {
+        let cwd = temp_project();
+        assert!(agent_name_exists(&cwd, "default", None));
+
+        let draft = AgentDraft {
+            name: "local-helper".to_string(),
+            description: "Local helper".to_string(),
+            instructions: "Help locally.".to_string(),
+            tools: vec!["read".to_string()],
+            disallow_tools: Vec::new(),
+            model: None,
+        };
+        let path = write_agent_file(&cwd, AgentSourceKind::Project, &draft).unwrap();
+
+        assert!(agent_name_exists(&cwd, "local-helper", None));
+        assert!(!agent_name_exists(&cwd, "local-helper", Some(&path)));
     }
 }

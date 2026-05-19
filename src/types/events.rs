@@ -1,4 +1,4 @@
-use crate::subagents::AgentSummary;
+use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, HistoryItem, UserDraft};
@@ -31,6 +31,22 @@ pub enum UiToRuntimeEvent {
     },
     /// 用户在会话选择页中确认选择
     SessionSelected { session_id: String },
+    /// 用户请求保存 agent
+    AgentSaveRequested {
+        source_kind: AgentSourceKind,
+        original_path: Option<std::path::PathBuf>,
+        draft: AgentDraft,
+    },
+    /// 用户请求删除 agent
+    AgentDeleteRequested { path: std::path::PathBuf },
+    /// 用户请求由 LLM 生成 agent
+    AgentGenerateRequested {
+        source_kind: AgentSourceKind,
+        description: String,
+        tools: Vec<String>,
+        disallow_tools: Vec<String>,
+        model: Option<String>,
+    },
     /// 用户响应工具暂停请求
     ResolveToolPause {
         tool_use_id: String,
@@ -138,6 +154,15 @@ pub enum RuntimeToUiEvent {
     CommandList(Vec<CommandSummary>),
     /// Runtime 启动时推送 subagent 列表（供 @ mention 自动补全使用）
     AgentList(Vec<AgentSummary>),
+    /// Runtime 刷新 `/agents` 面板数据
+    AgentManagementUpdated { records: Vec<AgentRecord> },
+    /// LLM 已生成 agent 草稿，供 `/agents` 面板预览和保存
+    AgentGenerated {
+        source_kind: AgentSourceKind,
+        draft: AgentDraft,
+    },
+    /// LLM 生成 agent 失败，供 `/agents` 面板恢复输入态并显示错误。
+    AgentGenerateFailed { message: String },
 
     /// 新一轮 LLM 调用开始
     TurnStarted,
@@ -237,6 +262,13 @@ pub enum InteractionRequest {
     },
     /// 会话选择：列出项目下所有会话
     SessionSelection { sessions: Vec<SessionSummary> },
+    /// Agent 管理：列出、查看、创建、编辑、删除 subagent
+    AgentManagement {
+        records: Vec<AgentRecord>,
+        providers: HashMap<String, ProviderProfile>,
+        current_provider: String,
+        current_model: String,
+    },
 }
 
 /// 会话摘要（供选择页展示）。

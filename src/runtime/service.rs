@@ -30,6 +30,7 @@ use super::history;
 pub(crate) enum PendingInteraction {
     ModelSelect,
     SessionSelect,
+    AgentManage,
 }
 
 #[derive(Debug)]
@@ -61,6 +62,15 @@ impl CapabilityStore {
             .read()
             .expect("subagent registry lock poisoned")
             .clone()
+    }
+
+    fn reload_subagents(&self, settings: &Settings) -> Arc<AgentRegistry> {
+        let registry = Arc::new(crate::subagents::load_agent_registry(&settings.cwd));
+        *self
+            .subagents
+            .write()
+            .expect("subagent registry lock poisoned") = registry.clone();
+        registry
     }
 }
 
@@ -229,6 +239,21 @@ impl AgentRuntime {
                                     self.pending_interaction = None;
                                 }
                             }
+                            UiToRuntimeEvent::AgentSaveRequested { source_kind, original_path, draft } => {
+                                if self.pending_interaction == Some(PendingInteraction::AgentManage) {
+                                    self.save_agent(source_kind, original_path.as_deref(), &draft).await;
+                                }
+                            }
+                            UiToRuntimeEvent::AgentDeleteRequested { path } => {
+                                if self.pending_interaction == Some(PendingInteraction::AgentManage) {
+                                    self.delete_agent(&path).await;
+                                }
+                            }
+                            UiToRuntimeEvent::AgentGenerateRequested { source_kind, description, tools, disallow_tools, model } => {
+                                if self.pending_interaction == Some(PendingInteraction::AgentManage) {
+                                    self.generate_agent(source_kind, &description, tools, disallow_tools, model).await;
+                                }
+                            }
                             UiToRuntimeEvent::ResolveToolPause { .. } => {
                                 self.send_event(RuntimeToUiEvent::Error(
                                     "Cannot resolve tool pause because no run is active".to_string(),
@@ -279,6 +304,9 @@ impl AgentRuntime {
                     }
                     InteractionRequest::SessionSelection { .. } => {
                         Some(PendingInteraction::SessionSelect)
+                    }
+                    InteractionRequest::AgentManagement { .. } => {
+                        Some(PendingInteraction::AgentManage)
                     }
                 };
                 self.send_event(RuntimeToUiEvent::InteractionRequest(req))
@@ -452,6 +480,92 @@ impl AgentRuntime {
         .await;
     }
 
+    async fn save_agent(
+        &mut self,
+        source_kind: crate::subagents::AgentSourceKind,
+        original_path: Option<&std::path::Path>,
+        draft: &crate::subagents::AgentDraft,
+    ) {
+        if crate::subagents::agent_name_exists(&self.settings.cwd, &draft.name, original_path) {
+            self.send_event(RuntimeToUiEvent::Error(format!(
+                "agent '{}' 已存在",
+                draft.name
+            )))
+            .await;
+            return;
+        }
+        match crate::subagents::write_agent_file(&self.settings.cwd, source_kind, draft) {
+            Ok(written_path) => {
+                if let Some(path) = original_path
+                    && path != written_path
+                {
+                    let _ = crate::subagents::delete_agent_file(path);
+                }
+                self.refresh_agents_after_change().await;
+                self.send_event(RuntimeToUiEvent::CommandNotice(format!(
+                    "agent '{}' 已保存",
+                    draft.name
+                )))
+                .await;
+            }
+            Err(e) => self.send_event(RuntimeToUiEvent::Error(e)).await,
+        }
+    }
+
+    async fn delete_agent(&mut self, path: &std::path::Path) {
+        match crate::subagents::delete_agent_file(path) {
+            Ok(()) => {
+                self.refresh_agents_after_change().await;
+                self.send_event(RuntimeToUiEvent::CommandNotice("agent 已删除".to_string()))
+                    .await;
+            }
+            Err(e) => self.send_event(RuntimeToUiEvent::Error(e)).await,
+        }
+    }
+
+    async fn refresh_agents_after_change(&mut self) {
+        let registry = self.capabilities.reload_subagents(&self.settings);
+        self.settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
+            &self.settings,
+            &registry.summaries(),
+        ));
+        self.send_event(RuntimeToUiEvent::AgentList(registry.summaries()))
+            .await;
+        self.send_event(RuntimeToUiEvent::AgentManagementUpdated {
+            records: crate::subagents::list_agent_records(&self.settings.cwd),
+        })
+        .await;
+    }
+
+    async fn generate_agent(
+        &mut self,
+        source_kind: crate::subagents::AgentSourceKind,
+        description: &str,
+        tools: Vec<String>,
+        disallow_tools: Vec<String>,
+        model: Option<String>,
+    ) {
+        match crate::subagents::generate_agent_draft(
+            &self.llm_client,
+            &self.settings,
+            description,
+            tools,
+            disallow_tools,
+            model,
+        )
+        .await
+        {
+            Ok(draft) => {
+                self.send_event(RuntimeToUiEvent::AgentGenerated { source_kind, draft })
+                    .await;
+            }
+            Err(e) => {
+                self.send_event(RuntimeToUiEvent::AgentGenerateFailed { message: e })
+                    .await;
+            }
+        }
+    }
+
     /// 处理一次完整的用户请求（可能含多轮 LLM 调用）。
     async fn process_run(&mut self, start: RunStart) {
         if self.session_id.is_none() {
@@ -545,7 +659,10 @@ impl AgentRuntime {
                             UiToRuntimeEvent::SendMessage(_)
                             | UiToRuntimeEvent::SendCommand(_)
                             | UiToRuntimeEvent::ModelSelected { .. }
-                            | UiToRuntimeEvent::SessionSelected { .. } => {
+                            | UiToRuntimeEvent::SessionSelected { .. }
+                            | UiToRuntimeEvent::AgentSaveRequested { .. }
+                            | UiToRuntimeEvent::AgentDeleteRequested { .. }
+                            | UiToRuntimeEvent::AgentGenerateRequested { .. } => {
                                 let _ = event_tx
                                     .send(RuntimeToUiEvent::Error(
                                         "Cannot handle this request while a run is active".to_string(),

@@ -1,7 +1,15 @@
-use super::state::{AgentStatus, InteractionStep, ModelSelectionEntry, UiMessage, UiState};
+use super::state::{
+    AgentCreateStep, AgentGenerateReturn, AgentManagerView, AgentModelEntry, AgentStatus,
+    InteractionStep, ModelSelectionEntry, UiMessage, UiState,
+};
+use crate::subagents::AgentSourceKind;
 use crate::types::events::{ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
+
+const AGENT_TOOL_ROW_COUNT: usize = 13;
+const AGENT_TOOL_NAMES: [&str; 5] = ["read", "bash", "edit", "write", "ask_user"];
+const AGENT_EDIT_ACTION_COUNT: usize = 4;
 
 /// 处理交互模式的键盘事件。
 /// 返回 `true` = 事件已消费；`false` = 调用方应退出交互模式。
@@ -19,7 +27,7 @@ pub(super) async fn handle_interaction_key(
         } => {
             use ModelSelectionEntry as E;
             match key {
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     let mut new = selected.saturating_sub(1);
                     while new > 0 && matches!(&entries[new], E::ProviderHeader { .. }) {
                         new = new.saturating_sub(1);
@@ -29,7 +37,7 @@ pub(super) async fn handle_interaction_key(
                     }
                     true
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     let max = entries.len().saturating_sub(1);
                     let mut new = (*selected + 1).min(max);
                     while new < max && matches!(&entries[new], E::ProviderHeader { .. }) {
@@ -40,7 +48,7 @@ pub(super) async fn handle_interaction_key(
                     }
                     true
                 }
-                KeyCode::Left | KeyCode::Char('h') => {
+                KeyCode::Left => {
                     if let E::Model { model, .. } = &entries[*selected]
                         && model.thinking
                     {
@@ -48,7 +56,7 @@ pub(super) async fn handle_interaction_key(
                     }
                     true
                 }
-                KeyCode::Right | KeyCode::Char('l') => {
+                KeyCode::Right => {
                     if let E::Model { model, .. } = &entries[*selected]
                         && model.thinking
                     {
@@ -136,6 +144,602 @@ pub(super) async fn handle_interaction_key(
             KeyCode::Esc => false,
             _ => true,
         },
+        InteractionStep::Agents(manager) => {
+            if matches!(manager.view, AgentManagerView::Generating(_)) {
+                return true;
+            }
+            match key {
+                KeyCode::Esc => {
+                    match manager.view {
+                        AgentManagerView::List => return false,
+                        AgentManagerView::Create(step) => {
+                            step_agent_create_back(manager, step);
+                        }
+                        AgentManagerView::ConfirmDelete(idx) => {
+                            manager.view = AgentManagerView::Detail(idx);
+                        }
+                        AgentManagerView::EditMetadata
+                        | AgentManagerView::EditTools
+                        | AgentManagerView::EditModel => {
+                            autosave_agent_edit(manager, request_tx).await;
+                            manager.view = AgentManagerView::EditMenu;
+                        }
+                        AgentManagerView::EditMenu => {
+                            manager.view = AgentManagerView::List;
+                        }
+                        _ => manager.view = AgentManagerView::List,
+                    }
+                    true
+                }
+                KeyCode::Up => {
+                    if manager.view == AgentManagerView::EditTools
+                        && manager.draft.field == super::state::AgentEditorField::Tools
+                    {
+                        manager.tool_selected = manager.tool_selected.saturating_sub(1);
+                    } else if manager.view == AgentManagerView::EditModel
+                        && manager.draft.field == super::state::AgentEditorField::Model
+                    {
+                        select_prev_agent_model(manager);
+                        apply_selected_agent_model(manager);
+                    } else if agent_text_input_active(manager)
+                        && manager.current_field_is_multiline()
+                    {
+                        manager.move_draft_cursor_up();
+                    } else {
+                        match manager.view {
+                            AgentManagerView::List => {
+                                manager.selected = manager.selected.saturating_sub(1);
+                            }
+                            AgentManagerView::Detail(idx) => {
+                                let max = detail_action_count(manager, idx).saturating_sub(1);
+                                manager.detail_action_selected =
+                                    manager.detail_action_selected.saturating_sub(1).min(max);
+                            }
+                            AgentManagerView::EditMenu => {
+                                manager.edit_action_selected =
+                                    manager.edit_action_selected.saturating_sub(1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Scope) => {
+                                manager.create_scope_selected =
+                                    manager.create_scope_selected.saturating_sub(1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Tools) => {
+                                manager.tool_selected = manager.tool_selected.saturating_sub(1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Model) => {
+                                select_prev_agent_model(manager);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Method) => {
+                                manager.create_method_selected =
+                                    manager.create_method_selected.saturating_sub(1);
+                            }
+                            _ => {}
+                        }
+                    }
+                    true
+                }
+                KeyCode::Down => {
+                    if manager.view == AgentManagerView::EditTools
+                        && manager.draft.field == super::state::AgentEditorField::Tools
+                    {
+                        manager.tool_selected =
+                            (manager.tool_selected + 1).min(AGENT_TOOL_ROW_COUNT - 1);
+                    } else if manager.view == AgentManagerView::EditModel
+                        && manager.draft.field == super::state::AgentEditorField::Model
+                    {
+                        select_next_agent_model(manager);
+                        apply_selected_agent_model(manager);
+                    } else if agent_text_input_active(manager)
+                        && manager.current_field_is_multiline()
+                    {
+                        manager.move_draft_cursor_down();
+                    } else {
+                        match manager.view {
+                            AgentManagerView::List => {
+                                manager.selected =
+                                    (manager.selected + 1).min(manager.records.len());
+                            }
+                            AgentManagerView::Detail(idx) => {
+                                let max = detail_action_count(manager, idx).saturating_sub(1);
+                                manager.detail_action_selected =
+                                    (manager.detail_action_selected + 1).min(max);
+                            }
+                            AgentManagerView::EditMenu => {
+                                manager.edit_action_selected = (manager.edit_action_selected + 1)
+                                    .min(AGENT_EDIT_ACTION_COUNT - 1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Scope) => {
+                                manager.create_scope_selected =
+                                    (manager.create_scope_selected + 1).min(1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Tools) => {
+                                manager.tool_selected =
+                                    (manager.tool_selected + 1).min(AGENT_TOOL_ROW_COUNT - 1);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Model) => {
+                                select_next_agent_model(manager);
+                            }
+                            AgentManagerView::Create(AgentCreateStep::Method) => {
+                                manager.create_method_selected =
+                                    (manager.create_method_selected + 1).min(1);
+                            }
+                            _ => {}
+                        }
+                    }
+                    true
+                }
+                KeyCode::Left => {
+                    if agent_text_input_active(manager) {
+                        manager.move_draft_cursor_left();
+                    }
+                    true
+                }
+                KeyCode::Right => {
+                    if agent_text_input_active(manager) {
+                        manager.move_draft_cursor_right();
+                    }
+                    true
+                }
+                KeyCode::Char('c') if manager.view == AgentManagerView::List => {
+                    manager.start_create();
+                    true
+                }
+                KeyCode::Enter => {
+                    handle_agents_enter(manager, request_tx).await;
+                    true
+                }
+                KeyCode::Tab => {
+                    match manager.view {
+                        AgentManagerView::GeneratedPreview => {
+                            manager.cycle_field();
+                        }
+                        AgentManagerView::EditMetadata => {
+                            manager.draft.field = match manager.draft.field {
+                                super::state::AgentEditorField::Name => {
+                                    super::state::AgentEditorField::Description
+                                }
+                                super::state::AgentEditorField::Description => {
+                                    super::state::AgentEditorField::Instructions
+                                }
+                                _ => super::state::AgentEditorField::Name,
+                            };
+                            manager.move_draft_cursor_to_current_end();
+                        }
+                        _ => {}
+                    }
+                    true
+                }
+                KeyCode::Backspace => {
+                    match manager.view {
+                        AgentManagerView::Generate
+                        | AgentManagerView::EditMetadata
+                        | AgentManagerView::Create(AgentCreateStep::ManualName)
+                        | AgentManagerView::Create(AgentCreateStep::ManualDescription)
+                        | AgentManagerView::Create(AgentCreateStep::ManualInstructions)
+                        | AgentManagerView::Create(AgentCreateStep::GenerateDescription) => {
+                            manager.backspace_draft_char();
+                        }
+                        AgentManagerView::GeneratedPreview if agent_text_input_active(manager) => {
+                            manager.backspace_draft_char();
+                        }
+                        _ => {}
+                    }
+                    true
+                }
+                KeyCode::Char(' ')
+                    if manager.view == AgentManagerView::Create(AgentCreateStep::Tools) =>
+                {
+                    toggle_agent_tool_group_or_item(manager);
+                    true
+                }
+                KeyCode::Char(' ')
+                    if manager.view == AgentManagerView::GeneratedPreview
+                        && manager.draft.field == super::state::AgentEditorField::Tools =>
+                {
+                    toggle_agent_tool_group_or_item(manager);
+                    true
+                }
+                KeyCode::Char(' ') if manager.view == AgentManagerView::EditTools => {
+                    toggle_agent_tool_group_or_item(manager);
+                    true
+                }
+                KeyCode::Char(c) if agent_text_input_active(manager) => {
+                    manager.insert_draft_char(c);
+                    true
+                }
+                _ => true,
+            }
+        }
+    }
+}
+
+async fn handle_agents_enter(
+    manager: &mut super::state::AgentManagerState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
+    match manager.view.clone() {
+        AgentManagerView::List => {
+            if manager.selected == 0 {
+                manager.start_create();
+            } else {
+                manager.detail_action_selected = 0;
+                manager.view = AgentManagerView::Detail(manager.selected - 1);
+            }
+        }
+        AgentManagerView::Detail(idx) => {
+            handle_agent_detail_action(manager, idx);
+        }
+        AgentManagerView::EditMenu => {
+            handle_agent_edit_menu_enter(manager);
+        }
+        AgentManagerView::EditMetadata => {
+            autosave_agent_edit(manager, request_tx).await;
+            manager.view = AgentManagerView::EditMenu;
+        }
+        AgentManagerView::EditTools | AgentManagerView::EditModel => {
+            autosave_agent_edit(manager, request_tx).await;
+            manager.view = AgentManagerView::EditMenu;
+        }
+        AgentManagerView::GeneratedPreview => {
+            let draft = manager.to_agent_draft();
+            let _ = request_tx
+                .send(UiToRuntimeEvent::AgentSaveRequested {
+                    source_kind: manager.draft.source_kind,
+                    original_path: manager.draft.original_path.clone(),
+                    draft,
+                })
+                .await;
+        }
+        AgentManagerView::Generate => {
+            submit_agent_generate(manager, request_tx, AgentGenerateReturn::Direct).await;
+        }
+        AgentManagerView::Generating(_) => {}
+        AgentManagerView::Create(step) => {
+            handle_agent_create_enter(manager, request_tx, step).await;
+        }
+        AgentManagerView::ConfirmDelete(idx) => {
+            if let Some(path) = manager
+                .records
+                .get(idx)
+                .and_then(|record| record.path.clone())
+            {
+                let _ = request_tx
+                    .send(UiToRuntimeEvent::AgentDeleteRequested { path })
+                    .await;
+            }
+        }
+    }
+}
+
+fn handle_agent_edit_menu_enter(manager: &mut super::state::AgentManagerState) {
+    match manager
+        .edit_action_selected
+        .min(AGENT_EDIT_ACTION_COUNT - 1)
+    {
+        0 => {
+            manager.draft.field = super::state::AgentEditorField::Name;
+            manager.move_draft_cursor_to_current_end();
+            manager.view = AgentManagerView::EditMetadata;
+        }
+        1 => {
+            manager.draft.field = super::state::AgentEditorField::Tools;
+            manager.view = AgentManagerView::EditTools;
+        }
+        2 => {
+            manager.draft.field = super::state::AgentEditorField::Model;
+            manager.sync_model_selection_to_draft();
+            manager.view = AgentManagerView::EditModel;
+        }
+        _ => manager.view = AgentManagerView::List,
+    }
+}
+
+async fn autosave_agent_edit(
+    manager: &super::state::AgentManagerState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
+    let draft = manager.to_agent_draft();
+    let _ = request_tx
+        .send(UiToRuntimeEvent::AgentSaveRequested {
+            source_kind: manager.draft.source_kind,
+            original_path: manager.draft.original_path.clone(),
+            draft,
+        })
+        .await;
+}
+
+async fn handle_agent_create_enter(
+    manager: &mut super::state::AgentManagerState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    step: AgentCreateStep,
+) {
+    match step {
+        AgentCreateStep::Scope => {
+            manager.draft.source_kind = if manager.create_scope_selected == 0 {
+                AgentSourceKind::Project
+            } else {
+                AgentSourceKind::User
+            };
+            manager.view = AgentManagerView::Create(AgentCreateStep::Tools);
+        }
+        AgentCreateStep::Tools => {
+            manager.view = AgentManagerView::Create(AgentCreateStep::Model);
+        }
+        AgentCreateStep::Model => {
+            apply_selected_agent_model(manager);
+            manager.view = AgentManagerView::Create(AgentCreateStep::Method);
+        }
+        AgentCreateStep::Method => {
+            if manager.create_method_selected == 0 {
+                manager.draft.field = super::state::AgentEditorField::GenerateDescription;
+                manager.move_draft_cursor_to_current_end();
+                manager.view = AgentManagerView::Create(AgentCreateStep::GenerateDescription);
+            } else {
+                manager.draft.field = super::state::AgentEditorField::Name;
+                manager.move_draft_cursor_to_current_end();
+                manager.view = AgentManagerView::Create(AgentCreateStep::ManualName);
+            }
+        }
+        AgentCreateStep::ManualName => {
+            manager.draft.field = super::state::AgentEditorField::Description;
+            manager.move_draft_cursor_to_current_end();
+            manager.view = AgentManagerView::Create(AgentCreateStep::ManualDescription);
+        }
+        AgentCreateStep::ManualDescription => {
+            manager.draft.field = super::state::AgentEditorField::Instructions;
+            manager.move_draft_cursor_to_current_end();
+            manager.view = AgentManagerView::Create(AgentCreateStep::ManualInstructions);
+        }
+        AgentCreateStep::ManualInstructions => {
+            let draft = manager.to_agent_draft();
+            let _ = request_tx
+                .send(UiToRuntimeEvent::AgentSaveRequested {
+                    source_kind: manager.draft.source_kind,
+                    original_path: None,
+                    draft,
+                })
+                .await;
+        }
+        AgentCreateStep::GenerateDescription => {
+            submit_agent_generate(manager, request_tx, AgentGenerateReturn::CreateFlow).await;
+        }
+    }
+}
+
+async fn submit_agent_generate(
+    manager: &mut super::state::AgentManagerState,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    return_to: AgentGenerateReturn,
+) {
+    let description = manager.draft.generated_description.trim().to_string();
+    if description.is_empty() {
+        manager.message = Some("请先填写用途描述，再生成 agent".to_string());
+        manager.draft.field = super::state::AgentEditorField::GenerateDescription;
+        manager.move_draft_cursor_to_current_end();
+        return;
+    }
+
+    let sent = request_tx
+        .send(UiToRuntimeEvent::AgentGenerateRequested {
+            source_kind: manager.draft.source_kind,
+            description,
+            tools: manager.draft.tools.clone(),
+            disallow_tools: manager.draft.disallow_tools.clone(),
+            model: manager.draft.model.clone(),
+        })
+        .await;
+    if sent.is_ok() {
+        manager.start_generating(return_to);
+    }
+}
+
+fn step_agent_create_back(manager: &mut super::state::AgentManagerState, step: AgentCreateStep) {
+    match step {
+        AgentCreateStep::Scope => manager.view = AgentManagerView::List,
+        AgentCreateStep::Tools => manager.view = AgentManagerView::Create(AgentCreateStep::Scope),
+        AgentCreateStep::Model => manager.view = AgentManagerView::Create(AgentCreateStep::Tools),
+        AgentCreateStep::Method => manager.view = AgentManagerView::Create(AgentCreateStep::Model),
+        AgentCreateStep::ManualName | AgentCreateStep::GenerateDescription => {
+            manager.view = AgentManagerView::Create(AgentCreateStep::Method);
+        }
+        AgentCreateStep::ManualDescription => {
+            manager.draft.field = super::state::AgentEditorField::Name;
+            manager.move_draft_cursor_to_current_end();
+            manager.view = AgentManagerView::Create(AgentCreateStep::ManualName);
+        }
+        AgentCreateStep::ManualInstructions => {
+            manager.draft.field = super::state::AgentEditorField::Description;
+            manager.move_draft_cursor_to_current_end();
+            manager.view = AgentManagerView::Create(AgentCreateStep::ManualDescription);
+        }
+    }
+}
+
+fn agent_text_input_active(manager: &super::state::AgentManagerState) -> bool {
+    match manager.view {
+        AgentManagerView::GeneratedPreview => matches!(
+            manager.draft.field,
+            super::state::AgentEditorField::Name
+                | super::state::AgentEditorField::Description
+                | super::state::AgentEditorField::Instructions
+        ),
+        AgentManagerView::EditMetadata => matches!(
+            manager.draft.field,
+            super::state::AgentEditorField::Name
+                | super::state::AgentEditorField::Description
+                | super::state::AgentEditorField::Instructions
+        ),
+        AgentManagerView::Generate
+        | AgentManagerView::Create(AgentCreateStep::ManualName)
+        | AgentManagerView::Create(AgentCreateStep::ManualDescription)
+        | AgentManagerView::Create(AgentCreateStep::ManualInstructions)
+        | AgentManagerView::Create(AgentCreateStep::GenerateDescription) => true,
+        _ => false,
+    }
+}
+
+fn apply_selected_agent_model(manager: &mut super::state::AgentManagerState) {
+    match manager.model_entries.get(manager.model_selected) {
+        Some(AgentModelEntry::Inherit) => manager.draft.model = None,
+        Some(AgentModelEntry::Model {
+            provider_key,
+            model,
+        }) => manager.draft.model = Some(format!("{}/{}", provider_key, model.id)),
+        Some(AgentModelEntry::ProviderHeader { .. }) | None => {}
+    }
+}
+
+fn detail_action_count(manager: &super::state::AgentManagerState, idx: usize) -> usize {
+    manager
+        .records
+        .get(idx)
+        .map(|record| if record.editable { 3 } else { 1 })
+        .unwrap_or(0)
+}
+
+fn handle_agent_detail_action(manager: &mut super::state::AgentManagerState, idx: usize) {
+    let Some(record) = manager.records.get(idx).cloned() else {
+        manager.view = AgentManagerView::List;
+        return;
+    };
+    let selected = manager
+        .detail_action_selected
+        .min(detail_action_count(manager, idx).saturating_sub(1));
+    if record.editable {
+        match selected {
+            0 => manager.start_edit(record),
+            1 => manager.view = AgentManagerView::ConfirmDelete(idx),
+            _ => manager.view = AgentManagerView::List,
+        }
+    } else {
+        manager.view = AgentManagerView::List;
+    }
+}
+
+fn select_prev_agent_model(manager: &mut super::state::AgentManagerState) {
+    let mut new = manager.model_selected.saturating_sub(1);
+    while new > 0
+        && matches!(
+            manager.model_entries.get(new),
+            Some(AgentModelEntry::ProviderHeader { .. })
+        )
+    {
+        new = new.saturating_sub(1);
+    }
+    if matches!(
+        manager.model_entries.get(new),
+        Some(AgentModelEntry::Model { .. }) | Some(AgentModelEntry::Inherit)
+    ) {
+        manager.model_selected = new;
+    }
+}
+
+fn select_next_agent_model(manager: &mut super::state::AgentManagerState) {
+    let max = manager.model_entries.len().saturating_sub(1);
+    let mut new = (manager.model_selected + 1).min(max);
+    while new < max
+        && matches!(
+            manager.model_entries.get(new),
+            Some(AgentModelEntry::ProviderHeader { .. })
+        )
+    {
+        new = (new + 1).min(max);
+    }
+    if matches!(
+        manager.model_entries.get(new),
+        Some(AgentModelEntry::Model { .. }) | Some(AgentModelEntry::Inherit)
+    ) {
+        manager.model_selected = new;
+    }
+}
+
+fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState) {
+    match manager.tool_selected {
+        0 => {
+            manager.draft.tools.clear();
+            manager.draft.disallow_tools.clear();
+        }
+        1 => toggle_allow_group(manager, &["read"]),
+        2 => toggle_allow_group(manager, &["bash", "edit", "write"]),
+        3..=7 => {
+            let tool = AGENT_TOOL_NAMES[manager.tool_selected - 3];
+            if manager.draft.tools.is_empty() {
+                toggle_tool(&mut manager.draft.disallow_tools, tool);
+            } else {
+                toggle_tool(&mut manager.draft.tools, tool);
+                manager.draft.disallow_tools.retain(|item| item != tool);
+            }
+        }
+        8..=12 => {
+            let tool = AGENT_TOOL_NAMES[manager.tool_selected - 8];
+            if manager.draft.disallow_tools.iter().any(|item| item == tool) {
+                manager.draft.disallow_tools.retain(|item| item != tool);
+            } else {
+                manager.draft.disallow_tools.push(tool.to_string());
+                manager.draft.tools.retain(|item| item != tool);
+            }
+        }
+        _ => {}
+    }
+    manager.draft.tools.retain(|tool| tool != "subagent");
+    manager.draft.tools.sort();
+    manager.draft.tools.dedup();
+    manager
+        .draft
+        .disallow_tools
+        .retain(|tool| tool != "subagent");
+    manager.draft.disallow_tools.sort();
+    manager.draft.disallow_tools.dedup();
+}
+
+fn toggle_allow_group(manager: &mut super::state::AgentManagerState, group: &[&str]) {
+    if manager.draft.tools.is_empty() {
+        let enabled = group
+            .iter()
+            .all(|tool| !manager.draft.disallow_tools.iter().any(|item| item == tool));
+        if enabled {
+            for tool in group {
+                add_tool(&mut manager.draft.disallow_tools, tool);
+            }
+        } else {
+            manager
+                .draft
+                .disallow_tools
+                .retain(|tool| !group.iter().any(|item| item == &tool.as_str()));
+        }
+        return;
+    }
+
+    let enabled = group
+        .iter()
+        .all(|tool| manager.draft.tools.iter().any(|item| item == tool));
+    if enabled {
+        manager
+            .draft
+            .tools
+            .retain(|tool| !group.iter().any(|item| item == &tool.as_str()));
+    } else {
+        for tool in group {
+            add_tool(&mut manager.draft.tools, tool);
+        }
+    }
+    manager
+        .draft
+        .disallow_tools
+        .retain(|tool| !group.iter().any(|item| item == &tool.as_str()));
+}
+
+fn toggle_tool(tools: &mut Vec<String>, tool: &str) {
+    if tools.iter().any(|item| item == tool) {
+        tools.retain(|item| item != tool);
+    } else {
+        add_tool(tools, tool);
+    }
+}
+
+fn add_tool(tools: &mut Vec<String>, tool: &str) {
+    if !tools.iter().any(|item| item == tool) {
+        tools.push(tool.to_string());
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod effort;
 pub mod exit;
 pub mod help;
@@ -125,6 +126,7 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(exit::ExitCommand));
     registry.register(Arc::new(effort::EffortCommand));
     registry.register(Arc::new(model::ModelCommand));
+    registry.register(Arc::new(agents::AgentsCommand));
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));
     registry.register(Arc::new(rename::RenameCommand));
@@ -150,7 +152,7 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "sessions", "new", "model", "effort", "init", "rename", "help", "exit"
+                "sessions", "new", "model", "agents", "effort", "init", "rename", "help", "exit"
             ]
         );
     }

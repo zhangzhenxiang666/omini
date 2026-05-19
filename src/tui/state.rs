@@ -18,7 +18,10 @@ mod mention;
 mod permission;
 
 pub use autocomplete::CommandAutocomplete;
-pub use interaction::{InteractionStep, ModelSelectionEntry};
+pub use interaction::{
+    AgentCreateStep, AgentEditorField, AgentGenerateReturn, AgentManagerState, AgentManagerView,
+    AgentModelEntry, InteractionStep, ModelSelectionEntry,
+};
 pub use mention::{InputMention, MentionAutocomplete, MentionCandidate};
 
 pub const PASTE_MARKER_THRESHOLD_CHARS: usize = 512;
@@ -467,6 +470,17 @@ impl UiState {
                     selected: 0,
                 })
             }
+            InteractionRequest::AgentManagement {
+                records,
+                providers,
+                current_provider,
+                current_model,
+            } => Some(InteractionStep::Agents(Box::new(AgentManagerState::new(
+                records.clone(),
+                providers.clone(),
+                current_provider.clone(),
+                current_model.clone(),
+            )))),
         };
     }
 
@@ -693,6 +707,33 @@ impl UiState {
                 self.mention_autocomplete
                     .set_candidates(mention::agent_summaries_to_mention_candidates(agents));
                 self.update_input_autocomplete();
+            }
+            RuntimeToUiEvent::AgentManagementUpdated { records } => {
+                if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
+                    let keep_view = matches!(
+                        manager.view,
+                        AgentManagerView::EditMenu
+                            | AgentManagerView::EditMetadata
+                            | AgentManagerView::EditTools
+                            | AgentManagerView::EditModel
+                    );
+                    manager.refresh_records(records);
+                    if !keep_view {
+                        manager.view = AgentManagerView::List;
+                    }
+                }
+            }
+            RuntimeToUiEvent::AgentGenerated { source_kind, draft } => {
+                if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
+                    manager.apply_generated(source_kind, draft);
+                }
+            }
+            RuntimeToUiEvent::AgentGenerateFailed { message } => {
+                if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
+                    manager.fail_generation(message);
+                } else {
+                    self.messages.push(UiMessage::Notice { text: message });
+                }
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
             RuntimeToUiEvent::SessionChanged { .. } => {}

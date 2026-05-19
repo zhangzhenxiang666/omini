@@ -51,7 +51,7 @@ impl Tool for WriteTool {
     }
 
     async fn prepare(&self, input: WriteInput) -> Result<Self::Prepared, ToolResult> {
-        let existed = match validate_target(&input).await {
+        let existed = match validate_target(&input) {
             Ok(existed) => existed,
             Err(e) => return Err(ToolResult::error(e)),
         };
@@ -102,7 +102,7 @@ struct WriteReport {
 }
 
 async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> {
-    let existed = validate_target(&prepared.input).await?;
+    let existed = validate_target(&prepared.input)?;
 
     fs::write(&prepared.input.file_path, &prepared.input.content)
         .await
@@ -117,7 +117,7 @@ async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> 
     })
 }
 
-async fn validate_target(input: &WriteInput) -> Result<bool, String> {
+fn validate_target(input: &WriteInput) -> Result<bool, String> {
     if input.file_path.trim().is_empty() {
         return Err("file_path must not be empty".to_string());
     }
