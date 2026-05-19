@@ -6,6 +6,7 @@ pub use omini_types::subagents;
 mod app;
 mod clipboard;
 mod input;
+mod markdown;
 mod render;
 mod selection;
 mod state;

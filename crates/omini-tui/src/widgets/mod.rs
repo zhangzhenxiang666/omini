@@ -86,58 +86,27 @@ pub fn build_bordered_lines(
     italic: bool,
     bg: Option<Color>,
 ) -> Vec<Line<'static>> {
-    let available = content_width.saturating_sub(2);
+    let available = content_width.max(1);
     let mut lines: Vec<Line> = Vec::new();
 
-    let mut content_style = if italic {
-        Style::default()
-            .fg(border_color)
-            .add_modifier(Modifier::ITALIC)
-    } else {
-        Style::default()
-    };
+    let mut content_style = Style::default().fg(border_color);
+    if italic {
+        content_style = content_style.add_modifier(Modifier::ITALIC);
+    }
     if let Some(c) = bg {
         content_style = content_style.bg(c);
     }
 
-    let border_span = |c: Color| -> Span<'static> {
-        let mut style = Style::default().fg(c);
-        if let Some(bg_c) = bg {
-            style = style.bg(bg_c);
-        }
-        Span::styled("\u{2503}", style)
-    };
-
-    let space_span = || -> Span<'static> {
-        if let Some(c) = bg {
-            Span::raw(" ").style(Style::default().bg(c))
-        } else {
-            Span::raw(" ")
-        }
-    };
-
-    if text.is_empty() {
-        lines.push(Line::from(vec![border_span(border_color)]));
+    let wrapped = word_wrap(text, available);
+    if wrapped.is_empty() {
+        lines.push(Line::from(Span::styled(String::new(), content_style)));
     } else {
-        let wrapped = word_wrap(text, available);
         for wrapped_line in wrapped {
-            lines.push(Line::from(vec![
-                border_span(border_color),
-                space_span(),
-                Span::styled(wrapped_line, content_style),
-            ]));
+            lines.push(Line::from(Span::styled(wrapped_line, content_style)));
         }
     }
 
     lines
-}
-
-pub fn build_plain_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let wrapped = word_wrap(text, content_width);
-    wrapped.into_iter().map(Line::from).collect()
 }
 
 pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
@@ -167,10 +136,9 @@ pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
 }
 
 pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    let available = content_width.saturating_sub(2);
+    let available = content_width.max(1);
     let mut lines: Vec<Line> = Vec::new();
 
-    let border_style = Style::default().fg(Color::DarkGray);
     let prefix_style = Style::default()
         .fg(Color::Rgb(141, 119, 78))
         .add_modifier(Modifier::ITALIC);
@@ -179,11 +147,7 @@ pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'stati
         .add_modifier(Modifier::ITALIC);
 
     if text.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("\u{2503}", border_style),
-            Span::raw(" "),
-            Span::styled("Thinking: ", prefix_style),
-        ]));
+        lines.push(Line::from(vec![Span::styled("Thinking: ", prefix_style)]));
         return lines;
     }
 
@@ -196,58 +160,34 @@ pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'stati
         let is_first = ll_idx == 0;
 
         if is_first && first_line_available == 0 {
-            // Terminal too narrow for prefix + any content on one line
-            lines.push(Line::from(vec![
-                Span::styled("\u{2503}", border_style),
-                Span::raw(" "),
-                Span::styled(prefix, prefix_style),
-            ]));
+            lines.push(Line::from(vec![Span::styled(prefix, prefix_style)]));
             let wrapped = word_wrap(ll, available);
             for wl in wrapped {
-                lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
-                    Span::styled(wl, text_style),
-                ]));
+                lines.push(Line::from(vec![Span::styled(wl, text_style)]));
             }
             continue;
         }
 
         if ll.is_empty() {
-            // Empty logical line from explicit newline: show an empty line
             if is_first {
-                lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
-                    Span::styled(prefix, prefix_style),
-                ]));
+                lines.push(Line::from(vec![Span::styled(prefix, prefix_style)]));
             } else {
-                lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
-                ]));
+                lines.push(Line::from(""));
             }
             continue;
         }
 
         if is_first {
-            // First logical line: fit content after "Thinking: "
             let first_w = UnicodeWidthStr::width(*ll);
             if prefix_w + first_w <= available {
-                // Entire first line fits after prefix
                 lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
                     Span::styled(prefix, prefix_style),
                     Span::styled(ll.to_string(), text_style),
                 ]));
             } else {
-                // Split: first part after prefix, rest re-wrapped at full width
                 let first_wrapped = word_wrap(ll, first_line_available);
                 let first_chunk = first_wrapped.first().cloned().unwrap_or_default();
                 lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
                     Span::styled(prefix, prefix_style),
                     Span::styled(first_chunk, text_style),
                 ]));
@@ -255,23 +195,14 @@ pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'stati
                     let rest = first_wrapped[1..].join(" ");
                     let rest_wrapped = word_wrap(&rest, available);
                     for rl in rest_wrapped {
-                        lines.push(Line::from(vec![
-                            Span::styled("\u{2503}", border_style),
-                            Span::raw(" "),
-                            Span::styled(rl, text_style),
-                        ]));
+                        lines.push(Line::from(vec![Span::styled(rl, text_style)]));
                     }
                 }
             }
         } else {
-            // Subsequent logical lines: wrap at full width
             let wrapped = word_wrap(ll, available);
             for wl in wrapped {
-                lines.push(Line::from(vec![
-                    Span::styled("\u{2503}", border_style),
-                    Span::raw(" "),
-                    Span::styled(wl, text_style),
-                ]));
+                lines.push(Line::from(vec![Span::styled(wl, text_style)]));
             }
         }
     }
@@ -312,5 +243,34 @@ pub fn render_tool(
         ),
         "ask_user" => ask_user::render(tool_use, tool_result, content_width),
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn bordered_lines_render_without_left_rail() {
+        let color = Color::Rgb(100, 200, 130);
+        let lines = build_bordered_lines("tool result", 40, color, false, None);
+
+        assert_eq!(plain(&lines[0]), "tool result");
+        assert_eq!(lines[0].spans[0].style.fg, Some(color));
+    }
+
+    #[test]
+    fn thinking_lines_render_without_left_rail() {
+        let lines = build_thinking_lines("checking context", 40);
+
+        assert_eq!(plain(&lines[0]), "Thinking: checking context");
+        assert!(!plain(&lines[0]).starts_with('\u{2503}'));
     }
 }

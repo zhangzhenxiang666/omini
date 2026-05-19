@@ -10,6 +10,7 @@ crossterm.workspace = true
 dirs.workspace = true
 omini-runtime.workspace = true
 omini-types.workspace = true
+pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

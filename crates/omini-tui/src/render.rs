@@ -1,3 +1,4 @@
+use crate::markdown::build_markdown_lines;
 use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::{
     AgentCreateStep, AgentEditorField, AgentManagerState, AgentManagerView, AgentModelEntry,
@@ -6,9 +7,7 @@ use crate::state::{
 use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::events::{PermissionPreview, SubagentStatus, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock};
-use crate::widgets::{
-    build_bordered_lines, build_plain_lines, build_thinking_lines, display_path, render_tool,
-};
+use crate::widgets::{build_bordered_lines, build_thinking_lines, display_path, render_tool};
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -912,7 +911,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     );
                 }
                 ContentBlock::Text(tb) => {
-                    let mut lines = build_plain_lines(&tb.text, content_width);
+                    let mut lines = build_markdown_lines(&tb.text, content_width);
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::Image(_) => {}
@@ -1029,7 +1028,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
             let mut block_lines: Vec<Line> = Vec::new();
             match block {
                 ContentBlock::Text(tb) => {
-                    let mut lines = build_plain_lines(&tb.text, content_width);
+                    let mut lines = build_markdown_lines(&tb.text, content_width);
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::Image(_) => {}
