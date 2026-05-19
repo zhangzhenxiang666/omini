@@ -130,6 +130,8 @@ impl UiState {
         match event {
             RuntimeToUiEvent::RunStarted => {
                 self.pending_assistant = None;
+                self.clear_run_dividers();
+                self.start_run_timer();
                 self.agent_status = AgentStatus::Thinking;
             }
             RuntimeToUiEvent::UserMessageInjected(item) => {
@@ -186,6 +188,7 @@ impl UiState {
                 self.running_tools.remove(&tr.tool_use_id);
                 self.pending_tool_previews.remove(&tr.tool_use_id);
                 if self.pending_tool_previews.is_empty() {
+                    self.resume_run_timer();
                     self.reset_permission_drawer();
                     if self.agent_status == AgentStatus::AwaitingInput {
                         self.agent_status = AgentStatus::Working;
@@ -226,6 +229,9 @@ impl UiState {
                 {
                     self.messages.push(UiMessage::Message(msg));
                 }
+                if let Some(elapsed) = self.finish_run_timer() {
+                    self.messages.push(UiMessage::RunDivider { elapsed });
+                }
                 self.pending_intervention_inputs.clear();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -239,6 +245,7 @@ impl UiState {
                 }
                 self.pending_tool_previews
                     .insert(req.tool_use_id.clone(), req);
+                self.pause_run_timer();
                 self.agent_status = AgentStatus::AwaitingInput;
             }
             RuntimeToUiEvent::SubagentStarted(event) => {
@@ -278,6 +285,7 @@ impl UiState {
                     event.session_id, event.tool_result.tool_use_id
                 ));
                 if self.pending_tool_previews.is_empty() {
+                    self.resume_run_timer();
                     self.reset_permission_drawer();
                     if self.agent_status == AgentStatus::AwaitingInput {
                         self.agent_status = AgentStatus::Working;
@@ -429,6 +437,7 @@ impl UiState {
             self.subagents.insert(node.session_id.clone(), node);
         }
         self.pending_assistant = None;
+        self.run_timer = None;
         self.queued_user_inputs.clear();
         self.input.clear();
         self.input_mentions.clear();

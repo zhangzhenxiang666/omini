@@ -7,6 +7,8 @@ use crate::types::message::Message;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::time::Duration;
+use tokio::time::Instant;
 
 mod autocomplete;
 mod events;
@@ -98,6 +100,69 @@ pub enum AgentStatus {
     AwaitingInput,
 }
 
+#[derive(Debug, Clone)]
+pub struct RunTimer {
+    started_at: Instant,
+    paused_total: Duration,
+    pause_started_at: Option<Instant>,
+}
+
+impl RunTimer {
+    fn started_at(started_at: Instant) -> Self {
+        Self {
+            started_at,
+            paused_total: Duration::ZERO,
+            pause_started_at: None,
+        }
+    }
+
+    fn pause_at(&mut self, now: Instant) {
+        if self.pause_started_at.is_none() {
+            self.pause_started_at = Some(now);
+        }
+    }
+
+    fn resume_at(&mut self, now: Instant) {
+        let Some(paused_at) = self.pause_started_at.take() else {
+            return;
+        };
+        self.paused_total += now.saturating_duration_since(paused_at);
+    }
+
+    fn elapsed_at(&self, now: Instant) -> Duration {
+        let active_pause = self
+            .pause_started_at
+            .map(|paused_at| now.saturating_duration_since(paused_at))
+            .unwrap_or(Duration::ZERO);
+        now.saturating_duration_since(self.started_at)
+            .saturating_sub(self.paused_total + active_pause)
+    }
+
+    fn finish_at(mut self, now: Instant) -> Duration {
+        self.resume_at(now);
+        self.elapsed_at(now)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.pause_started_at.is_some()
+    }
+}
+
+pub(crate) fn format_run_duration(duration: Duration) -> String {
+    let total = duration.as_secs();
+    let seconds = total % 60;
+    let minutes = (total / 60) % 60;
+    let hours = total / 3600;
+
+    if hours > 0 {
+        format!("{hours}h{minutes:02}m{seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 impl std::fmt::Display for AgentStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -113,6 +178,7 @@ impl std::fmt::Display for AgentStatus {
 pub enum UiMessage {
     Message(Message),
     Display(DisplayMessage),
+    RunDivider { elapsed: Duration },
     Notice { text: String },
     Warning { text: String },
     Error { text: String },
@@ -155,18 +221,22 @@ impl UiMessage {
     pub fn as_message(&self) -> Option<&Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Display(_) | Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => {
-                None
-            }
+            Self::Display(_)
+            | Self::RunDivider { .. }
+            | Self::Notice { .. }
+            | Self::Warning { .. }
+            | Self::Error { .. } => None,
         }
     }
 
     pub fn as_message_mut(&mut self) -> Option<&mut Message> {
         match self {
             Self::Message(message) => Some(message),
-            Self::Display(_) | Self::Notice { .. } | Self::Warning { .. } | Self::Error { .. } => {
-                None
-            }
+            Self::Display(_)
+            | Self::RunDivider { .. }
+            | Self::Notice { .. }
+            | Self::Warning { .. }
+            | Self::Error { .. } => None,
         }
     }
 }
@@ -226,6 +296,8 @@ pub struct UiState {
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
+    /// 当前 query 的有效运行计时器；等待用户授权/回答时暂停。
+    pub run_timer: Option<RunTimer>,
     /// 从底部向上滚动的行数（0 = 位于底部，显示最新消息）
     pub scroll_offset: usize,
     /// 自动滚动锁定：true = 有新内容时自动保持在底部；false = 用户手动浏览历史不跳转
@@ -310,6 +382,7 @@ impl UiState {
             pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
+            run_timer: None,
             scroll_offset: 0,
             auto_scroll: true,
             scroll_step: 1,
@@ -344,6 +417,43 @@ impl UiState {
         self.pending_tool_previews
             .values()
             .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
+    }
+
+    pub fn start_run_timer(&mut self) {
+        self.run_timer = Some(RunTimer::started_at(Instant::now()));
+    }
+
+    pub fn clear_run_dividers(&mut self) {
+        self.messages
+            .retain(|message| !matches!(message, UiMessage::RunDivider { .. }));
+    }
+
+    pub fn pause_run_timer(&mut self) {
+        if let Some(timer) = &mut self.run_timer {
+            timer.pause_at(Instant::now());
+        }
+    }
+
+    pub fn resume_run_timer(&mut self) {
+        if let Some(timer) = &mut self.run_timer {
+            timer.resume_at(Instant::now());
+        }
+    }
+
+    pub fn finish_run_timer(&mut self) -> Option<Duration> {
+        self.run_timer
+            .take()
+            .map(|timer| timer.finish_at(Instant::now()))
+    }
+
+    pub fn current_run_elapsed(&self) -> Option<Duration> {
+        self.run_timer
+            .as_ref()
+            .map(|timer| timer.elapsed_at(Instant::now()))
+    }
+
+    pub fn is_run_timer_paused(&self) -> bool {
+        self.run_timer.as_ref().is_some_and(RunTimer::is_paused)
     }
 
     pub fn clear_selectable_screen_lines(&mut self) {

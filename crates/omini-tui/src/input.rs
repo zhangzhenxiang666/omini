@@ -804,6 +804,7 @@ pub(super) async fn resolve_active_tool_pause(
         .await;
     state.pending_tool_previews.remove(&req.tool_use_id);
     if state.pending_tool_previews.is_empty() {
+        state.resume_run_timer();
         state.reset_permission_drawer();
     }
 }
@@ -825,6 +826,7 @@ pub(super) async fn flush_queued_user_inputs(
         return;
     };
 
+    state.clear_run_dividers();
     state.messages.extend(ui_messages);
     state.scroll_offset = 0;
     state.auto_scroll = true;

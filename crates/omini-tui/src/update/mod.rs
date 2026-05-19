@@ -244,7 +244,10 @@ async fn handle_tool_pause_key(
             state
                 .pending_tool_previews
                 .remove(&active_pause.tool_use_id);
-            state.reset_permission_drawer();
+            if state.pending_tool_previews.is_empty() {
+                state.resume_run_timer();
+                state.reset_permission_drawer();
+            }
         }
         KeyCode::Enter => {
             if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) {
@@ -426,6 +429,7 @@ async fn handle_composer_key(
                 } else if state.is_run_active() {
                     state.queued_user_inputs.push_back(draft);
                 } else {
+                    state.clear_run_dividers();
                     let ui_message = match draft.clone().history_item() {
                         crate::types::display::HistoryItem::Message(message) => {
                             UiMessage::Message(message)

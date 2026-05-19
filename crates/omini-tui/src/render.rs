@@ -2,7 +2,7 @@ use crate::markdown::build_markdown_lines;
 use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::{
     AgentCreateStep, AgentEditorField, AgentManagerState, AgentManagerView, AgentModelEntry,
-    InteractionStep, ModelSelectionEntry, SubagentNode, UiMessage, UiState,
+    InteractionStep, ModelSelectionEntry, SubagentNode, UiMessage, UiState, format_run_duration,
 };
 use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::events::{PermissionPreview, SubagentStatus, ToolPauseKind, ToolPauseRequest};
@@ -17,6 +17,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod agents;
@@ -666,6 +667,31 @@ fn build_alert_lines(text: &str, content_width: usize, kind: AlertKind) -> Vec<L
         .collect()
 }
 
+fn build_run_divider_line(elapsed: Duration, content_width: usize) -> Vec<Line<'static>> {
+    let style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
+    let label = format!("─ Worked for {} ", format_run_divider_duration(elapsed));
+    let label_width = UnicodeWidthStr::width(label.as_str());
+    if content_width <= label_width + 1 {
+        return vec![Line::from(Span::styled(
+            truncate_str(label.trim(), content_width),
+            style,
+        ))];
+    }
+
+    vec![Line::from(vec![
+        Span::styled(label, style),
+        Span::styled("─".repeat(content_width - label_width), style),
+    ])]
+}
+
+fn format_run_divider_duration(duration: Duration) -> String {
+    format_run_duration(duration)
+        .replace('h', "h ")
+        .replace('m', "m ")
+        .trim()
+        .to_string()
+}
+
 fn format_subagent_label(label: &str) -> String {
     let words = label_words(label);
     if words.is_empty() {
@@ -827,6 +853,19 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
     let mut rendered_msg_idx = 0;
     for ui_message in &state.messages {
+        if let UiMessage::RunDivider { elapsed } = ui_message {
+            let block_lines = build_run_divider_line(*elapsed, content_width);
+            if !block_lines.is_empty() {
+                if !all_lines.is_empty() {
+                    all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
+                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+                all_lines.extend(block_lines);
+            }
+            continue;
+        }
+
         if let UiMessage::Display(display) = ui_message {
             let block_lines = build_display_message_lines(display, content_width);
             if !block_lines.is_empty() {
@@ -851,6 +890,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                 UiMessage::Error { text } => {
                     build_alert_lines(text, content_width, AlertKind::Error)
                 }
+                UiMessage::RunDivider { .. } => unreachable!(),
                 UiMessage::Display(_) => unreachable!(),
                 UiMessage::Message(_) => unreachable!(),
             };
@@ -1226,5 +1266,29 @@ fn apply_text_selection_highlight(
         ) {
             *line = highlighted_line(text, start_col, end_col, highlight);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_divider_renders_elapsed_duration() {
+        let lines = build_run_divider_line(Duration::from_secs(67), 24);
+        let text = line_to_plain_text(&lines[0]);
+
+        assert_eq!(lines.len(), 1);
+        assert!(text.starts_with("─ Worked for 1m 07s ─"));
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 24);
+    }
+
+    #[test]
+    fn run_divider_does_not_exceed_narrow_width() {
+        let lines = build_run_divider_line(Duration::from_secs(67), 4);
+        let text = line_to_plain_text(&lines[0]);
+
+        assert_eq!(lines.len(), 1);
+        assert!(UnicodeWidthStr::width(text.as_str()) <= 4);
     }
 }

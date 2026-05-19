@@ -1,8 +1,12 @@
 use super::*;
 use crate::subagents::AgentSummary;
 use crate::types::display::MentionKind;
-use crate::types::events::{RuntimeToUiEvent, SubagentStartedEvent};
+use crate::types::events::{
+    PermissionPreview, RuntimeToUiEvent, SubagentStartedEvent, ToolPauseKind, ToolPauseRequest,
+};
 use crate::types::message::ToolResultBlock;
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn state_with_mention(cursor_char: usize) -> UiState {
     let mut state = UiState::new();
@@ -38,6 +42,107 @@ fn start_subagent(state: &mut UiState) {
         spawn_tool_use_id: "tool_1".to_string(),
         agent_label: "explorer".to_string(),
     }));
+}
+
+fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+    ToolPauseRequest {
+        tool_use_id: tool_use_id.to_string(),
+        preview_tool_use_id: None,
+        tool_name: "bash".to_string(),
+        permission_source: None,
+        source_session_id: None,
+        source_agent_label: None,
+        kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+            tool_name: "bash".to_string(),
+            payload: serde_json::Map::new(),
+        }),
+    }
+}
+
+#[test]
+fn formats_run_duration() {
+    assert_eq!(format_run_duration(Duration::from_secs(0)), "0s");
+    assert_eq!(format_run_duration(Duration::from_secs(7)), "7s");
+    assert_eq!(format_run_duration(Duration::from_secs(67)), "1m07s");
+    assert_eq!(format_run_duration(Duration::from_secs(3723)), "1h02m03s");
+}
+
+#[test]
+fn run_timer_excludes_paused_duration() {
+    let started_at = Instant::now();
+    let mut timer = RunTimer::started_at(started_at);
+
+    timer.pause_at(started_at + Duration::from_secs(10));
+    assert_eq!(
+        timer.elapsed_at(started_at + Duration::from_secs(30)),
+        Duration::from_secs(10)
+    );
+
+    timer.resume_at(started_at + Duration::from_secs(30));
+    assert_eq!(
+        timer.elapsed_at(started_at + Duration::from_secs(35)),
+        Duration::from_secs(15)
+    );
+
+    timer.pause_at(started_at + Duration::from_secs(40));
+    assert_eq!(
+        timer.finish_at(started_at + Duration::from_secs(50)),
+        Duration::from_secs(20)
+    );
+}
+
+#[test]
+fn run_finished_appends_elapsed_divider_and_clears_timer() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    assert!(state.run_timer.is_some());
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    assert!(state.run_timer.is_none());
+    assert!(matches!(
+        state.messages.last(),
+        Some(UiMessage::RunDivider { .. })
+    ));
+}
+
+#[test]
+fn run_started_removes_previous_elapsed_divider() {
+    let mut state = UiState::new();
+    state.messages.push(UiMessage::RunDivider {
+        elapsed: Duration::from_secs(67),
+    });
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+
+    assert!(
+        !state
+            .messages
+            .iter()
+            .any(|message| matches!(message, UiMessage::RunDivider { .. }))
+    );
+}
+
+#[test]
+fn tool_pause_pauses_timer_until_result_removes_last_preview() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+
+    assert!(state.is_run_timer_paused());
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: String::new(),
+        metadata: None,
+    }));
+
+    assert!(!state.is_run_timer_paused());
 }
 
 #[test]

@@ -1,7 +1,7 @@
-use crate::state::{InteractionStep, UiState};
+use crate::state::{AgentStatus, InteractionStep, UiState, format_run_duration};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
@@ -22,10 +22,11 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     };
     state.set_input_wrap_width(area.width as usize);
     let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
+    let activity_height = if state.is_run_active() { 3 } else { 1 };
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
-        Constraint::Length(1),
+        Constraint::Length(activity_height),
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
@@ -33,6 +34,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     state.messages_area = chunks[1];
 
     super::render_messages(state, frame, chunks[1]);
+    render_activity(state, frame, chunks[2]);
     super::autocomplete::render_autocomplete(state, frame, chunks[3]);
     super::status::render_footer(state, frame, chunks[4]);
 
@@ -52,4 +54,49 @@ fn render_background(frame: &mut ratatui::Frame, area: Rect) {
         Paragraph::new(Line::from("")).style(Style::default().bg(Color::Rgb(40, 44, 52))),
         area,
     );
+}
+
+fn render_activity(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
+    if area.height == 0 || !state.is_run_active() {
+        return;
+    }
+
+    let Some(elapsed) = state.current_run_elapsed() else {
+        return;
+    };
+
+    let activity_area = Rect {
+        y: area.y + area.height.saturating_sub(1) / 2,
+        height: 1,
+        ..area
+    };
+    let style = Style::default().fg(Color::Rgb(0x7a, 0x82, 0x8e));
+    let bright = Color::Rgb(0xa6, 0xaf, 0xb9);
+    let dim = Color::Rgb(0x5a, 0x62, 0x6f);
+    let label = match state.agent_status {
+        AgentStatus::Thinking => "Thinking",
+        AgentStatus::Working => "Working",
+        AgentStatus::AwaitingInput => "Waiting for you",
+        AgentStatus::Idle => return,
+    };
+    let elapsed = format_run_duration(elapsed);
+    let meta = if state.agent_status == AgentStatus::AwaitingInput || state.is_run_timer_paused() {
+        format!(" (paused at {elapsed})")
+    } else {
+        format!(" ({elapsed} · esc to interrupt)")
+    };
+
+    let mut spans = vec![Span::styled("• ", style)];
+    if state.agent_status == AgentStatus::AwaitingInput {
+        spans.push(Span::styled(label.to_string(), style));
+    } else {
+        spans.extend(super::status::animated_status_spans_with_palette(
+            label, bright, dim,
+        ));
+    }
+    spans.push(Span::styled(meta, style));
+
+    let mut line = Line::from(spans);
+    super::register_and_highlight_lines(state, activity_area, std::slice::from_mut(&mut line));
+    frame.render_widget(Paragraph::new(line), activity_area);
 }
