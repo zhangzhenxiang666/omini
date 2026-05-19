@@ -1,5 +1,5 @@
-use omini::config::settings::OminiRoot;
-use omini::db::Database;
+use omini_runtime::config::settings::OminiRoot;
+use omini_runtime::db::Database;
 use std::error::Error;
 
 #[tokio::main]
@@ -33,9 +33,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
 
     Database::open(&root.db_path())
         .await
-        .map(omini::db::init_global)?;
+        .map(omini_runtime::db::init_global)?;
 
-    omini::tui::run_ui(settings, project).await?;
+    omini_tui::run_ui(settings, project).await?;
 
     Ok(())
 }

@@ -1,4 +1,3 @@
-use crate::db::DbError;
 use crate::permissions::RawPermissionConfig;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -114,6 +113,4 @@ pub enum ConfigError {
     TomlSer(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("database error: {0}")]
-    Db(#[from] DbError),
 }

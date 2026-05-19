@@ -62,9 +62,9 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
 
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
-    // Line 1: "Select model" in accent color, bold
+    // Line 1: model selection title in accent color, bold
     let mut title_line = Line::from(Span::styled(
-        " Select model",
+        " 选择模型",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
     ));
     let title_area = Rect {
@@ -181,7 +181,7 @@ fn render_model_panel(
                 let mut desc_parts = Vec::new();
                 let limit_k = model.limit / 1000;
                 if limit_k > 0 {
-                    desc_parts.push(format!("{}K context", limit_k));
+                    desc_parts.push(format!("{}K 上下文", limit_k));
                 }
                 if model.thinking {
                     desc_parts.push("thinking".to_string());
@@ -294,9 +294,9 @@ fn render_model_panel(
 
     // Hint
     let hint_text = if has_thinking {
-        "  ↑↓ select  ·  ←→ effort  ·  Enter confirm  ·  Esc cancel"
+        "  ↑↓ 选择  ·  ←→ effort  ·  Enter 确认  ·  Esc 取消"
     } else {
-        "  ↑↓ select  ·  Enter confirm  ·  Esc cancel"
+        "  ↑↓ 选择  ·  Enter 确认  ·  Esc 取消"
     };
     let mut hint = Line::from(Span::styled(
         hint_text,

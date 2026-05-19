@@ -1,4 +1,4 @@
-use crate::tui::state::UiState;
+use crate::state::UiState;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -51,7 +51,7 @@ pub(super) fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, i
     let cmds: Vec<_> = state.autocomplete.filtered.iter().collect();
     let max_name_width = cmds
         .iter()
-        .map(|cmd| format!("/{}", cmd.name).chars().count())
+        .map(|cmd| UnicodeWidthStr::width(format!("/{}", cmd.name).as_str()))
         .max()
         .unwrap_or(0);
     let lines: Vec<Line> = cmds
@@ -64,7 +64,8 @@ pub(super) fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, i
             let row_bg = if is_sel { sel_bg } else { input_bg };
 
             let left = format!("/{}", cmd.name);
-            let padding = " ".repeat(max_name_width.saturating_sub(left.chars().count()));
+            let padding =
+                " ".repeat(max_name_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
             let text = format!("{}{}  {}", left, padding, cmd.description);
             let text_w = UnicodeWidthStr::width(&text[..]);
             let pad = content_width.saturating_sub(text_w);
@@ -128,7 +129,7 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
     let content_width = popup_width.saturating_sub(4) as usize;
 
     if total == 0 {
-        let text = "no matches";
+        let text = "无匹配";
         let text_w = UnicodeWidthStr::width(text);
         let pad = content_width.saturating_sub(text_w);
         let content_style = Style::default().fg(idle_fg).bg(input_bg);
@@ -152,7 +153,7 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
     let candidates: Vec<_> = state.mention_autocomplete.filtered.iter().collect();
     let max_name_width = candidates
         .iter()
-        .map(|candidate| candidate.drawer_display().chars().count())
+        .map(|candidate| UnicodeWidthStr::width(candidate.drawer_display().as_str()))
         .max()
         .unwrap_or(0);
     let lines: Vec<Line> = candidates
@@ -164,20 +165,20 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
             let is_sel = start + i == selected;
             let row_bg = if is_sel { sel_bg } else { input_bg };
             let left = candidate.drawer_display();
-            let padding = " ".repeat(max_name_width.saturating_sub(left.chars().count()));
+            let padding =
+                " ".repeat(max_name_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
             let kind = match candidate.kind {
                 crate::types::display::MentionKind::Subagent => "agent",
-                crate::types::display::MentionKind::Directory => "dir",
+                crate::types::display::MentionKind::Directory => "目录",
                 crate::types::display::MentionKind::File if candidate.description == "image" => {
-                    "image"
+                    "图片"
                 }
-                crate::types::display::MentionKind::File => "file",
-                crate::types::display::MentionKind::Command => "cmd",
+                crate::types::display::MentionKind::File => "文件",
+                crate::types::display::MentionKind::Command => "命令",
             };
-            let text = format!(
-                "{}{}  {:<5}  {}",
-                left, padding, kind, candidate.description
-            );
+            let description = mention_description(candidate.description.as_str());
+            let kind_display = pad_display_width(kind, 5);
+            let text = format!("{}{}  {}  {}", left, padding, kind_display, description);
             let text_w = UnicodeWidthStr::width(&text[..]);
             let pad = content_width.saturating_sub(text_w);
 
@@ -187,8 +188,8 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
             let mut spans = vec![
                 Span::styled("\u{2503}", border_style),
                 Span::styled(format!("{}{}  ", left, padding), content_style),
-                Span::styled(format!("{kind:<5}"), kind_style),
-                Span::styled(format!("  {}", candidate.description), content_style),
+                Span::styled(kind_display, kind_style),
+                Span::styled(format!("  {}", description), content_style),
             ];
             if pad > 0 {
                 spans.push(Span::styled(" ".repeat(pad), content_style));
@@ -200,4 +201,23 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
         .collect();
 
     frame.render_widget(Paragraph::new(ratatui::text::Text::from(lines)), popup_area);
+}
+
+fn pad_display_width(text: &str, width: usize) -> String {
+    let text_width = UnicodeWidthStr::width(text);
+    if text_width >= width {
+        text.to_string()
+    } else {
+        format!("{}{}", text, " ".repeat(width - text_width))
+    }
+}
+
+fn mention_description(description: &str) -> &str {
+    match description {
+        "image" => "图片",
+        "file" => "文件",
+        "directory" => "目录",
+        "command" => "命令",
+        other => other,
+    }
 }

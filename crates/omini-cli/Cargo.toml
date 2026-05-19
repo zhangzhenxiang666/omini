@@ -1,0 +1,9 @@
+[package]
+name = "omini"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+omini-runtime.workspace = true
+omini-tui.workspace = true
+tokio.workspace = true

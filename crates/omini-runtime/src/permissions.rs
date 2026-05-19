@@ -1,18 +1,9 @@
 use crate::types::events::{BashPermissionPreview, PermissionPreview, PermissionSource};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct RawPermissionConfig {
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub ask: Vec<String>,
-    #[serde(default)]
-    pub deny: Vec<String>,
-}
+pub use omini_types::permissions::RawPermissionConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {

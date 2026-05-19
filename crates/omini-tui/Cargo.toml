@@ -1,0 +1,19 @@
+[package]
+name = "omini-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+dirs.workspace = true
+omini-runtime.workspace = true
+omini-types.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true

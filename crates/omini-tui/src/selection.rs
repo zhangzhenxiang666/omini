@@ -1,4 +1,4 @@
-use crate::tui::state::{SelectionPoint, UiState};
+use crate::state::{SelectionPoint, UiState};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -153,7 +153,7 @@ fn slice_display_cols(text: &str, start_col: usize, end_col: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::state::{TextSelection, UiState};
+    use crate::state::{TextSelection, UiState};
 
     fn state_with_lines(lines: &[(u16, &str)]) -> UiState {
         let mut state = UiState::new();

@@ -1,3 +1,5 @@
+pub use omini_types as types;
+
 pub mod api;
 pub mod command;
 pub mod config;
@@ -8,6 +10,4 @@ pub mod prompts;
 pub mod runtime;
 pub mod subagents;
 pub mod tools;
-pub mod tui;
-pub mod types;
 pub mod util;

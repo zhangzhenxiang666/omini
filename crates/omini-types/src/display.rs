@@ -1,4 +1,4 @@
-use crate::types::message::{ContentBlock, Message, Role};
+use crate::message::{ContentBlock, Message, Role};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::{Deserialize, Serialize};

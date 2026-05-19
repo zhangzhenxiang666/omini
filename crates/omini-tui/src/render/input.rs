@@ -1,5 +1,5 @@
-use crate::tui::selection::{highlighted_line, selected_cols_for_screen_line};
-use crate::tui::state::UiState;
+use crate::selection::{highlighted_line, selected_cols_for_screen_line};
+use crate::state::UiState;
 use crate::types::display::UserDraft;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -54,7 +54,7 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
     let mut lines = if state.input.is_empty() {
         vec![Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
-            Span::styled("Type a message...", placeholder_style),
+            Span::styled("输入消息...", placeholder_style),
         ])]
     } else {
         input_lines(state, prefix_style, cmd_color)
@@ -82,6 +82,9 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
 
 fn input_lines(state: &UiState, prefix_style: Style, cmd_color: Style) -> Vec<Line<'static>> {
     let command_end_char = command_highlight_end(state);
+    let args_hint = command_args_hint(state);
+    let input_char_len = state.input.chars().count();
+    let hint_style = Style::default().fg(Color::DarkGray);
     state
         .input_line_bounds()
         .into_iter()
@@ -96,6 +99,11 @@ fn input_lines(state: &UiState, prefix_style: Style, cmd_color: Style) -> Vec<Li
                 spans.push(Span::raw("  "));
             }
             spans.extend(input_spans(state, start, end, command_end_char, cmd_color));
+            if end == input_char_len
+                && let Some(hint) = args_hint
+            {
+                spans.push(Span::styled(hint.to_string(), hint_style));
+            }
             Line::from(spans)
         })
         .collect()
@@ -239,6 +247,60 @@ fn command_highlight_end(state: &UiState) -> Option<usize> {
     }
 }
 
+fn command_args_hint(state: &UiState) -> Option<&'static str> {
+    let input = &state.input;
+    let cmd = matched_input_command(state, input)?;
+    if !cmd.has_args {
+        return None;
+    }
+
+    let space_pos = input.find(' ')?;
+    if input[space_pos..].chars().all(char::is_whitespace) {
+        cmd.args_description
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::events::CommandSummary;
+
+    fn command(
+        name: &str,
+        has_args: bool,
+        args_description: Option<&'static str>,
+    ) -> CommandSummary {
+        CommandSummary {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            has_args,
+            args_description,
+        }
+    }
+
+    #[test]
+    fn command_args_hint_shows_for_selected_arg_command_without_args() {
+        let mut state = UiState::new();
+        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
+        state.input = "/rename ".to_string();
+
+        assert_eq!(command_args_hint(&state), Some("<name>"));
+    }
+
+    #[test]
+    fn command_args_hint_hides_after_user_types_args() {
+        let mut state = UiState::new();
+        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
+        state.input = "/rename title".to_string();
+
+        assert_eq!(command_args_hint(&state), None);
+    }
+}
+
 fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     let bg_color = Color::Rgb(54, 58, 66);
     let bg = Style::default().bg(bg_color);
@@ -268,14 +330,14 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
         .map(|draft| draft.text.clone())
         .collect::<Vec<_>>();
     let title = if is_pending {
-        format!("Inserting next turn ({})", input_texts.len())
+        format!("插入到下一轮 ({})", input_texts.len())
     } else {
-        format!("Queued messages ({})", input_texts.len())
+        format!("已排队消息 ({})", input_texts.len())
     };
     let title_meta = if is_pending {
-        " - waiting for the current turn boundary"
+        " - 等待当前轮次边界"
     } else {
-        " - sent after the current run"
+        " - 当前运行结束后发送"
     };
     let mut title_line = Line::from(vec![
         Span::styled(" ", bg),
@@ -327,19 +389,13 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
     let mut footer = if is_pending {
         Line::from(vec![
             Span::styled(" ", bg),
-            Span::styled(
-                "input queue is locked until insertion completes",
-                meta_style,
-            ),
+            Span::styled("输入队列已锁定，等待插入完成", meta_style),
         ])
     } else {
         Line::from(vec![
             Span::styled(" ", bg),
             Span::styled("Alt+Enter", hint_style),
-            Span::styled(
-                " inserts queued messages before the next LLM turn",
-                meta_style,
-            ),
+            Span::styled(" 将排队消息插入到下一轮 LLM 前", meta_style),
         ])
     };
     state.register_selectable_screen_line(

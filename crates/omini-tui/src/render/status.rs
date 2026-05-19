@@ -1,5 +1,5 @@
-use crate::tui::selection::{highlighted_line, selected_cols_for_screen_line};
-use crate::tui::state::{AgentStatus, UiState};
+use crate::selection::{highlighted_line, selected_cols_for_screen_line};
+use crate::state::{AgentStatus, UiState};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -105,7 +105,7 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
     if let Some(session_id) = state.current_session_id.as_deref() {
         base_spans.extend([
             Span::styled(
-                format!(" session:{} ", session_id),
+                format!(" 会话:{} ", session_id),
                 Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98)),
             ),
             Span::styled("·", Style::default().fg(Color::DarkGray)),

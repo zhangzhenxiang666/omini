@@ -1,0 +1,25 @@
+[package]
+name = "omini-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+http.workspace = true
+omini-types.workspace = true
+pin-project-lite.workspace = true
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+toml.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
+uuid.workspace = true

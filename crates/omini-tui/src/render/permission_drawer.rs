@@ -108,7 +108,7 @@ pub(super) fn render_permission_drawer(
 
     let title = match &request.kind {
         ToolPauseKind::UserInput(preview) => format!(
-            " Question {}/{} ({} unanswered) ",
+            " 问题 {}/{}（{} 个未回答） ",
             state.user_input_question_index + 1,
             preview.questions.len(),
             state.user_input_unanswered_count()
@@ -213,43 +213,34 @@ fn build_user_input_action_lines(
     if state.user_input_note_mode {
         Text::from(vec![Line::from(vec![
             Span::styled(
-                "tab or esc ",
+                "Tab 或 Esc ",
                 Style::default().fg(Color::Rgb(140, 145, 155)),
             ),
-            Span::styled(
-                "to finish notes",
-                Style::default().fg(Color::Rgb(140, 145, 155)),
-            ),
+            Span::styled("结束备注", Style::default().fg(Color::Rgb(140, 145, 155))),
             Span::raw(" | "),
-            Span::styled("enter ", Style::default().fg(Color::Rgb(140, 145, 155))),
-            Span::styled(
-                "to submit answer",
-                Style::default().fg(Color::Rgb(140, 145, 155)),
-            ),
+            Span::styled("Enter ", Style::default().fg(Color::Rgb(140, 145, 155))),
+            Span::styled("提交回答", Style::default().fg(Color::Rgb(140, 145, 155))),
         ])])
     } else {
         Text::from(vec![Line::from(vec![
             Span::styled(
-                "tab to add notes",
+                "Tab 添加备注",
                 Style::default()
                     .fg(Color::Rgb(0x42, 0xd9, 0xe8))
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" | "),
             Span::styled(
-                "enter to submit answer",
+                "Enter 提交回答",
                 Style::default().fg(Color::Rgb(140, 145, 155)),
             ),
             Span::raw(" | "),
             Span::styled(
-                "←/→ to navigate questions",
+                "←/→ 切换问题",
                 Style::default().fg(Color::Rgb(140, 145, 155)),
             ),
             Span::raw(" | "),
-            Span::styled(
-                "esc to interrupt",
-                Style::default().fg(Color::Rgb(140, 145, 155)),
-            ),
+            Span::styled("Esc 中断", Style::default().fg(Color::Rgb(140, 145, 155))),
         ])])
     }
 }
@@ -313,7 +304,7 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
         ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
         ToolPauseKind::Permission(PermissionPreview::Custom { .. }) => ("allow tool", "deny tool"),
-        ToolPauseKind::UserInput(_) => ("submit response", "cancel request"),
+        ToolPauseKind::UserInput(_) => ("提交回答", "取消请求"),
     }
 }
 
@@ -341,10 +332,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             {
                 lines.push(Line::from(vec![
                     Span::raw("  "),
-                    Span::styled(
-                        "Description: ",
-                        Style::default().fg(Color::Rgb(140, 145, 155)),
-                    ),
+                    Span::styled("说明：", Style::default().fg(Color::Rgb(140, 145, 155))),
                     Span::styled(
                         description.trim().to_string(),
                         Style::default().fg(Color::Rgb(220, 220, 225)),
@@ -376,7 +364,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 render_tool(tool_use, None, Some(request), content_width, project_dir)
             } else {
                 vec![Line::from(Span::styled(
-                    "Missing edit tool input for preview",
+                    "缺少编辑预览所需的工具输入",
                     Style::default().fg(Color::Rgb(255, 100, 100)),
                 ))]
             };
@@ -391,7 +379,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 render_tool(tool_use, None, Some(request), content_width, project_dir)
             } else {
                 vec![Line::from(Span::styled(
-                    "Missing write tool input for preview",
+                    "缺少写入预览所需的工具输入",
                     Style::default().fg(Color::Rgb(255, 100, 100)),
                 ))]
             };
@@ -407,7 +395,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             } else {
                 vec![Line::from(vec![
                     Span::raw("  "),
-                    Span::styled("Path: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+                    Span::styled("路径：", Style::default().fg(Color::Rgb(140, 145, 155))),
                     Span::styled(
                         display_path(&preview.file_path, project_dir),
                         Style::default().fg(Color::Rgb(220, 220, 225)),
@@ -428,7 +416,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
         ToolPauseKind::UserInput(preview) => {
             let Some(question) = preview.questions.get(question_index) else {
                 return DrawerLines {
-                    lines: vec![Line::from("Missing question")],
+                    lines: vec![Line::from("缺少问题")],
                     note_line_index: None,
                     note_cursor_column: None,
                 };
@@ -485,7 +473,7 @@ fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseReque
             insert_at,
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("From: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled("来源：", Style::default().fg(Color::Rgb(140, 145, 155))),
                 Span::styled(
                     label.to_string(),
                     Style::default().fg(Color::Rgb(220, 220, 225)),
@@ -500,7 +488,7 @@ fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseReque
             insert_at,
             Line::from(vec![
                 Span::raw("  "),
-                Span::styled("Rule: ", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled("规则：", Style::default().fg(Color::Rgb(140, 145, 155))),
                 Span::styled(
                     source.decision.clone(),
                     Style::default().fg(Color::Rgb(220, 220, 225)),
@@ -567,7 +555,7 @@ fn user_input_question_lines(
         Style::default().fg(Color::Rgb(140, 145, 155)),
     ))];
     lines.extend(
-        crate::tui::widgets::word_wrap(&question.question, content_width)
+        crate::widgets::word_wrap(&question.question, content_width)
             .into_iter()
             .map(|line| {
                 Line::from(Span::styled(

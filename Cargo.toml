@@ -1,9 +1,17 @@
-[package]
-name = "omini"
+[workspace]
+members = [
+    "crates/omini-cli",
+    "crates/omini-runtime",
+    "crates/omini-tui",
+    "crates/omini-types",
+]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
 async-trait = "0.1.89"
 base64 = "0.22.1"
 bytes = "1.11.1"
@@ -26,3 +34,7 @@ toml = "1.1.2"
 tracing = "0.1.44"
 unicode-width = "0.2"
 uuid = { version = "1.23.1", features = ["v4"] }
+
+omini-runtime = { path = "crates/omini-runtime" }
+omini-tui = { path = "crates/omini-tui" }
+omini-types = { path = "crates/omini-types" }

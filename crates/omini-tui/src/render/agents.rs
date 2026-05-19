@@ -434,7 +434,7 @@ fn editable_text_window(
 ) -> EditableTextWindow {
     if text.is_empty() {
         return EditableTextWindow {
-            lines: crate::tui::widgets::word_wrap(placeholder, width)
+            lines: crate::widgets::word_wrap(placeholder, width)
                 .into_iter()
                 .take(max_lines.max(1))
                 .collect(),
@@ -648,7 +648,7 @@ fn build_agent_detail_lines(
         &["返回"]
     };
     let action_line_count = actions.len() + 4;
-    let instruction_lines = crate::tui::widgets::word_wrap(&record.instructions, width);
+    let instruction_lines = crate::widgets::word_wrap(&record.instructions, width);
     let instruction_limit = if content_height == usize::MAX {
         instruction_lines.len()
     } else {
@@ -1123,7 +1123,7 @@ fn build_agent_generating_lines(
     } else {
         description
     };
-    for line in crate::tui::widgets::word_wrap(description, width)
+    for line in crate::widgets::word_wrap(description, width)
         .into_iter()
         .take(8)
     {
@@ -1338,12 +1338,12 @@ fn selectable_row(selected: bool, key: &str, label: &str, desc: &str) -> Line<'s
     } else {
         format!("{key}  ")
     };
+    let label_part = pad_display_width(&format!("{key_part}{label}"), 10);
     Line::from(Span::styled(
         format!(
-            "{} {}{:<10} {}",
+            "{} {} {}",
             if selected { "❯" } else { " " },
-            key_part,
-            label,
+            label_part,
             desc
         ),
         style,
@@ -1501,4 +1501,33 @@ fn hint(text: &str) -> Line<'static> {
         text.to_string(),
         Style::default().fg(Color::Rgb(140, 145, 155)),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'static>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn selectable_row_aligns_descriptions_by_display_width() {
+        let llm = line_text(&selectable_row(true, "", "LLM 创建", "下一步输入用途描述"));
+        let manual = line_text(&selectable_row(false, "", "手动创建", "逐步填写名称"));
+
+        let llm_prefix = llm
+            .split_once("下一步输入用途描述")
+            .expect("description should be present")
+            .0;
+        let manual_prefix = manual
+            .split_once("逐步填写名称")
+            .expect("description should be present")
+            .0;
+
+        assert_eq!(llm_prefix.width(), manual_prefix.width());
+    }
 }

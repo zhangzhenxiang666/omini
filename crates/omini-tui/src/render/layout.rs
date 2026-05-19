@@ -1,4 +1,4 @@
-use crate::tui::state::{InteractionStep, UiState};
+use crate::state::{InteractionStep, UiState};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
