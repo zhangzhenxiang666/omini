@@ -1,0 +1,55 @@
+use crate::tui::state::{InteractionStep, UiState};
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Style};
+use ratatui::text::Line;
+use ratatui::widgets::Paragraph;
+
+pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
+    let area = frame.area();
+    state.clear_selectable_screen_lines();
+    render_background(frame, area);
+
+    if let Some(InteractionStep::Session { .. }) = &state.interaction_step {
+        super::render_session_list(state, frame, area);
+        return;
+    }
+
+    let drawer_len = super::input::queued_drawer_inputs(state).len();
+    let queued_height = if drawer_len == 0 {
+        0
+    } else {
+        drawer_len.min(4) as u16 + 2
+    };
+    state.set_input_wrap_width(area.width as usize);
+    let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(input_height),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    state.messages_area = chunks[1];
+
+    super::render_messages(state, frame, chunks[1]);
+    super::autocomplete::render_autocomplete(state, frame, chunks[3]);
+    super::status::render_footer(state, frame, chunks[4]);
+
+    if state.interaction_step.is_none() && state.active_tool_pause().is_none() {
+        super::input::render_input(state, frame, chunks[3]);
+    }
+
+    if state.interaction_request.is_some() {
+        super::interactions::render_interaction(state, frame, area);
+    }
+
+    super::permission_drawer::render_permission_drawer(state, frame, area);
+}
+
+fn render_background(frame: &mut ratatui::Frame, area: Rect) {
+    frame.render_widget(
+        Paragraph::new(Line::from("")).style(Style::default().bg(Color::Rgb(40, 44, 52))),
+        area,
+    );
+}
