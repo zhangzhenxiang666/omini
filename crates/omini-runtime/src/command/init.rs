@@ -86,7 +86,7 @@ pub struct InitCommand;
 
 #[async_trait]
 impl Command for InitCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "init"
     }
 
@@ -94,7 +94,7 @@ impl Command for InitCommand {
         &[]
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "分析项目并生成 AGENTS.md"
     }
 

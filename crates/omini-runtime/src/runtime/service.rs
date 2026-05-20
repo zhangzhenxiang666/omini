@@ -6,6 +6,7 @@ use crate::config::project::sanitize;
 use crate::db;
 use crate::engine::{QueryContext, QueryEngine};
 use crate::permissions::PermissionEngine;
+use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
@@ -46,6 +47,7 @@ pub(super) enum RunStart {
 #[derive(Debug)]
 struct CapabilityStore {
     subagents: RwLock<Arc<AgentRegistry>>,
+    skills: RwLock<Arc<SkillRegistry>>,
 }
 
 impl CapabilityStore {
@@ -54,6 +56,7 @@ impl CapabilityStore {
             subagents: RwLock::new(Arc::new(crate::subagents::load_agent_registry(
                 &settings.cwd,
             ))),
+            skills: RwLock::new(Arc::new(crate::skills::load_skill_registry(&settings.cwd))),
         }
     }
 
@@ -71,6 +74,13 @@ impl CapabilityStore {
             .write()
             .expect("subagent registry lock poisoned") = registry.clone();
         registry
+    }
+
+    fn skill_registry(&self) -> Arc<SkillRegistry> {
+        self.skills
+            .read()
+            .expect("skill registry lock poisoned")
+            .clone()
     }
 }
 
@@ -137,9 +147,11 @@ impl AgentRuntime {
         let subagent_runner = Arc::new(RuntimeSubagentRunner);
         let capabilities = CapabilityStore::load(&settings);
         let subagent_registry = capabilities.subagent_registry();
-        settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
+        let skill_registry = capabilities.skill_registry();
+        settings.system_prompt = Some(crate::prompts::build_system_prompt_with_capabilities(
             &settings,
             &subagent_registry.summaries(),
+            &skill_registry.injected_summaries(),
         ));
         let permission_engine = Arc::new(PermissionEngine::load(
             settings.cwd.clone(),
@@ -150,6 +162,7 @@ impl AgentRuntime {
         // 初始化命令注册表并注册内置命令
         let mut command_registry = CommandRegistry::new();
         command::register_default_commands(&mut command_registry);
+        command::register_skill_commands(&mut command_registry, &skill_registry);
 
         // 向 UI 推送 runtime 侧能力快照（供自动补全使用）
         let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(command_registry.summaries()));
@@ -157,6 +170,12 @@ impl AgentRuntime {
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
                 "Subagent: {}",
+                diagnostic.message()
+            )));
+        }
+        for diagnostic in &skill_registry.diagnostics {
+            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+                "Skill: {}",
                 diagnostic.message()
             )));
         }
@@ -525,9 +544,11 @@ impl AgentRuntime {
 
     async fn refresh_agents_after_change(&mut self) {
         let registry = self.capabilities.reload_subagents(&self.settings);
-        self.settings.system_prompt = Some(crate::prompts::build_system_prompt_with_subagents(
+        let skill_registry = self.capabilities.skill_registry();
+        self.settings.system_prompt = Some(crate::prompts::build_system_prompt_with_capabilities(
             &self.settings,
             &registry.summaries(),
+            &skill_registry.injected_summaries(),
         ));
         self.send_event(RuntimeToUiEvent::AgentList(registry.summaries()))
             .await;
@@ -594,6 +615,7 @@ impl AgentRuntime {
 
         {
             let subagent_registry = self.capabilities.subagent_registry();
+            let skill_registry = self.capabilities.skill_registry();
             let run_settings = self.settings.clone();
             let run_settings = Arc::new(run_settings);
             // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
@@ -614,6 +636,7 @@ impl AgentRuntime {
                         .clone()
                         .expect("session dir must exist before query"),
                     subagent_registry: Arc::clone(&subagent_registry),
+                    skill_registry: Arc::clone(&skill_registry),
                     subagent_runner: Some(Arc::clone(&self.subagent_runner)),
                     project: self.project.clone(),
                 })),

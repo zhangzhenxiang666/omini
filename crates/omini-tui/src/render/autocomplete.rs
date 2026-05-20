@@ -1,4 +1,5 @@
 use crate::state::UiState;
+use crate::types::events::CommandSummary;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -51,7 +52,7 @@ pub(super) fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, i
     let cmds: Vec<_> = state.autocomplete.filtered.iter().collect();
     let max_name_width = cmds
         .iter()
-        .map(|cmd| UnicodeWidthStr::width(format!("/{}", cmd.name).as_str()))
+        .map(|cmd| UnicodeWidthStr::width(command_signature(cmd).as_str()))
         .max()
         .unwrap_or(0);
     let lines: Vec<Line> = cmds
@@ -62,28 +63,16 @@ pub(super) fn render_autocomplete(state: &UiState, frame: &mut ratatui::Frame, i
         .map(|(i, cmd)| {
             let is_sel = start + i == selected;
             let row_bg = if is_sel { sel_bg } else { input_bg };
-
-            let left = format!("/{}", cmd.name);
-            let padding =
-                " ".repeat(max_name_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
-            let text = format!("{}{}  {}", left, padding, cmd.description);
-            let text_w = UnicodeWidthStr::width(&text[..]);
-            let pad = content_width.saturating_sub(text_w);
-
             let content_style = Style::default().fg(idle_fg).bg(row_bg);
             let border_style = Style::default().fg(border_clr);
 
-            let mut spans = vec![
-                Span::styled("\u{2503}", border_style),
-                Span::styled(text, content_style),
-            ];
-            if pad > 0 {
-                spans.push(Span::styled(" ".repeat(pad), content_style));
-            }
-            spans.push(Span::styled("  ", content_style));
-            spans.push(Span::styled("\u{2503}", border_style));
-
-            Line::from(spans)
+            command_row_line(
+                cmd,
+                max_name_width,
+                content_width,
+                content_style,
+                border_style,
+            )
         })
         .collect();
 
@@ -178,24 +167,26 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
             };
             let description = mention_description(candidate.description.as_str());
             let kind_display = pad_display_width(kind, 5);
-            let text = format!("{}{}  {}  {}", left, padding, kind_display, description);
-            let text_w = UnicodeWidthStr::width(&text[..]);
-            let pad = content_width.saturating_sub(text_w);
 
             let content_style = Style::default().fg(idle_fg).bg(row_bg);
             let kind_style = Style::default().fg(kind_fg).bg(row_bg);
             let border_style = Style::default().fg(border_clr);
-            let mut spans = vec![
-                Span::styled("\u{2503}", border_style),
-                Span::styled(format!("{}{}  ", left, padding), content_style),
-                Span::styled(kind_display, kind_style),
-                Span::styled(format!("  {}", description), content_style),
-            ];
-            if pad > 0 {
-                spans.push(Span::styled(" ".repeat(pad), content_style));
-            }
-            spans.push(Span::styled("  ", content_style));
-            spans.push(Span::styled("\u{2503}", border_style));
+            let mut spans = vec![Span::styled("\u{2503}", border_style)];
+            let mut remaining = content_width;
+            push_clipped_span(
+                &mut spans,
+                &format!("{}{}  ", left, padding),
+                content_style,
+                &mut remaining,
+            );
+            push_clipped_span(&mut spans, &kind_display, kind_style, &mut remaining);
+            push_clipped_span(
+                &mut spans,
+                &format!("  {}", description),
+                content_style,
+                &mut remaining,
+            );
+            finish_bordered_row(&mut spans, remaining, content_style, border_style);
             Line::from(spans)
         })
         .collect();
@@ -219,5 +210,149 @@ fn mention_description(description: &str) -> &str {
         "directory" => "目录",
         "command" => "命令",
         other => other,
+    }
+}
+
+fn command_row_line(
+    cmd: &CommandSummary,
+    max_name_width: usize,
+    content_width: usize,
+    content_style: Style,
+    border_style: Style,
+) -> Line<'static> {
+    let left = command_signature(cmd);
+    let padding = " ".repeat(max_name_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
+    let text = format!("{}{}  {}", left, padding, cmd.description);
+    let mut spans = vec![Span::styled("\u{2503}", border_style)];
+    let mut remaining = content_width;
+    push_clipped_span(&mut spans, &text, content_style, &mut remaining);
+    finish_bordered_row(&mut spans, remaining, content_style, border_style);
+    Line::from(spans)
+}
+
+fn command_signature(cmd: &CommandSummary) -> String {
+    if cmd.has_args
+        && let Some(args) = cmd.args_description
+    {
+        format!("/{} {}", cmd.name, args)
+    } else {
+        format!("/{}", cmd.name)
+    }
+}
+
+fn push_clipped_span(
+    spans: &mut Vec<Span<'static>>,
+    text: &str,
+    style: Style,
+    remaining: &mut usize,
+) {
+    if *remaining == 0 || text.is_empty() {
+        return;
+    }
+    let clipped = truncate_display_width(text, *remaining);
+    if clipped.is_empty() {
+        return;
+    }
+    *remaining = remaining.saturating_sub(UnicodeWidthStr::width(clipped.as_str()));
+    spans.push(Span::styled(clipped, style));
+}
+
+fn finish_bordered_row(
+    spans: &mut Vec<Span<'static>>,
+    remaining: usize,
+    content_style: Style,
+    border_style: Style,
+) {
+    if remaining > 0 {
+        spans.push(Span::styled(" ".repeat(remaining), content_style));
+    }
+    spans.push(Span::styled("  ", content_style));
+    spans.push(Span::styled("\u{2503}", border_style));
+}
+
+fn truncate_display_width(text: &str, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+
+    let ellipsis = "…";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ellipsis.to_string();
+    }
+
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + ch_width + ellipsis_width > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_width;
+    }
+    out.push_str(ellipsis);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_width(line: &Line<'_>) -> usize {
+        line.spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum()
+    }
+
+    fn plain(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn command_row_truncates_description_before_right_border() {
+        let cmd = CommandSummary {
+            name: "skill-creator".to_string(),
+            aliases: Vec::new(),
+            description: "Create or update a very long specialized workflow skill".to_string(),
+            sort_weight: 0,
+            has_args: true,
+            args_description: Some("[prompt]"),
+        };
+        let content_style = Style::default();
+        let border_style = Style::default();
+        let line = command_row_line(&cmd, 23, 20, content_style, border_style);
+
+        assert_eq!(line_width(&line), 24);
+        assert!(plain(&line).ends_with('\u{2503}'));
+    }
+
+    #[test]
+    fn command_signature_includes_args_description() {
+        let cmd = CommandSummary {
+            name: "skill-creator".to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            has_args: true,
+            args_description: Some("[prompt]"),
+        };
+
+        assert_eq!(command_signature(&cmd), "/skill-creator [prompt]");
+    }
+
+    #[test]
+    fn clipped_span_handles_wide_text_within_width() {
+        let clipped = truncate_display_width("很长的描述文本", 6);
+
+        assert!(UnicodeWidthStr::width(clipped.as_str()) <= 6);
+        assert!(clipped.ends_with('…'));
     }
 }

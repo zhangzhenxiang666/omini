@@ -7,6 +7,7 @@ pub mod model;
 pub mod new;
 pub mod rename;
 pub mod sessions;
+pub mod skill;
 
 use crate::runtime::AgentRuntime;
 use crate::types::events::{CommandResult, CommandSummary};
@@ -41,9 +42,9 @@ pub fn parse(input: &str) -> Option<ParsedCommand<'_>> {
 /// 命令实现 trait。
 #[async_trait]
 pub trait Command: Send + Sync {
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
     fn aliases(&self) -> &[&'static str];
-    fn description(&self) -> &'static str;
+    fn description(&self) -> &str;
     fn args_description(&self) -> Option<&'static str> {
         None
     }
@@ -134,6 +135,16 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(help::HelpCommand));
 }
 
+/// 注册所有动态 skill 命令。
+pub fn register_skill_commands(
+    registry: &mut CommandRegistry,
+    skills: &crate::skills::SkillRegistry,
+) {
+    for spec in skills.skills.values() {
+        registry.register(Arc::new(skill::SkillCommand::new(spec.clone())));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +166,25 @@ mod tests {
                 "sessions", "new", "model", "agents", "effort", "init", "rename", "help", "exit"
             ]
         );
+    }
+
+    #[test]
+    fn skill_commands_are_registered_from_skill_registry() {
+        let mut registry = CommandRegistry::new();
+        let cwd = std::env::temp_dir().join(format!("omini-command-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        let skills = crate::skills::load_skill_registry(&cwd);
+
+        register_skill_commands(&mut registry, &skills);
+
+        let command = registry.get("skill-creator").unwrap();
+        assert!(command.has_args());
+        assert_eq!(command.args_description(), Some("[prompt]"));
+        assert!(
+            command
+                .description()
+                .contains("Create or update Omini skills")
+        );
+        let _ = std::fs::remove_dir_all(cwd);
     }
 }

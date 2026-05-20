@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{display_path, spinner};
+use super::{display_path, spinner, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -17,18 +17,9 @@ pub(super) fn render(
     let error = Color::Rgb(255, 100, 100);
 
     let mut lines: Vec<Line> = Vec::new();
-    let title_style = if result.is_some_and(|tr| tr.is_error) {
-        Style::default().fg(error)
-    } else {
-        Style::default().fg(accent)
-    };
+    let is_pending = result.is_none();
+    let title_style = Style::default().fg(accent);
     let mut title = Vec::new();
-    if result.is_none() {
-        title.push(Span::styled(
-            format!("{} ", spinner()),
-            Style::default().fg(warn),
-        ));
-    }
 
     let query = tool_use
         .input
@@ -43,14 +34,40 @@ pub(super) fn render(
         .map(|path| display_path(path, project_dir))
         .unwrap_or_else(|| ".".to_string());
 
-    title.push(Span::raw(". "));
+    title.push(Span::raw("· "));
     title.push(Span::styled("Search", title_style));
     let detail = search_summary(query, &path);
     let used_width: usize = title.iter().map(|span| span.width()).sum();
-    let detail_width = content_width.saturating_sub(used_width).saturating_sub(1);
+    let spinner_width = if is_pending {
+        UnicodeWidthStr::width(format!(" {}", spinner()).as_str())
+    } else {
+        0
+    };
+    let detail_width = content_width
+        .saturating_sub(used_width)
+        .saturating_sub(1)
+        .saturating_sub(spinner_width);
     title.push(Span::raw(" "));
     title.push(Span::raw(truncate_display_width(&detail, detail_width)));
+    if is_pending {
+        title.push(Span::styled(
+            format!(" {}", spinner()),
+            Style::default().fg(warn),
+        ));
+    }
     lines.push(Line::from(title));
+
+    if let Some(tr) = result
+        && tr.is_error
+    {
+        let error_style = Style::default().fg(error);
+        for line in word_wrap(tr.content.trim(), content_width.saturating_sub(2).max(1)) {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(line, error_style),
+            ]));
+        }
+    }
 
     lines
 }

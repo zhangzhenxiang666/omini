@@ -1,5 +1,6 @@
 use crate::config::project::{ProjectDir, SessionDir};
 use crate::permissions::{PermissionDecision, PermissionEngine};
+use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::config::Settings;
 use crate::types::events::{
@@ -25,6 +26,7 @@ pub mod bash_tool;
 pub mod edit_tool;
 pub mod read_tool;
 pub mod search_tool;
+pub mod skill_tool;
 pub mod subagent_tool;
 pub mod write_tool;
 
@@ -120,6 +122,7 @@ pub struct ToolRuntimeContext {
     pub agent_label: Option<String>,
     pub session_dir: SessionDir,
     pub subagent_registry: Arc<AgentRegistry>,
+    pub skill_registry: Arc<SkillRegistry>,
     pub subagent_runner: Option<Arc<RuntimeSubagentRunner>>,
     pub project: ProjectDir,
 }
@@ -132,6 +135,7 @@ impl std::fmt::Debug for ToolRuntimeContext {
             .field("agent_label", &self.agent_label)
             .field("session_dir", &self.session_dir)
             .field("subagent_registry", &self.subagent_registry)
+            .field("skill_registry", &self.skill_registry)
             .field("project", &self.project)
             .finish_non_exhaustive()
     }
@@ -606,6 +610,7 @@ pub fn inherited_subagent_tool_names() -> Vec<String> {
         "ask_user".to_string(),
         "bash".to_string(),
         "search".to_string(),
+        "skill".to_string(),
         "read".to_string(),
         "edit".to_string(),
         "write".to_string(),
@@ -620,6 +625,9 @@ fn create_registry_with_allowed(
     let mut registry = ToolRegistry::new();
     if tool_allowed(allowed, "ask_user") {
         registry.register(ask_user_tool::AskUserTool);
+    }
+    if tool_allowed(allowed, "skill") {
+        registry.register(skill_tool::SkillTool);
     }
     if tool_allowed(allowed, "bash") {
         registry.register(bash_tool::BashTool);
@@ -654,7 +662,8 @@ fn tool_definition_priority(name: &str) -> usize {
         "write" => 3,
         "bash" => 4,
         "ask_user" => 5,
-        "subagent" => 6,
+        "skill" => 6,
+        "subagent" => 7,
         _ => 100,
     }
 }

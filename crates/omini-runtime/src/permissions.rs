@@ -250,7 +250,7 @@ impl PermissionEngine {
             },
             "edit" | "write" => PermissionDecision::Ask,
             "search" => PermissionDecision::Allow,
-            "ask_user" | "subagent" => PermissionDecision::Allow,
+            "ask_user" | "skill" | "subagent" => PermissionDecision::Allow,
             _ => PermissionDecision::Ask,
         }
     }
@@ -1227,6 +1227,16 @@ mod tests {
         let check = engine.check("read", None, &input);
         assert_eq!(check.decision, PermissionDecision::Ask);
         assert_eq!(check.source, None);
+    }
+
+    #[test]
+    fn skill_defaults_allow_without_permission_prompt() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &[]));
+        let input = serde_json::json!({"name": "commit-message"});
+        assert_eq!(
+            engine.decide("skill", None, &input),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]

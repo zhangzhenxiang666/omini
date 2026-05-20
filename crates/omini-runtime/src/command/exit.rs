@@ -7,13 +7,13 @@ pub struct ExitCommand;
 
 #[async_trait]
 impl Command for ExitCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "exit"
     }
     fn aliases(&self) -> &[&'static str] {
         &["quit"]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "退出程序"
     }
     fn sort_weight(&self) -> i32 {

@@ -8,13 +8,13 @@ pub struct HelpCommand;
 
 #[async_trait]
 impl Command for HelpCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "help"
     }
     fn aliases(&self) -> &[&'static str] {
         &["?"]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "显示帮助"
     }
     fn sort_weight(&self) -> i32 {

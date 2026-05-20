@@ -1168,6 +1168,7 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
         ("edit", "编辑文件", &["edit"][..]),
         ("write", "写入文件", &["write"][..]),
         ("ask_user", "询问用户", &["ask_user"][..]),
+        ("skill", "加载技能", &["skill"][..]),
     ];
     for (offset, (label, desc, tools)) in allow_rows.iter().enumerate() {
         let idx = offset + 1;
@@ -1186,9 +1187,10 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
         ("edit", "不编辑文件"),
         ("write", "不写入文件"),
         ("ask_user", "不询问用户"),
+        ("skill", "不加载技能"),
     ];
     for (offset, (label, desc)) in deny_rows.iter().enumerate() {
-        let idx = offset + 9;
+        let idx = offset + 10;
         let enabled = manager
             .draft
             .disallow_tools

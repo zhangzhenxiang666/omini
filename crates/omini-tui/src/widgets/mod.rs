@@ -12,6 +12,7 @@ mod bash;
 mod file_mutation;
 mod read;
 mod search;
+mod skill;
 
 pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
@@ -136,18 +137,22 @@ pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
 }
 
 pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    let available = content_width.max(1);
+    let available = content_width.saturating_sub(2);
     let mut lines: Vec<Line> = Vec::new();
 
+    let border_style = Style::default().fg(Color::DarkGray);
     let prefix_style = Style::default()
         .fg(Color::Rgb(141, 119, 78))
         .add_modifier(Modifier::ITALIC);
     let text_style = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::ITALIC);
+    let rail_spans = || vec![Span::styled("\u{2503}", border_style), Span::raw(" ")];
 
     if text.is_empty() {
-        lines.push(Line::from(vec![Span::styled("Thinking: ", prefix_style)]));
+        let mut spans = rail_spans();
+        spans.push(Span::styled("Thinking: ", prefix_style));
+        lines.push(Line::from(spans));
         return lines;
     }
 
@@ -160,19 +165,25 @@ pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'stati
         let is_first = ll_idx == 0;
 
         if is_first && first_line_available == 0 {
-            lines.push(Line::from(vec![Span::styled(prefix, prefix_style)]));
+            let mut spans = rail_spans();
+            spans.push(Span::styled(prefix, prefix_style));
+            lines.push(Line::from(spans));
             let wrapped = word_wrap(ll, available);
             for wl in wrapped {
-                lines.push(Line::from(vec![Span::styled(wl, text_style)]));
+                let mut spans = rail_spans();
+                spans.push(Span::styled(wl, text_style));
+                lines.push(Line::from(spans));
             }
             continue;
         }
 
         if ll.is_empty() {
             if is_first {
-                lines.push(Line::from(vec![Span::styled(prefix, prefix_style)]));
+                let mut spans = rail_spans();
+                spans.push(Span::styled(prefix, prefix_style));
+                lines.push(Line::from(spans));
             } else {
-                lines.push(Line::from(""));
+                lines.push(Line::from(rail_spans()));
             }
             continue;
         }
@@ -180,29 +191,33 @@ pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'stati
         if is_first {
             let first_w = UnicodeWidthStr::width(*ll);
             if prefix_w + first_w <= available {
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(ll.to_string(), text_style),
-                ]));
+                let mut spans = rail_spans();
+                spans.push(Span::styled(prefix, prefix_style));
+                spans.push(Span::styled(ll.to_string(), text_style));
+                lines.push(Line::from(spans));
             } else {
                 let first_wrapped = word_wrap(ll, first_line_available);
                 let first_chunk = first_wrapped.first().cloned().unwrap_or_default();
-                lines.push(Line::from(vec![
-                    Span::styled(prefix, prefix_style),
-                    Span::styled(first_chunk, text_style),
-                ]));
+                let mut spans = rail_spans();
+                spans.push(Span::styled(prefix, prefix_style));
+                spans.push(Span::styled(first_chunk, text_style));
+                lines.push(Line::from(spans));
                 if first_wrapped.len() > 1 {
                     let rest = first_wrapped[1..].join(" ");
                     let rest_wrapped = word_wrap(&rest, available);
                     for rl in rest_wrapped {
-                        lines.push(Line::from(vec![Span::styled(rl, text_style)]));
+                        let mut spans = rail_spans();
+                        spans.push(Span::styled(rl, text_style));
+                        lines.push(Line::from(spans));
                     }
                 }
             }
         } else {
             let wrapped = word_wrap(ll, available);
             for wl in wrapped {
-                lines.push(Line::from(vec![Span::styled(wl, text_style)]));
+                let mut spans = rail_spans();
+                spans.push(Span::styled(wl, text_style));
+                lines.push(Line::from(spans));
             }
         }
     }
@@ -227,6 +242,7 @@ pub fn render_tool(
             content_width,
             project_dir,
         ),
+        "skill" => skill::render(tool_use, tool_result, content_width),
         "edit" => file_mutation::render_edit(
             tool_use,
             tool_result,
@@ -267,10 +283,63 @@ mod tests {
     }
 
     #[test]
-    fn thinking_lines_render_without_left_rail() {
+    fn thinking_lines_render_with_left_rail() {
         let lines = build_thinking_lines("checking context", 40);
 
-        assert_eq!(plain(&lines[0]), "Thinking: checking context");
-        assert!(!plain(&lines[0]).starts_with('\u{2503}'));
+        assert_eq!(plain(&lines[0]), "\u{2503} Thinking: checking context");
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn skill_tool_renders_invoked_skill_command() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("name".to_string(), serde_json::json!("commit-message"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "skill".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: false,
+            content: String::new(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+
+        assert_eq!(plain(&lines[0]), "· Skill commit-message");
+    }
+
+    #[test]
+    fn bash_tool_error_is_rendered_as_error_not_output() {
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "command".to_string(),
+            serde_json::json!("git commit -m 'feat: add skills system'"),
+        );
+        input.insert("description".to_string(), serde_json::json!("创建提交"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "bash".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: true,
+            content: "Permission denied for tool: bash".to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+
+        assert!(plain(&lines[0]).starts_with("· Bash("));
+        assert_eq!(plain(&lines[1]), "  └─ # 创建提交");
+        assert_eq!(plain(&lines[2]), "  Permission denied for tool: bash");
+        assert_eq!(
+            lines[0].spans[1].style.fg,
+            Some(Color::Rgb(0x42, 0xb3, 0xc2))
+        );
+        assert_eq!(lines[2].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
     }
 }

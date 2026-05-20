@@ -9,7 +9,7 @@ pub struct EffortCommand;
 
 #[async_trait]
 impl Command for EffortCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "effort"
     }
 
@@ -17,7 +17,7 @@ impl Command for EffortCommand {
         &[]
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "调整当前模型的思考程度"
     }
 
@@ -30,7 +30,7 @@ impl Command for EffortCommand {
     }
 
     fn args_description(&self) -> Option<&'static str> {
-        Some("none | low | medium | high")
+        Some("<none | low | medium | high>")
     }
 
     async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {

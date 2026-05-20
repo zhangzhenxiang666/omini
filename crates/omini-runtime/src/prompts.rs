@@ -1,3 +1,4 @@
+use crate::skills::SkillSummary;
 use crate::subagents::AgentSummary;
 use crate::types::config::Settings;
 use chrono::Local;
@@ -29,13 +30,23 @@ struct InstructionFile {
 /// Build the full system prompt for the current request.
 pub fn build_system_prompt(settings: &Settings) -> String {
     let subagents = crate::subagents::load_agent_summaries(&settings.cwd);
-    build_system_prompt_with_subagents(settings, &subagents)
+    let skills = crate::skills::load_skill_summaries(&settings.cwd);
+    build_system_prompt_with_capabilities(settings, &subagents, &skills)
 }
 
 /// Build the full system prompt with a runtime-provided capability snapshot.
 pub fn build_system_prompt_with_subagents(
     settings: &Settings,
     subagents: &[AgentSummary],
+) -> String {
+    build_system_prompt_with_capabilities(settings, subagents, &[])
+}
+
+/// Build the full system prompt with runtime-provided capability snapshots.
+pub(crate) fn build_system_prompt_with_capabilities(
+    settings: &Settings,
+    subagents: &[AgentSummary],
+    skills: &[SkillSummary],
 ) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are Omini, a coding agent running in the user's local terminal.\n\n");
@@ -51,7 +62,10 @@ pub fn build_system_prompt_with_subagents(
     }
     prompt.push_str(&subagent_section(subagents));
     prompt.push('\n');
-    // TODO: Add a skills section after the skills registry and loading protocol are implemented.
+    if let Some(section) = skill_section(skills) {
+        prompt.push_str(&section);
+        prompt.push('\n');
+    }
     prompt.push_str(&project_context_prompt(&settings.cwd));
     prompt
 }
@@ -236,6 +250,37 @@ fn subagent_section(agents: &[AgentSummary]) -> String {
     }
     section.push_str("</delegation_instructions>");
     section
+}
+
+pub(crate) fn skill_section(skills: &[SkillSummary]) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+
+    let mut section = String::new();
+    section.push_str("<skill_instructions>\n");
+    section.push_str("## Skills\n\n");
+    section.push_str(
+        "- Skills are progressively disclosed domain instructions with optional bundled resources.\n",
+    );
+    section.push_str(
+        "- Use the `skill` tool when a listed skill is relevant, or when the user explicitly asks to use a skill by name.\n",
+    );
+    section.push_str(
+        "- The system prompt lists only each skill's name and description. The full skill body and absolute directory path are loaded by the `skill` tool or by the matching slash command.\n",
+    );
+    section.push_str(
+        "- A matching slash command may inject a `<skill>` block with `<source>slash_command</source>`. When present, treat that skill as already loaded, follow the included skill body directly, and do not call the `skill` tool for the same skill again in that turn.\n",
+    );
+    section.push_str(
+        "- Only call the `skill` tool for a different skill if that distinct skill is also needed.\n\n",
+    );
+    section.push_str("## Available Skills\n\n");
+    for skill in skills {
+        section.push_str(&format!("- `{}`: {}\n", skill.name, skill.description));
+    }
+    section.push_str("</skill_instructions>");
+    Some(section)
 }
 
 fn project_instructions_section(
@@ -513,6 +558,25 @@ mod tests {
         let prompt = build_system_prompt_with_subagents(&settings, &[]);
 
         assert!(!prompt.contains("<language_preference>"));
+    }
+
+    #[test]
+    fn skill_section_includes_descriptions_without_paths() {
+        let settings = test_settings(None);
+        let skill_dir = PathBuf::from("/tmp/omini-skill-test/writer");
+        let skills = vec![SkillSummary {
+            name: "writer".to_string(),
+            description: "Write carefully".to_string(),
+            directory: skill_dir.clone(),
+        }];
+
+        let prompt = build_system_prompt_with_capabilities(&settings, &[], &skills);
+
+        assert!(prompt.contains("<skill_instructions>"));
+        assert!(prompt.contains("- `writer`: Write carefully"));
+        assert!(prompt.contains("<source>slash_command</source>"));
+        assert!(prompt.contains("do not call the `skill` tool for the same skill again"));
+        assert!(!prompt.contains(skill_dir.to_str().unwrap()));
     }
 
     #[test]

@@ -8,13 +8,13 @@ pub struct SessionsCommand;
 
 #[async_trait]
 impl Command for SessionsCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "sessions"
     }
     fn aliases(&self) -> &[&'static str] {
         &["resume"]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "切换会话"
     }
     fn sort_weight(&self) -> i32 {

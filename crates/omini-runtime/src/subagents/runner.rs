@@ -2,6 +2,7 @@ use crate::api::{FinishReason, LlmClient};
 use crate::config::project::sanitize;
 use crate::db::{self, Session};
 use crate::engine::{QueryContext, QueryEngine};
+use crate::skills::SkillSummary;
 use crate::subagents::AgentSpec;
 use crate::tools::{
     ToolExecutionContext, ToolResult, ToolRuntimeContext, create_subagent_registry_from_parent,
@@ -129,9 +130,15 @@ async fn run_subagent(
             .await;
     }
 
+    let skill_summaries = subagent_skill_summaries(&tool_registry, &runtime.skill_registry);
+
     let tool_registry = Arc::new(tool_registry);
     let mut settings = settings;
-    settings.system_prompt = Some(subagent_system_prompt(&parent_settings, &spec));
+    settings.system_prompt = Some(subagent_system_prompt(
+        &parent_settings,
+        &spec,
+        &skill_summaries,
+    ));
     let settings = Arc::new(settings);
     let llm_client = LlmClient::new(
         settings.endpoint,
@@ -144,6 +151,7 @@ async fn run_subagent(
         agent_label: Some(spec.name.clone()),
         session_dir: session_dir.clone(),
         subagent_registry: Arc::clone(&runtime.subagent_registry),
+        skill_registry: Arc::clone(&runtime.skill_registry),
         subagent_runner: runtime.subagent_runner.clone(),
         project: runtime.project.clone(),
     });
@@ -366,7 +374,11 @@ fn spawn_subagent_bridge(
     })
 }
 
-fn subagent_system_prompt(parent: &crate::types::config::Settings, spec: &AgentSpec) -> String {
+fn subagent_system_prompt(
+    parent: &crate::types::config::Settings,
+    spec: &AgentSpec,
+    skills: &[SkillSummary],
+) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are running as an isolated subagent for Omini.\n\n");
     if let Some(section) = crate::prompts::language_preference_section(parent) {
@@ -374,6 +386,10 @@ fn subagent_system_prompt(parent: &crate::types::config::Settings, spec: &AgentS
         prompt.push_str("\n\n");
     }
     prompt.push_str(&crate::prompts::project_context_prompt(&parent.cwd));
+    if let Some(section) = crate::prompts::skill_section(skills) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&section);
+    }
     prompt.push_str("\n\n<subagent_instructions>\n");
     prompt.push_str(
         "Return a concise final result for the parent agent. Do not try to spawn subagents.\n\n",
@@ -386,6 +402,17 @@ fn subagent_system_prompt(parent: &crate::types::config::Settings, spec: &AgentS
     prompt.push_str(&spec.instructions);
     prompt.push_str("\n</subagent_instructions>");
     prompt
+}
+
+fn subagent_skill_summaries(
+    tool_registry: &crate::tools::ToolRegistry,
+    skill_registry: &crate::skills::SkillRegistry,
+) -> Vec<SkillSummary> {
+    if tool_registry.contains("skill") {
+        skill_registry.injected_summaries()
+    } else {
+        Vec::new()
+    }
 }
 
 fn extract_final_text(messages: &[Message]) -> String {
@@ -566,10 +593,54 @@ mod tests {
         parent.language = Some("  en  ".to_string());
         let spec = test_spec(None);
 
-        let prompt = subagent_system_prompt(&parent, &spec);
+        let prompt = subagent_system_prompt(&parent, &spec, &[]);
 
         assert!(prompt.contains("<language_preference>"));
         assert!(prompt.contains("`en`"));
         assert!(prompt.contains("<subagent_instructions>"));
+    }
+
+    #[test]
+    fn subagent_system_prompt_includes_skill_summaries_when_provided() {
+        let parent = test_settings();
+        let spec = test_spec(None);
+        let skills = vec![SkillSummary {
+            name: "commit-message".to_string(),
+            description: "Suggest commit messages".to_string(),
+            directory: PathBuf::from("/tmp/skill"),
+        }];
+
+        let prompt = subagent_system_prompt(&parent, &spec, &skills);
+
+        assert!(prompt.contains("<skill_instructions>"));
+        assert!(prompt.contains("- `commit-message`: Suggest commit messages"));
+        assert!(prompt.contains("Use the `skill` tool"));
+        assert!(prompt.contains("<subagent_instructions>"));
+        assert!(!prompt.contains("/tmp/skill"));
+    }
+
+    #[test]
+    fn subagent_system_prompt_omits_skill_section_when_no_summaries_provided() {
+        let parent = test_settings();
+        let spec = test_spec(None);
+
+        let prompt = subagent_system_prompt(&parent, &spec, &[]);
+
+        assert!(!prompt.contains("<skill_instructions>"));
+        assert!(prompt.contains("<subagent_instructions>"));
+    }
+
+    #[test]
+    fn subagent_skill_summaries_follow_skill_tool_availability() {
+        let parent = test_settings();
+        let skill_registry = crate::skills::load_skill_registry(&parent.cwd);
+        let with_skill = crate::tools::create_subagent_registry(&["skill".to_string()]);
+        let without_skill = crate::tools::create_subagent_registry(&["read".to_string()]);
+
+        let visible = subagent_skill_summaries(&with_skill, &skill_registry);
+        let hidden = subagent_skill_summaries(&without_skill, &skill_registry);
+
+        assert!(visible.iter().any(|skill| skill.name == "commit-message"));
+        assert!(hidden.is_empty());
     }
 }

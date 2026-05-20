@@ -19,18 +19,9 @@ pub(super) fn render(
     const MAX_OUTPUT_LINES: usize = 10;
 
     let mut lines: Vec<Line> = Vec::new();
-    let title_style = if result.is_some_and(|tr| tr.is_error) {
-        Style::default().fg(error)
-    } else {
-        Style::default().fg(accent)
-    };
+    let is_pending = result.is_none();
+    let title_style = Style::default().fg(accent);
     let mut title = Vec::new();
-    if result.is_none() {
-        title.push(Span::styled(
-            format!("{} ", spinner()),
-            Style::default().fg(warn),
-        ));
-    }
     let desc = tool_use
         .input
         .get("description")
@@ -44,14 +35,20 @@ pub(super) fn render(
         .unwrap_or("")
         .trim();
 
-    title.push(Span::raw(". "));
+    title.push(Span::raw("· "));
     title.push(Span::styled("Bash", title_style));
     if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();
         let parens_width = UnicodeWidthStr::width("()");
+        let spinner_width = if is_pending {
+            UnicodeWidthStr::width(format!(" {}", spinner()).as_str())
+        } else {
+            0
+        };
         let cmd_width = content_width
             .saturating_sub(used_width)
-            .saturating_sub(parens_width);
+            .saturating_sub(parens_width)
+            .saturating_sub(spinner_width);
         title.push(Span::raw("("));
         title.push(Span::raw(truncate_display_width(cmd, cmd_width)));
         title.push(Span::raw(")"));
@@ -64,6 +61,12 @@ pub(super) fn render(
                 title_style,
             ));
         }
+    }
+    if is_pending {
+        title.push(Span::styled(
+            format!(" {}", spinner()),
+            Style::default().fg(warn),
+        ));
     }
     lines.push(Line::from(title));
 
@@ -90,6 +93,13 @@ pub(super) fn render(
             format!("# {desc}"),
             Style::default().fg(dim).add_modifier(Modifier::ITALIC),
         );
+    }
+
+    if let Some(tr) = result
+        && tr.is_error
+    {
+        push_tool_error(&mut lines, &tr.content, content_width, error);
+        return lines;
     }
 
     if let Some(tr) = result
@@ -131,6 +141,32 @@ pub(super) fn render(
     }
 
     lines
+}
+
+fn push_tool_error(
+    lines: &mut Vec<Line<'static>>,
+    content: &str,
+    content_width: usize,
+    error: Color,
+) {
+    let message = content.trim();
+    let message = if message.is_empty() {
+        "Tool execution failed"
+    } else {
+        message
+    };
+    let prefix = "  ";
+    let continuation = "  ";
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let wrap_width = content_width.saturating_sub(prefix_width).max(1);
+    let style = Style::default().fg(error);
+    for (idx, line) in word_wrap(message, wrap_width).into_iter().enumerate() {
+        let current_prefix = if idx == 0 { prefix } else { continuation };
+        lines.push(Line::from(vec![
+            Span::styled(current_prefix, style),
+            Span::styled(line, style),
+        ]));
+    }
 }
 
 fn truncate_display_width(s: &str, max_width: usize) -> String {

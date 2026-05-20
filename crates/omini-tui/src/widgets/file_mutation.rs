@@ -122,11 +122,12 @@ pub(super) fn render_edit(
     });
     let is_permission_preview = result.is_none() && edit_preview.is_some();
     if is_running_without_preview {
+        header_spans.push(Span::raw("· "));
+        header_spans.push(Span::styled("Edit", Style::default().fg(accent)));
         header_spans.push(Span::styled(
-            format!("{} ", spinner()),
+            format!(" {}", spinner()),
             Style::default().fg(Color::Rgb(212, 182, 106)),
         ));
-        header_spans.push(Span::styled("Edit", Style::default().fg(accent)));
         lines.push(Line::from(header_spans));
         return lines;
     } else {
@@ -464,11 +465,12 @@ pub(super) fn render_write(
     let is_running_without_preview = result.is_none() && preview.is_none();
     if is_running_without_preview {
         lines.push(Line::from(vec![
+            Span::raw("· "),
+            Span::styled("Write", Style::default().fg(accent)),
             Span::styled(
-                format!("{} ", spinner()),
+                format!(" {}", spinner()),
                 Style::default().fg(Color::Rgb(212, 182, 106)),
             ),
-            Span::styled("Write", Style::default().fg(accent)),
         ]));
         return lines;
     }

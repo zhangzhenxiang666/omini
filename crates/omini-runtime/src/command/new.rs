@@ -7,13 +7,13 @@ pub struct NewCommand;
 
 #[async_trait]
 impl Command for NewCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "new"
     }
     fn aliases(&self) -> &[&'static str] {
         &["clear"]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "清空当前会话，开始新对话"
     }
     fn sort_weight(&self) -> i32 {

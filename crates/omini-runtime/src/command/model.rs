@@ -9,13 +9,13 @@ pub struct ModelCommand;
 
 #[async_trait]
 impl Command for ModelCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "model"
     }
     fn aliases(&self) -> &[&'static str] {
         &[]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "切换模型"
     }
     fn sort_weight(&self) -> i32 {

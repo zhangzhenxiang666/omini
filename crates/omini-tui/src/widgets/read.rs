@@ -30,14 +30,6 @@ pub(super) fn render(
             Some(ToolPauseKind::Permission(PermissionPreview::Read(_)))
         );
 
-    if result.is_none() {
-        let spin = spinner();
-        main_spans.push(Span::styled(
-            format!("{} ", spin),
-            Style::default().fg(Color::Rgb(212, 182, 106)),
-        ));
-    }
-
     main_spans.push(Span::raw("· "));
     if is_permission_preview {
         main_spans.push(Span::styled(
@@ -47,6 +39,12 @@ pub(super) fn render(
     } else {
         main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
         main_spans.push(Span::raw(format!(" {}", display_file_path)));
+    }
+    if result.is_none() {
+        main_spans.push(Span::styled(
+            format!(" {}", spinner()),
+            Style::default().fg(Color::Rgb(212, 182, 106)),
+        ));
     }
 
     lines.push(Line::from(main_spans));

@@ -9,7 +9,7 @@ pub struct AgentsCommand;
 
 #[async_trait]
 impl Command for AgentsCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "agents"
     }
 
@@ -17,7 +17,7 @@ impl Command for AgentsCommand {
         &[]
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "管理 agent"
     }
 

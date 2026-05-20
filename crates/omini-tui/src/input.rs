@@ -7,8 +7,10 @@ use crate::types::events::{ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
-const AGENT_TOOL_ROW_COUNT: usize = 15;
-const AGENT_TOOL_NAMES: [&str; 6] = ["search", "read", "bash", "edit", "write", "ask_user"];
+const AGENT_TOOL_ROW_COUNT: usize = 17;
+const AGENT_TOOL_NAMES: [&str; 7] = [
+    "search", "read", "bash", "edit", "write", "ask_user", "skill",
+];
 const AGENT_ALLOW_TOOL_START: usize = 3;
 const AGENT_DENY_TOOL_START: usize = AGENT_ALLOW_TOOL_START + AGENT_TOOL_NAMES.len();
 const AGENT_EDIT_ACTION_COUNT: usize = 4;

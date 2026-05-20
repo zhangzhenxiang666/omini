@@ -21,18 +21,8 @@ pub(super) fn render(
     let mut lines = Vec::new();
 
     let mut title = Vec::new();
-    if result.is_none() {
-        title.push(Span::styled(
-            format!("{} ", spinner()),
-            Style::default().fg(warn),
-        ));
-    }
     title.push(Span::raw("· "));
-    let title_style = Style::default().fg(if result.is_some_and(|tr| tr.is_error) {
-        error
-    } else {
-        accent
-    });
+    let title_style = Style::default().fg(accent);
     if result.is_some_and(|tr| !tr.is_error) && answered_count > 0 {
         title.push(Span::styled("Questions", title_style));
         let answered_text = if question_count > 0 {
@@ -52,6 +42,12 @@ pub(super) fn render(
                 if question_count == 1 { "" } else { "s" }
             ),
             Style::default().fg(dim),
+        ));
+    }
+    if result.is_none() {
+        title.push(Span::styled(
+            format!(" {}", spinner()),
+            Style::default().fg(warn),
         ));
     }
     lines.push(Line::from(title));

@@ -788,6 +788,13 @@ fn subagent_tool_summary(tool_use: &ToolUseBlock, project_dir: Option<&Path>) ->
             .get("file_path")
             .and_then(|value| value.as_str())
             .map(|path| display_path(path, project_dir)),
+        "skill" => tool_use
+            .input
+            .get("name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string),
         "edit" | "write" => tool_use
             .input
             .get("file_path")

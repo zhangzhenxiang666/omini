@@ -8,13 +8,13 @@ pub struct RenameCommand;
 
 #[async_trait]
 impl Command for RenameCommand {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "rename"
     }
     fn aliases(&self) -> &[&'static str] {
         &[]
     }
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "重命名当前会话"
     }
     fn sort_weight(&self) -> i32 {
