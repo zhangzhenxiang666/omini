@@ -44,7 +44,9 @@ pub(super) async fn handle_input_event(
             }
         }
         Event::Paste(text)
-            if state.interaction_step.is_none() && state.active_tool_pause().is_none() =>
+            if state.interaction_step.is_none()
+                && state.active_tool_pause().is_none()
+                && state.help_drawer.is_none() =>
         {
             state.insert_paste(text);
             state.update_input_autocomplete();
@@ -122,6 +124,11 @@ async fn handle_key_event(
         return true;
     }
 
+    if state.help_drawer.is_some() {
+        handle_help_drawer_key(state, code, modifiers);
+        return true;
+    }
+
     if code == KeyCode::Esc
         && matches!(
             state.agent_status,
@@ -148,6 +155,37 @@ async fn handle_key_event(
     }
 
     handle_composer_key(state, code, modifiers, request_tx).await
+}
+
+fn handle_help_drawer_key(state: &mut UiState, code: KeyCode, modifiers: KeyModifiers) {
+    match (code, modifiers) {
+        (KeyCode::Esc, _) => state.close_help_drawer(),
+        (KeyCode::Right, _) => state.help_next_tab(),
+        (KeyCode::Tab, modifiers) if modifiers.is_empty() => state.help_next_tab(),
+        (KeyCode::Left, _) | (KeyCode::BackTab, _) => state.help_prev_tab(),
+        (KeyCode::Tab, KeyModifiers::SHIFT) => state.help_prev_tab(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => state.help_select_next(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => state.help_select_prev(),
+        (KeyCode::PageDown, _) => {
+            let page = state
+                .help_drawer
+                .as_ref()
+                .map(|_| state.messages_area.height as usize / 2)
+                .unwrap_or(1)
+                .max(1);
+            state.help_page_down(page);
+        }
+        (KeyCode::PageUp, _) => {
+            let page = state
+                .help_drawer
+                .as_ref()
+                .map(|_| state.messages_area.height as usize / 2)
+                .unwrap_or(1)
+                .max(1);
+            state.help_page_up(page);
+        }
+        _ => {}
+    }
 }
 
 async fn handle_tool_pause_key(

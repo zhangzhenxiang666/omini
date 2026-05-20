@@ -1,6 +1,10 @@
 use super::*;
 
 pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     if let Some(InteractionStep::Agents(manager)) = &mut state.interaction_step {
         manager.set_draft_wrap_width(super::agents::input_box_inner_width(
             area.width.saturating_sub(4) as usize,
@@ -32,11 +36,11 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
     let extra: u16 = if has_thinking { 6 } else { 4 };
     let panel_height = ((entries.len() as u16) + extra)
         .clamp(5, 22)
-        .min(area.height.saturating_sub(4).max(1));
+        .min(area.height);
 
     let panel_area = Rect {
         x: area.x,
-        y: area.y + area.height - panel_height,
+        y: area.y + area.height.saturating_sub(panel_height),
         width: area.width,
         height: panel_height,
     };
@@ -63,59 +67,65 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // Line 1: model selection title in accent color, bold
-    let mut title_line = Line::from(Span::styled(
-        " 选择模型",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    ));
-    let title_area = Rect {
-        x: panel_area.x,
-        y: panel_area.y + 1,
-        width: panel_area.width,
-        height: 1,
-    };
-    register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
+    if panel_area.height > 1 {
+        let mut title_line = Line::from(Span::styled(
+            " 选择模型",
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        let title_area = Rect {
+            x: panel_area.x,
+            y: panel_area.y + 1,
+            width: panel_area.width,
+            height: 1,
+        };
+        register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
 
-    frame.render_widget(Paragraph::new(title_line), title_area);
+        frame.render_widget(Paragraph::new(title_line), title_area);
+    }
 
     // Line 2: Chinese subtitle in gray
-    let mut subtitle_line = Line::from(Span::styled(
-        " 切换模型，适用于当前会话和未来会话。",
-        Style::default().fg(Color::Rgb(140, 145, 155)),
-    ));
-    let subtitle_area = Rect {
-        x: panel_area.x,
-        y: panel_area.y + 2,
-        width: panel_area.width,
-        height: 1,
-    };
-    register_and_highlight_lines(
-        state,
-        subtitle_area,
-        std::slice::from_mut(&mut subtitle_line),
-    );
+    if panel_area.height > 2 {
+        let mut subtitle_line = Line::from(Span::styled(
+            " 切换模型，适用于当前会话和未来会话。",
+            Style::default().fg(Color::Rgb(140, 145, 155)),
+        ));
+        let subtitle_area = Rect {
+            x: panel_area.x,
+            y: panel_area.y + 2,
+            width: panel_area.width,
+            height: 1,
+        };
+        register_and_highlight_lines(
+            state,
+            subtitle_area,
+            std::slice::from_mut(&mut subtitle_line),
+        );
 
-    frame.render_widget(Paragraph::new(subtitle_line), subtitle_area);
+        frame.render_widget(Paragraph::new(subtitle_line), subtitle_area);
+    }
 
     // Content area below divider
     let content_area = Rect {
         x: panel_area.x,
         y: panel_area.y + 3,
         width: panel_area.width,
-        height: panel_area.height - 3,
+        height: panel_area.height.saturating_sub(3),
     };
 
-    render_model_panel(
-        state,
-        frame,
-        content_area,
-        ModelPanelParams {
-            entries: &entries,
-            selected,
-            thinking_idx,
-            active_provider: &active_provider,
-            active_model: &active_model,
-        },
-    );
+    if content_area.width > 0 && content_area.height > 0 && content_area.y < panel_area.bottom() {
+        render_model_panel(
+            state,
+            frame,
+            content_area,
+            ModelPanelParams {
+                entries: &entries,
+                selected,
+                thinking_idx,
+                active_provider: &active_provider,
+                active_model: &active_model,
+            },
+        );
+    }
 }
 
 struct ModelPanelParams<'a> {
@@ -153,21 +163,21 @@ fn render_model_panel(
     let hint_y = area.y + area.height - 1;
 
     // Render model entries
-    let mut lines: Vec<Line> = Vec::new();
+    let mut model_lines: Vec<ScrollableLine> = Vec::new();
     let mut model_num: usize = 0;
 
     for (i, entry) in params.entries.iter().enumerate() {
-        if lines.len() >= list_h as usize {
-            break;
-        }
         match entry {
             ModelSelectionEntry::ProviderHeader { name } => {
-                lines.push(Line::from(Span::styled(
-                    format!("  {}", name),
-                    Style::default()
-                        .fg(Color::Rgb(140, 145, 155))
-                        .add_modifier(Modifier::BOLD),
-                )));
+                model_lines.push(ScrollableLine {
+                    selected: false,
+                    line: Line::from(Span::styled(
+                        format!("  {}", name),
+                        Style::default()
+                            .fg(Color::Rgb(140, 145, 155))
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                });
             }
             ModelSelectionEntry::Model {
                 provider_key,
@@ -177,16 +187,7 @@ fn render_model_panel(
                 let is_sel = i == params.selected;
                 let display = model.name.as_deref().unwrap_or(&model.id);
 
-                // Build description from model config
-                let mut desc_parts = Vec::new();
-                let limit_k = model.limit / 1000;
-                if limit_k > 0 {
-                    desc_parts.push(format!("{}K 上下文", limit_k));
-                }
-                if model.thinking {
-                    desc_parts.push("thinking".to_string());
-                }
-                let desc = desc_parts.join(" · ");
+                let meta = model_meta_text(model, display);
 
                 // Checkmark for non-standard providers (custom models)
                 let is_active =
@@ -198,57 +199,50 @@ fn render_model_panel(
                 let selected_color = Color::Rgb(0x42, 0xd9, 0xe8);
                 let active_color = Color::Rgb(126, 158, 126);
 
-                if is_sel {
-                    let mut spans = vec![
-                        Span::styled(" ❯ ", Style::default().fg(selected_color)),
-                        Span::styled(
-                            format!(" {} {}{}", number_str, display, checkmark),
-                            Style::default()
-                                .fg(selected_color)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ];
-                    if !desc.is_empty() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(desc, Style::default().fg(selected_color)));
-                    }
-                    lines.push(Line::from(spans));
+                let fg_color = if is_active {
+                    active_color
                 } else {
-                    let fg_color = if is_active {
-                        active_color
+                    Color::Rgb(165, 172, 182)
+                };
+                let style = Style::default().fg(fg_color);
+                let name_style = if is_active {
+                    Style::default()
+                        .fg(active_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    style
+                };
+                let mut spans = vec![
+                    if is_sel {
+                        Span::styled(" ❯ ", Style::default().fg(selected_color))
                     } else {
-                        Color::Rgb(165, 172, 182)
-                    };
-                    let style = Style::default().fg(fg_color);
-                    let name_style = if is_active {
-                        Style::default()
-                            .fg(active_color)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        style
-                    };
-                    let mut spans = vec![
-                        Span::styled("   ", style),
-                        Span::styled(
-                            format!(" {} {}{}", number_str, display, checkmark),
-                            name_style,
-                        ),
-                    ];
-                    if !desc.is_empty() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(desc, Style::default().fg(fg_color)));
-                    }
-                    lines.push(Line::from(spans));
+                        Span::styled("   ", style)
+                    },
+                    Span::styled(
+                        format!(" {} {}{}", number_str, display, checkmark),
+                        name_style,
+                    ),
+                ];
+                if !meta.is_empty() {
+                    spans.push(Span::raw("  "));
+                    spans.push(Span::styled(meta, Style::default().fg(fg_color)));
                 }
+                model_lines.push(ScrollableLine {
+                    selected: is_sel,
+                    line: Line::from(spans),
+                });
             }
         }
     }
 
-    register_and_highlight_lines(state, list_area, &mut lines);
-    frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
+    let mut lines = scrollable_lines(model_lines, list_h as usize, "↑ 更多模型", "↓ 更多模型");
+    if list_area.width > 0 && list_area.height > 0 {
+        register_and_highlight_lines(state, list_area, &mut lines);
+        frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
+    }
 
     // Thinking effort row
-    if has_thinking {
+    if has_thinking && thinking_y < area.bottom() {
         const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉"];
         const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High"];
         const EFFORT_COLORS: &[Color] = &[
@@ -308,6 +302,81 @@ fn render_model_panel(
         width: area.width,
         height: 1,
     };
-    register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
-    frame.render_widget(Paragraph::new(hint), hint_area);
+    if hint_area.width > 0 {
+        register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
+        frame.render_widget(Paragraph::new(hint), hint_area);
+    }
+}
+
+fn model_meta_text(model: &crate::types::config::ModelConfig, display: &str) -> String {
+    let mut parts = Vec::new();
+    if model.id != display {
+        parts.push(model.id.clone());
+    }
+    if let Some(limit) = format_context_limit(model.limit) {
+        parts.push(format!("{limit} 上下文"));
+    }
+    if model.thinking {
+        parts.push("thinking".to_string());
+    }
+    parts.join(" · ")
+}
+
+fn format_context_limit(limit: u32) -> Option<String> {
+    if limit >= 1_000_000 {
+        let millions = limit as f64 / 1_000_000.0;
+        return Some(trim_decimal_unit(millions, "m"));
+    }
+    if limit >= 1_000 {
+        return Some(format!("{}k", limit / 1_000));
+    }
+    None
+}
+
+fn trim_decimal_unit(value: f64, unit: &str) -> String {
+    let mut text = format!("{value:.1}");
+    if text.ends_with(".0") {
+        text.truncate(text.len() - 2);
+    }
+    format!("{text}{unit}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::config::ModelConfig;
+
+    #[test]
+    fn context_limit_formats_million_tokens_as_m() {
+        assert_eq!(format_context_limit(1_000_000).as_deref(), Some("1m"));
+        assert_eq!(format_context_limit(1_500_000).as_deref(), Some("1.5m"));
+        assert_eq!(format_context_limit(256_000).as_deref(), Some("256k"));
+    }
+
+    #[test]
+    fn model_meta_includes_id_when_display_name_differs() {
+        let model = ModelConfig {
+            id: "gpt-5.4-mini".to_string(),
+            name: Some("GPT 5.4 Mini".to_string()),
+            limit: 1_000_000,
+            thinking: true,
+        };
+
+        assert_eq!(
+            model_meta_text(&model, "GPT 5.4 Mini"),
+            "gpt-5.4-mini · 1m 上下文 · thinking"
+        );
+    }
+
+    #[test]
+    fn model_meta_omits_duplicate_id_when_display_is_id() {
+        let model = ModelConfig {
+            id: "gpt-5.4-mini".to_string(),
+            name: None,
+            limit: 1_000_000,
+            thinking: false,
+        };
+
+        assert_eq!(model_meta_text(&model, "gpt-5.4-mini"), "1m 上下文");
+    }
 }

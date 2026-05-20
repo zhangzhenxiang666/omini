@@ -301,6 +301,7 @@ fn truncate_display_width(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::events::CommandKind;
 
     fn line_width(line: &Line<'_>) -> usize {
         line.spans
@@ -323,6 +324,7 @@ mod tests {
             aliases: Vec::new(),
             description: "Create or update a very long specialized workflow skill".to_string(),
             sort_weight: 0,
+            kind: CommandKind::Skill,
             has_args: true,
             args_description: Some("[prompt]"),
         };
@@ -341,6 +343,7 @@ mod tests {
             aliases: Vec::new(),
             description: String::new(),
             sort_weight: 0,
+            kind: CommandKind::Skill,
             has_args: true,
             args_description: Some("[prompt]"),
         };

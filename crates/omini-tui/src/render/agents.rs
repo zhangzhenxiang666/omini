@@ -6,10 +6,12 @@ pub(super) fn render_agents_panel(
     area: Rect,
     manager: &AgentManagerState,
 ) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
     let max_panel_height = ((area.height as f32) * 0.75).round() as u16;
-    let max_panel_height = max_panel_height
-        .max(28)
-        .min(area.height.saturating_sub(4).max(1));
+    let max_panel_height = max_panel_height.max(28).min(area.height);
     let max_content_height = max_panel_height.saturating_sub(3) as usize;
     let natural_lines =
         build_agents_lines(manager, area.width.saturating_sub(4) as usize, usize::MAX);
@@ -57,18 +59,25 @@ pub(super) fn render_agents_panel(
         content_area.height as usize,
     );
     let mut rendered = lines;
-    register_and_highlight_lines(state, content_area, &mut rendered);
-    frame.render_widget(Paragraph::new(Text::from(rendered)), content_area);
+    if content_area.width > 0 && content_area.height > 0 && content_area.y < panel_area.bottom() {
+        register_and_highlight_lines(state, content_area, &mut rendered);
+        frame.render_widget(Paragraph::new(Text::from(rendered)), content_area);
+    }
 
     let mut footer = agents_footer_hint(manager);
-    register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer));
-    frame.render_widget(Paragraph::new(footer), footer_area);
+    if footer_area.width > 0 {
+        register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer));
+        frame.render_widget(Paragraph::new(footer), footer_area);
+    }
 
-    if let Some((line_idx, col)) = agent_editor_cursor(
-        manager,
-        content_area.width as usize,
-        content_area.height as usize,
-    ) {
+    if content_area.width > 0
+        && content_area.height > 0
+        && let Some((line_idx, col)) = agent_editor_cursor(
+            manager,
+            content_area.width as usize,
+            content_area.height as usize,
+        )
+    {
         let cursor_y = content_area.y.saturating_add(line_idx as u16).min(
             content_area
                 .y
@@ -109,10 +118,16 @@ fn build_agents_lines(
         }
         AgentManagerView::EditMenu => build_agent_edit_menu_lines(manager, &mut lines),
         AgentManagerView::EditMetadata => {
-            build_agent_edit_metadata_lines(manager, width, &mut lines)
+            build_agent_edit_metadata_lines(manager, width, content_height, &mut lines)
         }
-        AgentManagerView::EditTools => build_agent_tools_lines(manager, &mut lines),
-        AgentManagerView::EditModel => build_agent_model_lines(manager, &mut lines),
+        AgentManagerView::EditTools => {
+            let remaining_height = content_height.saturating_sub(lines.len());
+            build_agent_tools_lines(manager, remaining_height, &mut lines);
+        }
+        AgentManagerView::EditModel => {
+            let remaining_height = content_height.saturating_sub(lines.len());
+            build_agent_model_lines(manager, remaining_height, &mut lines);
+        }
         AgentManagerView::Create(step) => {
             build_agent_create_lines(manager, *step, width, content_height, &mut lines)
         }
@@ -213,19 +228,16 @@ fn agent_editor_cursor(
                 },
             )),
             AgentEditorField::Instructions => {
+                let content_line_idx = PANEL_PREFIX_LINES
+                    + agent_editor_instructions_cursor_prefix_lines(manager, input_width);
                 let window = editable_text_window(
                     &manager.draft.instructions,
                     manager.draft.cursor,
                     input_width,
-                    AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES,
+                    cursor_text_box_max_lines(content_line_idx, content_height, 10),
                     "输入 agent 的系统指令。",
                 );
-                Some((
-                    PANEL_PREFIX_LINES
-                        + agent_editor_instructions_cursor_prefix_lines(manager, input_width)
-                        + window.cursor_line,
-                    2 + window.cursor_col,
-                ))
+                Some((content_line_idx + window.cursor_line, 2 + window.cursor_col))
             }
             AgentEditorField::Tools | AgentEditorField::Model => None,
             AgentEditorField::GenerateDescription => None,
@@ -258,34 +270,33 @@ fn agent_editor_cursor(
                 )
                 .lines
                 .len();
+                let content_line_idx = PANEL_PREFIX_LINES + 12 + description_lines;
                 let window = editable_text_window(
                     &manager.draft.instructions,
                     manager.draft.cursor,
                     input_width,
-                    AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES,
+                    cursor_text_box_max_lines(
+                        content_line_idx,
+                        content_height,
+                        AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES,
+                    ),
                     "输入 agent 的系统指令。",
                 );
-                Some((
-                    PANEL_PREFIX_LINES + 12 + description_lines + window.cursor_line,
-                    2 + window.cursor_col,
-                ))
+                Some((content_line_idx + window.cursor_line, 2 + window.cursor_col))
             }
             _ => None,
         },
         AgentManagerView::Generate => {
+            let content_line_idx =
+                PANEL_PREFIX_LINES + agent_generate_cursor_prefix_lines(manager, false);
             let window = editable_text_window(
                 &manager.draft.generated_description,
                 manager.draft.cursor,
                 input_width,
-                agent_generate_text_max_lines(content_height, false),
+                cursor_text_box_max_lines(content_line_idx, content_height, 12),
                 "例如：擅长翻译 Rust 代码注释，只读取必要文件，保持代码不变。",
             );
-            Some((
-                PANEL_PREFIX_LINES
-                    + agent_generate_cursor_prefix_lines(manager, false)
-                    + window.cursor_line,
-                2 + window.cursor_col,
-            ))
+            Some((content_line_idx + window.cursor_line, 2 + window.cursor_col))
         }
         AgentManagerView::Create(step) => match step {
             AgentCreateStep::ManualName => Some((
@@ -308,34 +319,28 @@ fn agent_editor_cursor(
                 ))
             }
             AgentCreateStep::ManualInstructions => {
+                let content_line_idx =
+                    PANEL_PREFIX_LINES + agent_manual_create_field_cursor_prefix_lines(manager);
                 let window = editable_text_window(
                     &manager.draft.instructions,
                     manager.draft.cursor,
                     input_width,
-                    agent_generate_text_max_lines(content_height, true),
+                    cursor_text_box_max_lines(content_line_idx, content_height, 12),
                     "输入 agent 的系统指令。",
                 );
-                Some((
-                    PANEL_PREFIX_LINES
-                        + agent_manual_create_field_cursor_prefix_lines(manager)
-                        + window.cursor_line,
-                    2 + window.cursor_col,
-                ))
+                Some((content_line_idx + window.cursor_line, 2 + window.cursor_col))
             }
             AgentCreateStep::GenerateDescription => {
+                let content_line_idx =
+                    PANEL_PREFIX_LINES + agent_generate_cursor_prefix_lines(manager, true);
                 let window = editable_text_window(
                     &manager.draft.generated_description,
                     manager.draft.cursor,
                     input_width,
-                    agent_generate_text_max_lines(content_height, true),
+                    cursor_text_box_max_lines(content_line_idx, content_height, 12),
                     "例如：擅长翻译 Rust 代码注释，只读取必要文件，保持代码不变。",
                 );
-                Some((
-                    PANEL_PREFIX_LINES
-                        + agent_generate_cursor_prefix_lines(manager, true)
-                        + window.cursor_line,
-                    2 + window.cursor_col,
-                ))
+                Some((content_line_idx + window.cursor_line, 2 + window.cursor_col))
             }
             _ => None,
         },
@@ -369,6 +374,13 @@ fn agent_editor_instructions_cursor_prefix_lines(
     manager: &AgentManagerState,
     input_width: usize,
 ) -> usize {
+    agent_editor_instructions_lines_before_box(manager, input_width) + 2
+}
+
+fn agent_editor_instructions_lines_before_box(
+    manager: &AgentManagerState,
+    input_width: usize,
+) -> usize {
     let summary_lines =
         agent_tool_summary_line_count(&manager.draft.tools, &manager.draft.disallow_tools);
     let description_cursor = if manager.draft.field == AgentEditorField::Description {
@@ -385,15 +397,7 @@ fn agent_editor_instructions_cursor_prefix_lines(
     )
     .lines
     .len();
-    14 + summary_lines + description_lines
-}
-
-fn agent_generate_text_max_lines(content_height: usize, create_flow: bool) -> usize {
-    if content_height == usize::MAX {
-        return 12;
-    }
-    let reserved = if create_flow { 10 } else { 8 };
-    content_height.saturating_sub(reserved).clamp(1, 12)
+    12 + summary_lines + description_lines
 }
 
 fn agent_generate_cursor_prefix_lines(manager: &AgentManagerState, create_flow: bool) -> usize {
@@ -401,6 +405,18 @@ fn agent_generate_cursor_prefix_lines(manager: &AgentManagerState, create_flow: 
     let before_box_content =
         5 + agent_tool_summary_line_count(&manager.draft.tools, &manager.draft.disallow_tools);
     create_tabs + before_box_content
+}
+
+fn cursor_text_box_max_lines(
+    content_line_idx: usize,
+    content_height: usize,
+    preferred: usize,
+) -> usize {
+    text_box_max_lines(
+        content_line_idx.saturating_sub(2),
+        content_height,
+        preferred,
+    )
 }
 
 fn input_box_cursor_col(value: &str, cursor: usize) -> usize {
@@ -722,6 +738,7 @@ fn build_agent_edit_menu_lines(manager: &AgentManagerState, lines: &mut Vec<Line
 fn build_agent_edit_metadata_lines(
     manager: &AgentManagerState,
     width: usize,
+    content_height: usize,
     lines: &mut Vec<Line<'static>>,
 ) {
     lines.push(Line::from(Span::styled(
@@ -773,7 +790,11 @@ fn build_agent_edit_metadata_lines(
         manager.draft.field == AgentEditorField::Instructions,
         EditorTextBoxLayout {
             width,
-            max_lines: AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES,
+            max_lines: text_box_max_lines(
+                lines.len(),
+                content_height,
+                AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES,
+            ),
         },
         "输入 agent 的系统指令。",
     );
@@ -853,13 +874,15 @@ fn build_agent_editor_lines(
         lines.push(Line::from(""));
         match manager.draft.field {
             AgentEditorField::Model => {
-                build_agent_model_lines(manager, lines);
+                let remaining_height = content_height.saturating_sub(lines.len());
+                build_agent_model_lines(manager, remaining_height, lines);
                 lines.push(Line::from(""));
                 editor_summary_row(lines, "工具", agent_tool_summary_text(manager), false);
                 pad_lines_to_section_height(lines, AGENT_TOOLS_SECTION_LINES, 1);
             }
             AgentEditorField::Tools => {
-                build_agent_tools_lines(manager, lines);
+                let remaining_height = content_height.saturating_sub(lines.len());
+                build_agent_tools_lines(manager, remaining_height, lines);
                 lines.push(Line::from(""));
                 editor_summary_row(
                     lines,
@@ -912,8 +935,14 @@ fn build_agent_create_lines(
             ));
             lines.push(Line::from(""));
         }
-        AgentCreateStep::Tools => build_agent_tools_lines(manager, lines),
-        AgentCreateStep::Model => build_agent_model_lines(manager, lines),
+        AgentCreateStep::Tools => {
+            let remaining_height = content_height.saturating_sub(lines.len());
+            build_agent_tools_lines(manager, remaining_height, lines);
+        }
+        AgentCreateStep::Model => {
+            let remaining_height = content_height.saturating_sub(lines.len());
+            build_agent_model_lines(manager, remaining_height, lines);
+        }
         AgentCreateStep::Method => {
             push_agent_section(lines, "创建方式");
             lines.push(Line::from(""));
@@ -1131,11 +1160,25 @@ fn build_agent_generating_lines(
     }
 }
 
-fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'static>>) {
-    push_agent_section(lines, "工具策略");
-    lines.push(Line::from(""));
+fn build_agent_tools_lines(
+    manager: &AgentManagerState,
+    max_lines: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    lines.extend(scrollable_lines(
+        agent_tool_lines(manager),
+        max_lines,
+        "↑ 更多工具",
+        "↓ 更多工具",
+    ));
+}
+
+fn agent_tool_lines(manager: &AgentManagerState) -> Vec<ScrollableLine> {
+    let mut lines = Vec::new();
+    lines.push(section_tool_line("工具策略"));
+    lines.push(raw_tool_line(""));
     let inherited = manager.draft.tools.is_empty();
-    lines.push(tool_row(
+    lines.push(indexed_tool_line(
         manager.tool_selected == 0,
         inherited && manager.draft.disallow_tools.is_empty(),
         "继承全部",
@@ -1145,16 +1188,13 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
             "使用父会话工具，排除禁用项"
         },
     ));
-    lines.push(Line::from(""));
-    push_agent_section(
-        lines,
-        if inherited {
-            "有效工具"
-        } else {
-            "仅允许"
-        },
-    );
-    lines.push(Line::from(""));
+    lines.push(raw_tool_line(""));
+    lines.push(section_tool_line(if inherited {
+        "有效工具"
+    } else {
+        "仅允许"
+    }));
+    lines.push(raw_tool_line(""));
     let allow_rows = [
         ("读工具组", "search, read", &["search", "read"][..]),
         (
@@ -1175,11 +1215,16 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
         let enabled = tools
             .iter()
             .all(|tool| tool_effectively_enabled(manager, tool));
-        lines.push(tool_row(idx == manager.tool_selected, enabled, label, desc));
+        lines.push(indexed_tool_line(
+            idx == manager.tool_selected,
+            enabled,
+            label,
+            desc,
+        ));
     }
-    lines.push(Line::from(""));
-    push_agent_section(lines, "禁用");
-    lines.push(Line::from(""));
+    lines.push(raw_tool_line(""));
+    lines.push(section_tool_line("禁用"));
+    lines.push(raw_tool_line(""));
     let deny_rows = [
         ("search", "不搜索文件"),
         ("read", "不读取文件"),
@@ -1196,7 +1241,39 @@ fn build_agent_tools_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'st
             .disallow_tools
             .iter()
             .any(|tool| tool == label);
-        lines.push(tool_row(idx == manager.tool_selected, enabled, label, desc));
+        lines.push(indexed_tool_line(
+            idx == manager.tool_selected,
+            enabled,
+            label,
+            desc,
+        ));
+    }
+    lines
+}
+
+fn raw_tool_line(text: &str) -> ScrollableLine {
+    ScrollableLine {
+        selected: false,
+        line: Line::from(text.to_string()),
+    }
+}
+
+fn section_tool_line(label: &str) -> ScrollableLine {
+    ScrollableLine {
+        selected: false,
+        line: Line::from(Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(Color::Rgb(140, 145, 155))
+                .add_modifier(Modifier::BOLD),
+        )),
+    }
+}
+
+fn indexed_tool_line(selected: bool, enabled: bool, label: &str, desc: &str) -> ScrollableLine {
+    ScrollableLine {
+        selected,
+        line: tool_row(selected, enabled, label, desc),
     }
 }
 
@@ -1253,54 +1330,101 @@ fn agent_tool_summary_line_count(tools: &[String], disallow_tools: &[String]) ->
     }
 }
 
-fn build_agent_model_lines(manager: &AgentManagerState, lines: &mut Vec<Line<'static>>) {
-    push_agent_section(lines, "当前配置");
-    lines.push(Line::from(""));
-    for (idx, entry) in manager.model_entries.iter().enumerate().take(20) {
+fn build_agent_model_lines(
+    manager: &AgentManagerState,
+    max_lines: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
+    lines.extend(scrollable_lines(
+        agent_model_lines(manager),
+        max_lines,
+        "↑ 更多模型",
+        "↓ 更多模型",
+    ));
+}
+
+fn agent_model_lines(manager: &AgentManagerState) -> Vec<ScrollableLine> {
+    let mut lines = Vec::new();
+    lines.push(scroll_section_line("当前配置"));
+    lines.push(unselected_line(Line::from("")));
+    for (idx, entry) in manager.model_entries.iter().enumerate() {
         match entry {
             AgentModelEntry::Inherit => {
                 let selected = idx == manager.model_selected;
-                let style = selectable_style(selected);
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "{} 继承主会话模型{}",
-                        if selected { "❯" } else { " " },
-                        if manager.draft.model.is_none() {
-                            " ✔"
-                        } else {
-                            ""
-                        }
-                    ),
-                    style,
-                )));
-                lines.push(Line::from(""));
-                push_agent_section(lines, "可选模型");
-                lines.push(Line::from(""));
+                lines.push(ScrollableLine {
+                    selected,
+                    line: Line::from(Span::styled(
+                        format!(
+                            "{} 继承主会话模型{}",
+                            if selected { "❯" } else { " " },
+                            if manager.draft.model.is_none() {
+                                " ✔"
+                            } else {
+                                ""
+                            }
+                        ),
+                        Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6)),
+                    )),
+                });
+                lines.push(unselected_line(Line::from("")));
+                lines.push(scroll_section_line("可选模型"));
+                lines.push(unselected_line(Line::from("")));
             }
-            AgentModelEntry::ProviderHeader { name } => lines.push(Line::from(Span::styled(
-                name.clone(),
-                Style::default()
-                    .fg(Color::Rgb(140, 145, 155))
-                    .add_modifier(Modifier::BOLD),
-            ))),
+            AgentModelEntry::ProviderHeader { name } => {
+                lines.push(ScrollableLine {
+                    selected: false,
+                    line: Line::from(Span::styled(
+                        name.clone(),
+                        Style::default()
+                            .fg(Color::Rgb(140, 145, 155))
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                });
+            }
             AgentModelEntry::Model {
                 provider_key,
                 model,
             } => {
                 let selected = idx == manager.model_selected;
                 let value = format!("{}/{}", provider_key, model.id);
-                lines.push(Line::from(format!(
-                    "{} {}{}",
-                    if selected { "❯" } else { " " },
-                    model.name.as_deref().unwrap_or(&model.id),
-                    if Some(&value) == manager.draft.model.as_ref() {
-                        " ✔"
-                    } else {
-                        ""
-                    }
-                )));
+                lines.push(ScrollableLine {
+                    selected,
+                    line: Line::from(Span::styled(
+                        format!(
+                            "{} {}{}",
+                            if selected { "❯" } else { " " },
+                            model.name.as_deref().unwrap_or(&model.id),
+                            if Some(&value) == manager.draft.model.as_ref() {
+                                " ✔"
+                            } else {
+                                ""
+                            }
+                        ),
+                        Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6)),
+                    )),
+                });
             }
         }
+    }
+    lines
+}
+
+fn unselected_line(line: Line<'static>) -> ScrollableLine {
+    ScrollableLine {
+        selected: false,
+        line,
+    }
+}
+
+fn scroll_section_line(label: &str) -> ScrollableLine {
+    ScrollableLine {
+        selected: false,
+        line: Line::from(Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(Color::Rgb(140, 145, 155))
+                .add_modifier(Modifier::BOLD),
+        )),
     }
 }
 
@@ -1510,12 +1634,52 @@ fn hint(text: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
+    use crate::types::config::ModelConfig;
+    use std::collections::HashMap;
 
     fn line_text(line: &Line<'static>) -> String {
         line.spans
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn manager_with_tool_selected(tool_selected: usize) -> AgentManagerState {
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.draft.source_kind = AgentSourceKind::Project;
+        manager.tool_selected = tool_selected;
+        manager
+    }
+
+    fn manager_with_model_selected(model_selected: usize) -> AgentManagerState {
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.model_entries = vec![AgentModelEntry::Inherit];
+        for idx in 0..6 {
+            manager.model_entries.push(AgentModelEntry::ProviderHeader {
+                name: format!("Provider {idx}"),
+            });
+            manager.model_entries.push(AgentModelEntry::Model {
+                provider_key: format!("provider-{idx}"),
+                model: ModelConfig {
+                    id: format!("model-{idx}"),
+                    name: Some(format!("Model {idx}")),
+                    limit: 1000,
+                    thinking: false,
+                },
+            });
+        }
+        manager.model_selected = model_selected;
+        manager
+    }
+
+    fn numbered_lines(prefix: &str, count: usize) -> String {
+        (0..count)
+            .map(|idx| format!("{prefix} {idx:02}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
@@ -1533,5 +1697,156 @@ mod tests {
             .0;
 
         assert_eq!(llm_prefix.width(), manual_prefix.width());
+    }
+
+    #[test]
+    fn tool_lines_keep_bottom_selected_row_visible_when_cropped() {
+        let manager = manager_with_tool_selected(16);
+        let mut lines = Vec::new();
+
+        build_agent_tools_lines(&manager, 5, &mut lines);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("↑ 更多工具"));
+        assert!(rendered.contains("❯ [ ] skill"));
+        assert!(rendered.contains("不加载技能"));
+        assert!(!rendered.contains("↓ 更多工具"));
+    }
+
+    #[test]
+    fn tool_lines_show_both_scroll_indicators_for_middle_window() {
+        let manager = manager_with_tool_selected(8);
+        let mut lines = Vec::new();
+
+        build_agent_tools_lines(&manager, 5, &mut lines);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("↑ 更多工具"));
+        assert!(rendered.contains("↓ 更多工具"));
+        assert!(rendered.contains("❯ [x] ask_user"));
+    }
+
+    #[test]
+    fn tool_lines_do_not_show_scroll_indicators_when_full_height_fits() {
+        let manager = manager_with_tool_selected(16);
+        let mut lines = Vec::new();
+
+        build_agent_tools_lines(&manager, usize::MAX, &mut lines);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(!rendered.contains("更多工具"));
+        assert!(rendered.contains("❯ [ ] skill"));
+    }
+
+    #[test]
+    fn model_lines_keep_bottom_selected_row_visible_when_cropped() {
+        let manager = manager_with_model_selected(12);
+        let mut lines = Vec::new();
+
+        build_agent_model_lines(&manager, 5, &mut lines);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+
+        assert!(rendered.contains("↑ 更多模型"));
+        assert!(rendered.contains("❯ Model 5"));
+        assert!(!rendered.contains("↓ 更多模型"));
+    }
+
+    #[test]
+    fn selected_agent_model_uses_arrow_without_text_highlight() {
+        let manager = manager_with_model_selected(0);
+        let lines = agent_model_lines(&manager);
+        let selected = lines
+            .into_iter()
+            .find(|line| line.selected)
+            .expect("selected model line should exist");
+
+        assert!(line_text(&selected.line).contains("❯ 继承主会话模型"));
+        assert_ne!(
+            selected.line.spans[0].style.fg,
+            Some(Color::Rgb(0x42, 0xd9, 0xe8))
+        );
+    }
+
+    #[test]
+    fn generated_preview_cursor_uses_cropped_instruction_box_height() {
+        let width = 80;
+        let content_height = 19;
+        let instructions = numbered_lines("step", 20);
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.apply_generated(
+            AgentSourceKind::Project,
+            AgentDraft {
+                name: "code-review".to_string(),
+                description: "Reviews code changes.".to_string(),
+                instructions,
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+            },
+        );
+        manager.draft.field = AgentEditorField::Instructions;
+        manager.move_draft_cursor_to_current_end();
+
+        let lines = build_agents_lines(&manager, width, content_height);
+        let (cursor_line, _) =
+            agent_editor_cursor(&manager, width, content_height).expect("cursor should render");
+
+        assert!(cursor_line < content_height);
+        assert_eq!(cursor_line, content_height - 1);
+        assert!(line_text(&lines[cursor_line]).starts_with("│ "));
+        assert!(line_text(&lines[cursor_line]).contains("step 19"));
+    }
+
+    #[test]
+    fn edit_metadata_cursor_uses_cropped_instruction_box_height() {
+        let width = 80;
+        let content_height = 16;
+        let instructions = numbered_lines("rule", 20);
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.start_edit(AgentRecord {
+            name: "code-review".to_string(),
+            description: "Reviews code changes.".to_string(),
+            instructions,
+            tools: Vec::new(),
+            disallow_tools: Vec::new(),
+            model: None,
+            source_kind: AgentSourceKind::Project,
+            path: None,
+            editable: true,
+        });
+        manager.view = AgentManagerView::EditMetadata;
+        manager.draft.field = AgentEditorField::Instructions;
+        manager.move_draft_cursor_to_current_end();
+
+        let lines = build_agents_lines(&manager, width, content_height);
+        let (cursor_line, _) =
+            agent_editor_cursor(&manager, width, content_height).expect("cursor should render");
+
+        assert!(cursor_line < content_height);
+        assert_eq!(cursor_line, content_height - 1);
+        assert!(line_text(&lines[cursor_line]).starts_with("│ "));
+        assert!(line_text(&lines[cursor_line]).contains("rule 19"));
+    }
+
+    #[test]
+    fn generate_cursor_uses_same_height_as_rendered_text_box() {
+        let width = 80;
+        let content_height = 10;
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.view = AgentManagerView::Generate;
+        manager.draft.field = AgentEditorField::GenerateDescription;
+        manager.draft.generated_description = numbered_lines("goal", 20);
+        manager.move_draft_cursor_to_current_end();
+
+        let lines = build_agents_lines(&manager, width, content_height);
+        let (cursor_line, _) =
+            agent_editor_cursor(&manager, width, content_height).expect("cursor should render");
+
+        assert!(cursor_line < content_height);
+        assert!(line_text(&lines[cursor_line]).starts_with("│ "));
+        assert!(line_text(&lines[cursor_line]).contains("goal 19"));
     }
 }

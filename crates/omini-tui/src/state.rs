@@ -1,7 +1,7 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
-    InteractionRequest, SubagentSnapshot, SubagentStatus, ToolPauseRequest,
+    CommandSummary, InteractionRequest, SubagentSnapshot, SubagentStatus, ToolPauseRequest,
 };
 use crate::types::message::Message;
 use ratatui::layout::Rect;
@@ -265,6 +265,35 @@ impl Default for StatusBar {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HelpTab {
+    #[default]
+    General,
+    Commands,
+    Skills,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpDrawerState {
+    pub tab: HelpTab,
+    pub commands: Vec<CommandSummary>,
+    pub general_selected: usize,
+    pub command_selected: usize,
+    pub skill_selected: usize,
+}
+
+impl HelpDrawerState {
+    pub fn new(commands: Vec<CommandSummary>) -> Self {
+        Self {
+            tab: HelpTab::General,
+            commands,
+            general_selected: 0,
+            command_selected: 0,
+            skill_selected: 0,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UiState {
     pub messages: Vec<UiMessage>,
@@ -352,6 +381,8 @@ pub struct UiState {
     pub interaction_request: Option<InteractionRequest>,
     /// 交互选择页的当前步骤与选中索引（TUI 本地状态）
     pub interaction_step: Option<InteractionStep>,
+    /// /help 底部抽屉状态。
+    pub help_drawer: Option<HelpDrawerState>,
 }
 
 impl Default for UiState {
@@ -410,6 +441,7 @@ impl UiState {
             current_session_id: None,
             interaction_request: None,
             interaction_step: None,
+            help_drawer: None,
         }
     }
 

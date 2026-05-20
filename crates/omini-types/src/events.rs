@@ -149,6 +149,8 @@ pub enum RuntimeToUiEvent {
     SessionTitleChanged { title: Option<String> },
     /// 需要 TUI 弹出交互选择页
     InteractionRequest(InteractionRequest),
+    /// 需要 TUI 打开帮助抽屉
+    ShowHelpDrawer(Vec<CommandSummary>),
 
     /// Runtime 启动时推送命令列表（供自动补全使用）
     CommandList(Vec<CommandSummary>),
@@ -283,16 +285,23 @@ pub struct SessionSummary {
 }
 
 /// 命令摘要（供自动补全 / 帮助展示）。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandSummary {
     pub name: String,
     pub aliases: Vec<String>,
     pub description: String,
     pub sort_weight: i32,
+    pub kind: CommandKind,
     /// true = 需要额外参数，选中后只补全命令名+空格
     /// false = 无参数，选中后直接执行
     pub has_args: bool,
     pub args_description: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandKind {
+    Builtin,
+    Skill,
 }
 
 /// 命令执行结果。

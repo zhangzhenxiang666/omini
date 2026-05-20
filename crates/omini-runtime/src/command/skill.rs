@@ -2,7 +2,7 @@ use crate::command::Command;
 use crate::runtime::AgentRuntime;
 use crate::skills::SkillSpec;
 use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
-use crate::types::events::{CommandEffect, CommandResult};
+use crate::types::events::{CommandEffect, CommandKind, CommandResult};
 use crate::types::message::Message;
 use crate::types::message::Role;
 use async_trait::async_trait;
@@ -69,6 +69,10 @@ impl Command for SkillCommand {
 
     fn sort_weight(&self) -> i32 {
         500
+    }
+
+    fn kind(&self) -> CommandKind {
+        CommandKind::Skill
     }
 
     async fn execute(&self, _runtime: &mut AgentRuntime, args: &str) -> CommandResult {

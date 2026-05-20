@@ -22,6 +22,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 mod agents;
 mod autocomplete;
+mod help_drawer;
 mod input;
 mod interactions;
 mod layout;
@@ -37,6 +38,74 @@ const USER_INPUT_NONE_LABEL: &str = "以上都不是";
 const USER_INPUT_NONE_DESCRIPTION: &str = "可按 Tab 在备注中补充说明。";
 const USER_INPUT_NOTE_PREFIX: &str = "› ";
 const USER_INPUT_NOTE_PLACEHOLDER: &str = "添加备注";
+
+struct ScrollableLine {
+    selected: bool,
+    line: Line<'static>,
+}
+
+fn scrollable_lines(
+    lines: Vec<ScrollableLine>,
+    max_lines: usize,
+    top_indicator: &str,
+    bottom_indicator: &str,
+) -> Vec<Line<'static>> {
+    if max_lines == usize::MAX || lines.len() <= max_lines {
+        return lines.into_iter().map(|line| line.line).collect();
+    }
+    if max_lines == 0 {
+        return Vec::new();
+    }
+
+    let selected_line = lines.iter().position(|line| line.selected).unwrap_or(0);
+    let (start, end, show_top, show_bottom) = scroll_window(lines.len(), selected_line, max_lines);
+    let mut rendered = Vec::with_capacity(max_lines);
+    if show_top {
+        rendered.push(scroll_indicator_line(top_indicator));
+    }
+    rendered.extend(
+        lines
+            .into_iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(|line| line.line),
+    );
+    if show_bottom {
+        rendered.push(scroll_indicator_line(bottom_indicator));
+    }
+    rendered
+}
+
+fn scroll_window(
+    total_lines: usize,
+    selected_line: usize,
+    max_lines: usize,
+) -> (usize, usize, bool, bool) {
+    if total_lines <= max_lines {
+        return (0, total_lines, false, false);
+    }
+
+    if max_lines <= 2 {
+        let start = selected_line
+            .saturating_sub(max_lines.saturating_sub(1))
+            .min(total_lines.saturating_sub(max_lines));
+        return (start, start + max_lines, false, false);
+    }
+
+    let visible_lines = max_lines - 2;
+    let start = selected_line
+        .saturating_sub(visible_lines / 2)
+        .min(total_lines.saturating_sub(visible_lines));
+    let end = start + visible_lines;
+    (start, end, start > 0, end < total_lines)
+}
+
+fn scroll_indicator_line(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default().fg(Color::Rgb(140, 145, 155)),
+    ))
+}
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     layout::render(state, frame);
@@ -637,12 +706,12 @@ enum AlertKind {
 }
 
 fn build_alert_lines(text: &str, content_width: usize, kind: AlertKind) -> Vec<Line<'static>> {
-    let (icon, color) = match kind {
-        AlertKind::Notice => ("ℹ", Color::Rgb(0x7a, 0xba, 0xff)),
-        AlertKind::Warning => ("⚠", Color::Rgb(0xd4, 0xb6, 0x6a)),
-        AlertKind::Error => ("✖", Color::Rgb(255, 100, 100)),
+    let (label, color) = match kind {
+        AlertKind::Notice => ("info", Color::Rgb(0x7a, 0xba, 0xff)),
+        AlertKind::Warning => ("warn", Color::Rgb(0xd4, 0xb6, 0x6a)),
+        AlertKind::Error => ("error", Color::Rgb(255, 100, 100)),
     };
-    let prefix = format!("{icon} ");
+    let prefix = format!("[{label}] ");
     let wrap_width = content_width
         .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
         .max(1);
@@ -1279,6 +1348,13 @@ fn apply_text_selection_highlight(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::HelpDrawerState;
+    use crate::types::config::ModelConfig;
+    use crate::types::events::{
+        PermissionPreview, ReadPermissionPreview, ToolPauseKind, ToolPauseRequest,
+    };
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn run_divider_renders_elapsed_duration() {
@@ -1297,5 +1373,81 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(UnicodeWidthStr::width(text.as_str()) <= 4);
+    }
+
+    #[test]
+    fn scrollable_lines_keep_selected_line_visible() {
+        let lines = (0..8)
+            .map(|idx| ScrollableLine {
+                selected: idx == 7,
+                line: Line::from(format!("line {idx}")),
+            })
+            .collect();
+
+        let rendered = scrollable_lines(lines, 4, "top", "bottom")
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>();
+
+        assert_eq!(rendered.first().map(String::as_str), Some("top"));
+        assert!(rendered.iter().any(|line| line == "line 7"));
+        assert!(!rendered.iter().any(|line| line == "bottom"));
+    }
+
+    #[test]
+    fn help_drawer_renders_in_tiny_terminal() {
+        let backend = TestBackend::new(169, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.help_drawer = Some(HelpDrawerState::new(Vec::new()));
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+    }
+
+    #[test]
+    fn model_drawer_renders_in_tiny_terminal() {
+        let backend = TestBackend::new(80, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.interaction_step = Some(InteractionStep::ModelSelection {
+            entries: vec![ModelSelectionEntry::Model {
+                provider_key: "test".to_string(),
+                model: ModelConfig {
+                    id: "tiny-model".to_string(),
+                    name: None,
+                    limit: 1_000,
+                    thinking: true,
+                },
+            }],
+            selected: 0,
+            thinking_idx: 0,
+            active_provider: "test".to_string(),
+            active_model: "tiny-model".to_string(),
+        });
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+    }
+
+    #[test]
+    fn permission_drawer_renders_in_tiny_terminal() {
+        let backend = TestBackend::new(80, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.pending_tool_previews.insert(
+            "read-1".to_string(),
+            ToolPauseRequest {
+                tool_use_id: "read-1".to_string(),
+                preview_tool_use_id: None,
+                tool_name: "read".to_string(),
+                permission_source: None,
+                source_session_id: None,
+                source_agent_label: None,
+                kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                    file_path: "Cargo.toml".to_string(),
+                })),
+            },
+        );
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
     }
 }

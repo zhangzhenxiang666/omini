@@ -6,10 +6,13 @@ use super::{
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::events::{
-    InteractionRequest, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus, ToolPauseKind,
+    CommandKind, CommandSummary, InteractionRequest, RuntimeToUiEvent, SubagentSnapshot,
+    SubagentStatus, ToolPauseKind,
 };
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use std::collections::VecDeque;
+
+const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
 
 impl UiState {
     pub fn is_run_active(&self) -> bool {
@@ -63,6 +66,7 @@ impl UiState {
     }
 
     pub fn open_interaction_request(&mut self, req: &InteractionRequest) {
+        self.help_drawer = None;
         self.interaction_step = match req {
             InteractionRequest::ModelSelection {
                 providers,
@@ -124,6 +128,91 @@ impl UiState {
                 current_model.clone(),
             )))),
         };
+    }
+
+    pub fn open_help_drawer(&mut self, commands: Vec<CommandSummary>) {
+        self.autocomplete.visible = false;
+        self.mention_autocomplete.visible = false;
+        self.help_drawer = Some(super::HelpDrawerState::new(commands));
+    }
+
+    pub fn close_help_drawer(&mut self) {
+        self.help_drawer = None;
+    }
+
+    pub fn help_next_tab(&mut self) {
+        let Some(drawer) = &mut self.help_drawer else {
+            return;
+        };
+        drawer.tab = match drawer.tab {
+            super::HelpTab::General => super::HelpTab::Commands,
+            super::HelpTab::Commands => super::HelpTab::Skills,
+            super::HelpTab::Skills => super::HelpTab::General,
+        };
+    }
+
+    pub fn help_prev_tab(&mut self) {
+        let Some(drawer) = &mut self.help_drawer else {
+            return;
+        };
+        drawer.tab = match drawer.tab {
+            super::HelpTab::General => super::HelpTab::Skills,
+            super::HelpTab::Commands => super::HelpTab::General,
+            super::HelpTab::Skills => super::HelpTab::Commands,
+        };
+    }
+
+    pub fn help_select_next(&mut self) {
+        let Some(drawer) = &mut self.help_drawer else {
+            return;
+        };
+        match drawer.tab {
+            super::HelpTab::Commands => {
+                let len = command_count(&drawer.commands, CommandKind::Builtin);
+                if len > 0 {
+                    drawer.command_selected = (drawer.command_selected + 1).min(len - 1);
+                }
+            }
+            super::HelpTab::Skills => {
+                let len = command_count(&drawer.commands, CommandKind::Skill);
+                if len > 0 {
+                    drawer.skill_selected = (drawer.skill_selected + 1).min(len - 1);
+                }
+            }
+            super::HelpTab::General => {
+                drawer.general_selected =
+                    (drawer.general_selected + 1).min(GENERAL_HELP_SELECTABLE_COUNT - 1);
+            }
+        }
+    }
+
+    pub fn help_select_prev(&mut self) {
+        let Some(drawer) = &mut self.help_drawer else {
+            return;
+        };
+        match drawer.tab {
+            super::HelpTab::Commands => {
+                drawer.command_selected = drawer.command_selected.saturating_sub(1);
+            }
+            super::HelpTab::Skills => {
+                drawer.skill_selected = drawer.skill_selected.saturating_sub(1);
+            }
+            super::HelpTab::General => {
+                drawer.general_selected = drawer.general_selected.saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn help_page_down(&mut self, amount: usize) {
+        for _ in 0..amount.max(1) {
+            self.help_select_next();
+        }
+    }
+
+    pub fn help_page_up(&mut self, amount: usize) {
+        for _ in 0..amount.max(1) {
+            self.help_select_prev();
+        }
     }
 
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
@@ -350,6 +439,9 @@ impl UiState {
             RuntimeToUiEvent::InteractionRequest(req) => {
                 self.interaction_request = Some(req);
             }
+            RuntimeToUiEvent::ShowHelpDrawer(commands) => {
+                self.open_help_drawer(commands);
+            }
             RuntimeToUiEvent::CommandList(cmds) => {
                 self.autocomplete.all_commands = cmds;
             }
@@ -448,6 +540,14 @@ impl UiState {
         self.agent_status = AgentStatus::Idle;
         self.interaction_step = None;
         self.interaction_request = None;
+        self.help_drawer = None;
         self.scroll_to_bottom();
     }
+}
+
+fn command_count(commands: &[CommandSummary], kind: CommandKind) -> usize {
+    commands
+        .iter()
+        .filter(|command| command.kind == kind)
+        .count()
 }

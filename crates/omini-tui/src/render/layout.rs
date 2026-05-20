@@ -38,7 +38,10 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     super::autocomplete::render_autocomplete(state, frame, chunks[3]);
     super::status::render_footer(state, frame, chunks[4]);
 
-    if state.interaction_step.is_none() && state.active_tool_pause().is_none() {
+    if state.interaction_step.is_none()
+        && state.active_tool_pause().is_none()
+        && state.help_drawer.is_none()
+    {
         super::input::render_input(state, frame, chunks[3]);
     }
 
@@ -46,6 +49,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         super::interactions::render_interaction(state, frame, area);
     }
 
+    super::help_drawer::render_help_drawer(state, frame, area);
     super::permission_drawer::render_permission_drawer(state, frame, area);
 }
 

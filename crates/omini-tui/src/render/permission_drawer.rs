@@ -28,6 +28,12 @@ pub(super) fn render_permission_drawer(
         state.permission_drawer_content_len = 0;
         return;
     };
+    if area.width == 0 || area.height == 0 {
+        state.permission_drawer_area = Rect::default();
+        state.permission_drawer_body_area = Rect::default();
+        state.permission_drawer_content_len = 0;
+        return;
+    }
 
     let project_dir = state.status_bar.cwd.clone();
     let preview_tool_use_id = request
@@ -64,15 +70,16 @@ pub(super) fn render_permission_drawer(
         terminal_cap
             .min(EDIT_PERMISSION_DRAWER_MAX_HEIGHT)
             .min(area.height.saturating_sub(1))
-            .max(7)
+            .max(1)
     } else {
         area.height
             .saturating_sub(4)
             .clamp(7, PERMISSION_DRAWER_MAX_HEIGHT)
+            .min(area.height)
     };
     let desired_height = (scroll_lines.len() as u16)
         .saturating_add(8)
-        .clamp(10, max_height);
+        .clamp(1, max_height.min(area.height));
     let body_height = desired_height.saturating_sub(7) as usize;
     let scroll_line_count = scroll_lines.len();
     let max_scroll = scroll_line_count.saturating_sub(body_height);
@@ -128,20 +135,24 @@ pub(super) fn render_permission_drawer(
             height: 1,
         },
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            title,
-            Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        ))),
-        Rect {
-            x: drawer_area.x,
-            y: drawer_area.y + 1,
-            width: drawer_area.width,
-            height: 1,
-        },
-    );
+    if drawer_area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                title,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ))),
+            Rect {
+                x: drawer_area.x,
+                y: drawer_area.y + 1,
+                width: drawer_area.width,
+                height: 1,
+            },
+        );
+    }
 
-    if let Some(header) = fixed_header {
+    if drawer_area.height > 3
+        && let Some(header) = fixed_header
+    {
         frame.render_widget(
             Paragraph::new(header),
             Rect {
@@ -153,9 +164,11 @@ pub(super) fn render_permission_drawer(
         );
     }
 
-    let paragraph = Paragraph::new(Text::from(visible_lines));
-    frame.render_widget(paragraph, body_area);
-    if max_scroll > 0 {
+    if body_area.width > 0 && body_area.height > 0 && body_area.y < drawer_area.bottom() {
+        let paragraph = Paragraph::new(Text::from(visible_lines));
+        frame.render_widget(paragraph, body_area);
+    }
+    if max_scroll > 0 && body_area.width > 0 && body_area.height > 0 {
         render_permission_scrollbar(frame, body_area, scroll_y, scroll_line_count);
     }
 
@@ -174,15 +187,17 @@ pub(super) fn render_permission_drawer(
         ToolPauseKind::Permission(_) => build_permission_action_lines(state, &request),
         ToolPauseKind::UserInput(preview) => build_user_input_action_lines(state, preview),
     };
-    frame.render_widget(
-        Paragraph::new(options),
-        Rect {
-            x: drawer_area.x + 3,
-            y: drawer_area.y + drawer_area.height.saturating_sub(3),
-            width: drawer_area.width.saturating_sub(6),
-            height: 2,
-        },
-    );
+    if drawer_area.height > 2 {
+        frame.render_widget(
+            Paragraph::new(options),
+            Rect {
+                x: drawer_area.x + 3,
+                y: drawer_area.y + drawer_area.height.saturating_sub(3),
+                width: drawer_area.width.saturating_sub(6),
+                height: 2.min(drawer_area.height.saturating_sub(2)),
+            },
+        );
+    }
 }
 
 fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) -> Text<'static> {

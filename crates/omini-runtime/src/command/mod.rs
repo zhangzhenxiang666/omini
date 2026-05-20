@@ -10,7 +10,7 @@ pub mod sessions;
 pub mod skill;
 
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandResult, CommandSummary};
+use crate::types::events::{CommandKind, CommandResult, CommandSummary};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -55,6 +55,10 @@ pub trait Command: Send + Sync {
     /// 命令抽屉排序权重，数值越小越靠前。
     fn sort_weight(&self) -> i32 {
         100
+    }
+    /// 命令类别，用于 UI 将内置命令和 skill 命令分组展示。
+    fn kind(&self) -> CommandKind {
+        CommandKind::Builtin
     }
     /// 执行命令。
     async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult;
@@ -115,6 +119,7 @@ impl CommandRegistry {
                 aliases: cmd.aliases().iter().map(|s| s.to_string()).collect(),
                 description: cmd.description().to_string(),
                 sort_weight: cmd.sort_weight(),
+                kind: cmd.kind(),
                 has_args: cmd.has_args(),
                 args_description: cmd.args_description(),
             })
@@ -180,6 +185,7 @@ mod tests {
         let command = registry.get("skill-creator").unwrap();
         assert!(command.has_args());
         assert_eq!(command.args_description(), Some("[prompt]"));
+        assert_eq!(command.kind(), CommandKind::Skill);
         assert!(
             command
                 .description()

@@ -265,7 +265,7 @@ fn command_args_hint(state: &UiState) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::events::CommandSummary;
+    use crate::types::events::{CommandKind, CommandSummary};
 
     fn command(
         name: &str,
@@ -277,6 +277,7 @@ mod tests {
             aliases: Vec::new(),
             description: String::new(),
             sort_weight: 0,
+            kind: CommandKind::Builtin,
             has_args,
             args_description,
         }

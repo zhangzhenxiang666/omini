@@ -2,7 +2,7 @@ use super::state::{
     AgentCreateStep, AgentGenerateReturn, AgentManagerView, AgentModelEntry, AgentStatus,
     InteractionStep, ModelSelectionEntry, UiMessage, UiState,
 };
-use crate::subagents::AgentSourceKind;
+use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use crate::types::events::{ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
@@ -442,6 +442,10 @@ async fn autosave_agent_edit(
     manager: &super::state::AgentManagerState,
     request_tx: &mpsc::Sender<UiToRuntimeEvent>,
 ) {
+    if !agent_edit_has_changes(manager) {
+        return;
+    }
+
     let draft = manager.to_agent_draft();
     let _ = request_tx
         .send(UiToRuntimeEvent::AgentSaveRequested {
@@ -450,6 +454,44 @@ async fn autosave_agent_edit(
             draft,
         })
         .await;
+}
+
+fn agent_edit_has_changes(manager: &super::state::AgentManagerState) -> bool {
+    let draft = manager.to_agent_draft();
+    let Some(record) = original_agent_record(manager) else {
+        return true;
+    };
+    !agent_record_matches_draft(record, &draft)
+}
+
+fn original_agent_record(manager: &super::state::AgentManagerState) -> Option<&AgentRecord> {
+    if let Some(original_path) = manager.draft.original_path.as_deref() {
+        return manager
+            .records
+            .iter()
+            .find(|record| record.path.as_deref() == Some(original_path));
+    }
+
+    manager.records.iter().find(|record| {
+        record.source_kind == manager.draft.source_kind && record.name == manager.draft.name
+    })
+}
+
+fn agent_record_matches_draft(record: &AgentRecord, draft: &AgentDraft) -> bool {
+    record.name.trim() == draft.name
+        && record.description.trim() == draft.description
+        && record.instructions.trim() == draft.instructions
+        && comparable_tools(&record.tools) == draft.tools
+        && comparable_tools(&record.disallow_tools) == draft.disallow_tools
+        && record.model == draft.model
+}
+
+fn comparable_tools(tools: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|tool| tool.as_str() != "subagent")
+        .cloned()
+        .collect()
 }
 
 async fn handle_agent_create_enter(
@@ -665,8 +707,8 @@ fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState
         }
         1 => toggle_allow_group(manager, &["search", "read"]),
         2 => toggle_allow_group(manager, &["bash", "edit", "write"]),
-        AGENT_ALLOW_TOOL_START..=8 => {
-            let tool = AGENT_TOOL_NAMES[manager.tool_selected - AGENT_ALLOW_TOOL_START];
+        selected if (AGENT_ALLOW_TOOL_START..AGENT_DENY_TOOL_START).contains(&selected) => {
+            let tool = AGENT_TOOL_NAMES[selected - AGENT_ALLOW_TOOL_START];
             if manager.draft.tools.is_empty() {
                 toggle_tool(&mut manager.draft.disallow_tools, tool);
             } else {
@@ -674,8 +716,8 @@ fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState
                 manager.draft.disallow_tools.retain(|item| item != tool);
             }
         }
-        AGENT_DENY_TOOL_START..=14 => {
-            let tool = AGENT_TOOL_NAMES[manager.tool_selected - AGENT_DENY_TOOL_START];
+        selected if (AGENT_DENY_TOOL_START..AGENT_TOOL_ROW_COUNT).contains(&selected) => {
+            let tool = AGENT_TOOL_NAMES[selected - AGENT_DENY_TOOL_START];
             if manager.draft.disallow_tools.iter().any(|item| item == tool) {
                 manager.draft.disallow_tools.retain(|item| item != tool);
             } else {
@@ -863,6 +905,30 @@ pub(super) fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AgentManagerState;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn manager_with_tool_selected(tool_selected: usize) -> AgentManagerState {
+        let mut manager =
+            AgentManagerState::new(Vec::new(), HashMap::new(), String::new(), String::new());
+        manager.tool_selected = tool_selected;
+        manager
+    }
+
+    fn editable_agent_record() -> AgentRecord {
+        AgentRecord {
+            name: "code-review".to_string(),
+            description: "Review code changes.".to_string(),
+            instructions: "Read the diff carefully.".to_string(),
+            tools: vec!["read".to_string()],
+            disallow_tools: vec!["write".to_string()],
+            model: Some("openai/gpt-test".to_string()),
+            source_kind: AgentSourceKind::Project,
+            path: Some(PathBuf::from("/tmp/code-review.md")),
+            editable: true,
+        }
+    }
 
     #[test]
     fn newline_key_accepts_shift_enter_and_ctrl_j_forms() {
@@ -875,5 +941,67 @@ mod tests {
     fn newline_key_rejects_plain_enter_and_intervention_key() {
         assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn toggle_allow_tool_handles_last_tool_row() {
+        let mut manager = manager_with_tool_selected(9);
+        manager.draft.tools = vec!["read".to_string()];
+
+        toggle_agent_tool_group_or_item(&mut manager);
+
+        assert!(manager.draft.tools.iter().any(|tool| tool == "skill"));
+        assert!(
+            !manager
+                .draft
+                .disallow_tools
+                .iter()
+                .any(|tool| tool == "skill")
+        );
+    }
+
+    #[test]
+    fn toggle_deny_tool_handles_last_tool_row() {
+        let mut manager = manager_with_tool_selected(16);
+
+        toggle_agent_tool_group_or_item(&mut manager);
+
+        assert!(
+            manager
+                .draft
+                .disallow_tools
+                .iter()
+                .any(|tool| tool == "skill")
+        );
+        assert!(!manager.draft.tools.iter().any(|tool| tool == "skill"));
+    }
+
+    #[test]
+    fn unchanged_agent_edit_is_not_dirty() {
+        let record = editable_agent_record();
+        let mut manager = AgentManagerState::new(
+            vec![record.clone()],
+            HashMap::new(),
+            String::new(),
+            String::new(),
+        );
+        manager.start_edit(record);
+
+        assert!(!agent_edit_has_changes(&manager));
+    }
+
+    #[test]
+    fn changed_agent_edit_is_dirty() {
+        let record = editable_agent_record();
+        let mut manager = AgentManagerState::new(
+            vec![record.clone()],
+            HashMap::new(),
+            String::new(),
+            String::new(),
+        );
+        manager.start_edit(record);
+        manager.draft.description.push_str(" Extra.");
+
+        assert!(agent_edit_has_changes(&manager));
     }
 }
