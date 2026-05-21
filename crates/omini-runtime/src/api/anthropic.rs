@@ -363,6 +363,7 @@ fn system_with_cache_control(system_prompt: &str) -> Value {
 
 fn messages_with_cache_control(messages: &[Message]) -> Result<Value, serde_json::Error> {
     let mut value = serde_json::to_value(messages)?;
+    strip_tool_result_metadata(&mut value);
     if let Some(content_block) = value
         .as_array_mut()
         .and_then(|messages| messages.last_mut())
@@ -374,4 +375,58 @@ fn messages_with_cache_control(messages: &[Message]) -> Result<Value, serde_json
         content_block.insert("cache_control".to_string(), cache_control());
     }
     Ok(value)
+}
+
+fn strip_tool_result_metadata(value: &mut Value) {
+    let Some(messages) = value.as_array_mut() else {
+        return;
+    };
+
+    for message in messages {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("tool_result")
+                && let Some(object) = block.as_object_mut()
+            {
+                object.remove("metadata");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::message::{ContentBlock, ToolResultBlock};
+
+    #[test]
+    fn messages_with_cache_control_strips_tool_result_metadata() {
+        let mut metadata = Map::new();
+        metadata.insert("permission_denied".to_string(), serde_json::json!(true));
+        let messages = vec![Message::new(
+            Role::User,
+            vec![ContentBlock::ToolResult(ToolResultBlock {
+                tool_use_id: "toolu_1".to_string(),
+                is_error: true,
+                content: "Permission denied for tool: bash".to_string(),
+                metadata: Some(metadata),
+            })],
+        )];
+
+        let value = messages_with_cache_control(&messages).expect("messages serialize");
+        let tool_result = value
+            .as_array()
+            .and_then(|messages| messages.first())
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|content| content.first())
+            .and_then(Value::as_object)
+            .expect("tool result object");
+
+        assert!(!tool_result.contains_key("metadata"));
+        assert!(tool_result.contains_key("cache_control"));
+    }
 }

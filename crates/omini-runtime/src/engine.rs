@@ -404,16 +404,24 @@ impl QueryEngine {
                 }
             };
 
+            let mut stop_after_permission_denial = false;
             if !tool_results.is_empty() {
                 had_tool_use = true;
                 // 按 assistant 消息中 tool_use 的顺序重排 tool_result
                 let result_blocks = Self::order_tool_results_for_message(
                     ctx.messages.last().expect("assistant message just pushed"),
                     tool_results,
-                )
-                .into_iter()
-                .map(ContentBlock::ToolResult)
-                .collect();
+                );
+                stop_after_permission_denial = Self::has_main_user_permission_denial_without_note(
+                    ctx.runtime_context
+                        .as_ref()
+                        .map(|runtime| runtime.session_type.as_str()),
+                    &result_blocks,
+                );
+                let result_blocks = result_blocks
+                    .into_iter()
+                    .map(ContentBlock::ToolResult)
+                    .collect();
                 let tool_msg = Message::new(Role::User, result_blocks);
                 let _ = event_tx
                     .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
@@ -427,6 +435,13 @@ impl QueryEngine {
             let had_intervention = self
                 .drain_pending_user_messages(ctx.messages, &event_tx)
                 .await;
+
+            if Self::should_stop_after_permission_denial(
+                stop_after_permission_denial,
+                had_intervention,
+            ) {
+                break;
+            }
 
             // 如果 LLM 没有请求 tool 调用，结束循环
             if !had_intervention && !matches!(finish_reason, FinishReason::ToolUse) {
@@ -515,6 +530,45 @@ impl QueryEngine {
                 .await;
         }
         injected
+    }
+
+    fn has_main_user_permission_denial_without_note(
+        runtime_session_type: Option<&str>,
+        tool_results: &[ToolResultBlock],
+    ) -> bool {
+        if runtime_session_type != Some("main") {
+            return false;
+        }
+
+        tool_results
+            .iter()
+            .any(Self::is_user_permission_denial_without_note)
+    }
+
+    fn should_stop_after_permission_denial(
+        has_permission_denial_without_note: bool,
+        had_intervention: bool,
+    ) -> bool {
+        has_permission_denial_without_note && !had_intervention
+    }
+
+    fn is_user_permission_denial_without_note(result: &ToolResultBlock) -> bool {
+        let Some(metadata) = &result.metadata else {
+            return false;
+        };
+
+        metadata
+            .get("permission_denial_source")
+            .and_then(|value| value.as_str())
+            == Some("user")
+            && metadata
+                .get("permission_denied")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+            && !metadata
+                .get("user_note_present")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
     }
 
     fn push_text_delta(blocks: &mut Vec<ContentBlock>, delta: &str) {
@@ -735,6 +789,26 @@ mod tests {
     use super::*;
     use crate::types::message::ToolUseBlock;
 
+    fn permission_denied_tool_result(user_note_present: bool) -> ToolResultBlock {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("permission_denied".to_string(), serde_json::json!(true));
+        metadata.insert(
+            "user_note_present".to_string(),
+            serde_json::json!(user_note_present),
+        );
+        metadata.insert(
+            "permission_denial_source".to_string(),
+            serde_json::json!("user"),
+        );
+
+        ToolResultBlock {
+            tool_use_id: "toolu_denied".to_string(),
+            is_error: true,
+            content: "Permission denied for tool: bash".to_string(),
+            metadata: Some(metadata),
+        }
+    }
+
     fn text_from_message(msg: &Message) -> String {
         msg.content
             .iter()
@@ -744,6 +818,61 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    #[test]
+    fn main_user_permission_denial_without_note_stops_next_query() {
+        let tool_results = vec![permission_denied_tool_result(false)];
+
+        assert!(QueryEngine::has_main_user_permission_denial_without_note(
+            Some("main"),
+            &tool_results
+        ));
+        assert!(QueryEngine::should_stop_after_permission_denial(
+            true, false
+        ));
+    }
+
+    #[test]
+    fn main_user_permission_denial_with_note_continues_next_query() {
+        let tool_results = vec![permission_denied_tool_result(true)];
+
+        assert!(!QueryEngine::has_main_user_permission_denial_without_note(
+            Some("main"),
+            &tool_results
+        ));
+    }
+
+    #[test]
+    fn main_user_permission_denial_with_intervention_continues_next_query() {
+        assert!(!QueryEngine::should_stop_after_permission_denial(
+            true, true
+        ));
+    }
+
+    #[test]
+    fn subagent_user_permission_denial_without_note_continues_next_query() {
+        let tool_results = vec![permission_denied_tool_result(false)];
+
+        assert!(!QueryEngine::has_main_user_permission_denial_without_note(
+            Some("subagent"),
+            &tool_results
+        ));
+    }
+
+    #[test]
+    fn configured_permission_denial_continues_next_query() {
+        let tool_results = vec![ToolResultBlock {
+            tool_use_id: "toolu_denied".to_string(),
+            is_error: true,
+            content: "denied by config".to_string(),
+            metadata: None,
+        }];
+
+        assert!(!QueryEngine::has_main_user_permission_denial_without_note(
+            Some("main"),
+            &tool_results
+        ));
     }
 
     #[tokio::test]

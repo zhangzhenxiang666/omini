@@ -46,8 +46,14 @@ fn clean_json_error(e: &serde_json::Error) -> String {
 
 fn permission_denied_result(tool_name: &str, note: Option<&str>) -> ToolResult {
     let message = format!("Permission denied for tool: {tool_name}");
+    let user_note_present = note.map(str::trim).is_some_and(|note| !note.is_empty());
+    let metadata = tool_metadata([
+        ("permission_denied", serde_json::json!(true)),
+        ("user_note_present", serde_json::json!(user_note_present)),
+        ("permission_denial_source", serde_json::json!("user")),
+    ]);
     let Some(note) = note.map(str::trim).filter(|note| !note.is_empty()) else {
-        return ToolResult::error(message);
+        return ToolResult::error(message).with_metadata(metadata);
     };
 
     let value = serde_json::json!({
@@ -57,6 +63,7 @@ fn permission_denied_result(tool_name: &str, note: Option<&str>) -> ToolResult {
         "required_action": "retry_with_user_guidance",
     });
     ToolResult::error(serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()))
+        .with_metadata(metadata)
 }
 
 /// 工具执行后的内部结果
@@ -751,6 +758,13 @@ mod tests {
 
         assert!(result.is_error);
         assert_eq!(result.output, "Permission denied for tool: bash");
+        let metadata = result.metadata.expect("permission denial metadata");
+        assert_eq!(metadata["permission_denied"], serde_json::json!(true));
+        assert_eq!(metadata["user_note_present"], serde_json::json!(false));
+        assert_eq!(
+            metadata["permission_denial_source"],
+            serde_json::json!("user")
+        );
     }
 
     #[test]
@@ -767,6 +781,13 @@ mod tests {
         assert!(value.get("tool").is_none());
         assert!(value.get("next_step").is_none());
         assert!(value.get("user_note").is_none());
+        let metadata = result.metadata.expect("permission denial metadata");
+        assert_eq!(metadata["permission_denied"], serde_json::json!(true));
+        assert_eq!(metadata["user_note_present"], serde_json::json!(true));
+        assert_eq!(
+            metadata["permission_denial_source"],
+            serde_json::json!("user")
+        );
     }
 
     #[test]
