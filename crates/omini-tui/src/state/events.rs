@@ -329,8 +329,9 @@ impl UiState {
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {
                 self.reset_permission_drawer();
-                if let ToolPauseKind::UserInput(preview) = &req.kind {
-                    self.prepare_user_input_preview(preview);
+                match &req.kind {
+                    ToolPauseKind::Permission(_) => self.prepare_permission_pause(),
+                    ToolPauseKind::UserInput(preview) => self.prepare_user_input_preview(preview),
                 }
                 self.pending_tool_previews
                     .insert(req.tool_use_id.clone(), req);

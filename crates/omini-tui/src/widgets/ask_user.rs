@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{spinner, word_wrap};
+use super::{spinner, tool_error_display_text, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -56,7 +56,8 @@ pub(super) fn render(
         && tr.is_error
     {
         let wrap_width = content_width.saturating_sub(2).max(1);
-        for wl in word_wrap(&tr.content, wrap_width) {
+        let display = tool_error_display_text(&tr.content);
+        for wl in word_wrap(&display, wrap_width) {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(wl, Style::default().fg(error)),

@@ -146,6 +146,20 @@ fn tool_pause_pauses_timer_until_result_removes_last_preview() {
 }
 
 #[test]
+fn permission_pause_prepares_single_note_slot() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+
+    assert_eq!(state.user_input_notes, vec![String::new()]);
+    assert_eq!(state.user_input_note_cursors, vec![0]);
+    assert!(!state.user_input_note_mode);
+    assert_eq!(state.permission_selected, 0);
+}
+
+#[test]
 fn subagent_spawn_tool_error_finishes_running_state() {
     let mut state = UiState::new();
     start_subagent(&mut state);

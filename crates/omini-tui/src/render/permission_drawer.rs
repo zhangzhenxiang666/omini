@@ -2,7 +2,7 @@ use super::*;
 
 struct DrawerLines {
     lines: Vec<Line<'static>>,
-    note_line_index: Option<usize>,
+    note_line: Option<Line<'static>>,
     note_cursor_column: Option<usize>,
 }
 
@@ -44,7 +44,7 @@ pub(super) fn render_permission_drawer(
     let content_width = area.width.saturating_sub(6) as usize;
     let DrawerLines {
         lines,
-        note_line_index,
+        note_line,
         note_cursor_column,
     } = build_permission_drawer_lines(PermissionDrawerLinesInput {
         request: &request,
@@ -59,6 +59,7 @@ pub(super) fn render_permission_drawer(
     });
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
+    let note_height = if note_line.is_some() { 1 } else { 0 };
     let is_edit_preview = matches!(
         request.kind,
         ToolPauseKind::Permission(PermissionPreview::Edit(_))
@@ -79,8 +80,9 @@ pub(super) fn render_permission_drawer(
     };
     let desired_height = (scroll_lines.len() as u16)
         .saturating_add(8)
+        .saturating_add(note_height)
         .clamp(1, max_height.min(area.height));
-    let body_height = desired_height.saturating_sub(7) as usize;
+    let body_height = desired_height.saturating_sub(7 + note_height) as usize;
     let scroll_line_count = scroll_lines.len();
     let max_scroll = scroll_line_count.saturating_sub(body_height);
     let capped_offset = state.permission_scroll_offset.min(max_scroll);
@@ -172,15 +174,22 @@ pub(super) fn render_permission_drawer(
         render_permission_scrollbar(frame, body_area, scroll_y, scroll_line_count);
     }
 
-    if state.user_input_note_mode
-        && let (Some(note_line_idx), Some(note_cursor_column)) =
-            (note_line_index, note_cursor_column)
-        && note_line_idx >= scroll_y
-        && note_line_idx < scroll_y + body_height
-    {
-        let cursor_x = body_area.x + note_cursor_column as u16;
-        let cursor_y = body_area.y + (note_line_idx - scroll_y) as u16;
-        frame.set_cursor_position((cursor_x, cursor_y));
+    let note_area = note_line.as_ref().and_then(|_| {
+        (drawer_area.height > 4).then_some(Rect {
+            x: drawer_area.x + 3,
+            y: drawer_area.y + drawer_area.height.saturating_sub(4),
+            width: drawer_area.width.saturating_sub(6),
+            height: 1,
+        })
+    });
+    if let (Some(note_line), Some(note_area)) = (note_line, note_area) {
+        frame.render_widget(Paragraph::new(note_line), note_area);
+        if state.user_input_note_mode
+            && let Some(note_cursor_column) = note_cursor_column
+        {
+            let cursor_x = note_area.x + note_cursor_column as u16;
+            frame.set_cursor_position((cursor_x, note_area.y));
+        }
     }
 
     let options = match &request.kind {
@@ -201,6 +210,19 @@ pub(super) fn render_permission_drawer(
 }
 
 fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) -> Text<'static> {
+    if state.user_input_note_mode {
+        return Text::from(vec![Line::from(vec![
+            Span::styled(
+                "Tab 或 Esc ",
+                Style::default().fg(Color::Rgb(140, 145, 155)),
+            ),
+            Span::styled("结束备注", Style::default().fg(Color::Rgb(140, 145, 155))),
+            Span::raw(" | "),
+            Span::styled("Enter ", Style::default().fg(Color::Rgb(140, 145, 155))),
+            Span::styled("拒绝请求", Style::default().fg(Color::Rgb(140, 145, 155))),
+        ])]);
+    }
+
     let yes_style = permission_option_style(state.permission_selected == 0);
     let no_style = permission_option_style(state.permission_selected == 1);
     let (yes_desc, no_desc) = permission_option_descriptions(request);
@@ -216,7 +238,7 @@ fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) ->
             Span::styled("2. ", no_style),
             Span::styled(format!("{:<3}", "No"), no_style),
             Span::raw("   "),
-            Span::styled(no_desc, desc_style),
+            Span::styled(format!("{no_desc} · Tab note"), desc_style),
         ]),
     ])
 }
@@ -370,7 +392,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             ]));
             DrawerLines {
                 lines,
-                note_line_index: None,
+                note_line: None,
                 note_cursor_column: None,
             }
         }
@@ -385,7 +407,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line_index: None,
+                note_line: None,
                 note_cursor_column: None,
             }
         }
@@ -400,7 +422,7 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line_index: None,
+                note_line: None,
                 note_cursor_column: None,
             }
         }
@@ -419,20 +441,20 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line_index: None,
+                note_line: None,
                 note_cursor_column: None,
             }
         }
         ToolPauseKind::Permission(_preview) => DrawerLines {
             lines: vec![Line::from("")],
-            note_line_index: None,
+            note_line: None,
             note_cursor_column: None,
         },
         ToolPauseKind::UserInput(preview) => {
             let Some(question) = preview.questions.get(question_index) else {
                 return DrawerLines {
                     lines: vec![Line::from("缺少问题")],
-                    note_line_index: None,
+                    note_line: None,
                     note_cursor_column: None,
                 };
             };
@@ -452,29 +474,39 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 &format!("{}. {}", question.options.len() + 1, USER_INPUT_NONE_LABEL),
                 USER_INPUT_NONE_DESCRIPTION,
             ));
-            let mut note_line_index = None;
-            let mut note_cursor_column = None;
-            if user_input_note_mode || !current_user_input_note.is_empty() {
-                lines.push(Line::from(""));
-                note_line_index = Some(lines.len().saturating_sub(1));
-                note_cursor_column = Some(user_input_note_cursor_column(
-                    current_user_input_note,
-                    user_input_note_cursor,
-                ));
-                lines.push(user_input_note_line(
-                    current_user_input_note,
-                    user_input_note_mode,
-                ));
-            }
-            DrawerLines {
+            let mut drawer = DrawerLines {
                 lines,
-                note_line_index,
-                note_cursor_column,
-            }
+                note_line: None,
+                note_cursor_column: None,
+            };
+            set_note_line(
+                &mut drawer,
+                current_user_input_note,
+                user_input_note_cursor,
+                user_input_note_mode,
+            );
+            drawer
         }
     };
+    if matches!(&request.kind, ToolPauseKind::Permission(_)) {
+        set_note_line(
+            &mut drawer,
+            current_user_input_note,
+            user_input_note_cursor,
+            user_input_note_mode,
+        );
+    }
     add_permission_source_line(&mut drawer, request);
     drawer
+}
+
+fn set_note_line(drawer: &mut DrawerLines, note: &str, cursor: usize, editing: bool) {
+    if !editing && note.is_empty() {
+        return;
+    }
+
+    drawer.note_line = Some(user_input_note_line(note, editing));
+    drawer.note_cursor_column = Some(user_input_note_cursor_column(note, cursor));
 }
 
 fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseRequest) {
@@ -532,9 +564,6 @@ fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseReque
         return;
     }
     drawer.lines.insert(insert_at, Line::from(""));
-    if let Some(index) = drawer.note_line_index.as_mut() {
-        *index += insert_at;
-    }
 }
 
 fn user_input_note_line(note: &str, editing: bool) -> Line<'static> {
@@ -652,6 +681,58 @@ fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUs
             ContentBlock::ToolUse(tu) if tu.id == tool_use_id => Some(tu),
             _ => None,
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn permission_request() -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: "tool_1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "write".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+                tool_name: "write".to_string(),
+                payload: serde_json::Map::new(),
+            }),
+        }
+    }
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn permission_note_is_fixed_outside_scroll_lines() {
+        let request = permission_request();
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 80,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "Use English comments",
+            user_input_note_cursor: 3,
+            user_input_note_mode: true,
+        });
+
+        let note_line = drawer.note_line.as_ref().expect("note line should render");
+        assert!(line_text(note_line).contains("Use English comments"));
+        assert!(
+            !drawer
+                .lines
+                .iter()
+                .any(|line| line_text(line).contains("Use English comments"))
+        );
+    }
 }
 
 // ===========================================================================

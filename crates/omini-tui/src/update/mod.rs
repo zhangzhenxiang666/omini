@@ -30,6 +30,111 @@ impl UpdateOutcome {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::events::{PermissionPreview, ToolPauseRequest};
+
+    fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+                tool_name: "bash".to_string(),
+                payload: serde_json::Map::new(),
+            }),
+        }
+    }
+
+    fn state_with_permission_pause() -> UiState {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+            "tool_1",
+        )));
+        state
+    }
+
+    async fn recv_pause_response(rx: &mut mpsc::Receiver<UiToRuntimeEvent>) -> ToolPauseResponse {
+        let Some(UiToRuntimeEvent::ResolveToolPause { response, .. }) = rx.recv().await else {
+            panic!("expected tool pause response");
+        };
+        response
+    }
+
+    #[tokio::test]
+    async fn tab_starts_permission_deny_note_mode() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+
+        assert!(state.user_input_note_mode);
+        assert_eq!(state.permission_selected, 1);
+        assert_eq!(state.current_user_input_note(), "");
+    }
+
+    #[tokio::test]
+    async fn permission_deny_note_is_sent_on_enter() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        for c in "Need context".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+        handle_tool_pause_key(&mut state, KeyCode::Enter, &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            ToolPauseResponse::Permission {
+                approved: false,
+                note: Some("Need context".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_esc_denies_without_note() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Esc, &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            ToolPauseResponse::Permission {
+                approved: false,
+                note: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_approval_ignores_stale_note() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        for c in "Do not run".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        handle_tool_pause_key(&mut state, KeyCode::Char('y'), &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            ToolPauseResponse::Permission {
+                approved: true,
+                note: None,
+            }
+        );
+    }
+}
+
 pub(super) async fn handle_input_event(
     state: &mut UiState,
     event: Event,
@@ -204,10 +309,16 @@ async fn handle_tool_pause_key(
             .unwrap_or(0),
         ToolPauseKind::Permission(_) => 1,
     };
+    let is_permission_pause = matches!(&active_pause.kind, ToolPauseKind::Permission(_));
+    let is_user_input_pause = matches!(&active_pause.kind, ToolPauseKind::UserInput(_));
 
     if state.user_input_note_mode {
         match code {
             KeyCode::Tab | KeyCode::Esc => state.user_input_note_mode = false,
+            KeyCode::Enter if is_permission_pause => {
+                state.permission_selected = 1;
+                input::resolve_active_tool_pause(state, request_tx).await;
+            }
             KeyCode::Enter => {
                 state.mark_current_user_input_answered();
                 if state.user_input_unanswered_count() == 0 {
@@ -218,8 +329,10 @@ async fn handle_tool_pause_key(
             }
             KeyCode::Backspace => state.delete_note_before(),
             KeyCode::Delete => state.delete_note_after(),
-            KeyCode::Up | KeyCode::Char('k') => state.permission_select_prev(),
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Up | KeyCode::Char('k') if is_user_input_pause => {
+                state.permission_select_prev()
+            }
+            KeyCode::Down | KeyCode::Char('j') if is_user_input_pause => {
                 state.permission_select_next_with_max(user_input_option_max);
             }
             KeyCode::Char(c) => state.insert_note_char(c),
@@ -237,14 +350,10 @@ async fn handle_tool_pause_key(
         KeyCode::Down | KeyCode::Char('j') => {
             state.permission_select_next_with_max(user_input_option_max);
         }
-        KeyCode::Left | KeyCode::Char('h')
-            if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) =>
-        {
+        KeyCode::Left | KeyCode::Char('h') if is_user_input_pause => {
             state.user_input_question_prev();
         }
-        KeyCode::Right | KeyCode::Char('l')
-            if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) =>
-        {
+        KeyCode::Right | KeyCode::Char('l') if is_user_input_pause => {
             state.user_input_question_next();
         }
         KeyCode::PageUp => {
@@ -255,19 +364,20 @@ async fn handle_tool_pause_key(
             let page = 1.max(state.permission_drawer_body_area.height as usize / 2);
             state.permission_scroll_down(page);
         }
-        KeyCode::Tab if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) => {
+        KeyCode::Tab if is_permission_pause => {
+            state.permission_selected = 1;
             state.user_input_note_mode = true;
             state.note_cursor_end();
         }
-        KeyCode::Char('y') | KeyCode::Char('Y')
-            if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
-        {
+        KeyCode::Tab if is_user_input_pause => {
+            state.user_input_note_mode = true;
+            state.note_cursor_end();
+        }
+        KeyCode::Char('y') | KeyCode::Char('Y') if is_permission_pause => {
             state.permission_selected = 0;
             input::resolve_active_tool_pause(state, request_tx).await;
         }
-        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N')
-            if matches!(active_pause.kind, ToolPauseKind::Permission(_)) =>
-        {
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') if is_permission_pause => {
             state.permission_selected = 1;
             input::resolve_active_tool_pause(state, request_tx).await;
         }

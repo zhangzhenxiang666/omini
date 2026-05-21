@@ -207,6 +207,16 @@ impl UiState {
         self.permission_selected = 0;
     }
 
+    pub(super) fn prepare_permission_pause(&mut self) {
+        self.user_input_question_index = 0;
+        self.user_input_selected.clear();
+        self.user_input_answered.clear();
+        self.user_input_notes = vec![String::new()];
+        self.user_input_note_cursors = vec![0];
+        self.user_input_note_mode = false;
+        self.permission_selected = 0;
+    }
+
     pub fn permission_scroll_up(&mut self, lines: usize) {
         self.permission_scroll_offset = self.permission_scroll_offset.saturating_add(lines);
     }

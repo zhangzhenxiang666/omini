@@ -384,8 +384,14 @@ pub enum ToolPauseKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToolPauseResponse {
-    Permission { approved: bool },
-    UserInput { value: Value },
+    Permission {
+        approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    UserInput {
+        value: Value,
+    },
     Cancelled,
 }
 
@@ -444,4 +450,27 @@ pub struct UserInputQuestion {
 pub struct UserInputOption {
     pub label: String,
     pub description: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn permission_response_deserializes_without_note() {
+        let response: ToolPauseResponse = serde_json::from_value(json!({
+            "type": "permission",
+            "approved": false,
+        }))
+        .unwrap();
+
+        assert_eq!(
+            response,
+            ToolPauseResponse::Permission {
+                approved: false,
+                note: None,
+            }
+        );
+    }
 }

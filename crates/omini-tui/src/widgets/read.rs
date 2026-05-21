@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
-use super::{display_path, spinner, word_wrap};
+use super::{display_path, spinner, tool_error_display_text, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -53,7 +53,8 @@ pub(super) fn render(
         && tr.is_error
     {
         let error_style = Style::default().fg(Color::Rgb(255, 100, 100));
-        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(2));
+        let display = tool_error_display_text(&tr.content);
+        let wrapped = word_wrap(&display, content_width.saturating_sub(2));
         for wl in wrapped {
             lines.push(Line::from(vec![Span::styled(wl, error_style)]));
         }

@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{spinner, word_wrap};
+use super::{spinner, tool_error_display_text, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -149,7 +149,8 @@ fn push_tool_error(
     content_width: usize,
     error: Color,
 ) {
-    let message = content.trim();
+    let message = tool_error_display_text(content);
+    let message = message.trim();
     let message = if message.is_empty() {
         "Tool execution failed"
     } else {

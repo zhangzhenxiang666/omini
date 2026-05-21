@@ -7,7 +7,9 @@ use crate::state::{
 use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::events::{PermissionPreview, SubagentStatus, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ContentBlock, TextBlock, ToolResultBlock, ToolUseBlock};
-use crate::widgets::{build_bordered_lines, build_thinking_lines, display_path, render_tool};
+use crate::widgets::{
+    build_bordered_lines, build_thinking_lines, display_path, render_tool, tool_error_display_text,
+};
 use chrono::DateTime;
 use chrono::Local;
 use chrono::Utc;
@@ -1105,8 +1107,13 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     } else {
                         Color::Rgb(100, 200, 130)
                     };
+                    let content = if tr.is_error {
+                        tool_error_display_text(&tr.content)
+                    } else {
+                        tr.content.clone()
+                    };
                     let mut lines =
-                        build_bordered_lines(&tr.content, content_width, color, false, None);
+                        build_bordered_lines(&content, content_width, color, false, None);
                     block_lines.append(&mut lines);
                 }
             }
@@ -1202,8 +1209,13 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     } else {
                         Color::Rgb(100, 200, 130)
                     };
+                    let content = if tr.is_error {
+                        tool_error_display_text(&tr.content)
+                    } else {
+                        tr.content.clone()
+                    };
                     let mut lines =
-                        build_bordered_lines(&tr.content, content_width, color, false, None);
+                        build_bordered_lines(&content, content_width, color, false, None);
                     block_lines.append(&mut lines);
                 }
             }

@@ -798,9 +798,14 @@ pub(super) async fn resolve_active_tool_pause(
     };
 
     let response = match &req.kind {
-        ToolPauseKind::Permission(_) => ToolPauseResponse::Permission {
-            approved: state.permission_selected == 0,
-        },
+        ToolPauseKind::Permission(_) => {
+            let approved = state.permission_selected == 0;
+            let note = (!approved)
+                .then(|| state.current_user_input_note().trim())
+                .filter(|note| !note.is_empty())
+                .map(str::to_string);
+            ToolPauseResponse::Permission { approved, note }
+        }
         ToolPauseKind::UserInput(preview) => {
             let mut answers = serde_json::Map::new();
 

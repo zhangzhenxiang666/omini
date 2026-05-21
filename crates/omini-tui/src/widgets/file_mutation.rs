@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
-use super::{display_path, spinner, word_wrap};
+use super::{display_path, spinner, tool_error_display_text, word_wrap};
 
 const MIN_CONTEXT_LINES_TO_COLLAPSE: usize = 4;
 
@@ -77,7 +77,8 @@ pub(super) fn render_edit(
             Span::raw(format!(" {}", display_file_path)),
         ]));
         let error_style = Style::default().fg(red_fg);
-        let wrapped = word_wrap(&tr.content, w.saturating_sub(2));
+        let display = tool_error_display_text(&tr.content);
+        let wrapped = word_wrap(&display, w.saturating_sub(2));
         for wl in wrapped {
             lines.push(Line::from(vec![
                 Span::raw("  "),
@@ -452,7 +453,8 @@ pub(super) fn render_write(
             Span::styled("Write", Style::default().fg(accent)),
         ]));
         let error_style = Style::default().fg(red_fg);
-        let wrapped = word_wrap(&tr.content, w.saturating_sub(2));
+        let display = tool_error_display_text(&tr.content);
+        let wrapped = word_wrap(&display, w.saturating_sub(2));
         for wl in wrapped {
             lines.push(Line::from(vec![
                 Span::raw("  "),

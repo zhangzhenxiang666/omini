@@ -2,7 +2,7 @@ use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use super::{spinner, word_wrap};
+use super::{spinner, tool_error_display_text, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -34,7 +34,8 @@ pub(super) fn render(
         && tr.is_error
     {
         let error_style = Style::default().fg(Color::Rgb(255, 100, 100));
-        for line in word_wrap(&tr.content, content_width.saturating_sub(2)) {
+        let display = tool_error_display_text(&tr.content);
+        for line in word_wrap(&display, content_width.saturating_sub(2)) {
             lines.push(Line::from(Span::styled(line, error_style)));
         }
     }

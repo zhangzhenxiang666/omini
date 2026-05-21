@@ -44,6 +44,21 @@ fn clean_json_error(e: &serde_json::Error) -> String {
     }
 }
 
+fn permission_denied_result(tool_name: &str, note: Option<&str>) -> ToolResult {
+    let message = format!("Permission denied for tool: {tool_name}");
+    let Some(note) = note.map(str::trim).filter(|note| !note.is_empty()) else {
+        return ToolResult::error(message);
+    };
+
+    let value = serde_json::json!({
+        "error": "permission_denied",
+        "message": message,
+        "user_guidance": note,
+        "required_action": "retry_with_user_guidance",
+    });
+    ToolResult::error(serde_json::to_string(&value).unwrap_or_else(|_| value.to_string()))
+}
+
 /// 工具执行后的内部结果
 #[derive(Debug, Clone)]
 pub struct ToolResult {
@@ -178,7 +193,10 @@ impl ToolExecutionContext {
                 .lock()
                 .expect("pending tool pause mutex poisoned");
             if pending.contains_key(&self.pause_id) {
-                return ToolPauseResponse::Permission { approved: false };
+                return ToolPauseResponse::Permission {
+                    approved: false,
+                    note: None,
+                };
             }
             pending.insert(self.pause_id.clone(), PendingToolPause::Permission(tx));
         }
@@ -412,12 +430,12 @@ impl RegisteredTool {
                                 .request_permission(preview, permission_check.source)
                                 .await
                             {
-                                ToolPauseResponse::Permission { approved: true } => {}
-                                ToolPauseResponse::Permission { approved: false } => {
-                                    return ToolResult::error(format!(
-                                        "Permission denied for tool: {}",
-                                        tool.name()
-                                    ));
+                                ToolPauseResponse::Permission { approved: true, .. } => {}
+                                ToolPauseResponse::Permission {
+                                    approved: false,
+                                    note,
+                                } => {
+                                    return permission_denied_result(tool.name(), note.as_deref());
                                 }
                                 ToolPauseResponse::Cancelled => {
                                     return ToolResult::error("Tool execution cancelled");
@@ -725,5 +743,37 @@ mod tests {
         let search = names.iter().position(|name| name == "search").unwrap();
         let bash = names.iter().position(|name| name == "bash").unwrap();
         assert!(search < bash, "{names:?}");
+    }
+
+    #[test]
+    fn permission_denied_without_note_preserves_plain_message() {
+        let result = permission_denied_result("bash", None);
+
+        assert!(result.is_error);
+        assert_eq!(result.output, "Permission denied for tool: bash");
+    }
+
+    #[test]
+    fn permission_denied_with_note_returns_guidance_content() {
+        let result = permission_denied_result("bash", Some("Please inspect first."));
+        let value: Value = serde_json::from_str(&result.output).unwrap();
+
+        assert!(result.is_error);
+        assert!(!result.output.contains('\n'));
+        assert_eq!(value["error"], "permission_denied");
+        assert_eq!(value["message"], "Permission denied for tool: bash");
+        assert_eq!(value["user_guidance"], "Please inspect first.");
+        assert_eq!(value["required_action"], "retry_with_user_guidance");
+        assert!(value.get("tool").is_none());
+        assert!(value.get("next_step").is_none());
+        assert!(value.get("user_note").is_none());
+    }
+
+    #[test]
+    fn permission_denied_note_uses_json_string_escaping() {
+        let result = permission_denied_result("bash", Some("Use A < B & C > D."));
+        let value: Value = serde_json::from_str(&result.output).unwrap();
+
+        assert_eq!(value["user_guidance"], "Use A < B & C > D.");
     }
 }

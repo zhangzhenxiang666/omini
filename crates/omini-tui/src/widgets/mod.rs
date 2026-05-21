@@ -110,6 +110,37 @@ pub fn build_bordered_lines(
     lines
 }
 
+pub fn tool_error_display_text(content: &str) -> String {
+    if let Some(text) = permission_denied_display_text(content) {
+        return text;
+    }
+
+    content.trim().to_string()
+}
+
+fn permission_denied_display_text(content: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+    let object = value.as_object()?;
+    if object.get("error").and_then(|value| value.as_str()) != Some("permission_denied") {
+        return None;
+    }
+
+    let guidance = object
+        .get("user_guidance")
+        .and_then(|value| value.as_str())
+        .map(collapse_whitespace)
+        .filter(|value| !value.is_empty());
+
+    Some(match guidance {
+        Some(guidance) => format!("Permission denied · {guidance}"),
+        None => "Permission denied".to_string(),
+    })
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
     let path_obj = Path::new(path);
 
@@ -341,5 +372,49 @@ mod tests {
             Some(Color::Rgb(0x42, 0xb3, 0xc2))
         );
         assert_eq!(lines[2].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
+    }
+
+    #[test]
+    fn permission_denied_json_displays_as_guidance_summary() {
+        let content = serde_json::json!({
+            "error": "permission_denied",
+            "message": "Permission denied for tool: write",
+            "user_guidance": "Use English comments.\nAvoid extra changes.",
+            "required_action": "retry_with_user_guidance",
+        })
+        .to_string();
+
+        assert_eq!(
+            tool_error_display_text(&content),
+            "Permission denied · Use English comments. Avoid extra changes."
+        );
+    }
+
+    #[test]
+    fn bash_permission_denied_json_does_not_render_raw_json() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("command".to_string(), serde_json::json!("touch demo"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "bash".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: true,
+            content: serde_json::json!({
+                "error": "permission_denied",
+                "message": "Permission denied for tool: bash",
+                "user_guidance": "Inspect first",
+                "required_action": "retry_with_user_guidance",
+            })
+            .to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+
+        assert_eq!(plain(&lines[1]), "  Permission denied · Inspect first");
+        assert!(!plain(&lines[1]).contains("required_action"));
     }
 }

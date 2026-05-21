@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{display_path, spinner, word_wrap};
+use super::{display_path, spinner, tool_error_display_text, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -61,7 +61,8 @@ pub(super) fn render(
         && tr.is_error
     {
         let error_style = Style::default().fg(error);
-        for line in word_wrap(tr.content.trim(), content_width.saturating_sub(2).max(1)) {
+        let display = tool_error_display_text(&tr.content);
+        for line in word_wrap(&display, content_width.saturating_sub(2).max(1)) {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(line, error_style),
