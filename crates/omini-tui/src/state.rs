@@ -1,7 +1,8 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
-    CommandSummary, InteractionRequest, SubagentSnapshot, SubagentStatus, ToolPauseRequest,
+    ActiveProfile, CommandSummary, InteractionRequest, SubagentSnapshot, SubagentStatus,
+    SubmittedPlan, ToolPauseRequest,
 };
 use crate::types::message::Message;
 use ratatui::layout::Rect;
@@ -178,6 +179,7 @@ impl std::fmt::Display for AgentStatus {
 pub enum UiMessage {
     Message(Message),
     Display(DisplayMessage),
+    ProposedPlan { text: String },
     RunDivider { elapsed: Duration },
     Notice { text: String },
     Warning { text: String },
@@ -214,6 +216,9 @@ impl UiMessage {
             .map(|item| match item {
                 HistoryItem::Message(message) => Self::Message(message),
                 HistoryItem::Display(display) => Self::Display(display),
+                HistoryItem::Plan(plan) => Self::ProposedPlan {
+                    text: plan.markdown,
+                },
             })
             .collect()
     }
@@ -222,6 +227,7 @@ impl UiMessage {
         match self {
             Self::Message(message) => Some(message),
             Self::Display(_)
+            | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notice { .. }
             | Self::Warning { .. }
@@ -233,6 +239,7 @@ impl UiMessage {
         match self {
             Self::Message(message) => Some(message),
             Self::Display(_)
+            | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notice { .. }
             | Self::Warning { .. }
@@ -252,6 +259,8 @@ pub struct StatusBar {
     pub active_provider: String,
     /// 当前工作目录路径
     pub cwd: PathBuf,
+    /// 当前运行 profile
+    pub active_profile: ActiveProfile,
 }
 
 impl Default for StatusBar {
@@ -261,6 +270,7 @@ impl Default for StatusBar {
             thinking_effort: None,
             active_provider: String::new(),
             cwd: PathBuf::new(),
+            active_profile: ActiveProfile::Main,
         }
     }
 }
@@ -299,6 +309,8 @@ pub struct UiState {
     pub messages: Vec<UiMessage>,
     /// 正在流式构建中的 assistant 消息（SSE 实时显示）
     pub pending_assistant: Option<Message>,
+    /// 正在流式构建中的 proposed plan markdown。
+    pub pending_proposed_plan: Option<String>,
     /// 渲染后的消息总行数（用于滚动条计算）
     pub total_lines: usize,
     /// 消息区域的位置和大小
@@ -383,6 +395,10 @@ pub struct UiState {
     pub interaction_step: Option<InteractionStep>,
     /// /help 底部抽屉状态。
     pub help_drawer: Option<HelpDrawerState>,
+    /// 待审批的计划。
+    pub plan_approval: Option<SubmittedPlan>,
+    /// 计划审批抽屉当前选中的操作。
+    pub plan_approval_selected: usize,
 }
 
 impl Default for UiState {
@@ -396,6 +412,7 @@ impl UiState {
         Self {
             messages: Vec::new(),
             pending_assistant: None,
+            pending_proposed_plan: None,
             total_lines: 0,
             messages_area: Rect::default(),
             selectable_message_lines: Vec::new(),
@@ -442,6 +459,8 @@ impl UiState {
             interaction_request: None,
             interaction_step: None,
             help_drawer: None,
+            plan_approval: None,
+            plan_approval_selected: 0,
         }
     }
 

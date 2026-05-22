@@ -5,7 +5,7 @@ use crate::tools::{
     ToolRuntimeContext,
 };
 use crate::types::config::Settings;
-use crate::types::events::{EngineToRuntimeEvent, ToolPauseResponse};
+use crate::types::events::{ActiveProfile, EngineToRuntimeEvent, ToolPauseResponse};
 use crate::types::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
@@ -37,6 +37,7 @@ struct ToolRunControls {
     settings: Arc<Settings>,
     pending_tool_pauses: PendingToolPauses,
     permission_engine: Arc<PermissionEngine>,
+    active_profile: ActiveProfile,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
     runtime_context: Option<Arc<ToolRuntimeContext>>,
@@ -53,6 +54,7 @@ pub struct QueryContext<'a> {
     pub settings: Arc<Settings>,
     pub llm_client: LlmClient,
     pub tool_registry: Arc<ToolRegistry>,
+    pub active_profile: ActiveProfile,
     pub runtime_context: Option<Arc<ToolRuntimeContext>>,
 }
 
@@ -277,6 +279,7 @@ impl QueryEngine {
                                 settings: Arc::clone(&ctx.settings),
                                 pending_tool_pauses,
                                 permission_engine,
+                                active_profile: ctx.active_profile,
                                 cancelled,
                                 cancel_notify,
                                 runtime_context,
@@ -759,6 +762,7 @@ impl QueryEngine {
                 event_tx: event_tx.clone(),
                 pending_tool_pauses: controls.pending_tool_pauses,
                 permission_engine: controls.permission_engine,
+                active_profile: controls.active_profile,
                 cancelled: controls.cancelled,
                 cancel_notify: controls.cancel_notify,
                 runtime: runtime_context,

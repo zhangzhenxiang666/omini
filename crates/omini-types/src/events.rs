@@ -1,12 +1,35 @@
 use crate::config::ProviderProfile;
 use crate::config::ThinkingEffort;
-use crate::display::{DisplayMessage, HistoryItem, UserDraft};
+use crate::display::{DisplayMessage, DisplayPlan, HistoryItem, UserDraft};
 use crate::message::{Message, ToolResultBlock, ToolUseBlock};
 use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveProfile {
+    #[default]
+    Main,
+    Plan,
+}
+
+impl ActiveProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Plan => "plan",
+        }
+    }
+}
+
+impl std::fmt::Display for ActiveProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 // ===========================================================================
 // 第一层：UI → Runtime 的事件
@@ -21,6 +44,8 @@ pub enum UiToRuntimeEvent {
     SendMessage(UserDraft),
     /// 用户执行一条命令
     SendCommand(String),
+    /// 用户切换当前 active profile
+    ToggleActiveProfile,
     /// 用户发送一条消息插入正在运行的 query，在下一轮 LLM 调用前生效
     InterveneMessage(UserDraft),
     /// 用户在模型选择页中确认选择
@@ -51,6 +76,11 @@ pub enum UiToRuntimeEvent {
     ResolveToolPause {
         tool_use_id: String,
         response: ToolPauseResponse,
+    },
+    /// 用户响应计划审批抽屉
+    ResolvePlanApproval {
+        plan_id: String,
+        action: PlanApprovalAction,
     },
 }
 
@@ -92,6 +122,8 @@ pub enum EngineToRuntimeEvent {
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
+    /// 模型提交了计划，runtime 已完成持久化
+    PlanSubmitted(SubmittedPlan),
 
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),
@@ -147,6 +179,8 @@ pub enum RuntimeToUiEvent {
 
     /// 会话标题变更（TUI 头部栏显示用）
     SessionTitleChanged { title: Option<String> },
+    /// 当前 profile 已变更
+    ActiveProfileChanged(ActiveProfile),
     /// 需要 TUI 弹出交互选择页
     InteractionRequest(InteractionRequest),
     /// 需要 TUI 打开帮助抽屉
@@ -175,6 +209,8 @@ pub enum RuntimeToUiEvent {
     ThinkingDelta(String),
     /// text 块流式增量
     TextDelta(String),
+    /// plan mode 中 `<proposed_plan>` 块的流式增量
+    ProposedPlanDelta(String),
 
     /// LLM 发起了工具调用
     ToolUse(ToolUseBlock),
@@ -183,6 +219,8 @@ pub enum RuntimeToUiEvent {
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
+    /// 计划已提交，TUI 应打开计划审批抽屉
+    PlanSubmitted(SubmittedPlan),
 
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),
@@ -247,6 +285,15 @@ pub enum SubagentStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+pub type SubmittedPlan = DisplayPlan;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanApprovalAction {
+    Approve,
+    ApproveAndCompact,
+    ContinueDiscussing,
 }
 
 // ===========================================================================

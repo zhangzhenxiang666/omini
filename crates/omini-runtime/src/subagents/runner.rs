@@ -182,6 +182,7 @@ async fn run_subagent(
                 settings: Arc::clone(&settings),
                 llm_client,
                 tool_registry,
+                active_profile: ctx.active_profile,
                 runtime_context: Some(child_runtime),
             },
             child_tx,
@@ -352,6 +353,11 @@ fn spawn_subagent_bridge(
                 EngineToRuntimeEvent::ToolPauseRequested(req) => {
                     let _ = parent_tx
                         .send(EngineToRuntimeEvent::ToolPauseRequested(req))
+                        .await;
+                }
+                EngineToRuntimeEvent::PlanSubmitted(plan) => {
+                    let _ = parent_tx
+                        .send(EngineToRuntimeEvent::PlanSubmitted(plan))
                         .await;
                 }
                 EngineToRuntimeEvent::Error(e) => {

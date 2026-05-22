@@ -4,8 +4,8 @@ use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::config::Settings;
 use crate::types::events::{
-    EngineToRuntimeEvent, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
-    ToolPauseResponse, UserInputPreview,
+    ActiveProfile, EngineToRuntimeEvent, PermissionPreview, PermissionSource, ToolPauseKind,
+    ToolPauseRequest, ToolPauseResponse, UserInputPreview,
 };
 use crate::types::message::ToolResultBlock;
 use crate::types::tool::ToolDefinition;
@@ -28,6 +28,7 @@ pub mod read_tool;
 pub mod search_tool;
 pub mod skill_tool;
 pub mod subagent_tool;
+pub mod todo_tool;
 pub mod write_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -132,6 +133,7 @@ pub struct ToolExecutionContext {
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_engine: Arc<PermissionEngine>,
+    pub active_profile: ActiveProfile,
     pub cancelled: Arc<AtomicBool>,
     pub cancel_notify: Arc<Notify>,
     pub runtime: Option<Arc<ToolRuntimeContext>>,
@@ -178,6 +180,7 @@ impl ToolExecutionContext {
             permission_engine: Arc::new(PermissionEngine::empty(
                 std::env::current_dir().unwrap_or_else(|_| ".".into()),
             )),
+            active_profile: ActiveProfile::Main,
             cancelled: Arc::new(AtomicBool::new(false)),
             cancel_notify: Arc::new(Notify::new()),
             runtime: None,
@@ -407,6 +410,14 @@ impl RegisteredTool {
                 let tool = Arc::clone(&tool);
                 Box::pin(async move {
                     let raw_input = Value::Object(input.clone().into_iter().collect());
+                    if let Some(check) = ctx
+                        .permission_engine
+                        .profile_policy(ctx.active_profile, tool.name())
+                        && let PermissionDecision::Deny { reason } = check.decision
+                    {
+                        return ToolResult::error(reason);
+                    }
+
                     let input: T::Input = match serde_json::from_value(raw_input.clone()) {
                         Ok(i) => i,
                         Err(e) => {
@@ -422,9 +433,12 @@ impl RegisteredTool {
                     };
 
                     let preview = tool.permission_preview(&prepared);
-                    let permission_check =
-                        ctx.permission_engine
-                            .check(tool.name(), preview.as_ref(), &raw_input);
+                    let permission_check = ctx.permission_engine.check_for_profile(
+                        ctx.active_profile,
+                        tool.name(),
+                        preview.as_ref(),
+                        &raw_input,
+                    );
                     match permission_check.decision {
                         PermissionDecision::Allow => {}
                         PermissionDecision::Deny { reason } => return ToolResult::error(reason),
@@ -669,6 +683,9 @@ fn create_registry_with_allowed(
     if tool_allowed(allowed, "write") {
         registry.register(write_tool::WriteTool);
     }
+    if include_subagent && tool_allowed(allowed, "todo_write") {
+        registry.register(todo_tool::TodoWriteTool);
+    }
     if include_subagent && tool_allowed(allowed, "subagent") {
         registry.register(subagent_tool::SubagentTool);
     }
@@ -688,7 +705,8 @@ fn tool_definition_priority(name: &str) -> usize {
         "bash" => 4,
         "ask_user" => 5,
         "skill" => 6,
-        "subagent" => 7,
+        "todo_write" => 7,
+        "subagent" => 8,
         _ => 100,
     }
 }
@@ -737,6 +755,27 @@ mod tests {
         let registry = create_main_registry();
 
         assert!(registry.contains("search"));
+    }
+
+    #[test]
+    fn main_registry_contains_todo_write_schema() {
+        let definition = create_main_registry()
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "todo_write")
+            .expect("todo_write should be registered");
+
+        let item_properties = definition
+            .input_schema
+            .get("properties")
+            .and_then(|properties| properties.get("todos"))
+            .and_then(|todos| todos.get("items"))
+            .and_then(|items| items.get("properties"))
+            .expect("todo_write items should have properties");
+
+        assert!(item_properties.get("content").is_some());
+        assert!(item_properties.get("status").is_some());
+        assert!(item_properties.get("step").is_none());
     }
 
     #[test]

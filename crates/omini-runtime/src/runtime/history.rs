@@ -1,10 +1,12 @@
 use super::service::RunStart;
 use crate::config::project::{ProjectDir, SessionDir};
 use crate::db::{self, NewMessage};
-use crate::types::display::{DisplayMessage, HistoryItem};
+use crate::types::display::{DisplayMessage, DisplayPlan, HistoryItem};
 use crate::types::events::{SubagentSnapshot, SubagentStatus};
-use crate::types::message::{Message, Role};
-use chrono::Utc;
+use crate::types::message::{ContentBlock, Message, Role};
+use crate::types::proposed_plan::{extract_proposed_plan_text, strip_proposed_plan_blocks};
+use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 use std::path::Path;
 
 pub(super) fn title_text(
@@ -22,6 +24,10 @@ fn history_item_text(item: &HistoryItem) -> Option<String> {
         HistoryItem::Display(display) => {
             let text = display.text.trim();
             (!text.is_empty()).then(|| text.to_string())
+        }
+        HistoryItem::Plan(plan) => {
+            let title = plan.title.trim();
+            (!title.is_empty()).then(|| title.to_string())
         }
     }
 }
@@ -47,12 +53,27 @@ pub(super) async fn load_messages_from_db(session_id: &str, blocks_dir: &Path) -
         }
     };
 
+    let persisted_plan_markdowns = stored
+        .iter()
+        .filter(|sm| sm.kind == "plan")
+        .filter_map(|sm| serde_json::from_str::<DisplayPlan>(&sm.content).ok())
+        .map(|plan| normalized_plan_markdown(&plan.markdown))
+        .collect::<HashSet<_>>();
+
     let mut messages = Vec::with_capacity(stored.len());
     for sm in stored {
         if sm.kind == "display" {
             match serde_json::from_str::<DisplayMessage>(&sm.content) {
                 Ok(display) => messages.push(HistoryItem::Display(display)),
                 Err(e) => eprintln!("load_messages_from_db: parse display failed: {e}"),
+            }
+            continue;
+        }
+
+        if sm.kind == "plan" {
+            match serde_json::from_str::<DisplayPlan>(&sm.content) {
+                Ok(plan) => messages.push(HistoryItem::Plan(plan)),
+                Err(e) => eprintln!("load_messages_from_db: parse plan failed: {e}"),
             }
             continue;
         }
@@ -76,7 +97,17 @@ pub(super) async fn load_messages_from_db(session_id: &str, blocks_dir: &Path) -
                 continue;
             }
         };
-        messages.push(HistoryItem::Message(Message::new(role, blocks)));
+        let (blocks, legacy_plans) = split_embedded_plan_blocks(
+            blocks,
+            role.clone(),
+            &persisted_plan_markdowns,
+            sm.id,
+            sm.created_at,
+        );
+        if !blocks.is_empty() {
+            messages.push(HistoryItem::Message(Message::new(role, blocks)));
+        }
+        messages.extend(legacy_plans.into_iter().map(HistoryItem::Plan));
     }
     messages
 }
@@ -109,7 +140,7 @@ pub(super) async fn load_subagents_for_session(
             .into_iter()
             .filter_map(|item| match item {
                 HistoryItem::Message(message) => Some(message),
-                HistoryItem::Display(_) => None,
+                HistoryItem::Display(_) | HistoryItem::Plan(_) => None,
             })
             .collect();
         subagents.push(SubagentSnapshot {
@@ -188,4 +219,65 @@ pub(super) async fn persist_db_only(session_id: &str, blocks_dir: &Path, msg: &M
         blocks_dir: blocks_dir.to_path_buf(),
     };
     let _ = db::global_db().insert_message(&new_msg).await;
+}
+
+pub(super) async fn persist_plan_db_only(session_id: &str, plan: &DisplayPlan) {
+    let _ = db::global_db().insert_plan_message(session_id, plan).await;
+}
+
+fn split_embedded_plan_blocks(
+    blocks: Vec<ContentBlock>,
+    role: Role,
+    persisted_plan_markdowns: &HashSet<String>,
+    message_id: i64,
+    message_created_at: DateTime<Utc>,
+) -> (Vec<ContentBlock>, Vec<DisplayPlan>) {
+    if role != Role::Assistant {
+        return (blocks, Vec::new());
+    }
+
+    let mut out_blocks = Vec::with_capacity(blocks.len());
+    let mut legacy_plans = Vec::new();
+
+    for block in blocks {
+        let ContentBlock::Text(text_block) = block else {
+            out_blocks.push(block);
+            continue;
+        };
+
+        if let Some(markdown) = extract_proposed_plan_text(&text_block.text) {
+            let markdown = normalized_plan_markdown(&markdown);
+            if !markdown.is_empty() && !persisted_plan_markdowns.contains(&markdown) {
+                let idx = legacy_plans.len() + 1;
+                legacy_plans.push(DisplayPlan {
+                    id: format!("legacy-{message_id}-{idx}"),
+                    title: title_from_markdown(&markdown),
+                    markdown: markdown.clone(),
+                    path: std::path::PathBuf::new(),
+                    created_at: message_created_at,
+                });
+            }
+        }
+
+        let stripped = strip_proposed_plan_blocks(&text_block.text);
+        if !stripped.trim().is_empty() {
+            out_blocks.push(ContentBlock::from_text(stripped));
+        }
+    }
+
+    (out_blocks, legacy_plans)
+}
+
+fn normalized_plan_markdown(markdown: &str) -> String {
+    markdown.trim().to_string()
+}
+
+fn title_from_markdown(markdown: &str) -> String {
+    for line in markdown.lines() {
+        let title = line.trim().trim_start_matches('#').trim();
+        if !title.is_empty() {
+            return title.chars().take(80).collect();
+        }
+    }
+    "Plan".to_string()
 }

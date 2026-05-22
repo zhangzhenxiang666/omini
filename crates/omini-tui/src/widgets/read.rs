@@ -56,7 +56,10 @@ pub(super) fn render(
         let display = tool_error_display_text(&tr.content);
         let wrapped = word_wrap(&display, content_width.saturating_sub(2));
         for wl in wrapped {
-            lines.push(Line::from(vec![Span::styled(wl, error_style)]));
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(wl, error_style),
+            ]));
         }
     }
 

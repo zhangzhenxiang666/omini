@@ -1,0 +1,157 @@
+use crate::config::project::ProjectDir;
+use crate::types::events::{ActiveProfile, RuntimeToUiEvent, SubmittedPlan};
+use crate::types::message::{ContentBlock, Message, Role};
+use crate::types::proposed_plan::{
+    ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text,
+};
+use chrono::Utc;
+use tokio::sync::mpsc;
+
+const CURRENT_PLAN_ID: &str = "plan";
+const CURRENT_PLAN_FILE: &str = "plan.md";
+
+pub(super) struct ProposedPlanForwarder {
+    parser: Option<ProposedPlanParser>,
+}
+
+impl ProposedPlanForwarder {
+    pub(super) fn new(active_profile: ActiveProfile) -> Self {
+        Self {
+            parser: (active_profile == ActiveProfile::Plan).then(ProposedPlanParser::new),
+        }
+    }
+
+    pub(super) async fn forward_text_delta(
+        &mut self,
+        event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+        delta: String,
+    ) {
+        let Some(parser) = self.parser.as_mut() else {
+            let _ = event_tx.send(RuntimeToUiEvent::TextDelta(delta)).await;
+            return;
+        };
+
+        forward_segments(event_tx, parser.push_str(&delta)).await;
+    }
+
+    pub(super) async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToUiEvent>) {
+        let Some(parser) = self.parser.as_mut() else {
+            return;
+        };
+        forward_segments(event_tx, parser.finish()).await;
+    }
+}
+
+async fn forward_segments(
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    segments: Vec<ProposedPlanSegment>,
+) {
+    for segment in segments {
+        match segment {
+            ProposedPlanSegment::Normal(text) if !text.is_empty() => {
+                let _ = event_tx.send(RuntimeToUiEvent::TextDelta(text)).await;
+            }
+            ProposedPlanSegment::ProposedPlanDelta(delta) if !delta.is_empty() => {
+                let _ = event_tx
+                    .send(RuntimeToUiEvent::ProposedPlanDelta(delta))
+                    .await;
+            }
+            ProposedPlanSegment::Normal(_)
+            | ProposedPlanSegment::ProposedPlanStart
+            | ProposedPlanSegment::ProposedPlanDelta(_)
+            | ProposedPlanSegment::ProposedPlanEnd => {}
+        }
+    }
+}
+
+pub(super) fn path(project: &ProjectDir, plan_id: &str) -> std::path::PathBuf {
+    let plans_dir = project.path().join("plans");
+    if plan_id == CURRENT_PLAN_ID {
+        plans_dir.join(CURRENT_PLAN_FILE)
+    } else {
+        // TODO(plan-path): 这里保留旧的时间戳计划文件名兼容。确认不再需要读取旧计划后，
+        // 可以改成忽略 plan_id 并始终返回 plans/plan.md。
+        plans_dir.join(format!("{plan_id}.md"))
+    }
+}
+
+pub(super) fn compacted_context(plan_content: &str) -> String {
+    format!(
+        "Planning context was compacted after user approval.\n\nFinal approved plan:\n{plan_content}\n\nUse this plan as the execution context. Intermediate planning discussion and discarded alternatives were intentionally omitted."
+    )
+}
+
+pub(super) fn approval_message() -> String {
+    "Approved. Implement the proposed plan now.".to_string()
+}
+
+pub(super) async fn persist_latest(
+    project: &ProjectDir,
+    active_profile: ActiveProfile,
+    messages: &[Message],
+) -> Result<Option<SubmittedPlan>, String> {
+    if active_profile != ActiveProfile::Plan {
+        return Ok(None);
+    }
+
+    let Some(message) = messages.last() else {
+        return Ok(None);
+    };
+    if message.role != Role::Assistant {
+        return Ok(None);
+    }
+
+    let text = assistant_text(message);
+    let Some(markdown) = extract_proposed_plan_text(&text) else {
+        return Ok(None);
+    };
+    let markdown = markdown.trim().to_string();
+    if markdown.is_empty() {
+        return Ok(None);
+    }
+
+    let created_at = Utc::now();
+    let title = title_from_markdown(&markdown);
+    let plans_dir = project.path().join("plans");
+    let path = path(project, CURRENT_PLAN_ID);
+
+    tokio::fs::create_dir_all(&plans_dir).await.map_err(|e| {
+        format!(
+            "Failed to create plans directory {}: {e}",
+            plans_dir.display()
+        )
+    })?;
+    // TODO(plan-load): 目前只先把最新计划写入 plans/plan.md。计划加载到
+    // session 的具体方式还未确定，后续明确后再实现。
+    tokio::fs::write(&path, &markdown)
+        .await
+        .map_err(|e| format!("Failed to write plan {}: {e}", path.display()))?;
+
+    Ok(Some(SubmittedPlan {
+        id: CURRENT_PLAN_ID.to_string(),
+        title,
+        markdown,
+        path,
+        created_at,
+    }))
+}
+
+fn assistant_text(message: &Message) -> String {
+    let mut text = String::new();
+    for block in &message.content {
+        if let ContentBlock::Text(tb) = block {
+            text.push_str(&tb.text);
+        }
+    }
+    text
+}
+
+fn title_from_markdown(markdown: &str) -> String {
+    for line in markdown.lines() {
+        let title = line.trim().trim_start_matches('#').trim();
+        if !title.is_empty() {
+            return title.chars().take(80).collect();
+        }
+    }
+    "Plan".to_string()
+}

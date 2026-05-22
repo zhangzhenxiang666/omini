@@ -4,7 +4,9 @@ use super::selection::{
     selected_text, selection_point_from_mouse, update_text_selection_from_mouse,
 };
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
-use crate::types::events::{RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
+use crate::types::events::{
+    PlanApprovalAction, RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent,
+};
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
 
@@ -33,7 +35,11 @@ impl UpdateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::events::{PermissionPreview, ToolPauseRequest};
+    use crate::types::events::{
+        PermissionPreview, PlanApprovalAction, SubmittedPlan, ToolPauseRequest,
+    };
+    use chrono::Utc;
+    use std::path::PathBuf;
 
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
         ToolPauseRequest {
@@ -56,6 +62,16 @@ mod tests {
             "tool_1",
         )));
         state
+    }
+
+    fn submitted_plan() -> SubmittedPlan {
+        SubmittedPlan {
+            id: "20260521T000000Z-plan".to_string(),
+            title: "Plan".to_string(),
+            markdown: "# Plan\n\n- Step".to_string(),
+            path: PathBuf::from("/tmp/plan.md"),
+            created_at: Utc::now(),
+        }
     }
 
     async fn recv_pause_response(rx: &mut mpsc::Receiver<UiToRuntimeEvent>) -> ToolPauseResponse {
@@ -133,6 +149,53 @@ mod tests {
             }
         );
     }
+
+    #[tokio::test]
+    async fn plan_approval_enter_sends_selected_action() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
+        state.plan_approval_selected = 1;
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_plan_approval_key(&mut state, KeyCode::Enter, &tx).await;
+
+        let Some(UiToRuntimeEvent::ResolvePlanApproval { plan_id, action }) = rx.recv().await
+        else {
+            panic!("expected plan approval response");
+        };
+        assert_eq!(plan_id, "20260521T000000Z-plan");
+        assert_eq!(action, PlanApprovalAction::ApproveAndCompact);
+        assert!(state.plan_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn plan_approval_esc_continues_discussion() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_plan_approval_key(&mut state, KeyCode::Esc, &tx).await;
+
+        let Some(UiToRuntimeEvent::ResolvePlanApproval { action, .. }) = rx.recv().await else {
+            panic!("expected plan approval response");
+        };
+        assert_eq!(action, PlanApprovalAction::ContinueDiscussing);
+        assert!(state.plan_approval.is_none());
+    }
+
+    #[tokio::test]
+    async fn shift_tab_sends_profile_toggle() {
+        let mut state = UiState::new();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let handled =
+            handle_key_event(&mut state, KeyCode::BackTab, KeyModifiers::SHIFT, &tx).await;
+
+        assert!(handled);
+        let Some(UiToRuntimeEvent::ToggleActiveProfile) = rx.recv().await else {
+            panic!("expected profile toggle event");
+        };
+    }
 }
 
 pub(super) async fn handle_input_event(
@@ -151,6 +214,7 @@ pub(super) async fn handle_input_event(
         Event::Paste(text)
             if state.interaction_step.is_none()
                 && state.active_tool_pause().is_none()
+                && state.plan_approval.is_none()
                 && state.help_drawer.is_none() =>
         {
             state.insert_paste(text);
@@ -234,6 +298,11 @@ async fn handle_key_event(
         return true;
     }
 
+    if state.plan_approval.is_some() {
+        handle_plan_approval_key(state, code, request_tx).await;
+        return true;
+    }
+
     if code == KeyCode::Esc
         && matches!(
             state.agent_status,
@@ -246,6 +315,11 @@ async fn handle_key_event(
 
     if state.active_tool_pause().is_some() {
         handle_tool_pause_key(state, code, request_tx).await;
+        return true;
+    }
+
+    if is_profile_toggle_key(code, modifiers) {
+        let _ = request_tx.send(UiToRuntimeEvent::ToggleActiveProfile).await;
         return true;
     }
 
@@ -291,6 +365,73 @@ fn handle_help_drawer_key(state: &mut UiState, code: KeyCode, modifiers: KeyModi
         }
         _ => {}
     }
+}
+
+fn is_profile_toggle_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    code == KeyCode::BackTab || (code == KeyCode::Tab && modifiers.contains(KeyModifiers::SHIFT))
+}
+
+async fn handle_plan_approval_key(
+    state: &mut UiState,
+    code: KeyCode,
+    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+) {
+    let Some(plan) = state.plan_approval.as_ref() else {
+        return;
+    };
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            state.plan_approval_selected = state.plan_approval_selected.saturating_sub(1);
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            state.plan_approval_selected = (state.plan_approval_selected + 1).min(2);
+        }
+        KeyCode::Char('1') => {
+            state.plan_approval_selected = 0;
+            submit_plan_approval(state, request_tx).await;
+        }
+        KeyCode::Char('2') => {
+            state.plan_approval_selected = 1;
+            submit_plan_approval(state, request_tx).await;
+        }
+        KeyCode::Char('3') => {
+            state.plan_approval_selected = 2;
+            submit_plan_approval(state, request_tx).await;
+        }
+        KeyCode::Esc => {
+            let plan_id = plan.id.clone();
+            state.plan_approval = None;
+            state.plan_approval_selected = 0;
+            let _ = request_tx
+                .send(UiToRuntimeEvent::ResolvePlanApproval {
+                    plan_id,
+                    action: PlanApprovalAction::ContinueDiscussing,
+                })
+                .await;
+        }
+        KeyCode::Enter => {
+            submit_plan_approval(state, request_tx).await;
+        }
+        _ => {}
+    }
+}
+
+async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<UiToRuntimeEvent>) {
+    let Some(plan) = state.plan_approval.take() else {
+        return;
+    };
+    let action = match state.plan_approval_selected.min(2) {
+        0 => PlanApprovalAction::Approve,
+        1 => PlanApprovalAction::ApproveAndCompact,
+        _ => PlanApprovalAction::ContinueDiscussing,
+    };
+    state.plan_approval_selected = 0;
+    let _ = request_tx
+        .send(UiToRuntimeEvent::ResolvePlanApproval {
+            plan_id: plan.id,
+            action,
+        })
+        .await;
 }
 
 async fn handle_tool_pause_key(
@@ -585,6 +726,9 @@ async fn handle_composer_key(
                         crate::types::display::HistoryItem::Display(display) => {
                             UiMessage::Display(display)
                         }
+                        crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+                            text: plan.markdown,
+                        },
                     };
                     state.messages.push(ui_message);
                     let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;

@@ -1,4 +1,6 @@
-use crate::types::events::{BashPermissionPreview, PermissionPreview, PermissionSource};
+use crate::types::events::{
+    ActiveProfile, BashPermissionPreview, PermissionPreview, PermissionSource,
+};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -164,12 +166,37 @@ impl PermissionEngine {
         self.check(tool_name, preview, raw_input).decision
     }
 
+    pub fn decide_for_profile(
+        &self,
+        active_profile: ActiveProfile,
+        tool_name: &str,
+        preview: Option<&PermissionPreview>,
+        raw_input: &Value,
+    ) -> PermissionDecision {
+        self.check_for_profile(active_profile, tool_name, preview, raw_input)
+            .decision
+    }
+
     pub fn check(
         &self,
         tool_name: &str,
         preview: Option<&PermissionPreview>,
         raw_input: &Value,
     ) -> PermissionCheck {
+        self.check_for_profile(ActiveProfile::Main, tool_name, preview, raw_input)
+    }
+
+    pub fn check_for_profile(
+        &self,
+        active_profile: ActiveProfile,
+        tool_name: &str,
+        preview: Option<&PermissionPreview>,
+        raw_input: &Value,
+    ) -> PermissionCheck {
+        if let Some(check) = self.profile_policy(active_profile, tool_name) {
+            return check;
+        }
+
         if tool_name == "bash" {
             let Some(PermissionPreview::Bash(preview)) = preview else {
                 return PermissionCheck {
@@ -250,9 +277,31 @@ impl PermissionEngine {
             },
             "edit" | "write" => PermissionDecision::Ask,
             "search" => PermissionDecision::Allow,
+            "todo_write" => PermissionDecision::Allow,
             "ask_user" | "skill" | "subagent" => PermissionDecision::Allow,
             _ => PermissionDecision::Ask,
         }
+    }
+
+    pub fn profile_policy(
+        &self,
+        active_profile: ActiveProfile,
+        tool_name: &str,
+    ) -> Option<PermissionCheck> {
+        let tool = normalize_tool_name(tool_name);
+        let decision = match active_profile {
+            ActiveProfile::Plan if matches!(tool.as_str(), "edit" | "write" | "todo_write") => {
+                PermissionDecision::Deny {
+                    reason: format!("{tool_name} is not available in plan profile"),
+                }
+            }
+            _ => return None,
+        };
+
+        Some(PermissionCheck {
+            decision,
+            source: None,
+        })
     }
 
     fn decide_bash(&self, preview: &BashPermissionPreview) -> PermissionCheck {
@@ -620,7 +669,7 @@ fn parse_tool_rule_parts(
 fn is_supported_permission_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "read" | "search" | "edit" | "write" | "subagent" | "ask_user"
+        "read" | "search" | "edit" | "write" | "subagent" | "ask_user" | "todo_write"
     )
 }
 
@@ -1104,6 +1153,7 @@ fn normalize_tool_name(tool: &str) -> String {
         "Edit" | "edit" => "edit".to_string(),
         "Write" | "write" => "write".to_string(),
         "Subagent" | "subagent" => "subagent".to_string(),
+        "TodoWrite" | "todo_write" => "todo_write".to_string(),
         other => other.to_ascii_lowercase(),
     }
 }
@@ -1217,6 +1267,28 @@ mod tests {
                 source: "/repo/.omini/permissions.toml".to_string(),
                 rule: "Read(**/*.toml)".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn plan_profile_hard_denies_write_execution_tools() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &[]));
+
+        for tool in ["edit", "write", "todo_write"] {
+            assert!(matches!(
+                engine.decide_for_profile(ActiveProfile::Plan, tool, None, &serde_json::json!({})),
+                PermissionDecision::Deny { .. }
+            ));
+        }
+
+        assert_eq!(
+            engine.decide_for_profile(
+                ActiveProfile::Plan,
+                "subagent",
+                None,
+                &serde_json::json!({})
+            ),
+            PermissionDecision::Allow
         );
     }
 

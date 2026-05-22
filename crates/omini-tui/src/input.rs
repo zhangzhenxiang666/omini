@@ -869,6 +869,9 @@ pub(super) async fn flush_queued_user_inputs(
         .map(|draft| match draft.clone().history_item() {
             crate::types::display::HistoryItem::Message(message) => UiMessage::Message(message),
             crate::types::display::HistoryItem::Display(display) => UiMessage::Display(display),
+            crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+                text: plan.markdown,
+            },
         })
         .collect::<Vec<_>>();
     let Some(draft) = state.take_queued_user_draft() else {

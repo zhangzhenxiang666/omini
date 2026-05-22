@@ -13,8 +13,8 @@ use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, HistoryItem};
 use crate::types::events::{
-    CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest, RuntimeToUiEvent,
-    UiToRuntimeEvent,
+    ActiveProfile, CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest,
+    PlanApprovalAction, RuntimeToUiEvent, SubmittedPlan, UiToRuntimeEvent,
 };
 use crate::types::message::Message;
 use chrono::Utc;
@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::history;
+use super::plan;
 
 /// 待处理的交互类型（等待 UI 回传选择结果）。
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +128,8 @@ pub struct AgentRuntime {
     cancelled: Arc<AtomicBool>,
     /// 命令注册表
     pub(crate) command_registry: CommandRegistry,
+    /// 当前运行 profile
+    pub(crate) active_profile: ActiveProfile,
     /// 当前等待 UI 回传的交互类型
     pending_interaction: Option<PendingInteraction>,
 }
@@ -152,6 +155,7 @@ impl AgentRuntime {
             &settings,
             &subagent_registry.summaries(),
             &skill_registry.injected_summaries(),
+            ActiveProfile::Main,
         ));
         let permission_engine = Arc::new(PermissionEngine::load(
             settings.cwd.clone(),
@@ -200,6 +204,7 @@ impl AgentRuntime {
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
             command_registry,
+            active_profile: ActiveProfile::Main,
             pending_interaction: None,
         }
     }
@@ -230,6 +235,9 @@ impl AgentRuntime {
                                 if let Some(parsed) = command::parse(&text) {
                                     self.handle_command(&parsed).await;
                                 }
+                            }
+                            UiToRuntimeEvent::ToggleActiveProfile => {
+                                self.toggle_active_profile().await;
                             }
                             UiToRuntimeEvent::InterveneMessage(draft) => {
                                 let _ = draft;
@@ -278,6 +286,9 @@ impl AgentRuntime {
                                     "Cannot resolve tool pause because no run is active".to_string(),
                                 ))
                                 .await;
+                            }
+                            UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
+                                self.resolve_plan_approval(&plan_id, action).await;
                             }
                         }
                     }
@@ -450,6 +461,7 @@ impl AgentRuntime {
             .as_deref()
             .and_then(|s| s.parse::<ThinkingEffort>().ok());
         self.settings.thinking_effort = thinking_effort;
+        self.set_active_profile(ActiveProfile::Main);
 
         // UI 展示使用数据库消息；LLM 上下文使用 JSONL 历史。
         let blocks_dir = session_dir.path().join("blocks");
@@ -465,7 +477,7 @@ impl AgentRuntime {
                     .iter()
                     .filter_map(|item| match item {
                         HistoryItem::Message(message) => Some(message.clone()),
-                        HistoryItem::Display(_) => None,
+                        HistoryItem::Display(_) | HistoryItem::Plan(_) => None,
                     })
                     .collect()
             }
@@ -490,6 +502,9 @@ impl AgentRuntime {
             thinking_effort,
         })
         .await;
+
+        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
+            .await;
 
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id.to_string()),
@@ -549,6 +564,7 @@ impl AgentRuntime {
             &self.settings,
             &registry.summaries(),
             &skill_registry.injected_summaries(),
+            self.active_profile,
         ));
         self.send_event(RuntimeToUiEvent::AgentList(registry.summaries()))
             .await;
@@ -587,6 +603,110 @@ impl AgentRuntime {
         }
     }
 
+    pub(crate) fn set_active_profile(&mut self, profile: ActiveProfile) {
+        self.active_profile = profile;
+        self.rebuild_system_prompt();
+    }
+
+    async fn toggle_active_profile(&mut self) {
+        let next = match self.active_profile {
+            ActiveProfile::Main => ActiveProfile::Plan,
+            ActiveProfile::Plan => ActiveProfile::Main,
+        };
+        self.set_active_profile(next);
+        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
+            .await;
+    }
+
+    fn rebuild_system_prompt(&mut self) {
+        let subagent_registry = self.capabilities.subagent_registry();
+        let skill_registry = self.capabilities.skill_registry();
+        self.settings.system_prompt = Some(crate::prompts::build_system_prompt_with_capabilities(
+            &self.settings,
+            &subagent_registry.summaries(),
+            &skill_registry.injected_summaries(),
+            self.active_profile,
+        ));
+    }
+
+    async fn resolve_plan_approval(&mut self, plan_id: &str, action: PlanApprovalAction) {
+        match action {
+            PlanApprovalAction::ContinueDiscussing => {
+                self.set_active_profile(ActiveProfile::Plan);
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
+                    .await;
+            }
+            PlanApprovalAction::Approve => {
+                let plan_message = Message::from_user_text(plan::approval_message());
+                self.set_active_profile(ActiveProfile::Main);
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
+                    .await;
+                self.messages.push(plan_message.clone());
+                self.send_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
+                    plan_message,
+                )))
+                .await;
+                self.process_run(RunStart::UserMessage).await;
+            }
+            PlanApprovalAction::ApproveAndCompact => {
+                let path = self.plan_path(plan_id);
+                let plan_content = match std::fs::read_to_string(&path) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        self.send_event(RuntimeToUiEvent::Error(format!(
+                            "无法压缩规划上下文，读取计划失败 {}: {e}",
+                            path.display()
+                        )))
+                        .await;
+                        return;
+                    }
+                };
+                let plan_message = Message::from_user_text(plan::compacted_context(&plan_content));
+                self.session_id = None;
+                self.session_dir = None;
+                self.messages = vec![plan_message.clone()];
+                self.set_active_profile(ActiveProfile::Main);
+                self.create_session(Some(HistoryItem::Message(plan_message.clone())))
+                    .await;
+                self.persist_compacted_plan_initial_message(plan_message)
+                    .await;
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
+                    .await;
+                self.process_run(RunStart::Continue).await;
+            }
+        }
+    }
+
+    fn plan_path(&self, plan_id: &str) -> std::path::PathBuf {
+        plan::path(&self.project, plan_id)
+    }
+
+    async fn persist_compacted_plan_initial_message(&self, message: Message) {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return;
+        };
+        let Some(session_dir) = self.session_dir.as_ref() else {
+            return;
+        };
+
+        let blocks_dir = session_dir.path().join("blocks");
+        history::persist_one(session_dir, session_id, &blocks_dir, message).await;
+        let _ = db::global_db()
+            .update_session_msg_count(session_id, 1)
+            .await;
+    }
+
+    async fn persist_latest_proposed_plan(&self) -> Result<Option<SubmittedPlan>, String> {
+        let submitted =
+            plan::persist_latest(&self.project, self.active_profile, &self.messages).await?;
+        if let Some(plan) = submitted.as_ref()
+            && let Some(session_id) = self.session_id.as_deref()
+        {
+            history::persist_plan_db_only(session_id, plan).await;
+        }
+        Ok(submitted)
+    }
+
     /// 处理一次完整的用户请求（可能含多轮 LLM 调用）。
     async fn process_run(&mut self, start: RunStart) {
         if self.session_id.is_none() {
@@ -611,7 +731,9 @@ impl AgentRuntime {
         let (engine_tx, engine_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
 
         // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
-        let processor = self.spawn_event_processor(engine_rx).await;
+        let processor = self
+            .spawn_event_processor(engine_rx, self.active_profile)
+            .await;
 
         {
             let subagent_registry = self.capabilities.subagent_registry();
@@ -624,6 +746,7 @@ impl AgentRuntime {
                 settings: Arc::clone(&run_settings),
                 llm_client: self.llm_client.clone(),
                 tool_registry: Arc::clone(&self.tool_registry),
+                active_profile: self.active_profile,
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
                     session_id: self
                         .session_id
@@ -679,8 +802,17 @@ impl AgentRuntime {
                                 self.query_engine
                                     .enqueue_user_message(submission.llm_message);
                             }
+                            UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
+                                let _ = (plan_id, action);
+                                let _ = event_tx
+                                    .send(RuntimeToUiEvent::Error(
+                                        "Cannot resolve plan approval while a run is active".to_string(),
+                                    ))
+                                    .await;
+                            }
                             UiToRuntimeEvent::SendMessage(_)
                             | UiToRuntimeEvent::SendCommand(_)
+                            | UiToRuntimeEvent::ToggleActiveProfile
                             | UiToRuntimeEvent::ModelSelected { .. }
                             | UiToRuntimeEvent::SessionSelected { .. }
                             | UiToRuntimeEvent::AgentSaveRequested { .. }
@@ -711,12 +843,23 @@ impl AgentRuntime {
 
         self.cancelled.store(false, Ordering::Relaxed);
         self.send_event(RuntimeToUiEvent::RunFinished).await;
+
+        match self.persist_latest_proposed_plan().await {
+            Ok(Some(plan)) => {
+                self.send_event(RuntimeToUiEvent::PlanSubmitted(plan)).await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                self.send_event(RuntimeToUiEvent::Error(error)).await;
+            }
+        }
     }
 
     /// 启动事件处理器
     async fn spawn_event_processor(
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
+        active_profile: ActiveProfile,
     ) -> tokio::task::JoinHandle<()> {
         let session_id = self
             .session_id
@@ -731,6 +874,7 @@ impl AgentRuntime {
         let blocks_dir = session_dir.path().join("blocks");
 
         tokio::spawn(async move {
+            let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
@@ -746,13 +890,16 @@ impl AgentRuntime {
                         let _ = event_tx.send(RuntimeToUiEvent::TurnStarted).await;
                     }
                     EngineToRuntimeEvent::TurnEnded => {
+                        proposed_plan_forwarder.flush(&event_tx).await;
                         let _ = event_tx.send(RuntimeToUiEvent::TurnEnded).await;
                     }
                     EngineToRuntimeEvent::ThinkingDelta(t) => {
                         let _ = event_tx.send(RuntimeToUiEvent::ThinkingDelta(t)).await;
                     }
                     EngineToRuntimeEvent::TextDelta(t) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::TextDelta(t)).await;
+                        proposed_plan_forwarder
+                            .forward_text_delta(&event_tx, t)
+                            .await;
                     }
                     EngineToRuntimeEvent::ToolUse(tu) => {
                         let _ = event_tx.send(RuntimeToUiEvent::ToolUse(tu)).await;
@@ -764,6 +911,9 @@ impl AgentRuntime {
                         let _ = event_tx
                             .send(RuntimeToUiEvent::ToolPauseRequested(req))
                             .await;
+                    }
+                    EngineToRuntimeEvent::PlanSubmitted(plan) => {
+                        let _ = event_tx.send(RuntimeToUiEvent::PlanSubmitted(plan)).await;
                     }
                     EngineToRuntimeEvent::SubagentStarted(event) => {
                         let _ = event_tx
@@ -870,5 +1020,471 @@ impl AgentRuntime {
             subagents: Vec::new(),
         })
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::project::ProjectsDir;
+    use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use crate::db::Database;
+    use crate::types::config::{ProviderType, Settings};
+    use crate::types::message::{ContentBlock, Role};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::OnceCell;
+
+    static TEST_DB: OnceCell<()> = OnceCell::const_new();
+
+    async fn ensure_test_db() {
+        TEST_DB
+            .get_or_init(|| async {
+                let db_path = std::env::temp_dir().join(format!(
+                    "omini-runtime-service-tests-{}.sqlite",
+                    std::process::id()
+                ));
+                let db = Database::open(&db_path)
+                    .await
+                    .expect("failed to open test database");
+                crate::db::init_global(db);
+            })
+            .await;
+    }
+
+    fn unique_temp_root(test_name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("omini-{test_name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("failed to create temp test root");
+        dir
+    }
+
+    fn test_user_config() -> UserConfig {
+        let mut models = HashMap::new();
+        models.insert(
+            "gpt-test".to_string(),
+            ModelEntry {
+                name: None,
+                limit: Some(256000),
+                thinking: Some(true),
+            },
+        );
+
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            ProviderConfig {
+                name: Some("OpenAI".to_string()),
+                endpoint: ProviderType::OpenAI,
+                base_url: "https://openai.example".to_string(),
+                api_key: "test-key".to_string(),
+                models: Some(models),
+            },
+        );
+
+        UserConfig {
+            providers,
+            language: None,
+            permissions: None,
+        }
+    }
+
+    fn settings_for_cwd(config: &UserConfig, cwd: &Path) -> Settings {
+        let mut settings = config
+            .to_settings(None, None, None)
+            .expect("failed to build settings");
+        settings.cwd = cwd.to_path_buf();
+        settings
+    }
+
+    fn text_content(message: &Message) -> &str {
+        let Some(ContentBlock::Text(text)) = message.content.first() else {
+            panic!("expected first content block to be text");
+        };
+        &text.text
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_block_is_persisted_as_submitted_plan() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("proposed-plan");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.set_active_profile(ActiveProfile::Plan);
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "Intro\n<proposed_plan>\n# Durable Plan\n\n- Execute it.\n</proposed_plan>\nOutro"
+                    .to_string(),
+            )],
+        )];
+
+        let plan = runtime
+            .persist_latest_proposed_plan()
+            .await
+            .expect("persist proposed plan should succeed")
+            .expect("plan should be extracted");
+
+        assert_eq!(plan.title, "Durable Plan");
+        assert_eq!(plan.id, "plan");
+        assert_eq!(plan.markdown, "# Durable Plan\n\n- Execute it.");
+        assert_eq!(plan.path, project.path().join("plans").join("plan.md"));
+        assert_eq!(
+            std::fs::read_to_string(&plan.path).expect("plan file should exist"),
+            plan.markdown
+        );
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_overwrites_current_plan_file() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("proposed-plan-overwrite");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.set_active_profile(ActiveProfile::Plan);
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "<proposed_plan>\n# First Plan\n\n- Earlier.\n</proposed_plan>".to_string(),
+            )],
+        )];
+        let first = runtime
+            .persist_latest_proposed_plan()
+            .await
+            .expect("persist first proposed plan should succeed")
+            .expect("first plan should be extracted");
+
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "<proposed_plan>\n# Second Plan\n\n- Later.\n</proposed_plan>".to_string(),
+            )],
+        )];
+        let second = runtime
+            .persist_latest_proposed_plan()
+            .await
+            .expect("persist second proposed plan should succeed")
+            .expect("second plan should be extracted");
+
+        let expected_path = project.path().join("plans").join("plan.md");
+        assert_eq!(first.id, "plan");
+        assert_eq!(second.id, "plan");
+        assert_eq!(first.path, expected_path);
+        assert_eq!(second.path, expected_path);
+        assert_eq!(
+            std::fs::read_to_string(&second.path).expect("plan file should exist"),
+            "# Second Plan\n\n- Later."
+        );
+
+        let entries = std::fs::read_dir(project.path().join("plans"))
+            .expect("plans dir should exist")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plans dir should be readable");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), expected_path);
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_persistence_ignores_inline_tag_reference() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("proposed-plan-inline-reference");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.set_active_profile(ActiveProfile::Plan);
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                concat!(
+                    "好的，让我把完整计划整理成规范的 `<proposed_plan>` 块。\n\n",
+                    "<proposed_plan>\n",
+                    "# 添加 `/thinking` 命令\n\n",
+                    "## 摘要\n\n",
+                    "- 切换思考块展示。\n",
+                    "</proposed_plan>",
+                )
+                .to_string(),
+            )],
+        )];
+
+        let plan = runtime
+            .persist_latest_proposed_plan()
+            .await
+            .expect("persist proposed plan should succeed")
+            .expect("plan should be extracted");
+
+        assert_eq!(plan.title, "添加 `/thinking` 命令");
+        assert!(plan.markdown.starts_with("# 添加 `/thinking` 命令"));
+        assert!(!plan.markdown.starts_with("` 块。"));
+        assert!(!plan.markdown.contains("<proposed_plan>"));
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_is_persisted_as_plan_db_message() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("proposed-plan-db");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.messages = vec![Message::from_user_text("seed".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        runtime.set_active_profile(ActiveProfile::Plan);
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "<proposed_plan>\n# DB Plan\n\n- Keep style.\n</proposed_plan>".to_string(),
+            )],
+        )];
+
+        let plan = runtime
+            .persist_latest_proposed_plan()
+            .await
+            .expect("persist proposed plan should succeed")
+            .expect("plan should be extracted");
+
+        let rows = db::global_db()
+            .get_messages(&session_id)
+            .await
+            .expect("messages should load");
+        assert!(rows.iter().any(|row| row.kind == "plan"));
+
+        let blocks_dir = runtime
+            .session_dir
+            .as_ref()
+            .expect("session dir should exist")
+            .path()
+            .join("blocks");
+        let loaded = history::load_messages_from_db(&session_id, &blocks_dir).await;
+        assert!(loaded.iter().any(|item| {
+            matches!(item, HistoryItem::Plan(loaded_plan) if loaded_plan.markdown == plan.markdown)
+        }));
+    }
+
+    #[tokio::test]
+    async fn approve_plan_adds_short_user_confirmation_only() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("approve-plan-short-message");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let mut settings = settings_for_cwd(&config, &cwd);
+        settings.max_turns = Some(0);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
+            )],
+        )];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+
+        runtime
+            .resolve_plan_approval("unused-plan-id", PlanApprovalAction::Approve)
+            .await;
+
+        let approval = runtime
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .expect("approval message should be added");
+        assert_eq!(
+            text_content(approval),
+            "Approved. Implement the proposed plan now."
+        );
+        assert!(!text_content(approval).contains("# Approved plan"));
+
+        let mut saw_short_approval_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(message)) = event
+                && text_content(&message) == "Approved. Implement the proposed plan now."
+            {
+                saw_short_approval_event = true;
+            }
+        }
+        assert!(saw_short_approval_event);
+    }
+
+    #[tokio::test]
+    async fn approve_and_compact_creates_new_session_with_plan_as_initial_user_message() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("approve-compact");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let mut settings = settings_for_cwd(&config, &cwd);
+        settings.max_turns = Some(0);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.messages = vec![Message::from_user_text("old conversation".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let old_session_id = runtime.session_id.clone();
+
+        let plan_id = "plan";
+        let plans_dir = project.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).expect("failed to create plans dir");
+        std::fs::write(
+            plans_dir.join("plan.md"),
+            "# Approved plan\n\n1. Execute it.",
+        )
+        .expect("failed to write plan");
+
+        runtime
+            .resolve_plan_approval(plan_id, PlanApprovalAction::ApproveAndCompact)
+            .await;
+
+        let new_session_id = runtime.session_id.clone();
+        assert_ne!(new_session_id, old_session_id);
+        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(runtime.messages[0].role, Role::User);
+        assert!(text_content(&runtime.messages[0]).contains("Final approved plan:"));
+        assert!(text_content(&runtime.messages[0]).contains("# Approved plan"));
+
+        let session_dir = runtime
+            .session_dir
+            .as_ref()
+            .expect("new session dir should exist");
+        assert_eq!(
+            session_dir
+                .load_history()
+                .expect("failed to load persisted history"),
+            runtime.messages
+        );
+
+        let mut saw_new_session_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let RuntimeToUiEvent::SessionChanged {
+                session_id: Some(session_id),
+                messages,
+                ..
+            } = event
+            {
+                if Some(session_id) == new_session_id {
+                    assert_eq!(messages.len(), 1);
+                    saw_new_session_event = true;
+                }
+            }
+        }
+        assert!(saw_new_session_event);
+    }
+
+    #[tokio::test]
+    async fn switch_session_resets_active_profile_to_main_and_notifies_ui() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("switch-session-mode");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("session body".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        while event_rx.try_recv().is_ok() {}
+
+        runtime.set_active_profile(ActiveProfile::Plan);
+        runtime.switch_session(&session_id).await;
+
+        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert!(
+            runtime
+                .settings
+                .system_prompt
+                .as_deref()
+                .expect("system prompt should be rebuilt")
+                .contains("<core_behavior>")
+        );
+        assert!(
+            !runtime
+                .settings
+                .system_prompt
+                .as_deref()
+                .expect("system prompt should be rebuilt")
+                .contains("<plan_mode_instructions>")
+        );
+
+        let mut saw_main_mode_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if matches!(
+                event,
+                RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Main)
+            ) {
+                saw_main_mode_event = true;
+            }
+        }
+        assert!(saw_main_mode_event);
     }
 }

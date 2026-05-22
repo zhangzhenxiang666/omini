@@ -43,6 +43,9 @@ impl UiState {
             .map(|draft| match draft.history_item() {
                 HistoryItem::Message(message) => UiMessage::Message(message),
                 HistoryItem::Display(display) => UiMessage::Display(display),
+                HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+                    text: plan.markdown,
+                },
             })
             .collect()
     }
@@ -219,6 +222,7 @@ impl UiState {
         match event {
             RuntimeToUiEvent::RunStarted => {
                 self.pending_assistant = None;
+                self.pending_proposed_plan = None;
                 self.clear_run_dividers();
                 self.start_run_timer();
                 self.agent_status = AgentStatus::Thinking;
@@ -227,6 +231,9 @@ impl UiState {
                 let ui_message = match item {
                     HistoryItem::Message(message) => UiMessage::Message(message),
                     HistoryItem::Display(display) => UiMessage::Display(display),
+                    HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+                        text: plan.markdown,
+                    },
                 };
                 self.messages.push(ui_message);
                 if self.auto_scroll {
@@ -263,6 +270,12 @@ impl UiState {
                 } else {
                     pending.content.push(ContentBlock::from_text(t));
                 }
+            }
+            RuntimeToUiEvent::ProposedPlanDelta(t) => {
+                self.agent_status = AgentStatus::Working;
+                self.pending_proposed_plan
+                    .get_or_insert_with(String::new)
+                    .push_str(&t);
             }
             RuntimeToUiEvent::ToolUse(tu) => {
                 self.running_tools.insert(tu.id.clone());
@@ -318,6 +331,11 @@ impl UiState {
                 {
                     self.messages.push(UiMessage::Message(msg));
                 }
+                if let Some(plan) = self.pending_proposed_plan.take()
+                    && !plan.trim().is_empty()
+                {
+                    self.messages.push(UiMessage::ProposedPlan { text: plan });
+                }
                 if let Some(elapsed) = self.finish_run_timer() {
                     self.messages.push(UiMessage::RunDivider { elapsed });
                 }
@@ -337,6 +355,13 @@ impl UiState {
                     .insert(req.tool_use_id.clone(), req);
                 self.pause_run_timer();
                 self.agent_status = AgentStatus::AwaitingInput;
+            }
+            RuntimeToUiEvent::PlanSubmitted(plan) => {
+                self.plan_approval = Some(plan);
+                self.plan_approval_selected = 0;
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
             }
             RuntimeToUiEvent::SubagentStarted(event) => {
                 self.subagents_by_tool_use
@@ -434,6 +459,9 @@ impl UiState {
                 self.interaction_step = None;
                 self.interaction_request = None;
             }
+            RuntimeToUiEvent::ActiveProfileChanged(profile) => {
+                self.status_bar.active_profile = profile;
+            }
             RuntimeToUiEvent::SessionTitleChanged { title } => {
                 self.current_session_title = title;
             }
@@ -530,6 +558,7 @@ impl UiState {
             self.subagents.insert(node.session_id.clone(), node);
         }
         self.pending_assistant = None;
+        self.pending_proposed_plan = None;
         self.run_timer = None;
         self.queued_user_inputs.clear();
         self.input.clear();
@@ -542,6 +571,8 @@ impl UiState {
         self.interaction_step = None;
         self.interaction_request = None;
         self.help_drawer = None;
+        self.plan_approval = None;
+        self.plan_approval_selected = 0;
         self.scroll_to_bottom();
     }
 }

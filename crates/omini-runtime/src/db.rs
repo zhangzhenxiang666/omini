@@ -1,4 +1,4 @@
-use crate::types::display::DisplayMessage;
+use crate::types::display::{DisplayMessage, DisplayPlan};
 use crate::types::message::ContentBlock;
 use chrono::{DateTime, Utc};
 use serde_json;
@@ -387,6 +387,26 @@ impl Database {
         .bind(content)
         .bind("display")
         .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn insert_plan_message(
+        &self,
+        session_id: &str,
+        plan: &DisplayPlan,
+    ) -> Result<(), DbError> {
+        let content = serde_json::to_string(plan)?;
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, kind, created_at)
+            VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind("assistant")
+        .bind(content)
+        .bind("plan")
+        .bind(plan.created_at)
         .execute(&self.pool)
         .await?;
         Ok(())

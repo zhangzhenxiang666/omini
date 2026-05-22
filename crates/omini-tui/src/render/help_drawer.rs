@@ -153,6 +153,7 @@ fn general_lines(content_width: usize, selected: usize, max_lines: usize) -> Vec
     let rows = [
         ("Enter", "发送消息"),
         ("Shift+Enter / Ctrl+J", "换行"),
+        ("Shift+Tab", "切换 Main/Plan 模式"),
         ("/", "输入命令，↑/↓ 选择，Tab/Enter 接受补全"),
         ("@", "引用文件或 agent，Tab/→ 展开目录"),
         ("PageUp / PageDown", "滚动消息"),

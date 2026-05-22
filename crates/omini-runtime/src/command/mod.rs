@@ -5,6 +5,7 @@ pub mod help;
 pub mod init;
 pub mod model;
 pub mod new;
+pub mod plan;
 pub mod rename;
 pub mod sessions;
 pub mod skill;
@@ -135,6 +136,7 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(agents::AgentsCommand));
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));
+    registry.register(Arc::new(plan::PlanCommand));
     registry.register(Arc::new(rename::RenameCommand));
     registry.register(Arc::new(init::InitCommand));
     registry.register(Arc::new(help::HelpCommand));
@@ -168,7 +170,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "sessions", "new", "model", "agents", "effort", "init", "rename", "help", "exit"
+                "sessions", "new", "plan", "model", "agents", "effort", "init", "rename", "help",
+                "exit"
             ]
         );
     }

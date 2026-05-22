@@ -1,5 +1,9 @@
 use super::*;
 
+const AGENT_EDITOR_MAX_WIDTH: usize = 140;
+const AGENT_TOOLS_SECTION_LINES: usize = 21;
+const AGENT_EDIT_CONTENT_INSTRUCTIONS_MAX_LINES: usize = 10;
+
 pub(super) fn render_agents_panel(
     state: &mut UiState,
     frame: &mut ratatui::Frame,

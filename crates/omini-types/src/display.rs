@@ -1,8 +1,10 @@
 use crate::message::{ContentBlock, Message, Role};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayMessage {
@@ -10,6 +12,15 @@ pub struct DisplayMessage {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentions: Vec<DisplayMention>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DisplayPlan {
+    pub id: String,
+    pub title: String,
+    pub markdown: String,
+    pub path: PathBuf,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -46,6 +57,7 @@ pub enum MentionKind {
 pub enum HistoryItem {
     Message(Message),
     Display(DisplayMessage),
+    Plan(DisplayPlan),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

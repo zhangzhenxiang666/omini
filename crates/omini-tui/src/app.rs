@@ -4,7 +4,7 @@ use super::update;
 use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
 use crate::types::config::Settings;
-use crate::types::events::{RuntimeToUiEvent, UiToRuntimeEvent};
+use crate::types::events::{ActiveProfile, RuntimeToUiEvent, UiToRuntimeEvent};
 use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
@@ -72,6 +72,7 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.thinking_effort = settings.thinking_effort;
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
+    state.status_bar.active_profile = ActiveProfile::Main;
     state.set_mention_context(settings.cwd.clone(), Vec::new());
 
     let running = Arc::new(AtomicBool::new(true));

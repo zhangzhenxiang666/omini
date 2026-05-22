@@ -4,6 +4,10 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
+const PLAN_APPROVAL_TOP_SPACER_HEIGHT: u16 = 1;
+const PLAN_APPROVAL_MIN_MESSAGES_HEIGHT: u16 = 1;
+const PLAN_APPROVAL_MESSAGE_GAP_HEIGHT: u16 = 1;
+
 pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
     state.clear_selectable_screen_lines();
@@ -11,6 +15,25 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     if let Some(InteractionStep::Session { .. }) = &state.interaction_step {
         super::render_session_list(state, frame, area);
+        return;
+    }
+
+    if state.plan_approval.is_some() {
+        let reserved_height = PLAN_APPROVAL_TOP_SPACER_HEIGHT
+            + PLAN_APPROVAL_MIN_MESSAGES_HEIGHT
+            + PLAN_APPROVAL_MESSAGE_GAP_HEIGHT;
+        let drawer_height = super::plan_approval_drawer::plan_approval_drawer_height(area)
+            .min(area.height.saturating_sub(reserved_height).max(1));
+        let chunks = Layout::vertical([
+            Constraint::Length(PLAN_APPROVAL_TOP_SPACER_HEIGHT),
+            Constraint::Min(PLAN_APPROVAL_MIN_MESSAGES_HEIGHT),
+            Constraint::Length(PLAN_APPROVAL_MESSAGE_GAP_HEIGHT),
+            Constraint::Length(drawer_height),
+        ])
+        .split(area);
+        state.messages_area = chunks[1];
+        super::render_messages(state, frame, chunks[1]);
+        super::plan_approval_drawer::render_plan_approval_drawer(state, frame, chunks[3]);
         return;
     }
 
@@ -41,6 +64,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     if state.interaction_step.is_none()
         && state.active_tool_pause().is_none()
         && state.help_drawer.is_none()
+        && state.plan_approval.is_none()
     {
         super::input::render_input(state, frame, chunks[3]);
     }

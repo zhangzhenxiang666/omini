@@ -1,5 +1,12 @@
 use super::*;
 
+const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
+const EDIT_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
+const USER_INPUT_NONE_LABEL: &str = "以上都不是";
+const USER_INPUT_NONE_DESCRIPTION: &str = "可按 Tab 在备注中补充说明。";
+const USER_INPUT_NOTE_PREFIX: &str = "› ";
+const USER_INPUT_NOTE_PLACEHOLDER: &str = "添加备注";
+
 struct DrawerLines {
     lines: Vec<Line<'static>>,
     note_line: Option<Line<'static>>,

@@ -1,10 +1,12 @@
 use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::{AgentStatus, UiState};
+use crate::types::events::ActiveProfile;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::time::{SystemTime, UNIX_EPOCH};
+use unicode_width::UnicodeWidthStr;
 
 pub(super) fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
     animated_status_spans_with_palette(text, Color::Rgb(200, 169, 238), Color::Rgb(55, 47, 65))
@@ -128,11 +130,34 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
             Line::from(base_spans)
         }
     };
+    append_plan_mode_hint(state, area.width as usize, &mut line);
     state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
     apply_selection_highlight(state, area, &mut line);
 
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);
+}
+
+fn append_plan_mode_hint(state: &UiState, width: usize, line: &mut Line<'static>) {
+    if state.status_bar.active_profile != ActiveProfile::Plan {
+        return;
+    }
+
+    let left_width = UnicodeWidthStr::width(line_to_plain_text(line).as_str());
+    let hint = "Plan mode (Shift+Tab 切换模式)";
+    let hint_width = UnicodeWidthStr::width(hint);
+    if left_width + hint_width + 1 > width {
+        return;
+    }
+
+    let gap = width.saturating_sub(left_width + hint_width);
+    let style = Style::default()
+        .fg(Color::Rgb(0xd7, 0x66, 0xff))
+        .add_modifier(Modifier::BOLD);
+    line.spans.push(Span::raw(" ".repeat(gap)));
+    line.spans.push(Span::styled("Plan mode", style));
+    line.spans
+        .push(Span::styled(" (Shift+Tab 切换模式)", style));
 }
 
 fn apply_selection_highlight(state: &UiState, area: Rect, line: &mut Line<'static>) {
@@ -153,4 +178,32 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plan_mode_hint_is_right_aligned_in_footer() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Plan;
+        let mut line = Line::from("left");
+
+        append_plan_mode_hint(&state, 40, &mut line);
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("Plan mode (Shift+Tab 切换模式)"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 40);
+    }
+
+    #[test]
+    fn main_profile_omits_plan_mode_hint() {
+        let state = UiState::new();
+        let mut line = Line::from("left");
+
+        append_plan_mode_hint(&state, 40, &mut line);
+
+        assert_eq!(line_to_plain_text(&line), "left");
+    }
 }

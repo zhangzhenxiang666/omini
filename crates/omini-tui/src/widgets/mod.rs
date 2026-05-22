@@ -13,6 +13,7 @@ mod file_mutation;
 mod read;
 mod search;
 mod skill;
+mod todo_write;
 
 pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
     if max_width == 0 {
@@ -274,6 +275,7 @@ pub fn render_tool(
             project_dir,
         ),
         "skill" => skill::render(tool_use, tool_result, content_width),
+        "todo_write" => todo_write::render(tool_use, tool_result, content_width),
         "edit" => file_mutation::render_edit(
             tool_use,
             tool_result,
@@ -416,5 +418,62 @@ mod tests {
 
         assert_eq!(plain(&lines[1]), "  Permission denied · Inspect first");
         assert!(!plain(&lines[1]).contains("required_action"));
+    }
+
+    #[test]
+    fn todo_write_renders_status_checklist_without_json() {
+        let mut input = std::collections::HashMap::new();
+        input.insert(
+            "todos".to_string(),
+            serde_json::json!([
+                {"content": "Read existing flow", "status": "completed"},
+                {"content": "Add UpdateTodo widget", "status": "in_progress"},
+                {"content": "Run focused tests", "status": "pending"},
+                {"content": "Drop obsolete step", "status": "cancelled"}
+            ]),
+        );
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "todo_write".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: false,
+            content: serde_json::json!({
+                "todos": [
+                    {"content": "Read existing flow", "status": "completed"}
+                ]
+            })
+            .to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+        let rendered: Vec<_> = lines.iter().map(plain).collect();
+
+        assert_eq!(rendered[0], "· UpdateTodo");
+        assert_eq!(rendered[1], "  └─ ✔ Read existing flow");
+        assert_eq!(rendered[2], "     □ Add UpdateTodo widget");
+        assert_eq!(rendered[3], "     □ Run focused tests");
+        assert_eq!(rendered[4], "     ✘ Drop obsolete step");
+        assert!(rendered.iter().all(|line| !line.contains("\"todos\"")));
+        assert_eq!(
+            lines[2].spans[3].style.fg,
+            Some(Color::Rgb(0x42, 0xb3, 0xc2))
+        );
+        assert_eq!(lines[2].spans[1].style.fg, Some(Color::Rgb(170, 174, 184)));
+        assert!(
+            !lines[4].spans[1]
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
+        assert!(
+            lines[4].spans[3]
+                .style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT)
+        );
     }
 }
