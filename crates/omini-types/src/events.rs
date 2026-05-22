@@ -3,6 +3,7 @@ use crate::config::ThinkingEffort;
 use crate::display::{DisplayMessage, DisplayPlan, HistoryItem, UserDraft};
 use crate::message::{Message, ToolResultBlock, ToolUseBlock};
 use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
+use crate::usage::Usage;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -124,9 +125,13 @@ pub enum EngineToRuntimeEvent {
     ToolPauseRequested(ToolPauseRequest),
     /// 模型提交了计划，runtime 已完成持久化
     PlanSubmitted(SubmittedPlan),
+    /// 当前 engine/session 的一轮 LLM usage。
+    UsageRecorded(Usage),
 
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),
+    /// 子 agent 的一轮 LLM usage。
+    SubagentUsageRecorded { session_id: String, usage: Usage },
     /// 子 agent 产生了一条完整消息，需要持久化并更新 UI 视图模型。
     SubagentMessageProduced(SubagentMessageEvent),
     /// 子 agent 请求工具调用。
@@ -169,12 +174,16 @@ pub enum RuntimeToUiEvent {
         provider: String,
         model: String,
         thinking_effort: Option<ThinkingEffort>,
+        context_window: Option<u32>,
     },
+    /// 当前会话 token usage 状态已变更。
+    UsageChanged(SessionUsageSnapshot),
     /// 会话已切换
     SessionChanged {
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,
+        usage: SessionUsageSnapshot,
     },
 
     /// 会话标题变更（TUI 头部栏显示用）
@@ -327,8 +336,15 @@ pub struct SessionSummary {
     pub title: String,
     pub model: String,
     pub provider: String,
-    pub message_count: i64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionUsageSnapshot {
+    pub current_context_tokens: i64,
+    pub total_tokens: i64,
+    pub total_cached_tokens: i64,
+    pub context_window: Option<u32>,
 }
 
 /// 命令摘要（供自动补全 / 帮助展示）。

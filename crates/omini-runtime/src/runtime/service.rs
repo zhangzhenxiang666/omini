@@ -14,7 +14,7 @@ use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, HistoryItem};
 use crate::types::events::{
     ActiveProfile, CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest,
-    PlanApprovalAction, RuntimeToUiEvent, SubmittedPlan, UiToRuntimeEvent,
+    PlanApprovalAction, RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, UiToRuntimeEvent,
 };
 use crate::types::message::Message;
 use chrono::Utc;
@@ -411,8 +411,10 @@ impl AgentRuntime {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 thinking_effort: self.settings.thinking_effort,
+                context_window: self.current_context_window(),
             })
             .await;
+            self.send_current_usage_snapshot().await;
         } else {
             self.send_event(RuntimeToUiEvent::Error(format!(
                 "提供商 '{provider}' 不存在"
@@ -484,15 +486,10 @@ impl AgentRuntime {
         };
         let subagents = history::load_subagents_for_session(session_id, &self.project).await;
 
-        let count = ui_messages.len() as i64;
         self.messages = runtime_messages;
 
-        let _ = db::global_db()
-            .update_session_msg_count(session_id, count)
-            .await;
-
         self.send_event(RuntimeToUiEvent::SessionTitleChanged {
-            title: db_session.title,
+            title: db_session.title.clone(),
         })
         .await;
 
@@ -500,6 +497,7 @@ impl AgentRuntime {
             provider: db_session.provider.clone(),
             model: db_session.model.clone(),
             thinking_effort,
+            context_window: self.current_context_window(),
         })
         .await;
 
@@ -510,6 +508,7 @@ impl AgentRuntime {
             session_id: Some(session_id.to_string()),
             messages: ui_messages,
             subagents,
+            usage: self.usage_snapshot_from_session(&db_session),
         })
         .await;
     }
@@ -691,9 +690,6 @@ impl AgentRuntime {
 
         let blocks_dir = session_dir.path().join("blocks");
         history::persist_one(session_dir, session_id, &blocks_dir, message).await;
-        let _ = db::global_db()
-            .update_session_msg_count(session_id, 1)
-            .await;
     }
 
     async fn persist_latest_proposed_plan(&self) -> Result<Option<SubmittedPlan>, String> {
@@ -834,13 +830,6 @@ impl AgentRuntime {
         // 等待事件处理器自然退出（engine_tx drop 后 engine_rx 收到 None）
         let _ = processor.await;
 
-        // 更新 session 消息计数（所有消息已被处理器增量持久化）
-        let total = self.messages.len() as i64;
-        db::global_db()
-            .update_session_msg_count(self.session_id.as_ref().unwrap(), total)
-            .await
-            .expect("failed to update session message count");
-
         self.cancelled.store(false, Ordering::Relaxed);
         self.send_event(RuntimeToUiEvent::RunFinished).await;
 
@@ -872,6 +861,7 @@ impl AgentRuntime {
         let event_tx = self.event_tx.clone();
         let project = self.project.clone();
         let blocks_dir = session_dir.path().join("blocks");
+        let context_window = self.current_context_window();
 
         tokio::spawn(async move {
             let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
@@ -915,10 +905,42 @@ impl AgentRuntime {
                     EngineToRuntimeEvent::PlanSubmitted(plan) => {
                         let _ = event_tx.send(RuntimeToUiEvent::PlanSubmitted(plan)).await;
                     }
+                    EngineToRuntimeEvent::UsageRecorded(usage) => {
+                        let _ = db::global_db()
+                            .record_session_usage(&session_id, usage)
+                            .await;
+                        if let Ok(Some(session)) = db::global_db().get_session(&session_id).await {
+                            let _ = event_tx
+                                .send(RuntimeToUiEvent::UsageChanged(usage_snapshot_from_session(
+                                    &session,
+                                    context_window,
+                                )))
+                                .await;
+                        }
+                    }
                     EngineToRuntimeEvent::SubagentStarted(event) => {
                         let _ = event_tx
                             .send(RuntimeToUiEvent::SubagentStarted(event))
                             .await;
+                    }
+                    EngineToRuntimeEvent::SubagentUsageRecorded {
+                        session_id: subagent_session_id,
+                        usage,
+                    } => {
+                        let _ = db::global_db()
+                            .record_session_usage(&subagent_session_id, usage)
+                            .await;
+                        let _ = db::global_db()
+                            .record_parent_subagent_usage(&session_id, usage)
+                            .await;
+                        if let Ok(Some(session)) = db::global_db().get_session(&session_id).await {
+                            let _ = event_tx
+                                .send(RuntimeToUiEvent::UsageChanged(usage_snapshot_from_session(
+                                    &session,
+                                    context_window,
+                                )))
+                                .await;
+                        }
                     }
                     EngineToRuntimeEvent::SubagentMessageProduced(event) => {
                         let parent_dir = project.session(&session_id);
@@ -993,7 +1015,9 @@ impl AgentRuntime {
             model: self.settings.model.clone(),
             thinking_effort: self.settings.thinking_effort.map(|t| t.to_string()),
             title,
-            message_count: 0,
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
             created_at: now,
             updated_at: now,
         };
@@ -1018,8 +1042,56 @@ impl AgentRuntime {
                         .collect()
                 }),
             subagents: Vec::new(),
+            usage: self.usage_snapshot_from_session(&session),
         })
         .await;
+    }
+
+    fn current_context_window(&self) -> Option<u32> {
+        self.settings
+            .providers
+            .get(&self.settings.active_provider)
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == self.settings.model)
+                    .map(|model| model.limit)
+            })
+    }
+
+    fn usage_snapshot_from_session(&self, session: &crate::db::Session) -> SessionUsageSnapshot {
+        usage_snapshot_from_session(session, self.current_context_window())
+    }
+
+    async fn send_current_usage_snapshot(&self) {
+        let Some(session_id) = self.session_id.as_deref() else {
+            self.send_event(RuntimeToUiEvent::UsageChanged(SessionUsageSnapshot {
+                context_window: self.current_context_window(),
+                ..SessionUsageSnapshot::default()
+            }))
+            .await;
+            return;
+        };
+
+        if let Ok(Some(session)) = db::global_db().get_session(session_id).await {
+            self.send_event(RuntimeToUiEvent::UsageChanged(
+                self.usage_snapshot_from_session(&session),
+            ))
+            .await;
+        }
+    }
+}
+
+fn usage_snapshot_from_session(
+    session: &crate::db::Session,
+    context_window: Option<u32>,
+) -> SessionUsageSnapshot {
+    SessionUsageSnapshot {
+        current_context_tokens: session.current_context_tokens,
+        total_tokens: session.total_tokens,
+        total_cached_tokens: session.total_cached_tokens,
+        context_window,
     }
 }
 
@@ -1486,5 +1558,98 @@ mod tests {
             }
         }
         assert!(saw_main_mode_event);
+    }
+
+    #[tokio::test]
+    async fn usage_events_update_main_and_subagent_session_totals() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("usage-events");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("session body".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let parent_session_id = runtime.session_id.clone().expect("session id should exist");
+
+        let subagent_session_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+        db::global_db()
+            .create_session(&db::Session {
+                id: subagent_session_id.clone(),
+                project_path: sanitize(&runtime.settings.cwd),
+                parent_session_id: Some(parent_session_id.clone()),
+                spawn_tool_use_id: Some("toolu_sub".to_string()),
+                session_type: "subagent".to_string(),
+                agent_label: Some("explorer".to_string()),
+                provider: runtime.settings.active_provider.clone(),
+                model: runtime.settings.model.clone(),
+                thinking_effort: runtime.settings.thinking_effort.map(|e| e.to_string()),
+                title: None,
+                current_context_tokens: 0,
+                total_tokens: 0,
+                total_cached_tokens: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("subagent session should insert");
+
+        let (engine_tx, engine_rx) = mpsc::channel(4);
+        let processor = runtime
+            .spawn_event_processor(engine_rx, ActiveProfile::Main)
+            .await;
+
+        engine_tx
+            .send(EngineToRuntimeEvent::UsageRecorded(
+                crate::types::usage::Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    cached_tokens: 3,
+                },
+            ))
+            .await
+            .expect("usage event should send");
+        engine_tx
+            .send(EngineToRuntimeEvent::SubagentUsageRecorded {
+                session_id: subagent_session_id.clone(),
+                usage: crate::types::usage::Usage {
+                    prompt_tokens: 7,
+                    completion_tokens: 8,
+                    cached_tokens: 4,
+                },
+            })
+            .await
+            .expect("subagent usage event should send");
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
+
+        let parent = db::global_db()
+            .get_session(&parent_session_id)
+            .await
+            .expect("parent should load")
+            .expect("parent should exist");
+        let subagent = db::global_db()
+            .get_session(&subagent_session_id)
+            .await
+            .expect("subagent should load")
+            .expect("subagent should exist");
+
+        assert_eq!(parent.current_context_tokens, 15);
+        assert_eq!(parent.total_tokens, 30);
+        assert_eq!(parent.total_cached_tokens, 7);
+        assert_eq!(subagent.current_context_tokens, 15);
+        assert_eq!(subagent.total_tokens, 15);
+        assert_eq!(subagent.total_cached_tokens, 4);
     }
 }

@@ -1,6 +1,6 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandEffect, CommandResult, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult, RuntimeToUiEvent, SessionUsageSnapshot};
 use async_trait::async_trait;
 
 pub struct NewCommand;
@@ -30,8 +30,26 @@ impl Command for NewCommand {
                 session_id: None,
                 messages: vec![],
                 subagents: vec![],
+                usage: SessionUsageSnapshot {
+                    context_window: current_context_window(runtime),
+                    ..SessionUsageSnapshot::default()
+                },
             }),
             CommandEffect::emit(RuntimeToUiEvent::SessionTitleChanged { title: None }),
         ])
     }
+}
+
+fn current_context_window(runtime: &AgentRuntime) -> Option<u32> {
+    runtime
+        .settings
+        .providers
+        .get(&runtime.settings.active_provider)
+        .and_then(|provider| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.id == runtime.settings.model)
+                .map(|model| model.limit)
+        })
 }

@@ -1,9 +1,10 @@
 use crate::api::{
-    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, StreamError, Usage,
+    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, StreamError,
     api_channel, send_with_retry, sse::IntoSseStream,
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
+use crate::types::usage::Usage;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -88,8 +89,11 @@ pub(super) async fn invoke_openai(
         let mut next_expected_tool_index: usize = 0;
         // 最终组装
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
-        let mut prompt_tokens: u32 = 0;
-        let mut completion_tokens: u32 = 0;
+        let mut usage = Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+        };
         let mut finish_reason: FinishReason = FinishReason::Stop;
         let mut saw_finish_reason = false;
         let mut saw_done = false;
@@ -129,6 +133,11 @@ pub(super) async fn invoke_openai(
                         }
                     };
 
+                    // usage
+                    if let Some(value) = data.get("usage") {
+                        update_usage_from_value(&mut usage, value);
+                    }
+
                     let choice = match data
                         .get("choices")
                         .and_then(|a| a.as_array())
@@ -151,18 +160,6 @@ pub(super) async fn invoke_openai(
                             "tool_calls" => FinishReason::ToolUse,
                             other => FinishReason::Error(other.to_string()),
                         };
-                    }
-
-                    // usage
-                    if let Some(usage) = data.get("usage") {
-                        prompt_tokens = usage
-                            .get("prompt_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
-                        completion_tokens = usage
-                            .get("completion_tokens")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or(0) as u32;
                     }
 
                     if let Some(delta) = choice.get("delta") {
@@ -323,16 +320,40 @@ pub(super) async fn invoke_openai(
         let completion = ApiCompletion {
             message: Message::new(Role::Assistant, std::mem::take(&mut content_blocks)),
             finish_reason,
-            usage: Usage {
-                prompt_tokens: prompt_tokens as usize,
-                completion_tokens: completion_tokens as usize,
-            },
+            usage,
         };
         let _ = tx.send(Ok(ApiEvent::Done(completion))).await;
 
         tracing::debug!("SSE stream task finished, channel closed");
     });
     Ok(result_stream)
+}
+
+fn update_usage_from_value(current: &mut Usage, usage: &Value) {
+    set_if_missing(
+        &mut current.prompt_tokens,
+        usage.get("prompt_tokens").and_then(Value::as_u64),
+    );
+    set_if_missing(
+        &mut current.completion_tokens,
+        usage.get("completion_tokens").and_then(Value::as_u64),
+    );
+    set_if_missing(
+        &mut current.cached_tokens,
+        usage
+            .get("prompt_tokens_details")
+            .and_then(|details| details.get("cached_tokens"))
+            .and_then(Value::as_u64),
+    );
+}
+
+fn set_if_missing(current: &mut usize, value: Option<u64>) {
+    if *current == 0
+        && let Some(value) = value
+        && value > 0
+    {
+        *current = value as usize;
+    }
 }
 
 #[derive(Clone)]
@@ -577,6 +598,79 @@ mod tests {
             arguments: arguments.to_string(),
             emitted: false,
         }
+    }
+
+    #[test]
+    fn parse_usage_reads_cached_prompt_tokens() {
+        let mut usage = Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+        };
+
+        update_usage_from_value(
+            &mut usage,
+            &serde_json::json!({
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_tokens_details": {
+                    "cached_tokens": 64
+                }
+            }),
+        );
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.cached_tokens, 64);
+    }
+
+    #[test]
+    fn parse_usage_accepts_usage_only_streaming_chunk() {
+        let mut usage = Usage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+        };
+        let chunk = serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 42,
+                "completion_tokens": 7,
+                "prompt_tokens_details": {
+                    "cached_tokens": 16
+                }
+            }
+        });
+
+        update_usage_from_value(&mut usage, chunk.get("usage").expect("usage exists"));
+
+        assert_eq!(usage.prompt_tokens, 42);
+        assert_eq!(usage.completion_tokens, 7);
+        assert_eq!(usage.cached_tokens, 16);
+    }
+
+    #[test]
+    fn update_usage_does_not_overwrite_existing_values_with_zeroes() {
+        let mut usage = Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            cached_tokens: 64,
+        };
+
+        update_usage_from_value(
+            &mut usage,
+            &serde_json::json!({
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "prompt_tokens_details": {
+                    "cached_tokens": 0
+                }
+            }),
+        );
+
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.completion_tokens, 20);
+        assert_eq!(usage.cached_tokens, 64);
     }
 
     #[tokio::test]

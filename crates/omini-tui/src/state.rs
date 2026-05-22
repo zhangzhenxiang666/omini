@@ -261,6 +261,16 @@ pub struct StatusBar {
     pub cwd: PathBuf,
     /// 当前运行 profile
     pub active_profile: ActiveProfile,
+    /// 当前 Plan 模式周期内是否已经发送过用户消息。
+    pub plan_mode_message_sent: bool,
+    /// 最近一次请求的上下文 token 数。
+    pub current_context_tokens: i64,
+    /// 当前会话历史累计 token 数。
+    pub total_tokens: i64,
+    /// 当前会话历史累计缓存命中 token 数。
+    pub total_cached_tokens: i64,
+    /// 当前模型上下文窗口。
+    pub context_window: Option<u32>,
 }
 
 impl Default for StatusBar {
@@ -271,6 +281,11 @@ impl Default for StatusBar {
             active_provider: String::new(),
             cwd: PathBuf::new(),
             active_profile: ActiveProfile::Main,
+            plan_mode_message_sent: false,
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
+            context_window: None,
         }
     }
 }
@@ -468,6 +483,12 @@ impl UiState {
         self.pending_tool_previews
             .values()
             .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
+    }
+
+    pub fn mark_plan_mode_message_sent(&mut self) {
+        if self.status_bar.active_profile == ActiveProfile::Plan {
+            self.status_bar.plan_mode_message_sent = true;
+        }
     }
 
     pub fn start_run_timer(&mut self) {

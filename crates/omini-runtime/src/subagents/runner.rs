@@ -100,7 +100,9 @@ async fn run_subagent(
         model: settings.model.clone(),
         thinking_effort: settings.thinking_effort.map(|e| e.to_string()),
         title: request.title.clone(),
-        message_count: 0,
+        current_context_tokens: 0,
+        total_tokens: 0,
+        total_cached_tokens: 0,
         created_at: now,
         updated_at: now,
     };
@@ -207,10 +209,6 @@ async fn run_subagent(
                 status,
             },
         ))
-        .await;
-
-    let _ = db::global_db()
-        .update_session_msg_count(&session_id, messages.len() as i64)
         .await;
 
     let summary = extract_final_text(&messages);
@@ -360,6 +358,14 @@ fn spawn_subagent_bridge(
                         .send(EngineToRuntimeEvent::PlanSubmitted(plan))
                         .await;
                 }
+                EngineToRuntimeEvent::UsageRecorded(usage) => {
+                    let _ = parent_tx
+                        .send(EngineToRuntimeEvent::SubagentUsageRecorded {
+                            session_id: session_id.clone(),
+                            usage,
+                        })
+                        .await;
+                }
                 EngineToRuntimeEvent::Error(e) => {
                     let _ = parent_tx.send(EngineToRuntimeEvent::Error(e)).await;
                 }
@@ -371,6 +377,7 @@ fn spawn_subagent_bridge(
                 | EngineToRuntimeEvent::ThinkingDelta(_)
                 | EngineToRuntimeEvent::TextDelta(_)
                 | EngineToRuntimeEvent::SubagentStarted(_)
+                | EngineToRuntimeEvent::SubagentUsageRecorded { .. }
                 | EngineToRuntimeEvent::SubagentMessageProduced(_)
                 | EngineToRuntimeEvent::SubagentToolUse(_)
                 | EngineToRuntimeEvent::SubagentToolResult(_)

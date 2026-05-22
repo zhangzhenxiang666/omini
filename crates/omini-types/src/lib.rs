@@ -6,6 +6,7 @@ pub mod permissions;
 pub mod proposed_plan;
 pub mod subagents;
 pub mod tool;
+pub mod usage;
 
 pub mod types {
     pub use crate::config;
@@ -14,4 +15,5 @@ pub mod types {
     pub use crate::message;
     pub use crate::proposed_plan;
     pub use crate::tool;
+    pub use crate::usage;
 }

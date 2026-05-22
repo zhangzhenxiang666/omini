@@ -1,5 +1,6 @@
 use crate::types::display::{DisplayMessage, DisplayPlan};
 use crate::types::message::ContentBlock;
+use crate::types::usage::Usage;
 use chrono::{DateTime, Utc};
 use serde_json;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -92,7 +93,9 @@ pub struct Session {
     pub model: String,
     pub thinking_effort: Option<String>,
     pub title: Option<String>,
-    pub message_count: i64,
+    pub current_context_tokens: i64,
+    pub total_tokens: i64,
+    pub total_cached_tokens: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -171,7 +174,9 @@ impl Database {
                 model             TEXT NOT NULL DEFAULT '',
                 thinking_effort   TEXT,
                 title             TEXT,
-                message_count     INTEGER NOT NULL DEFAULT 0,
+                current_context_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens      INTEGER NOT NULL DEFAULT 0,
+                total_cached_tokens INTEGER NOT NULL DEFAULT 0,
                 created_at        TEXT NOT NULL,
                 updated_at        TEXT NOT NULL
             )",
@@ -180,6 +185,12 @@ impl Database {
         .await?;
 
         self.ensure_sessions_column("spawn_tool_use_id", "TEXT")
+            .await?;
+        self.ensure_sessions_column("current_context_tokens", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_sessions_column("total_tokens", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.ensure_sessions_column("total_cached_tokens", "INTEGER NOT NULL DEFAULT 0")
             .await?;
 
         sqlx::query(
@@ -227,8 +238,9 @@ impl Database {
         sqlx::query(
             "INSERT INTO sessions
             (id, project_path, parent_session_id, spawn_tool_use_id, session_type, agent_label,
-            provider, model, thinking_effort, title, message_count, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            provider, model, thinking_effort, title, current_context_tokens, total_tokens,
+            total_cached_tokens, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&session.id)
         .bind(&session.project_path)
@@ -240,7 +252,9 @@ impl Database {
         .bind(&session.model)
         .bind(&session.thinking_effort)
         .bind(&session.title)
-        .bind(session.message_count)
+        .bind(session.current_context_tokens)
+        .bind(session.total_tokens)
+        .bind(session.total_cached_tokens)
         .bind(session.created_at)
         .bind(session.updated_at)
         .execute(&self.pool)
@@ -276,14 +290,49 @@ impl Database {
         Ok(rows)
     }
 
-    pub async fn update_session_msg_count(&self, id: &str, count: i64) -> Result<(), DbError> {
+    pub async fn record_session_usage(&self, id: &str, usage: Usage) -> Result<(), DbError> {
         let now = Utc::now();
-        sqlx::query("UPDATE sessions SET message_count = ?, updated_at = ? WHERE id = ?")
-            .bind(count)
-            .bind(now)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let total_tokens = usage_tokens_i64(usage);
+        let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
+        sqlx::query(
+            "UPDATE sessions
+            SET current_context_tokens = ?,
+                total_tokens = total_tokens + ?,
+                total_cached_tokens = total_cached_tokens + ?,
+                updated_at = ?
+            WHERE id = ?",
+        )
+        .bind(total_tokens)
+        .bind(total_tokens)
+        .bind(cached_tokens)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn record_parent_subagent_usage(
+        &self,
+        id: &str,
+        usage: Usage,
+    ) -> Result<(), DbError> {
+        let now = Utc::now();
+        let total_tokens = usage_tokens_i64(usage);
+        let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
+        sqlx::query(
+            "UPDATE sessions
+            SET total_tokens = total_tokens + ?,
+                total_cached_tokens = total_cached_tokens + ?,
+                updated_at = ?
+            WHERE id = ?",
+        )
+        .bind(total_tokens)
+        .bind(cached_tokens)
+        .bind(now)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -455,6 +504,14 @@ impl Database {
     }
 }
 
+fn usage_tokens_i64(usage: Usage) -> i64 {
+    usage_usize_to_i64(usage.total_tokens())
+}
+
+fn usage_usize_to_i64(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 /// 从存储的消息 content JSON（ContentBlock 数组）中提取纯文本。
 /// 跳过 file 引用的大块、tool_use、thinking 等非文本块。
 pub fn extract_message_text(content_json: &str) -> String {
@@ -478,4 +535,132 @@ pub fn extract_message_text(content_json: &str) -> String {
         return texts.join(" ");
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    async fn temp_db() -> Database {
+        let path = std::env::temp_dir().join(format!("omini-db-test-{}.sqlite", Uuid::new_v4()));
+        Database::open(&path).await.expect("db should open")
+    }
+
+    fn test_session(id: &str) -> Session {
+        let now = Utc::now();
+        Session {
+            id: id.to_string(),
+            project_path: "/tmp/project".to_string(),
+            parent_session_id: None,
+            spawn_tool_use_id: None,
+            session_type: "main".to_string(),
+            agent_label: None,
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            thinking_effort: None,
+            title: None,
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test]
+    async fn session_usage_fields_default_to_zero() {
+        let db = temp_db().await;
+        db.create_session(&test_session("s1"))
+            .await
+            .expect("session should insert");
+
+        let session = db
+            .get_session("s1")
+            .await
+            .expect("session should load")
+            .expect("session should exist");
+
+        assert_eq!(session.current_context_tokens, 0);
+        assert_eq!(session.total_tokens, 0);
+        assert_eq!(session.total_cached_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn record_session_usage_updates_current_and_totals() {
+        let db = temp_db().await;
+        db.create_session(&test_session("s1"))
+            .await
+            .expect("session should insert");
+
+        db.record_session_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: 3,
+            },
+        )
+        .await
+        .expect("usage should update");
+        db.record_session_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 2,
+                completion_tokens: 4,
+                cached_tokens: 1,
+            },
+        )
+        .await
+        .expect("usage should update");
+
+        let session = db
+            .get_session("s1")
+            .await
+            .expect("session should load")
+            .expect("session should exist");
+
+        assert_eq!(session.current_context_tokens, 6);
+        assert_eq!(session.total_tokens, 21);
+        assert_eq!(session.total_cached_tokens, 4);
+    }
+
+    #[tokio::test]
+    async fn record_parent_subagent_usage_only_updates_totals() {
+        let db = temp_db().await;
+        db.create_session(&test_session("s1"))
+            .await
+            .expect("session should insert");
+        db.record_session_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: 3,
+            },
+        )
+        .await
+        .expect("usage should update");
+
+        db.record_parent_subagent_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 7,
+                completion_tokens: 8,
+                cached_tokens: 4,
+            },
+        )
+        .await
+        .expect("subagent usage should update");
+
+        let session = db
+            .get_session("s1")
+            .await
+            .expect("session should load")
+            .expect("session should exist");
+
+        assert_eq!(session.current_context_tokens, 15);
+        assert_eq!(session.total_tokens, 30);
+        assert_eq!(session.total_cached_tokens, 7);
+    }
 }

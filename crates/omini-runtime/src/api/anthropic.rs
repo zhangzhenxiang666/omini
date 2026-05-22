@@ -1,9 +1,10 @@
 use crate::api::{
-    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, Usage, api_channel,
+    ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, api_channel,
     send_with_retry, sse::IntoSseStream,
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::message::{ContentBlock, Message, Role, ToolUseBlock};
+use crate::types::usage::Usage;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -100,8 +101,7 @@ pub(super) async fn invoke_anthropic(
 
         let mut current_block: Option<BlockState> = None;
         let mut content_blocks: Vec<ContentBlock> = Vec::new();
-        let mut prompt_tokens: u32 = 0;
-        let mut completion_tokens: u32 = 0;
+        let mut usage_counters = AnthropicUsage::default();
         let mut finish_reason: FinishReason = FinishReason::Stop;
 
         let mut stream = Box::pin(
@@ -138,11 +138,7 @@ pub(super) async fn invoke_anthropic(
                             if let Some(msg) = data.get("message")
                                 && let Some(usage) = msg.get("usage")
                             {
-                                prompt_tokens = usage
-                                    .get("input_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
+                                usage_counters.update_from_value(usage);
                             }
                         }
 
@@ -272,11 +268,7 @@ pub(super) async fn invoke_anthropic(
 
                         "message_delta" => {
                             if let Some(usage) = data.get("usage") {
-                                completion_tokens = usage
-                                    .get("output_tokens")
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(0)
-                                    as u32;
+                                usage_counters.update_from_value(usage);
                             }
                             if let Some(delta) = data.get("delta") {
                                 finish_reason = delta
@@ -300,10 +292,7 @@ pub(super) async fn invoke_anthropic(
                                     std::mem::take(&mut content_blocks),
                                 ),
                                 finish_reason: finish_reason.clone(),
-                                usage: Usage {
-                                    prompt_tokens: prompt_tokens as usize,
-                                    completion_tokens: completion_tokens as usize,
-                                },
+                                usage: usage_counters.to_usage(),
                             };
                             if tx.send(Ok(ApiEvent::Done(completion))).await.is_err() {
                                 break 'stream;
@@ -397,6 +386,56 @@ fn strip_tool_result_metadata(value: &mut Value) {
     }
 }
 
+#[derive(Default)]
+struct AnthropicUsage {
+    input_tokens: usize,
+    cache_creation_input_tokens: usize,
+    cache_read_input_tokens: usize,
+    output_tokens: usize,
+}
+
+impl AnthropicUsage {
+    fn update_from_value(&mut self, usage: &Value) {
+        set_if_missing(
+            &mut self.input_tokens,
+            usage.get("input_tokens").and_then(Value::as_u64),
+        );
+        set_if_missing(
+            &mut self.cache_creation_input_tokens,
+            usage
+                .get("cache_creation_input_tokens")
+                .and_then(Value::as_u64),
+        );
+        set_if_missing(
+            &mut self.cache_read_input_tokens,
+            usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        );
+        set_if_missing(
+            &mut self.output_tokens,
+            usage.get("output_tokens").and_then(Value::as_u64),
+        );
+    }
+
+    fn to_usage(&self) -> Usage {
+        Usage {
+            prompt_tokens: self.input_tokens
+                + self.cache_creation_input_tokens
+                + self.cache_read_input_tokens,
+            completion_tokens: self.output_tokens,
+            cached_tokens: self.cache_read_input_tokens,
+        }
+    }
+}
+
+fn set_if_missing(current: &mut usize, value: Option<u64>) {
+    if *current == 0
+        && let Some(value) = value
+        && value > 0
+    {
+        *current = value as usize;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,5 +467,47 @@ mod tests {
 
         assert!(!tool_result.contains_key("metadata"));
         assert!(tool_result.contains_key("cache_control"));
+    }
+
+    #[test]
+    fn anthropic_usage_counts_cache_tokens() {
+        let mut usage = AnthropicUsage::default();
+
+        usage.update_from_value(&serde_json::json!({
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 25,
+            "cache_read_input_tokens": 75,
+            "output_tokens": 0
+        }));
+        usage.update_from_value(&serde_json::json!({
+            "output_tokens": 30
+        }));
+
+        let usage = usage.to_usage();
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.cached_tokens, 75);
+    }
+
+    #[test]
+    fn anthropic_usage_does_not_overwrite_existing_values_with_zeroes() {
+        let mut usage = AnthropicUsage::default();
+
+        usage.update_from_value(&serde_json::json!({
+            "input_tokens": 100,
+            "cache_creation_input_tokens": 25,
+            "cache_read_input_tokens": 75
+        }));
+        usage.update_from_value(&serde_json::json!({
+            "input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "output_tokens": 30
+        }));
+
+        let usage = usage.to_usage();
+        assert_eq!(usage.prompt_tokens, 200);
+        assert_eq!(usage.completion_tokens, 30);
+        assert_eq!(usage.cached_tokens, 75);
     }
 }

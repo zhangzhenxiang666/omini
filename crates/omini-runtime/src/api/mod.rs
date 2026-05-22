@@ -2,6 +2,7 @@ use crate::types::config::ProviderType;
 use crate::types::config::ThinkingEffort;
 use crate::types::message::{Message, ToolUseBlock};
 use crate::types::tool::ToolDefinition;
+use crate::types::usage::Usage;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -65,12 +66,6 @@ pub struct ApiRequest<'a> {
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
     pub thinking_effort: Option<ThinkingEffort>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Usage {
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
 }
 
 #[derive(Debug, Clone)]

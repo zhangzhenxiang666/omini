@@ -74,6 +74,17 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
+    state.status_bar.context_window =
+        settings
+            .providers
+            .get(&settings.active_provider)
+            .and_then(|provider| {
+                provider
+                    .models
+                    .iter()
+                    .find(|model| model.id == settings.model)
+                    .map(|model| model.limit)
+            });
     state.set_mention_context(settings.cwd.clone(), Vec::new());
 
     let running = Arc::new(AtomicBool::new(true));

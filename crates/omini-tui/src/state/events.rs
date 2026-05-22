@@ -451,15 +451,26 @@ impl UiState {
                 provider,
                 model,
                 thinking_effort,
+                context_window,
             } => {
                 self.status_bar.active_provider = provider;
                 self.status_bar.model = model;
                 self.status_bar.thinking_effort = thinking_effort;
+                self.status_bar.context_window = context_window;
                 // 模型切换成功后自动关闭选择弹窗
                 self.interaction_step = None;
                 self.interaction_request = None;
             }
+            RuntimeToUiEvent::UsageChanged(usage) => {
+                self.status_bar.current_context_tokens = usage.current_context_tokens;
+                self.status_bar.total_tokens = usage.total_tokens;
+                self.status_bar.total_cached_tokens = usage.total_cached_tokens;
+                self.status_bar.context_window = usage.context_window;
+            }
             RuntimeToUiEvent::ActiveProfileChanged(profile) => {
+                if self.status_bar.active_profile != profile {
+                    self.status_bar.plan_mode_message_sent = false;
+                }
                 self.status_bar.active_profile = profile;
             }
             RuntimeToUiEvent::SessionTitleChanged { title } => {
@@ -546,9 +557,14 @@ impl UiState {
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,
+        usage: crate::types::events::SessionUsageSnapshot,
     ) {
         self.current_session_id = session_id;
         self.messages = UiMessage::from_history_items(messages);
+        self.status_bar.current_context_tokens = usage.current_context_tokens;
+        self.status_bar.total_tokens = usage.total_tokens;
+        self.status_bar.total_cached_tokens = usage.total_cached_tokens;
+        self.status_bar.context_window = usage.context_window;
         self.subagents.clear();
         self.subagents_by_tool_use.clear();
         for subagent in subagents {
@@ -574,6 +590,35 @@ impl UiState {
         self.plan_approval = None;
         self.plan_approval_selected = 0;
         self.scroll_to_bottom();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::events::ActiveProfile;
+
+    #[test]
+    fn entering_plan_mode_resets_plan_message_hint_state() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Main;
+        state.status_bar.plan_mode_message_sent = true;
+
+        state.apply_event(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan));
+
+        assert_eq!(state.status_bar.active_profile, ActiveProfile::Plan);
+        assert!(!state.status_bar.plan_mode_message_sent);
+    }
+
+    #[test]
+    fn plan_message_sent_is_recorded_only_in_plan_mode() {
+        let mut state = UiState::new();
+        state.mark_plan_mode_message_sent();
+        assert!(!state.status_bar.plan_mode_message_sent);
+
+        state.apply_event(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan));
+        state.mark_plan_mode_message_sent();
+        assert!(state.status_bar.plan_mode_message_sent);
     }
 }
 

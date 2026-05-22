@@ -883,6 +883,7 @@ pub(super) async fn flush_queued_user_inputs(
     state.scroll_offset = 0;
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
+    state.mark_plan_mode_message_sent();
     let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;
 }
 

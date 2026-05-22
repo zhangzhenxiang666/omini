@@ -33,7 +33,6 @@ impl Command for SessionsCommand {
                 title: s.title.unwrap_or_default(),
                 model: s.model,
                 provider: s.provider,
-                message_count: s.message_count,
                 created_at: s.created_at,
             });
         }

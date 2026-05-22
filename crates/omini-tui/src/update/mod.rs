@@ -288,9 +288,10 @@ pub(super) async fn handle_runtime_event(
         session_id,
         messages,
         subagents,
+        usage,
     } = event
     {
-        state.apply_session_changed(session_id, messages, subagents);
+        state.apply_session_changed(session_id, messages, subagents, usage);
     } else {
         let should_flush_queue = matches!(event, RuntimeToUiEvent::RunFinished);
         state.apply_event(event);
@@ -757,6 +758,7 @@ async fn handle_composer_key(
                         .send(UiToRuntimeEvent::SendCommand(draft.text))
                         .await;
                 } else if state.is_run_active() {
+                    state.mark_plan_mode_message_sent();
                     state.queued_user_inputs.push_back(draft);
                 } else {
                     state.clear_run_dividers();
@@ -772,6 +774,7 @@ async fn handle_composer_key(
                         },
                     };
                     state.messages.push(ui_message);
+                    state.mark_plan_mode_message_sent();
                     let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;
                     state.scroll_offset = 0;
                     state.auto_scroll = true;

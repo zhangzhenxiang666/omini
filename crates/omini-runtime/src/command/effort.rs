@@ -100,6 +100,17 @@ impl Command for EffortCommand {
                 provider: runtime.settings.active_provider.clone(),
                 model: runtime.settings.model.clone(),
                 thinking_effort: runtime.settings.thinking_effort,
+                context_window: runtime
+                    .settings
+                    .providers
+                    .get(&runtime.settings.active_provider)
+                    .and_then(|provider| {
+                        provider
+                            .models
+                            .iter()
+                            .find(|model| model.id == runtime.settings.model)
+                            .map(|model| model.limit)
+                    }),
             }),
             CommandEffect::Notice(format!("思考程度已设置为 {effort}")),
         ])

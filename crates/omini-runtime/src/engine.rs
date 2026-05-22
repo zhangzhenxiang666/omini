@@ -290,6 +290,9 @@ impl QueryEngine {
                             });
                         }
                         crate::api::ApiEvent::Done(completion) => {
+                            let _ = event_tx
+                                .send(EngineToRuntimeEvent::UsageRecorded(completion.usage))
+                                .await;
                             stream_completion = Some(completion);
                         }
                     },
@@ -363,7 +366,6 @@ impl QueryEngine {
                 }
             };
 
-            // TODO: 需要将token信息同步(占位)
             finish_reason = completion.finish_reason.clone();
 
             let msg = completion.message;

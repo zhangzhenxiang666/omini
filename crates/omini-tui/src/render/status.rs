@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::time::{SystemTime, UNIX_EPOCH};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) fn animated_status_spans(text: &str) -> Vec<Span<'static>> {
     animated_status_spans_with_palette(text, Color::Rgb(200, 169, 238), Color::Rgb(55, 47, 65))
@@ -89,6 +89,89 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
         _ => model_part,
     };
 
+    #[cfg(debug_assertions)]
+    let debug_session_id = state.current_session_id.as_deref();
+    #[cfg(not(debug_assertions))]
+    let debug_session_id = None;
+
+    let width = area.width as usize;
+    let plan_hint = plan_mode_hint(state, width);
+    let left_width = left_status_budget(width, plan_hint.as_ref());
+    let debug_style = choose_debug_session_style(
+        state,
+        &model_thinking,
+        &path_display,
+        debug_session_id,
+        left_width,
+    );
+    let left = build_left_status_line(state, &model_thinking, &path_display, debug_style);
+    let mut line = compose_footer_line(left, plan_hint, width);
+    state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
+    apply_selection_highlight(state, area, &mut line);
+
+    let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(paragraph, area);
+}
+
+fn append_usage_spans(status_bar: &crate::state::StatusBar, spans: &mut Vec<Span<'static>>) {
+    let usage_style = Style::default().fg(Color::Rgb(0xf2, 0xb5, 0x8d));
+    if let Some(context_window) = status_bar.context_window
+        && context_window > 0
+    {
+        let percent = ((status_bar.current_context_tokens.max(0) as f64 / context_window as f64)
+            * 100.0)
+            .round() as i64;
+        spans.extend([
+            Span::styled(format!(" Context {}% used ", percent.max(0)), usage_style),
+            Span::styled("·", Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+
+    if status_bar.total_tokens > 0 {
+        spans.extend([
+            Span::styled(
+                format!(" {} used ", format_token_count(status_bar.total_tokens)),
+                usage_style,
+            ),
+            Span::styled("·", Style::default().fg(Color::DarkGray)),
+        ]);
+    }
+}
+
+fn format_token_count(tokens: i64) -> String {
+    let tokens = tokens.max(0);
+    if tokens >= 1_000_000 {
+        let millions = tokens as f64 / 1_000_000.0;
+        return trim_decimal_unit(millions, "m");
+    }
+    if tokens >= 1_000 {
+        let thousands = tokens as f64 / 1_000.0;
+        return trim_decimal_unit(thousands, "k");
+    }
+    tokens.to_string()
+}
+
+fn trim_decimal_unit(value: f64, unit: &str) -> String {
+    let mut text = format!("{value:.1}");
+    if text.ends_with(".0") {
+        text.truncate(text.len() - 2);
+    }
+    format!("{text}{unit}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DebugSessionStyle {
+    Full,
+    Short,
+    Hidden,
+}
+
+fn build_left_status_line(
+    state: &UiState,
+    model_thinking: &str,
+    path_display: &str,
+    debug_style: DebugSessionStyle,
+) -> Line<'static> {
     let mut base_spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
         Span::styled(
@@ -102,19 +185,16 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
         ),
         Span::styled("·", Style::default().fg(Color::DarkGray)),
     ];
+    append_usage_spans(&state.status_bar, &mut base_spans);
 
     #[cfg(debug_assertions)]
-    if let Some(session_id) = state.current_session_id.as_deref() {
-        base_spans.extend([
-            Span::styled(
-                format!(" 会话:{} ", session_id),
-                Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98)),
-            ),
-            Span::styled("·", Style::default().fg(Color::DarkGray)),
-        ]);
-    }
+    append_debug_session_spans(
+        state.current_session_id.as_deref(),
+        debug_style,
+        &mut base_spans,
+    );
 
-    let mut line = match &state.agent_status {
+    match &state.agent_status {
         AgentStatus::Thinking | AgentStatus::Working => {
             let mut spans = base_spans;
             spans.push(Span::raw(" "));
@@ -129,35 +209,184 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
             ));
             Line::from(base_spans)
         }
-    };
-    append_plan_mode_hint(state, area.width as usize, &mut line);
-    state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
-    apply_selection_highlight(state, area, &mut line);
-
-    let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(paragraph, area);
+    }
 }
 
-fn append_plan_mode_hint(state: &UiState, width: usize, line: &mut Line<'static>) {
+#[cfg(debug_assertions)]
+fn append_debug_session_spans(
+    session_id: Option<&str>,
+    debug_style: DebugSessionStyle,
+    spans: &mut Vec<Span<'static>>,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let label = match debug_style {
+        DebugSessionStyle::Full => session_id.to_string(),
+        DebugSessionStyle::Short => {
+            let short = session_id.chars().take(8).collect::<String>();
+            format!("sid {short}")
+        }
+        DebugSessionStyle::Hidden => return,
+    };
+    spans.extend([
+        Span::styled(
+            format!(" {label} "),
+            Style::default().fg(Color::Rgb(0x8a, 0x8f, 0x98)),
+        ),
+        Span::styled("·", Style::default().fg(Color::DarkGray)),
+    ]);
+}
+
+fn choose_debug_session_style(
+    state: &UiState,
+    model_thinking: &str,
+    path_display: &str,
+    session_id: Option<&str>,
+    width: usize,
+) -> DebugSessionStyle {
+    if session_id.is_none() {
+        return DebugSessionStyle::Hidden;
+    }
+
+    for style in [DebugSessionStyle::Full, DebugSessionStyle::Short] {
+        let line = build_left_status_line(state, model_thinking, path_display, style);
+        if line_width(&line) <= width {
+            return style;
+        }
+    }
+
+    DebugSessionStyle::Hidden
+}
+
+fn plan_mode_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
     if state.status_bar.active_profile != ActiveProfile::Plan {
-        return;
+        return None;
     }
 
-    let left_width = UnicodeWidthStr::width(line_to_plain_text(line).as_str());
-    let hint = "Plan mode (Shift+Tab 切换模式)";
-    let hint_width = UnicodeWidthStr::width(hint);
-    if left_width + hint_width + 1 > width {
-        return;
+    let style = plan_mode_hint_style();
+    if !state.status_bar.plan_mode_message_sent {
+        let full = Line::from(vec![
+            Span::styled("Plan mode", style),
+            Span::styled(" (Shift+Tab 切换模式)", style),
+        ]);
+        if line_width(&full) < width {
+            return Some(full);
+        }
     }
 
-    let gap = width.saturating_sub(left_width + hint_width);
-    let style = Style::default()
+    let medium = Line::from(Span::styled("Plan mode", style));
+    if line_width(&medium) < width {
+        return Some(medium);
+    }
+
+    let compact = Line::from(Span::styled("PLAN", style));
+    if line_width(&compact) <= width {
+        return Some(compact);
+    }
+
+    None
+}
+
+fn plan_mode_hint_style() -> Style {
+    Style::default()
         .fg(Color::Rgb(0xd7, 0x66, 0xff))
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+}
+
+fn left_status_budget(width: usize, hint: Option<&Line<'_>>) -> usize {
+    let Some(hint) = hint else {
+        return width;
+    };
+    let hint_width = line_width(hint);
+    if hint_width >= width {
+        0
+    } else {
+        width.saturating_sub(hint_width + 1)
+    }
+}
+
+fn compose_footer_line(
+    left: Line<'static>,
+    hint: Option<Line<'static>>,
+    width: usize,
+) -> Line<'static> {
+    let Some(hint) = hint else {
+        return truncate_line_to_width(left, width);
+    };
+    let hint_width = line_width(&hint);
+    if hint_width >= width {
+        return truncate_line_to_width(hint, width);
+    }
+
+    let left_budget = width.saturating_sub(hint_width + 1);
+    let mut line = truncate_line_to_width(left, left_budget);
+    let left_width = line_width(&line);
+    let gap = width.saturating_sub(left_width + hint_width);
     line.spans.push(Span::raw(" ".repeat(gap)));
-    line.spans.push(Span::styled("Plan mode", style));
-    line.spans
-        .push(Span::styled(" (Shift+Tab 切换模式)", style));
+    line.spans.extend(hint.spans);
+    line
+}
+
+fn truncate_line_to_width(line: Line<'static>, width: usize) -> Line<'static> {
+    if line_width(&line) <= width {
+        return line;
+    }
+
+    let mut remaining = width;
+    let mut spans = Vec::new();
+    for span in line.spans {
+        if remaining == 0 {
+            break;
+        }
+
+        let content = span.content.as_ref();
+        let span_width = UnicodeWidthStr::width(content);
+        if span_width <= remaining {
+            remaining -= span_width;
+            spans.push(span);
+            continue;
+        }
+
+        let truncated = truncate_text_to_width(content, remaining);
+        if !truncated.is_empty() {
+            spans.push(Span::styled(truncated, span.style));
+        }
+        break;
+    }
+
+    Line::from(spans)
+}
+
+fn truncate_text_to_width(text: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
+    let suffix = "...";
+    let content_width = width - UnicodeWidthStr::width(suffix);
+    let mut used = 0;
+    let mut out = String::new();
+    for ch in text.chars() {
+        let ch_width = ch.width().unwrap_or(0);
+        if used + ch_width > content_width {
+            break;
+        }
+        used += ch_width;
+        out.push(ch);
+    }
+    out.push_str(suffix);
+    out
+}
+
+fn line_width(line: &Line<'_>) -> usize {
+    UnicodeWidthStr::width(line_to_plain_text(line).as_str())
 }
 
 fn apply_selection_highlight(state: &UiState, area: Rect, line: &mut Line<'static>) {
@@ -188,9 +417,8 @@ mod tests {
     fn plan_mode_hint_is_right_aligned_in_footer() {
         let mut state = UiState::new();
         state.status_bar.active_profile = ActiveProfile::Plan;
-        let mut line = Line::from("left");
 
-        append_plan_mode_hint(&state, 40, &mut line);
+        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
 
         let text = line_to_plain_text(&line);
         assert!(text.ends_with("Plan mode (Shift+Tab 切换模式)"));
@@ -198,12 +426,121 @@ mod tests {
     }
 
     #[test]
+    fn plan_mode_hint_omits_shortcut_after_message_sent() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Plan;
+        state.status_bar.plan_mode_message_sent = true;
+
+        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("Plan mode"));
+        assert!(!text.contains("Shift+Tab"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 40);
+    }
+
+    #[test]
     fn main_profile_omits_plan_mode_hint() {
         let state = UiState::new();
-        let mut line = Line::from("left");
 
-        append_plan_mode_hint(&state, 40, &mut line);
+        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
 
         assert_eq!(line_to_plain_text(&line), "left");
+    }
+
+    #[test]
+    fn plan_mode_hint_falls_back_to_compact_label_when_narrow() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Plan;
+
+        let line = compose_footer_line(
+            Line::from("very long left status"),
+            plan_mode_hint(&state, 8),
+            8,
+        );
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("PLAN"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 8);
+    }
+
+    #[test]
+    fn plan_mode_hint_survives_long_left_status() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Plan;
+
+        let line = compose_footer_line(
+            Line::from("very long left status that would otherwise hide the mode"),
+            plan_mode_hint(&state, 24),
+            24,
+        );
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("Plan mode"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 24);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_session_id_does_not_displace_plan_mode_hint() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Plan;
+        state.status_bar.model = "test-model".to_string();
+        state.status_bar.cwd = "/tmp/project".into();
+        state.current_session_id = Some("12345678-1234-1234-1234-123456789abc".to_string());
+        let width = 24;
+        let plan_hint = plan_mode_hint(&state, width);
+        let left_width = left_status_budget(width, plan_hint.as_ref());
+        let debug_style = choose_debug_session_style(
+            &state,
+            "test-model",
+            "/tmp/project",
+            state.current_session_id.as_deref(),
+            left_width,
+        );
+        let line = compose_footer_line(
+            build_left_status_line(&state, "test-model", "/tmp/project", debug_style),
+            plan_hint,
+            width,
+        );
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("Plan mode"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), width);
+    }
+
+    #[test]
+    fn token_count_formats_thousand_and_million_units() {
+        assert_eq!(format_token_count(999), "999");
+        assert_eq!(format_token_count(538_000), "538k");
+        assert_eq!(format_token_count(1_000_000), "1m");
+        assert_eq!(format_token_count(1_500_000), "1.5m");
+    }
+
+    #[test]
+    fn usage_spans_hide_zero_history_usage() {
+        let mut status = crate::state::StatusBar {
+            current_context_tokens: 56,
+            context_window: Some(100),
+            ..crate::state::StatusBar::default()
+        };
+        let mut spans = Vec::new();
+
+        append_usage_spans(&status, &mut spans);
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("Context 56% used"));
+        assert!(!text.contains(" used  ·"));
+
+        status.total_tokens = 1_000_000;
+        let mut spans = Vec::new();
+        append_usage_spans(&status, &mut spans);
+        let text = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(text.contains("1m used"));
     }
 }
