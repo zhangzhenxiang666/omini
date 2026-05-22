@@ -32,6 +32,7 @@ fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
         stderr(),
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
         )
     )?;
