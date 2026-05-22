@@ -39,6 +39,7 @@ mod tests {
         PermissionPreview, PlanApprovalAction, SubmittedPlan, ToolPauseRequest,
     };
     use chrono::Utc;
+    use crossterm::event::KeyEvent;
     use std::path::PathBuf;
 
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
@@ -196,6 +197,46 @@ mod tests {
             panic!("expected profile toggle event");
         };
     }
+
+    #[tokio::test]
+    async fn repeat_key_events_edit_composer() {
+        let mut state = UiState::new();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+            &tx,
+        )
+        .await;
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            &tx,
+        )
+        .await;
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            &tx,
+        )
+        .await;
+
+        assert_eq!(state.input, "a");
+        assert_eq!(state.cursor_char, 1);
+    }
 }
 
 pub(super) async fn handle_input_event(
@@ -204,7 +245,7 @@ pub(super) async fn handle_input_event(
     request_tx: &mpsc::Sender<UiToRuntimeEvent>,
 ) -> UpdateOutcome {
     match event {
-        Event::Key(key) if key.kind == KeyEventKind::Press => {
+        Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
             if handle_key_event(state, key.code, key.modifiers, request_tx).await {
                 UpdateOutcome::redraw()
             } else {
