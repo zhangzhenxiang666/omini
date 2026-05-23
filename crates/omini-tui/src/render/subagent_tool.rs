@@ -1,11 +1,11 @@
-use super::{status, truncate_str};
-use crate::state::SubagentNode;
-use crate::types::events::SubagentStatus;
+use super::truncate_str;
+use crate::state::{SubagentNode, pause_preview_tool_use_id};
+use crate::types::events::{SubagentStatus, ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
-use crate::widgets::display_path;
+use crate::widgets::{display_path, tool_title_style};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -13,6 +13,7 @@ pub(super) fn render_subagent_tool(
     tool_use: &ToolUseBlock,
     result: Option<&ToolResultBlock>,
     node: Option<&SubagentNode>,
+    pending_tool_pauses: &VecDeque<ToolPauseRequest>,
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
@@ -39,11 +40,7 @@ pub(super) fn render_subagent_tool(
 
     let mut header = vec![Span::raw("· ")];
     if matches!(status, SubagentStatus::Running) {
-        header.extend(status::animated_status_spans_with_palette(
-            &label,
-            accent,
-            Color::Rgb(0x1f, 0x4e, 0x58),
-        ));
+        header.push(Span::styled(label, tool_title_style(accent, true)));
     } else {
         header.push(Span::styled(
             label,
@@ -92,20 +89,26 @@ pub(super) fn render_subagent_tool(
         }
     }
 
-    let total_tools = child_tools.len();
-    let mut rendered_tools = 0usize;
-    for (idx, child_tool) in child_tools.iter().enumerate() {
-        if total_tools > 6 && idx == 3 {
+    let visible_tool_indices = visible_child_tool_indices(&child_tools, node, pending_tool_pauses);
+    let mut previous_idx = None;
+    for (rendered_tools, idx) in visible_tool_indices.into_iter().enumerate() {
+        if previous_idx.is_some_and(|previous| idx > previous + 1) {
             lines.push(Line::from(vec![
                 Span::raw("     "),
                 Span::styled("...", Style::default().fg(dim)),
             ]));
         }
-        if total_tools > 6 && idx >= 3 && idx < total_tools.saturating_sub(3) {
-            continue;
-        }
 
-        let prefix = if rendered_tools == 0 {
+        let child_tool = child_tools[idx];
+        let tool_pause = tool_pause_for_child_tool(pending_tool_pauses, node, &child_tool.id);
+        let tool_pause_active = tool_pause.is_some_and(|pause| {
+            pending_tool_pauses
+                .front()
+                .is_some_and(|active| active.tool_use_id == pause.tool_use_id)
+        });
+        let prefix = if tool_pause_active {
+            "  › "
+        } else if rendered_tools == 0 {
             "  └─ "
         } else {
             "     "
@@ -115,19 +118,75 @@ pub(super) fn render_subagent_tool(
             Span::raw(prefix),
             Span::styled(tool_name, Style::default().fg(text)),
         ];
+        let pause_label = tool_pause.map(tool_pause_label);
         if let Some(summary) = subagent_tool_summary(child_tool, project_dir) {
+            let pause_width = pause_label
+                .map(|label| UnicodeWidthStr::width(label) + UnicodeWidthStr::width(" · "))
+                .unwrap_or(0);
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                truncate_str(&summary, content_width.saturating_sub(10)),
+                truncate_str(&summary, content_width.saturating_sub(10 + pause_width)),
                 Style::default().fg(dim),
             ));
         }
+        if let Some(label) = pause_label {
+            let status_style = if tool_pause_active {
+                Style::default().fg(accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(dim)
+            };
+            spans.push(Span::styled(" · ", Style::default().fg(dim)));
+            spans.push(Span::styled(label, status_style));
+        }
         lines.push(Line::from(spans));
-        rendered_tools += 1;
+        previous_idx = Some(idx);
     }
 
     push_subagent_error_lines(&mut lines, result, content_width, "  ");
     lines
+}
+
+fn visible_child_tool_indices(
+    child_tools: &[&ToolUseBlock],
+    node: &SubagentNode,
+    pending_tool_pauses: &VecDeque<ToolPauseRequest>,
+) -> Vec<usize> {
+    if child_tools.len() <= 6 {
+        return (0..child_tools.len()).collect();
+    }
+
+    let mut indices = BTreeSet::new();
+    for idx in 0..3.min(child_tools.len()) {
+        indices.insert(idx);
+    }
+    for idx in child_tools.len().saturating_sub(3)..child_tools.len() {
+        indices.insert(idx);
+    }
+    for (idx, child_tool) in child_tools.iter().enumerate() {
+        if tool_pause_for_child_tool(pending_tool_pauses, node, &child_tool.id).is_some() {
+            indices.insert(idx);
+        }
+    }
+
+    indices.into_iter().collect()
+}
+
+fn tool_pause_for_child_tool<'a>(
+    pending_tool_pauses: &'a VecDeque<ToolPauseRequest>,
+    node: &SubagentNode,
+    tool_use_id: &str,
+) -> Option<&'a ToolPauseRequest> {
+    pending_tool_pauses.iter().find(|pause| {
+        pause.source_session_id.as_deref() == Some(node.session_id.as_str())
+            && pause_preview_tool_use_id(pause) == tool_use_id
+    })
+}
+
+fn tool_pause_label(preview: &ToolPauseRequest) -> &'static str {
+    match &preview.kind {
+        ToolPauseKind::Permission(_) => "Waiting for permission",
+        ToolPauseKind::UserInput(_) => "Waiting for answer",
+    }
 }
 
 fn push_subagent_error_lines(
@@ -320,7 +379,8 @@ mod tests {
             metadata: None,
         };
 
-        let lines = render_subagent_tool(&tool_use, Some(&result), None, 80, None);
+        let lines =
+            render_subagent_tool(&tool_use, Some(&result), None, &VecDeque::new(), 80, None);
         let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
 
         assert_eq!(lines[0].spans.len(), 2);

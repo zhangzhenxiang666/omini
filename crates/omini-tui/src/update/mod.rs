@@ -5,7 +5,8 @@ use super::selection::{
 };
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
 use crate::types::events::{
-    PlanApprovalAction, RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent,
+    PermissionPreview, PlanApprovalAction, RuntimeToUiEvent, ToolPauseKind, ToolPauseResponse,
+    UiToRuntimeEvent,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
@@ -36,7 +37,8 @@ impl UpdateOutcome {
 mod tests {
     use super::*;
     use crate::types::events::{
-        PermissionPreview, PlanApprovalAction, SubmittedPlan, ToolPauseRequest,
+        EditPermissionPreview, PermissionPreview, PlanApprovalAction, SubmittedPlan,
+        ToolPauseRequest,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -54,6 +56,26 @@ mod tests {
                 tool_name: "bash".to_string(),
                 payload: serde_json::Map::new(),
             }),
+        }
+    }
+
+    fn edit_permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "edit".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Edit(EditPermissionPreview {
+                summary: "Edit /tmp/demo.rs".to_string(),
+                path: "/tmp/demo.rs".to_string(),
+                replacement_count: 1,
+                replace_all: false,
+                start_lines: vec![1],
+                added_lines: 1,
+                removed_lines: 1,
+            })),
         }
     }
 
@@ -149,6 +171,80 @@ mod tests {
                 note: None,
             }
         );
+        assert_eq!(state.agent_status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn active_permission_pause_allows_message_text_selection_outside_drawer() {
+        let mut state = state_with_permission_pause();
+        state.register_selectable_screen_line(2, 0, 80, "assistant line".to_string());
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+
+        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 0);
+
+        assert!(state.is_selecting_text);
+        assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn active_permission_pause_allows_drawer_text_selection() {
+        let mut state = state_with_permission_pause();
+        state.register_selectable_screen_line(12, 3, 74, "drawer line".to_string());
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+
+        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 12, 3);
+
+        assert!(state.is_selecting_text);
+        assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn scrollable_edit_permission_drawer_captures_mouse_wheel() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
+            "tool_1",
+        )));
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 8;
+        state.permission_scroll_offset = 0;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 2, 0);
+
+        assert!(state.permission_scroll_offset > 0);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.auto_scroll);
+    }
+
+    #[test]
+    fn non_scrollable_or_non_edit_permission_drawer_uses_message_wheel() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
+            "tool_1",
+        )));
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 2;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
+
+        assert_eq!(state.permission_scroll_offset, usize::MAX);
+        assert!(state.scroll_offset > 0);
+        assert!(!state.auto_scroll);
+
+        let mut state = state_with_permission_pause();
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 8;
+        state.permission_scroll_offset = 0;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
+
+        assert_eq!(state.permission_scroll_offset, 0);
+        assert!(state.scroll_offset > 0);
+        assert!(!state.auto_scroll);
     }
 
     #[tokio::test]
@@ -606,13 +702,8 @@ async fn handle_tool_pause_key(
                     response: ToolPauseResponse::Cancelled,
                 })
                 .await;
-            state
-                .pending_tool_previews
-                .remove(&active_pause.tool_use_id);
-            if state.pending_tool_previews.is_empty() {
-                state.resume_run_timer();
-                state.reset_permission_drawer();
-            }
+            let removed_active = state.remove_tool_pause(&active_pause.tool_use_id);
+            state.finish_tool_pause_removal(removed_active);
         }
         KeyCode::Enter => {
             if matches!(active_pause.kind, ToolPauseKind::UserInput(_)) {
@@ -885,37 +976,43 @@ fn handle_mouse_event(state: &mut UiState, kind: MouseEventKind, row: u16, colum
         return;
     }
 
+    if active_permission_drawer_captures_scroll(state) {
+        match kind {
+            MouseEventKind::ScrollUp => {
+                state.update_scroll_step(tokio::time::Instant::now());
+                state.permission_scroll_up(state.scroll_step);
+                return;
+            }
+            MouseEventKind::ScrollDown => {
+                state.update_scroll_step(tokio::time::Instant::now());
+                state.permission_scroll_down(state.scroll_step);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if state.active_tool_pause().is_some() {
         let drawer = state.permission_drawer_area;
-        let body = state.permission_drawer_body_area;
         let in_drawer = row >= drawer.top()
             && row < drawer.bottom()
             && column >= drawer.left()
             && column < drawer.right();
-        let in_body = row >= body.top()
-            && row < body.bottom()
-            && column >= body.left()
-            && column < body.right();
 
+        let in_action_row =
+            row == drawer.bottom().saturating_sub(2) || row == drawer.bottom().saturating_sub(1);
         match kind {
-            MouseEventKind::Down(MouseButton::Left) if in_drawer => {
+            MouseEventKind::Down(MouseButton::Left) if in_drawer && in_action_row => {
                 if row == drawer.bottom().saturating_sub(2) {
                     state.permission_selected = 0;
-                } else if row == drawer.bottom().saturating_sub(1) {
+                } else {
                     state.permission_selected = 1;
                 }
+                return;
             }
-            MouseEventKind::ScrollUp if in_body => {
-                state.update_scroll_step(tokio::time::Instant::now());
-                state.permission_scroll_up(state.scroll_step);
-            }
-            MouseEventKind::ScrollDown if in_body => {
-                state.update_scroll_step(tokio::time::Instant::now());
-                state.permission_scroll_down(state.scroll_step);
-            }
+            _ if in_drawer => {}
             _ => {}
         }
-        return;
     }
 
     match kind {
@@ -949,4 +1046,18 @@ fn handle_mouse_event(state: &mut UiState, kind: MouseEventKind, row: u16, colum
         }
         _ => {}
     }
+}
+
+fn active_permission_drawer_captures_scroll(state: &UiState) -> bool {
+    let Some(request) = state.active_tool_pause() else {
+        return false;
+    };
+    let is_large_file_preview = matches!(
+        &request.kind,
+        ToolPauseKind::Permission(PermissionPreview::Edit(_))
+            | ToolPauseKind::Permission(PermissionPreview::Write(_))
+    );
+    is_large_file_preview
+        && state.permission_drawer_body_area.height > 0
+        && state.permission_drawer_content_len > state.permission_drawer_body_area.height as usize
 }

@@ -1238,8 +1238,9 @@ fn agent_tool_lines(manager: &AgentManagerState) -> Vec<ScrollableLine> {
         ("ask_user", "不询问用户"),
         ("skill", "不加载技能"),
     ];
+    let deny_start = allow_rows.len() + 1;
     for (offset, (label, desc)) in deny_rows.iter().enumerate() {
-        let idx = offset + 10;
+        let idx = offset + deny_start;
         let enabled = manager
             .draft
             .disallow_tools

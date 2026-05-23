@@ -38,7 +38,9 @@ impl Command for CompactCommand {
             .await
         {
             Ok(()) => CommandResult::Ok(Vec::new()),
-            Err(error) => CommandResult::Ok(vec![CommandEffect::Notice(error)]),
+            Err(error) => CommandResult::Ok(vec![CommandEffect::Emit(Box::new(
+                omini_types::events::RuntimeToUiEvent::Warning(error),
+            ))]),
         }
     }
 }

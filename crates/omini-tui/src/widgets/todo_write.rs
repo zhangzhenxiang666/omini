@@ -4,7 +4,7 @@ use ratatui::text::{Line, Span};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
-use super::{spinner, tool_error_display_text, word_wrap};
+use super::{tool_error_display_text, tool_title_style, word_wrap};
 
 struct TodoItem {
     content: String,
@@ -26,21 +26,15 @@ pub(super) fn render(
     content_width: usize,
 ) -> Vec<Line<'static>> {
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
-    let warn = Color::Rgb(212, 182, 106);
     let error = Color::Rgb(255, 100, 100);
     let dim = Color::Rgb(140, 142, 150);
 
     let mut lines = Vec::new();
-    let mut title = vec![
+    let is_pending = result.is_none();
+    let title = vec![
         Span::raw("· "),
-        Span::styled("Todo", Style::default().fg(accent)),
+        Span::styled("Todo", tool_title_style(accent, is_pending)),
     ];
-    if result.is_none() {
-        title.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(warn),
-        ));
-    }
     lines.push(Line::from(title));
 
     if let Some(tr) = result

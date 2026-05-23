@@ -1,7 +1,8 @@
-use crate::types::events::ToolPauseRequest;
+use crate::types::events::{ToolPauseKind, ToolPauseRequest};
 use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use serde_json::Map;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::UnicodeWidthChar;
@@ -71,6 +72,8 @@ pub fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
 }
 
 /// 基于时间的 spinner 字符（每 80ms 切换一帧）。
+// TODO: 当前 pending 状态改用标题文字呼吸；保留此函数，后续需要独立 spinner 时复用。
+#[allow(dead_code)]
 fn spinner() -> &'static str {
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let ms = SystemTime::now()
@@ -79,6 +82,46 @@ fn spinner() -> &'static str {
         .as_millis();
     let idx = (ms / 80) as usize % frames.len();
     frames[idx]
+}
+
+/// 工具标题样式。
+///
+/// pending 工具通过标题颜色呼吸来表达加载状态，不再追加 spinner 字符，
+/// 以避免不同终端字体下符号基线不一致的问题。
+pub(crate) fn tool_title_style(color: Color, pending: bool) -> Style {
+    let color = if pending {
+        breathing_color(color)
+    } else {
+        color
+    };
+    Style::default().fg(color)
+}
+
+fn breathing_color(color: Color) -> Color {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let phase = (ms % 1600) as f64 / 1600.0;
+    breathing_color_at(color, phase)
+}
+
+fn breathing_color_at(color: Color, phase: f64) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    let phase = phase.rem_euclid(1.0);
+    let breath = 0.5 - 0.5 * (phase * std::f64::consts::TAU).cos();
+    let scale = 0.65 + breath * 0.57;
+    Color::Rgb(
+        scale_channel(r, scale),
+        scale_channel(g, scale),
+        scale_channel(b, scale),
+    )
+}
+
+fn scale_channel(value: u8, scale: f64) -> u8 {
+    ((value as f64 * scale).round()).clamp(0.0, 255.0) as u8
 }
 
 pub fn build_bordered_lines(
@@ -261,10 +304,20 @@ pub fn render_tool(
     tool_use: &ToolUseBlock,
     tool_result: Option<&ToolResultBlock>,
     tool_preview: Option<&ToolPauseRequest>,
+    tool_pause_active: Option<bool>,
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
-    match tool_use.name.as_str() {
+    if tool_result.is_none()
+        && let (Some(preview), Some(tool_pause_active)) = (tool_preview, tool_pause_active)
+    {
+        let mut lines =
+            compact_waiting_tool_lines(tool_use, tool_pause_active, content_width, project_dir);
+        decorate_paused_tool(&mut lines, preview, tool_pause_active);
+        return lines;
+    }
+
+    let mut lines = match tool_use.name.as_str() {
         "bash" => bash::render(tool_use, tool_result, content_width),
         "search" => search::render(tool_use, tool_result, content_width, project_dir),
         "read" => read::render(
@@ -292,6 +345,171 @@ pub fn render_tool(
         ),
         "ask_user" => ask_user::render(tool_use, tool_result, content_width),
         _ => Vec::new(),
+    };
+
+    if lines.is_empty() && tool_preview.is_some() {
+        lines.push(Line::from(vec![
+            Span::raw("· "),
+            Span::styled(
+                tool_use.name.clone(),
+                tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), tool_result.is_none()),
+            ),
+        ]));
+    }
+
+    if tool_result.is_none()
+        && let (Some(preview), Some(tool_pause_active)) = (tool_preview, tool_pause_active)
+    {
+        decorate_paused_tool(&mut lines, preview, tool_pause_active);
+    }
+
+    lines
+}
+
+fn compact_waiting_tool_lines(
+    tool_use: &ToolUseBlock,
+    tool_pause_active: bool,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Vec<Line<'static>> {
+    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+    let title_style = tool_title_style(accent, !tool_pause_active);
+    let mut spans = vec![Span::raw("· ")];
+
+    match tool_use.name.as_str() {
+        "read" | "edit" | "write" => {
+            let title = match tool_use.name.as_str() {
+                "read" => "Read",
+                "edit" => "Edit",
+                "write" => "Write",
+                _ => unreachable!(),
+            };
+            spans.push(Span::styled(title, title_style));
+            spans.push(Span::raw(format!(
+                " {}",
+                compact_tool_path(tool_use, project_dir)
+            )));
+        }
+        "bash" => {
+            spans.push(Span::styled("Bash", title_style));
+            let command = tool_use
+                .input
+                .get("command")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let used_width: usize = spans.iter().map(|span| span.width()).sum();
+            let command_width = content_width
+                .saturating_sub(used_width)
+                .saturating_sub(UnicodeWidthStr::width("()"));
+            spans.push(Span::raw("("));
+            spans.push(Span::raw(truncate_display_width(command, command_width)));
+            spans.push(Span::raw(")"));
+        }
+        "ask_user" => {
+            spans.push(Span::styled("Ask User", title_style));
+            let count = tool_use
+                .input
+                .get("questions")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            spans.push(Span::raw(format!(
+                " ({} question{})",
+                count,
+                if count == 1 { "" } else { "s" }
+            )));
+        }
+        other => {
+            spans.push(Span::styled(other.to_string(), title_style));
+        }
+    }
+
+    vec![Line::from(spans)]
+}
+
+fn compact_tool_path(tool_use: &ToolUseBlock, project_dir: Option<&Path>) -> String {
+    let path = tool_use
+        .input
+        .get("file_path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("<unknown>");
+    display_path(path, project_dir)
+}
+
+fn decorate_paused_tool(
+    lines: &mut Vec<Line<'static>>,
+    preview: &ToolPauseRequest,
+    tool_pause_active: bool,
+) {
+    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+    let dim = Color::Rgb(140, 145, 155);
+    if tool_pause_active && let Some(first) = lines.first_mut() {
+        let active_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+        if first
+            .spans
+            .first()
+            .is_some_and(|span| span.content.as_ref() == "· ")
+        {
+            first.spans[0] = Span::styled("› ", active_style);
+        } else {
+            first.spans.insert(0, Span::styled("› ", active_style));
+        }
+    }
+
+    let status_style = if tool_pause_active {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(dim)
+    };
+    lines.push(Line::from(vec![
+        Span::raw("  └─ "),
+        Span::styled(tool_pause_label(preview), status_style),
+    ]));
+}
+
+fn truncate_display_width(s: &str, max_width: usize) -> String {
+    let width = UnicodeWidthStr::width(s);
+    if width <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    let ellipsis = "...";
+    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
+    if max_width <= ellipsis_width {
+        return ellipsis.chars().take(max_width).collect();
+    }
+
+    let target = max_width - ellipsis_width;
+    let mut result = String::new();
+    let mut current_width = 0;
+    for ch in s.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > target {
+            break;
+        }
+        result.push(ch);
+        current_width += ch_width;
+    }
+    result.push_str(ellipsis);
+    result
+}
+
+fn tool_pause_label(preview: &ToolPauseRequest) -> &'static str {
+    match &preview.kind {
+        ToolPauseKind::Permission(_) => "Waiting for permission",
+        ToolPauseKind::UserInput(_) => "Waiting for answer",
+    }
+}
+
+pub fn preview_placeholder_result(tool_use: &ToolUseBlock) -> ToolResultBlock {
+    ToolResultBlock {
+        tool_use_id: tool_use.id.clone(),
+        is_error: false,
+        content: String::new(),
+        metadata: Some(Map::new()),
     }
 }
 
@@ -324,6 +542,19 @@ mod tests {
     }
 
     #[test]
+    fn breathing_color_pulses_rgb_and_preserves_other_colors() {
+        assert_eq!(
+            breathing_color_at(Color::Rgb(100, 150, 200), 0.0),
+            Color::Rgb(65, 98, 130)
+        );
+        assert_eq!(
+            breathing_color_at(Color::Rgb(100, 150, 200), 0.5),
+            Color::Rgb(122, 183, 244)
+        );
+        assert_eq!(breathing_color_at(Color::DarkGray, 0.5), Color::DarkGray);
+    }
+
+    #[test]
     fn skill_tool_renders_invoked_skill_command() {
         let mut input = std::collections::HashMap::new();
         input.insert("name".to_string(), serde_json::json!("commit-message"));
@@ -339,7 +570,7 @@ mod tests {
             metadata: None,
         };
 
-        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
         assert_eq!(plain(&lines[0]), "· Skill commit-message");
     }
@@ -364,7 +595,7 @@ mod tests {
             metadata: None,
         };
 
-        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
         assert!(plain(&lines[0]).starts_with("· Bash("));
         assert_eq!(plain(&lines[1]), "  └─ # 创建提交");
@@ -414,7 +645,7 @@ mod tests {
             metadata: None,
         };
 
-        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
         assert_eq!(plain(&lines[1]), "  Permission denied · Inspect first");
         assert!(!plain(&lines[1]).contains("required_action"));
@@ -449,7 +680,7 @@ mod tests {
             metadata: None,
         };
 
-        let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
         assert_eq!(rendered[0], "· Todo");

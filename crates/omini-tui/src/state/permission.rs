@@ -1,8 +1,21 @@
 use super::UiState;
-use crate::types::events::UserInputPreview;
+use crate::types::events::{ToolPauseKind, UserInputPreview};
 use ratatui::layout::Rect;
 
 impl UiState {
+    pub fn prepare_active_tool_pause(&mut self) {
+        let Some(req) = self.active_tool_pause().cloned() else {
+            self.reset_permission_drawer();
+            return;
+        };
+
+        self.reset_permission_drawer();
+        match &req.kind {
+            ToolPauseKind::Permission(_) => self.prepare_permission_pause(),
+            ToolPauseKind::UserInput(preview) => self.prepare_user_input_preview(preview),
+        }
+    }
+
     pub fn reset_permission_drawer(&mut self) {
         self.permission_selected = 0;
         self.user_input_question_index = 0;

@@ -7,7 +7,7 @@ use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::events::{
     CommandKind, CommandSummary, CompactTrigger, InteractionRequest, RuntimeToUiEvent,
-    SubagentSnapshot, SubagentStatus, ToolPauseKind,
+    SubagentSnapshot, SubagentStatus,
 };
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use std::collections::VecDeque;
@@ -304,14 +304,8 @@ impl UiState {
             RuntimeToUiEvent::ToolResult(tr) => {
                 self.finish_subagent_for_tool_result(&tr);
                 self.running_tools.remove(&tr.tool_use_id);
-                self.pending_tool_previews.remove(&tr.tool_use_id);
-                if self.pending_tool_previews.is_empty() {
-                    self.resume_run_timer();
-                    self.reset_permission_drawer();
-                    if self.agent_status == AgentStatus::AwaitingInput {
-                        self.agent_status = AgentStatus::Working;
-                    }
-                }
+                let removed_active = self.remove_tool_pause(&tr.tool_use_id);
+                self.finish_tool_pause_removal(removed_active);
                 // 工具结果异步返回，追加到 pending_assistant 或最后一条消息中
                 if let Some(pending) = &mut self.pending_assistant {
                     pending.content.push(ContentBlock::ToolResult(tr));
@@ -362,13 +356,10 @@ impl UiState {
                 self.agent_status = AgentStatus::Idle;
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {
-                self.reset_permission_drawer();
-                match &req.kind {
-                    ToolPauseKind::Permission(_) => self.prepare_permission_pause(),
-                    ToolPauseKind::UserInput(preview) => self.prepare_user_input_preview(preview),
+                let should_prepare = self.push_tool_pause(req);
+                if should_prepare {
+                    self.prepare_active_tool_pause();
                 }
-                self.pending_tool_previews
-                    .insert(req.tool_use_id.clone(), req);
                 self.pause_run_timer();
                 self.agent_status = AgentStatus::AwaitingInput;
             }
@@ -409,19 +400,12 @@ impl UiState {
             }
             RuntimeToUiEvent::SubagentToolResult(event) => {
                 self.running_tools.remove(&event.tool_result.tool_use_id);
-                self.pending_tool_previews
-                    .remove(&event.tool_result.tool_use_id);
-                self.pending_tool_previews.remove(&format!(
+                let removed_active = self.remove_tool_pause(&event.tool_result.tool_use_id);
+                let removed_active = self.remove_tool_pause(&format!(
                     "{}:{}",
                     event.session_id, event.tool_result.tool_use_id
-                ));
-                if self.pending_tool_previews.is_empty() {
-                    self.resume_run_timer();
-                    self.reset_permission_drawer();
-                    if self.agent_status == AgentStatus::AwaitingInput {
-                        self.agent_status = AgentStatus::Working;
-                    }
-                }
+                )) || removed_active;
+                self.finish_tool_pause_removal(removed_active);
                 if let Some(node) = self.subagents.get_mut(&event.session_id) {
                     let msg = Message::new(
                         Role::User,
@@ -438,7 +422,7 @@ impl UiState {
             RuntimeToUiEvent::Error(e) => {
                 self.messages.push(UiMessage::Error { text: e });
                 self.fail_running_subagents();
-                if !self.pending_tool_previews.is_empty() {
+                if !self.pending_tool_pauses.is_empty() {
                     self.agent_status = AgentStatus::AwaitingInput;
                 } else if !self.is_run_active() {
                     self.agent_status = AgentStatus::Idle;

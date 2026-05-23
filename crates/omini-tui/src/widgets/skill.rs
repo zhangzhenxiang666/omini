@@ -2,7 +2,7 @@ use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-use super::{spinner, tool_error_display_text, word_wrap};
+use super::{tool_error_display_text, tool_title_style, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -18,16 +18,14 @@ pub(super) fn render(
         .unwrap_or("<unknown>");
     let skill_color = Color::Rgb(0x42, 0xb3, 0xc2);
     let mut main_spans = Vec::new();
+    let is_pending = result.is_none();
 
     main_spans.push(Span::raw("· "));
-    main_spans.push(Span::styled("Skill", Style::default().fg(skill_color)));
+    main_spans.push(Span::styled(
+        "Skill",
+        tool_title_style(skill_color, is_pending),
+    ));
     main_spans.push(Span::raw(format!(" {skill_name}")));
-    if result.is_none() {
-        main_spans.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(Color::Rgb(212, 182, 106)),
-        ));
-    }
 
     let mut lines = vec![Line::from(main_spans)];
     if let Some(tr) = result

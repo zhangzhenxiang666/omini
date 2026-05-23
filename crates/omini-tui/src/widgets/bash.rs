@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::{spinner, tool_error_display_text, word_wrap};
+use super::{tool_error_display_text, tool_title_style, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -12,7 +12,6 @@ pub(super) fn render(
 ) -> Vec<Line<'static>> {
     let dim = Color::Rgb(140, 142, 150);
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
-    let warn = Color::Rgb(212, 182, 106);
     let error = Color::Rgb(255, 100, 100);
     let output = Color::Rgb(156, 156, 156);
 
@@ -20,7 +19,7 @@ pub(super) fn render(
 
     let mut lines: Vec<Line> = Vec::new();
     let is_pending = result.is_none();
-    let title_style = Style::default().fg(accent);
+    let title_style = tool_title_style(accent, is_pending);
     let mut title = Vec::new();
     let desc = tool_use
         .input
@@ -40,15 +39,9 @@ pub(super) fn render(
     if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();
         let parens_width = UnicodeWidthStr::width("()");
-        let spinner_width = if is_pending {
-            UnicodeWidthStr::width(format!(" {}", spinner()).as_str())
-        } else {
-            0
-        };
         let cmd_width = content_width
             .saturating_sub(used_width)
-            .saturating_sub(parens_width)
-            .saturating_sub(spinner_width);
+            .saturating_sub(parens_width);
         title.push(Span::raw("("));
         title.push(Span::raw(truncate_display_width(cmd, cmd_width)));
         title.push(Span::raw(")"));
@@ -61,12 +54,6 @@ pub(super) fn render(
                 title_style,
             ));
         }
-    }
-    if is_pending {
-        title.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(warn),
-        ));
     }
     lines.push(Line::from(title));
 

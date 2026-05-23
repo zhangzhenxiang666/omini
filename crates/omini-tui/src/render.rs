@@ -51,7 +51,7 @@ mod tests {
     use crate::types::config::ModelConfig;
     use crate::types::display::DisplayPlan;
     use crate::types::events::{
-        PermissionPreview, ReadPermissionPreview, ToolPauseKind, ToolPauseRequest,
+        PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent, ToolPauseKind, ToolPauseRequest,
     };
     use crate::types::message::{Message, Role};
     use chrono::Utc;
@@ -97,26 +97,23 @@ mod tests {
         let backend = TestBackend::new(80, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.pending_tool_previews.insert(
-            "read-1".to_string(),
-            ToolPauseRequest {
-                tool_use_id: "read-1".to_string(),
-                preview_tool_use_id: None,
-                tool_name: "read".to_string(),
-                permission_source: None,
-                source_session_id: None,
-                source_agent_label: None,
-                kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
-                    file_path: "Cargo.toml".to_string(),
-                })),
-            },
-        );
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(ToolPauseRequest {
+            tool_use_id: "read-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "read".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                file_path: "Cargo.toml".to_string(),
+            })),
+        }));
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
     }
 
     #[test]
-    fn permission_drawer_hides_pending_tool_loading_card() {
+    fn permission_drawer_keeps_pending_tool_visible_and_highlighted() {
         let backend = TestBackend::new(80, 18);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
@@ -130,20 +127,17 @@ mod tests {
                 input,
             })],
         ));
-        state.pending_tool_previews.insert(
-            "read-1".to_string(),
-            ToolPauseRequest {
-                tool_use_id: "read-1".to_string(),
-                preview_tool_use_id: None,
-                tool_name: "read".to_string(),
-                permission_source: None,
-                source_session_id: None,
-                source_agent_label: None,
-                kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
-                    file_path: "Cargo.toml".to_string(),
-                })),
-            },
-        );
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(ToolPauseRequest {
+            tool_use_id: "read-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "read".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                file_path: "Cargo.toml".to_string(),
+            })),
+        }));
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
 
@@ -156,9 +150,8 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Read File"));
         assert!(rendered.contains("Cargo.toml"));
-        for frame in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] {
-            assert!(!rendered.contains(frame));
-        }
+        assert!(rendered.contains("Waiting for permission"));
+        assert!(rendered.contains("›"));
     }
 
     #[test]

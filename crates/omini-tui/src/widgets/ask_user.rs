@@ -3,7 +3,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{spinner, tool_error_display_text, word_wrap};
+use super::{tool_error_display_text, tool_title_style, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -13,16 +13,16 @@ pub(super) fn render(
     let accent = Color::Rgb(0x42, 0xd9, 0xe8);
     let dim = Color::Rgb(140, 145, 155);
     let text = Color::Rgb(220, 220, 225);
-    let warn = Color::Rgb(212, 182, 106);
     let error = Color::Rgb(255, 100, 100);
     let questions = ask_user_questions(tool_use);
     let question_count = questions.len();
     let answered_count = ask_user_answer_count(result);
+    let is_pending = result.is_none();
     let mut lines = Vec::new();
 
     let mut title = Vec::new();
     title.push(Span::raw("· "));
-    let title_style = Style::default().fg(accent);
+    let title_style = tool_title_style(accent, is_pending);
     if result.is_some_and(|tr| !tr.is_error) && answered_count > 0 {
         title.push(Span::styled("Questions", title_style));
         let answered_text = if question_count > 0 {
@@ -44,12 +44,6 @@ pub(super) fn render(
             Style::default().fg(dim),
         ));
     }
-    if result.is_none() {
-        title.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(warn),
-        ));
-    }
     lines.push(Line::from(title));
 
     if let Some(tr) = result
@@ -66,7 +60,7 @@ pub(super) fn render(
         return lines;
     }
 
-    if result.is_none() {
+    if is_pending {
         for question in questions.iter().take(3) {
             push_ask_user_question_summary(&mut lines, question, content_width, dim, text);
         }

@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use std::path::Path;
 use unicode_width::UnicodeWidthStr;
 
-use super::{display_path, spinner, tool_error_display_text, word_wrap};
+use super::{display_path, tool_error_display_text, tool_title_style, word_wrap};
 
 const MIN_CONTEXT_LINES_TO_COLLAPSE: usize = 4;
 
@@ -124,11 +124,7 @@ pub(super) fn render_edit(
     let is_permission_preview = result.is_none() && edit_preview.is_some();
     if is_running_without_preview {
         header_spans.push(Span::raw("· "));
-        header_spans.push(Span::styled("Edit", Style::default().fg(accent)));
-        header_spans.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(Color::Rgb(212, 182, 106)),
-        ));
+        header_spans.push(Span::styled("Edit", tool_title_style(accent, true)));
         lines.push(Line::from(header_spans));
         return lines;
     } else {
@@ -468,11 +464,7 @@ pub(super) fn render_write(
     if is_running_without_preview {
         lines.push(Line::from(vec![
             Span::raw("· "),
-            Span::styled("Write", Style::default().fg(accent)),
-            Span::styled(
-                format!(" {}", spinner()),
-                Style::default().fg(Color::Rgb(212, 182, 106)),
-            ),
+            Span::styled("Write", tool_title_style(accent, true)),
         ]));
         return lines;
     }

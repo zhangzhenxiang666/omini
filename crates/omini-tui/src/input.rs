@@ -851,11 +851,8 @@ pub(super) async fn resolve_active_tool_pause(
             response,
         })
         .await;
-    state.pending_tool_previews.remove(&req.tool_use_id);
-    if state.pending_tool_previews.is_empty() {
-        state.resume_run_timer();
-        state.reset_permission_drawer();
-    }
+    let removed_active = state.remove_tool_pause(&req.tool_use_id);
+    state.finish_tool_pause_removal(removed_active);
 }
 
 pub(super) async fn flush_queued_user_inputs(

@@ -175,6 +175,13 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
+pub(crate) fn pause_preview_tool_use_id(pause: &ToolPauseRequest) -> &str {
+    pause
+        .preview_tool_use_id
+        .as_deref()
+        .unwrap_or(&pause.tool_use_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiMessage {
     Message(Message),
@@ -374,8 +381,8 @@ pub struct UiState {
     pub runtime_handle: Option<tokio::task::JoinHandle<()>>,
     /// 正在运行中的工具 ID 集合（已收到 ToolUse 但尚未收到 ToolResult）
     pub running_tools: HashSet<String>,
-    /// 等待用户确认的工具预览，按 tool_use_id 关联到对应工具块。
-    pub pending_tool_previews: HashMap<String, ToolPauseRequest>,
+    /// 等待用户确认/输入的工具暂停队列，按到达顺序处理。
+    pub pending_tool_pauses: VecDeque<ToolPauseRequest>,
     /// 子 agent 视图模型，按 session id 存储完整消息。
     pub subagents: HashMap<String, SubagentNode>,
     /// 父 tool_use_id 到子 agent session id 的映射。
@@ -461,7 +468,7 @@ impl UiState {
             last_scroll_time: None,
             runtime_handle: None,
             running_tools: HashSet::new(),
-            pending_tool_previews: HashMap::new(),
+            pending_tool_pauses: VecDeque::new(),
             subagents: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
             permission_selected: 0,
@@ -489,9 +496,55 @@ impl UiState {
     }
 
     pub fn active_tool_pause(&self) -> Option<&ToolPauseRequest> {
-        self.pending_tool_previews
-            .values()
-            .min_by(|a, b| a.tool_use_id.cmp(&b.tool_use_id))
+        self.pending_tool_pauses.front()
+    }
+
+    pub fn push_tool_pause(&mut self, req: ToolPauseRequest) -> bool {
+        if let Some(existing) = self
+            .pending_tool_pauses
+            .iter_mut()
+            .find(|pause| pause.tool_use_id == req.tool_use_id)
+        {
+            *existing = req;
+            return false;
+        }
+
+        let was_empty = self.pending_tool_pauses.is_empty();
+        self.pending_tool_pauses.push_back(req);
+        was_empty
+    }
+
+    pub fn remove_tool_pause(&mut self, tool_use_id: &str) -> bool {
+        let removed_active = self
+            .active_tool_pause()
+            .is_some_and(|pause| pause.tool_use_id == tool_use_id);
+        self.pending_tool_pauses
+            .retain(|pause| pause.tool_use_id != tool_use_id);
+        removed_active
+    }
+
+    pub fn tool_pause_for_tool_use(&self, tool_use_id: &str) -> Option<&ToolPauseRequest> {
+        self.pending_tool_pauses.iter().find(|pause| {
+            pause.source_agent_label.is_none() && pause_preview_tool_use_id(pause) == tool_use_id
+        })
+    }
+
+    pub fn is_active_tool_pause(&self, pause: &ToolPauseRequest) -> bool {
+        self.active_tool_pause()
+            .is_some_and(|active| active.tool_use_id == pause.tool_use_id)
+    }
+
+    pub fn finish_tool_pause_removal(&mut self, removed_active: bool) {
+        if self.pending_tool_pauses.is_empty() {
+            self.resume_run_timer();
+            self.reset_permission_drawer();
+            if self.agent_status == AgentStatus::AwaitingInput {
+                self.agent_status = AgentStatus::Working;
+            }
+        } else if removed_active {
+            self.prepare_active_tool_pause();
+            self.agent_status = AgentStatus::AwaitingInput;
+        }
     }
 
     pub fn mark_plan_mode_message_sent(&mut self) {

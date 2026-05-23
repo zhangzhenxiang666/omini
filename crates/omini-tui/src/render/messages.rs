@@ -275,9 +275,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                 }
                 ContentBlock::Image(_) => {}
                 ContentBlock::ToolUse(tu) => {
-                    if tool_use_has_pause_preview(state, &tu.id) {
-                        continue;
-                    }
+                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                    let tool_pause_active =
+                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
                     if tu.name == "subagent" {
                         let node = state
                             .subagents_by_tool_use
@@ -298,6 +298,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                             tu,
                             tool_result.as_ref(),
                             node,
+                            &state.pending_tool_pauses,
                             content_width,
                             Some(state.status_bar.cwd.as_path()),
                         ));
@@ -320,7 +321,8 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                         let tool_lines = render_tool(
                             tu,
                             tool_result.as_ref(),
-                            None,
+                            tool_pause,
+                            tool_pause_active,
                             content_width,
                             Some(state.status_bar.cwd.as_path()),
                         );
@@ -334,7 +336,8 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                         let tool_lines = render_tool(
                             tu,
                             None,
-                            None,
+                            tool_pause,
+                            tool_pause_active,
                             content_width,
                             Some(state.status_bar.cwd.as_path()),
                         );
@@ -404,9 +407,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::ToolUse(tu) => {
-                    if tool_use_has_pause_preview(state, &tu.id) {
-                        continue;
-                    }
+                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                    let tool_pause_active =
+                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
                     if tu.name == "subagent" {
                         let node = state
                             .subagents_by_tool_use
@@ -423,6 +426,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                             tu,
                             tr.as_ref(),
                             node,
+                            &state.pending_tool_pauses,
                             content_width,
                             Some(state.status_bar.cwd.as_path()),
                         ));
@@ -442,7 +446,8 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                         let tool_lines = render_tool(
                             tu,
                             tr.as_ref(),
-                            None,
+                            tool_pause,
+                            tool_pause_active,
                             content_width,
                             Some(state.status_bar.cwd.as_path()),
                         );
@@ -553,16 +558,6 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         Paragraph::new(ratatui::text::Text::from(all_lines)).scroll((scroll_y as u16, 0));
 
     frame.render_widget(paragraph, area);
-}
-
-fn tool_use_has_pause_preview(state: &UiState, tool_use_id: &str) -> bool {
-    state.pending_tool_previews.values().any(|request| {
-        request
-            .preview_tool_use_id
-            .as_deref()
-            .unwrap_or(&request.tool_use_id)
-            == tool_use_id
-    })
 }
 
 #[cfg(test)]

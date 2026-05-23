@@ -4,13 +4,25 @@ const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
 const LARGE_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
 const USER_INPUT_NONE_LABEL: &str = "以上都不是";
 const USER_INPUT_NONE_DESCRIPTION: &str = "可按 Tab 在备注中补充说明。";
+const USER_INPUT_NOTE_MAX_LINES: usize = 4;
 const USER_INPUT_NOTE_PREFIX: &str = "› ";
 const USER_INPUT_NOTE_PLACEHOLDER: &str = "添加备注";
 
+#[derive(Clone, Copy)]
+struct NoteCursor {
+    row: usize,
+    column: usize,
+}
+
 struct DrawerLines {
     lines: Vec<Line<'static>>,
-    note_line: Option<Line<'static>>,
-    note_cursor_column: Option<usize>,
+    note_lines: Vec<Line<'static>>,
+    note_cursor: Option<NoteCursor>,
+}
+
+struct NoteRender {
+    lines: Vec<Line<'static>>,
+    cursor: Option<NoteCursor>,
 }
 
 struct PermissionDrawerLinesInput<'a> {
@@ -51,8 +63,8 @@ pub(super) fn render_permission_drawer(
     let content_width = area.width.saturating_sub(6) as usize;
     let DrawerLines {
         lines,
-        note_line,
-        note_cursor_column,
+        note_lines,
+        note_cursor,
     } = build_permission_drawer_lines(PermissionDrawerLinesInput {
         request: &request,
         tool_use,
@@ -66,7 +78,7 @@ pub(super) fn render_permission_drawer(
     });
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
-    let note_height = if note_line.is_some() { 1 } else { 0 };
+    let note_height = note_lines.len() as u16;
     let is_large_preview = matches!(
         request.kind,
         ToolPauseKind::Permission(PermissionPreview::Bash(_))
@@ -146,35 +158,36 @@ pub(super) fn render_permission_drawer(
         },
     );
     if drawer_area.height > 1 {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                title,
-                Style::default().fg(accent).add_modifier(Modifier::BOLD),
-            ))),
-            Rect {
-                x: drawer_area.x,
-                y: drawer_area.y + 1,
-                width: drawer_area.width,
-                height: 1,
-            },
-        );
+        let mut title_line = Line::from(Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+        let title_area = Rect {
+            x: drawer_area.x,
+            y: drawer_area.y + 1,
+            width: drawer_area.width,
+            height: 1,
+        };
+        register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
+        frame.render_widget(Paragraph::new(title_line), title_area);
     }
 
     if drawer_area.height > 3
-        && let Some(header) = fixed_header
+        && let Some(mut header) = fixed_header
     {
-        frame.render_widget(
-            Paragraph::new(header),
-            Rect {
-                x: drawer_area.x + 3,
-                y: drawer_area.y + 3,
-                width: drawer_area.width.saturating_sub(6),
-                height: 1,
-            },
-        );
+        let header_area = Rect {
+            x: drawer_area.x + 3,
+            y: drawer_area.y + 3,
+            width: drawer_area.width.saturating_sub(6),
+            height: 1,
+        };
+        register_and_highlight_lines(state, header_area, std::slice::from_mut(&mut header));
+        frame.render_widget(Paragraph::new(header), header_area);
     }
 
     if body_area.width > 0 && body_area.height > 0 && body_area.y < drawer_area.bottom() {
+        let mut visible_lines = visible_lines;
+        register_and_highlight_lines(state, body_area, &mut visible_lines);
         let paragraph = Paragraph::new(Text::from(visible_lines));
         frame.render_widget(paragraph, body_area);
     }
@@ -182,21 +195,25 @@ pub(super) fn render_permission_drawer(
         render_permission_scrollbar(frame, body_area, scroll_y, scroll_line_count);
     }
 
-    let note_area = note_line.as_ref().and_then(|_| {
-        (drawer_area.height > 4).then_some(Rect {
-            x: drawer_area.x + 3,
-            y: drawer_area.y + drawer_area.height.saturating_sub(4),
-            width: drawer_area.width.saturating_sub(6),
-            height: 1,
-        })
+    let note_area = (!note_lines.is_empty() && drawer_area.height > 4).then_some(Rect {
+        x: drawer_area.x + 3,
+        y: drawer_area.y
+            + drawer_area
+                .height
+                .saturating_sub(note_height.saturating_add(1)),
+        width: drawer_area.width.saturating_sub(6),
+        height: note_height,
     });
-    if let (Some(note_line), Some(note_area)) = (note_line, note_area) {
-        frame.render_widget(Paragraph::new(note_line), note_area);
+    if let Some(note_area) = note_area {
+        let mut note_lines = note_lines;
+        register_and_highlight_lines(state, note_area, &mut note_lines);
+        frame.render_widget(Paragraph::new(Text::from(note_lines)), note_area);
         if state.user_input_note_mode
-            && let Some(note_cursor_column) = note_cursor_column
+            && let Some(note_cursor) = note_cursor
         {
-            let cursor_x = note_area.x + note_cursor_column as u16;
-            frame.set_cursor_position((cursor_x, note_area.y));
+            let cursor_x = note_area.x + note_cursor.column as u16;
+            let cursor_y = note_area.y + note_cursor.row as u16;
+            frame.set_cursor_position((cursor_x, cursor_y));
         }
     }
 
@@ -205,36 +222,31 @@ pub(super) fn render_permission_drawer(
         ToolPauseKind::UserInput(preview) => build_user_input_action_lines(state, preview),
     };
     if drawer_area.height > 2 {
-        frame.render_widget(
-            Paragraph::new(options),
-            Rect {
-                x: drawer_area.x + 3,
-                y: drawer_area.y + drawer_area.height.saturating_sub(3),
-                width: drawer_area.width.saturating_sub(6),
-                height: 2.min(drawer_area.height.saturating_sub(2)),
-            },
-        );
+        let mut option_lines = options.lines;
+        let options_area = Rect {
+            x: drawer_area.x + 3,
+            y: drawer_area.y
+                + drawer_area
+                    .height
+                    .saturating_sub(note_height.saturating_add(3)),
+            width: drawer_area.width.saturating_sub(6),
+            height: 2.min(drawer_area.height.saturating_sub(2)),
+        };
+        register_and_highlight_lines(state, options_area, &mut option_lines);
+        frame.render_widget(Paragraph::new(Text::from(option_lines)), options_area);
     }
 }
 
 fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) -> Text<'static> {
-    if state.user_input_note_mode {
-        return Text::from(vec![Line::from(vec![
-            Span::styled(
-                "Tab 或 Esc ",
-                Style::default().fg(Color::Rgb(140, 145, 155)),
-            ),
-            Span::styled("结束备注", Style::default().fg(Color::Rgb(140, 145, 155))),
-            Span::raw(" | "),
-            Span::styled("Enter ", Style::default().fg(Color::Rgb(140, 145, 155))),
-            Span::styled("拒绝请求", Style::default().fg(Color::Rgb(140, 145, 155))),
-        ])]);
-    }
-
     let yes_style = permission_option_style(state.permission_selected == 0);
     let no_style = permission_option_style(state.permission_selected == 1);
     let (yes_desc, no_desc) = permission_option_descriptions(request);
     let desc_style = Style::default().fg(Color::Rgb(140, 145, 155));
+    let note_hint = if state.user_input_note_mode {
+        "Tab/Esc end note"
+    } else {
+        "Tab note"
+    };
     Text::from(vec![
         Line::from(vec![
             Span::styled("1. ", yes_style),
@@ -246,7 +258,7 @@ fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) ->
             Span::styled("2. ", no_style),
             Span::styled(format!("{:<3}", "No"), no_style),
             Span::raw("   "),
-            Span::styled(format!("{no_desc} · Tab note"), desc_style),
+            Span::styled(format!("{no_desc} · {note_hint}"), desc_style),
         ]),
     ])
 }
@@ -392,13 +404,21 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             ));
             DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             }
         }
         ToolPauseKind::Permission(PermissionPreview::Edit(_)) => {
             let lines = if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width, project_dir)
+                let placeholder = crate::widgets::preview_placeholder_result(tool_use);
+                render_tool(
+                    tool_use,
+                    Some(&placeholder),
+                    Some(request),
+                    None,
+                    content_width,
+                    project_dir,
+                )
             } else {
                 vec![Line::from(Span::styled(
                     "缺少编辑预览所需的工具输入",
@@ -407,13 +427,21 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             }
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => {
             let lines = if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width, project_dir)
+                let placeholder = crate::widgets::preview_placeholder_result(tool_use);
+                render_tool(
+                    tool_use,
+                    Some(&placeholder),
+                    Some(request),
+                    None,
+                    content_width,
+                    project_dir,
+                )
             } else {
                 vec![Line::from(Span::styled(
                     "缺少写入预览所需的工具输入",
@@ -422,13 +450,21 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             }
         }
         ToolPauseKind::Permission(PermissionPreview::Read(preview)) => {
             let lines = if let Some(tool_use) = tool_use {
-                render_tool(tool_use, None, Some(request), content_width, project_dir)
+                let placeholder = crate::widgets::preview_placeholder_result(tool_use);
+                render_tool(
+                    tool_use,
+                    Some(&placeholder),
+                    Some(request),
+                    None,
+                    content_width,
+                    project_dir,
+                )
             } else {
                 vec![Line::from(vec![
                     Span::raw("  "),
@@ -441,8 +477,8 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             };
             DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             }
         }
         ToolPauseKind::Permission(PermissionPreview::Search(preview)) => {
@@ -479,21 +515,21 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             ]));
             DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             }
         }
         ToolPauseKind::Permission(_preview) => DrawerLines {
             lines: vec![Line::from("")],
-            note_line: None,
-            note_cursor_column: None,
+            note_lines: Vec::new(),
+            note_cursor: None,
         },
         ToolPauseKind::UserInput(preview) => {
             let Some(question) = preview.questions.get(question_index) else {
                 return DrawerLines {
                     lines: vec![Line::from("缺少问题")],
-                    note_line: None,
-                    note_cursor_column: None,
+                    note_lines: Vec::new(),
+                    note_cursor: None,
                 };
             };
             let mut lines = Vec::new();
@@ -514,14 +550,16 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             ));
             let mut drawer = DrawerLines {
                 lines,
-                note_line: None,
-                note_cursor_column: None,
+                note_lines: Vec::new(),
+                note_cursor: None,
             };
             set_note_line(
                 &mut drawer,
                 current_user_input_note,
                 user_input_note_cursor,
                 user_input_note_mode,
+                false,
+                content_width,
             );
             drawer
         }
@@ -532,19 +570,35 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             current_user_input_note,
             user_input_note_cursor,
             user_input_note_mode,
+            true,
+            content_width,
         );
     }
     add_permission_source_line(&mut drawer, request);
     drawer
 }
 
-fn set_note_line(drawer: &mut DrawerLines, note: &str, cursor: usize, editing: bool) {
-    if !editing && note.is_empty() {
+fn set_note_line(
+    drawer: &mut DrawerLines,
+    note: &str,
+    cursor: usize,
+    editing: bool,
+    reserve_empty: bool,
+    content_width: usize,
+) {
+    if !reserve_empty && !editing && note.is_empty() {
         return;
     }
 
-    drawer.note_line = Some(user_input_note_line(note, editing));
-    drawer.note_cursor_column = Some(user_input_note_cursor_column(note, cursor));
+    if note.is_empty() && !editing {
+        drawer.note_lines = vec![Line::from("")];
+        drawer.note_cursor = None;
+    } else {
+        let NoteRender { lines, cursor } =
+            user_input_note_lines(note, cursor, editing, content_width);
+        drawer.note_lines = lines;
+        drawer.note_cursor = cursor;
+    }
 }
 
 fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseRequest) {
@@ -673,7 +727,12 @@ fn wrap_preserving_display_width(text: &str, max_width: usize) -> Vec<String> {
     lines
 }
 
-fn user_input_note_line(note: &str, editing: bool) -> Line<'static> {
+fn user_input_note_lines(
+    note: &str,
+    cursor_char: usize,
+    editing: bool,
+    content_width: usize,
+) -> NoteRender {
     let marker_style = if editing {
         Style::default()
             .fg(Color::Rgb(0x42, 0xd9, 0xe8))
@@ -681,20 +740,73 @@ fn user_input_note_line(note: &str, editing: bool) -> Line<'static> {
     } else {
         Style::default().fg(Color::Rgb(140, 145, 155))
     };
-    let value = if note.is_empty() {
-        USER_INPUT_NOTE_PLACEHOLDER
-    } else {
-        note
-    };
     let value_style = if note.is_empty() {
         Style::default().fg(Color::Rgb(140, 145, 155))
     } else {
         Style::default().fg(Color::Rgb(220, 220, 225))
     };
-    Line::from(vec![
-        Span::styled(USER_INPUT_NOTE_PREFIX, marker_style),
-        Span::styled(value.to_string(), value_style),
-    ])
+    let prefix_width = USER_INPUT_NOTE_PREFIX.width();
+
+    if note.is_empty() {
+        return NoteRender {
+            lines: vec![Line::from(vec![
+                Span::styled(USER_INPUT_NOTE_PREFIX, marker_style),
+                Span::styled(USER_INPUT_NOTE_PLACEHOLDER.to_string(), value_style),
+            ])],
+            cursor: editing.then_some(NoteCursor {
+                row: 0,
+                column: prefix_width,
+            }),
+        };
+    }
+
+    let value_width = content_width.saturating_sub(prefix_width).max(1);
+    let (value_lines, mut cursor) = wrap_note_value(note, cursor_char, value_width);
+    cursor.column += prefix_width;
+    let line_count = value_lines.len();
+    let start = if line_count > USER_INPUT_NOTE_MAX_LINES {
+        if editing {
+            cursor
+                .row
+                .saturating_add(1)
+                .saturating_sub(USER_INPUT_NOTE_MAX_LINES)
+        } else {
+            line_count.saturating_sub(USER_INPUT_NOTE_MAX_LINES)
+        }
+    } else {
+        0
+    };
+    let end = (start + USER_INPUT_NOTE_MAX_LINES).min(line_count);
+    let cursor = editing.then_some(cursor).and_then(|cursor| {
+        (cursor.row >= start && cursor.row < end).then_some(NoteCursor {
+            row: cursor.row - start,
+            column: cursor.column,
+        })
+    });
+    let lines = value_lines
+        .into_iter()
+        .enumerate()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .map(|(idx, value)| {
+            let prefix = if idx == 0 {
+                USER_INPUT_NOTE_PREFIX.to_string()
+            } else {
+                " ".repeat(prefix_width)
+            };
+            let prefix_style = if idx == 0 {
+                marker_style
+            } else {
+                Style::default()
+            };
+            Line::from(vec![
+                Span::styled(prefix, prefix_style),
+                Span::styled(value, value_style),
+            ])
+        })
+        .collect();
+
+    NoteRender { lines, cursor }
 }
 
 fn user_input_question_lines(
@@ -720,13 +832,62 @@ fn user_input_question_lines(
     lines
 }
 
-fn user_input_note_cursor_column(note: &str, cursor_char: usize) -> usize {
-    USER_INPUT_NOTE_PREFIX.width()
-        + note
-            .chars()
-            .take(cursor_char)
-            .map(|c| c.width().unwrap_or(0))
-            .sum::<usize>()
+fn wrap_note_value(note: &str, cursor_char: usize, max_width: usize) -> (Vec<String>, NoteCursor) {
+    let max_width = max_width.max(1);
+    let cursor_char = cursor_char.min(note.chars().count());
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+    let mut char_idx = 0;
+    let mut cursor = None;
+
+    for ch in note.chars() {
+        if ch == '\n' {
+            if char_idx == cursor_char && cursor.is_none() {
+                cursor = Some(NoteCursor {
+                    row: lines.len(),
+                    column: current_width,
+                });
+            }
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+            char_idx += 1;
+            if char_idx == cursor_char && cursor.is_none() {
+                cursor = Some(NoteCursor {
+                    row: lines.len(),
+                    column: 0,
+                });
+            }
+            continue;
+        }
+
+        let char_width = ch.width().unwrap_or(0);
+        if current_width > 0 && current_width + char_width > max_width {
+            lines.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+        if char_idx == cursor_char && cursor.is_none() {
+            cursor = Some(NoteCursor {
+                row: lines.len(),
+                column: current_width,
+            });
+        }
+        current.push(ch);
+        current_width += char_width;
+        char_idx += 1;
+    }
+
+    if cursor.is_none() {
+        cursor = Some(NoteCursor {
+            row: lines.len(),
+            column: current_width,
+        });
+    }
+    lines.push(current);
+
+    (lines, cursor.expect("note cursor should be set"))
 }
 
 fn user_input_option_line(selected: bool, label: &str, description: &str) -> Line<'static> {
@@ -832,13 +993,119 @@ mod tests {
             user_input_note_mode: true,
         });
 
-        let note_line = drawer.note_line.as_ref().expect("note line should render");
-        assert!(line_text(note_line).contains("Use English comments"));
+        assert!(
+            drawer
+                .note_lines
+                .iter()
+                .any(|line| line_text(line).contains("Use English comments"))
+        );
         assert!(
             !drawer
                 .lines
                 .iter()
                 .any(|line| line_text(line).contains("Use English comments"))
+        );
+    }
+
+    #[test]
+    fn permission_note_line_is_reserved_blank_when_empty() {
+        let request = permission_request();
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 80,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "",
+            user_input_note_cursor: 0,
+            user_input_note_mode: false,
+        });
+
+        assert_eq!(drawer.note_lines.len(), 1);
+        assert_eq!(line_text(&drawer.note_lines[0]), "");
+    }
+
+    #[test]
+    fn permission_note_wraps_and_moves_cursor_to_wrapped_line() {
+        let request = permission_request();
+        let note = "Use English comments and keep the approval reason concise";
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 18,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: note,
+            user_input_note_cursor: note.chars().count(),
+            user_input_note_mode: true,
+        });
+
+        assert!(drawer.note_lines.len() > 1);
+        let cursor = drawer.note_cursor.expect("note cursor should render");
+        assert!(cursor.row > 0);
+        assert!(
+            !drawer
+                .lines
+                .iter()
+                .any(|line| line_text(line).contains("approval reason"))
+        );
+    }
+
+    #[test]
+    fn user_input_note_wraps() {
+        let request = ToolPauseRequest {
+            tool_use_id: "ask-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "ask_user".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(crate::types::events::UserInputPreview {
+                questions: vec![crate::types::events::UserInputQuestion {
+                    id: "choice".to_string(),
+                    header: "Choice".to_string(),
+                    question: "Pick one".to_string(),
+                    options: vec![crate::types::events::UserInputOption {
+                        label: "First".to_string(),
+                        description: "Use the first option".to_string(),
+                    }],
+                }],
+            }),
+        };
+        let note = "A longer custom ask_user note should wrap cleanly";
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 16,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: note,
+            user_input_note_cursor: note.chars().count(),
+            user_input_note_mode: true,
+        });
+
+        assert!(drawer.note_lines.len() > 1);
+        assert!(drawer.note_cursor.is_some());
+    }
+
+    #[test]
+    fn permission_actions_remain_visible_in_note_mode() {
+        let request = permission_request();
+        let mut state = UiState::new();
+        state.user_input_note_mode = true;
+        state.permission_selected = 1;
+        let actions = build_permission_action_lines(&state, &request);
+        let rendered: Vec<String> = actions.lines.iter().map(line_text).collect();
+
+        assert!(rendered.iter().any(|line| line.contains("1. Yes")));
+        assert!(rendered.iter().any(|line| line.contains("2. No")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Tab/Esc end note"))
         );
     }
 

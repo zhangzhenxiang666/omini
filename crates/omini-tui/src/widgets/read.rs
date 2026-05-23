@@ -4,7 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
 
-use super::{display_path, spinner, tool_error_display_text, word_wrap};
+use super::{display_path, tool_error_display_text, tool_title_style, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -29,22 +29,15 @@ pub(super) fn render(
             preview.map(|req| &req.kind),
             Some(ToolPauseKind::Permission(PermissionPreview::Read(_)))
         );
+    let is_pending = result.is_none() && !is_permission_preview;
+    let title_style = tool_title_style(read_color, is_pending);
 
     main_spans.push(Span::raw("· "));
     if is_permission_preview {
-        main_spans.push(Span::styled(
-            display_file_path,
-            Style::default().fg(read_color),
-        ));
+        main_spans.push(Span::styled(display_file_path, title_style));
     } else {
-        main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
+        main_spans.push(Span::styled("Read", title_style));
         main_spans.push(Span::raw(format!(" {}", display_file_path)));
-    }
-    if result.is_none() && !is_permission_preview {
-        main_spans.push(Span::styled(
-            format!(" {}", spinner()),
-            Style::default().fg(Color::Rgb(212, 182, 106)),
-        ));
     }
 
     lines.push(Line::from(main_spans));

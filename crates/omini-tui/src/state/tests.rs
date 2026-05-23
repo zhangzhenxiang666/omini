@@ -60,6 +60,62 @@ fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
 }
 
 #[test]
+fn tool_pause_queue_uses_arrival_order() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_z",
+    )));
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_a",
+    )));
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_z");
+    assert_eq!(state.pending_tool_pauses.len(), 2);
+}
+
+#[test]
+fn queued_tool_pause_does_not_reset_active_drawer_state() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+    state.permission_selected = 1;
+    state.user_input_notes[0] = "not now".to_string();
+    state.user_input_note_cursors[0] = state.user_input_notes[0].chars().count();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_2",
+    )));
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_1");
+    assert_eq!(state.permission_selected, 1);
+    assert_eq!(state.current_user_input_note(), "not now");
+}
+
+#[test]
+fn removing_active_tool_pause_prepares_next_request() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_2",
+    )));
+    state.permission_selected = 1;
+    state.user_input_notes[0] = "deny first".to_string();
+    let removed_active = state.remove_tool_pause("tool_1");
+    state.finish_tool_pause_removal(removed_active);
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_2");
+    assert_eq!(state.permission_selected, 0);
+    assert_eq!(state.current_user_input_note(), "");
+    assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
+}
+
+#[test]
 fn formats_run_duration() {
     assert_eq!(format_run_duration(Duration::from_secs(0)), "0s");
     assert_eq!(format_run_duration(Duration::from_secs(7)), "7s");
