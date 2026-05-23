@@ -1,5 +1,5 @@
 use super::{
-    INPUT_BG, apply_text_selection_highlight, build_assistant_text_lines,
+    INPUT_BG, apply_text_selection_highlight, build_assistant_text_lines, build_llm_summary_lines,
     build_proposed_plan_lines, line_to_plain_text, line_width, render_subagent_tool,
     styled_wrapped_display, styled_wrapped_text, truncate_str,
 };
@@ -183,6 +183,19 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
             continue;
         }
 
+        if let UiMessage::CompactSummary { text } = ui_message {
+            let block_lines = build_llm_summary_lines(text, content_width);
+            if !block_lines.is_empty() {
+                if !all_lines.is_empty() {
+                    all_lines.push(Line::from(""));
+                    selectable_lines.push(String::new());
+                }
+                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+                all_lines.extend(block_lines);
+            }
+            continue;
+        }
+
         let UiMessage::Message(message) = ui_message else {
             let block_lines = match ui_message {
                 UiMessage::Notice { text } => {
@@ -197,6 +210,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                 UiMessage::RunDivider { .. } => unreachable!(),
                 UiMessage::Display(_) => unreachable!(),
                 UiMessage::ProposedPlan { .. } => unreachable!(),
+                UiMessage::CompactSummary { .. } => unreachable!(),
                 UiMessage::Message(_) => unreachable!(),
             };
             if !block_lines.is_empty() {
@@ -261,6 +275,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                 }
                 ContentBlock::Image(_) => {}
                 ContentBlock::ToolUse(tu) => {
+                    if tool_use_has_pause_preview(state, &tu.id) {
+                        continue;
+                    }
                     if tu.name == "subagent" {
                         let node = state
                             .subagents_by_tool_use
@@ -387,6 +404,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     block_lines.append(&mut lines);
                 }
                 ContentBlock::ToolUse(tu) => {
+                    if tool_use_has_pause_preview(state, &tu.id) {
+                        continue;
+                    }
                     if tu.name == "subagent" {
                         let node = state
                             .subagents_by_tool_use
@@ -533,6 +553,16 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         Paragraph::new(ratatui::text::Text::from(all_lines)).scroll((scroll_y as u16, 0));
 
     frame.render_widget(paragraph, area);
+}
+
+fn tool_use_has_pause_preview(state: &UiState, tool_use_id: &str) -> bool {
+    state.pending_tool_previews.values().any(|request| {
+        request
+            .preview_tool_use_id
+            .as_deref()
+            .unwrap_or(&request.tool_use_id)
+            == tool_use_id
+    })
 }
 
 #[cfg(test)]

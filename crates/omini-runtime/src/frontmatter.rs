@@ -8,15 +8,24 @@ pub struct FrontmatterParts<'a> {
 }
 
 pub fn split(content: &str) -> Result<FrontmatterParts<'_>, String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let content = content
         .strip_prefix("---")
         .ok_or_else(|| "missing frontmatter; expected file to start with '---'".to_string())?;
-    let content = content.strip_prefix('\n').unwrap_or(content);
+    let content = strip_optional_line_ending(content);
     let Some((frontmatter, body)) = content.split_once("\n---") else {
         return Err("missing closing frontmatter delimiter '---'".to_string());
     };
-    let body = body.strip_prefix('\n').unwrap_or(body);
+    let frontmatter = frontmatter.strip_suffix('\r').unwrap_or(frontmatter);
+    let body = strip_optional_line_ending(body);
     Ok(FrontmatterParts { frontmatter, body })
+}
+
+fn strip_optional_line_ending(input: &str) -> &str {
+    input
+        .strip_prefix("\r\n")
+        .or_else(|| input.strip_prefix('\n'))
+        .unwrap_or(input)
 }
 
 pub fn parse(content: &str) -> Result<(Mapping, &str), String> {
@@ -126,6 +135,30 @@ mod tests {
     }
 
     #[test]
+    fn splits_frontmatter_with_utf8_bom() {
+        let parts = split("\u{feff}---\nname: demo\n---\nBody\n").unwrap();
+
+        assert_eq!(parts.frontmatter, "name: demo");
+        assert_eq!(parts.body, "Body\n");
+    }
+
+    #[test]
+    fn splits_frontmatter_with_crlf_delimiters() {
+        let parts = split("---\r\nname: demo\r\n---\r\nBody\r\n").unwrap();
+
+        assert_eq!(parts.frontmatter, "name: demo");
+        assert_eq!(parts.body, "Body\r\n");
+    }
+
+    #[test]
+    fn splits_frontmatter_with_utf8_bom_and_crlf_delimiters() {
+        let parts = split("\u{feff}---\r\nname: demo\r\n---\r\nBody\r\n").unwrap();
+
+        assert_eq!(parts.frontmatter, "name: demo");
+        assert_eq!(parts.body, "Body\r\n");
+    }
+
+    #[test]
     fn rejects_missing_opening_delimiter() {
         let err = split("name: demo\n---\nBody").unwrap_err();
 
@@ -140,13 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_yaml_metadata() {
+    fn parses_top_level_bool() {
         let (raw, body) = parse(
             r#"---
 name: demo
 description: Demo
-metadata:
-  inject: false
+inject: false
 ---
 Body
 "#,
@@ -154,10 +186,7 @@ Body
         .unwrap();
 
         assert_eq!(required_string(&raw, "name").unwrap(), "demo");
-        assert_eq!(
-            optional_bool_path(&raw, &["metadata", "inject"]).unwrap(),
-            Some(false)
-        );
+        assert_eq!(optional_bool_path(&raw, &["inject"]).unwrap(), Some(false));
         assert_eq!(body, "Body\n");
     }
 

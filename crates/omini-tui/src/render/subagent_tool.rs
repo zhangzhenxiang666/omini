@@ -173,7 +173,7 @@ fn format_subagent_label(label: &str) -> String {
 fn format_tool_label(name: &str) -> String {
     match name {
         "ask_user" => "AskUser".to_string(),
-        "todo_write" => "UpdateTodo".to_string(),
+        "todo_write" => "Todo".to_string(),
         other => {
             let words = label_words(other);
             if words.is_empty() {

@@ -872,6 +872,9 @@ pub(super) async fn flush_queued_user_inputs(
             crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                 text: plan.markdown,
             },
+            crate::types::display::HistoryItem::Summary(summary) => UiMessage::CompactSummary {
+                text: summary.markdown,
+            },
         })
         .collect::<Vec<_>>();
     let Some(draft) = state.take_queued_user_draft() else {

@@ -202,6 +202,21 @@ impl SessionDir {
         Ok(())
     }
 
+    /// Replace `history.jsonl` with the provided LLM history.
+    pub fn rewrite_history(&self, messages: &[Message]) -> Result<(), ConfigError> {
+        fs::create_dir_all(&self.path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(self.history_path())?;
+        for msg in messages {
+            let line = serde_json::to_string(msg)?;
+            writeln!(file, "{}", line)?;
+        }
+        Ok(())
+    }
+
     /// 读取全部历史记录（按写入顺序）。
     pub fn load_history(&self) -> Result<Vec<Message>, ConfigError> {
         let path = self.history_path();

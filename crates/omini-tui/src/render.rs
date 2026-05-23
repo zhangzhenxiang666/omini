@@ -29,7 +29,7 @@ mod subagent_tool;
 mod text;
 mod theme;
 
-use assistant::{build_assistant_text_lines, build_proposed_plan_lines};
+use assistant::{build_assistant_text_lines, build_llm_summary_lines, build_proposed_plan_lines};
 use messages::render_messages;
 use scroll::{ScrollableLine, scrollable_lines};
 use session_list::render_session_list;
@@ -53,6 +53,7 @@ mod tests {
     use crate::types::events::{
         PermissionPreview, ReadPermissionPreview, ToolPauseKind, ToolPauseRequest,
     };
+    use crate::types::message::{Message, Role};
     use chrono::Utc;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -112,6 +113,52 @@ mod tests {
         );
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
+    }
+
+    #[test]
+    fn permission_drawer_hides_pending_tool_loading_card() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let mut input = std::collections::HashMap::new();
+        input.insert("file_path".to_string(), serde_json::json!("Cargo.toml"));
+        state.pending_assistant = Some(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse(ToolUseBlock {
+                id: "read-1".to_string(),
+                name: "read".to_string(),
+                input,
+            })],
+        ));
+        state.pending_tool_previews.insert(
+            "read-1".to_string(),
+            ToolPauseRequest {
+                tool_use_id: "read-1".to_string(),
+                preview_tool_use_id: None,
+                tool_name: "read".to_string(),
+                permission_source: None,
+                source_session_id: None,
+                source_agent_label: None,
+                kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                    file_path: "Cargo.toml".to_string(),
+                })),
+            },
+        );
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Read File"));
+        assert!(rendered.contains("Cargo.toml"));
+        for frame in ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] {
+            assert!(!rendered.contains(frame));
+        }
     }
 
     #[test]

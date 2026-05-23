@@ -6,8 +6,8 @@ use super::{
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::events::{
-    CommandKind, CommandSummary, InteractionRequest, RuntimeToUiEvent, SubagentSnapshot,
-    SubagentStatus, ToolPauseKind,
+    CommandKind, CommandSummary, CompactTrigger, InteractionRequest, RuntimeToUiEvent,
+    SubagentSnapshot, SubagentStatus, ToolPauseKind,
 };
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use std::collections::VecDeque;
@@ -20,6 +20,15 @@ impl UiState {
             self.agent_status,
             AgentStatus::Working | AgentStatus::Thinking | AgentStatus::AwaitingInput
         )
+    }
+
+    fn remove_empty_compact_summary_placeholder(&mut self) {
+        if matches!(
+            self.messages.last(),
+            Some(UiMessage::CompactSummary { text }) if text.trim().is_empty()
+        ) {
+            self.messages.pop();
+        }
     }
 
     pub fn take_queued_user_draft(&mut self) -> Option<UserDraft> {
@@ -45,6 +54,9 @@ impl UiState {
                 HistoryItem::Display(display) => UiMessage::Display(display),
                 HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                     text: plan.markdown,
+                },
+                HistoryItem::Summary(summary) => UiMessage::CompactSummary {
+                    text: summary.markdown,
                 },
             })
             .collect()
@@ -221,6 +233,7 @@ impl UiState {
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
         match event {
             RuntimeToUiEvent::RunStarted => {
+                self.manual_compact_running = false;
                 self.pending_assistant = None;
                 self.pending_proposed_plan = None;
                 self.clear_run_dividers();
@@ -233,6 +246,9 @@ impl UiState {
                     HistoryItem::Display(display) => UiMessage::Display(display),
                     HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                         text: plan.markdown,
+                    },
+                    HistoryItem::Summary(summary) => UiMessage::CompactSummary {
+                        text: summary.markdown,
                     },
                 };
                 self.messages.push(ui_message);
@@ -443,6 +459,7 @@ impl UiState {
             }
             RuntimeToUiEvent::CommandNotice(text) => {
                 self.messages.push(UiMessage::Notice { text });
+                self.finish_manual_compact();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -466,6 +483,73 @@ impl UiState {
                 self.status_bar.total_tokens = usage.total_tokens;
                 self.status_bar.total_cached_tokens = usage.total_cached_tokens;
                 self.status_bar.context_window = usage.context_window;
+            }
+            RuntimeToUiEvent::UsageTotalsChanged {
+                total_tokens,
+                total_cached_tokens,
+            } => {
+                self.status_bar.total_tokens = total_tokens;
+                self.status_bar.total_cached_tokens = total_cached_tokens;
+            }
+            RuntimeToUiEvent::CompactSummaryStarted(event) => {
+                if event.trigger == CompactTrigger::Manual {
+                    self.begin_manual_compact();
+                }
+                self.messages.push(UiMessage::CompactSummary {
+                    text: String::new(),
+                });
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            RuntimeToUiEvent::CompactSummaryDelta(event) => {
+                if event.trigger == CompactTrigger::Manual {
+                    self.begin_manual_compact();
+                }
+                if let Some(UiMessage::CompactSummary { text }) = self.messages.last_mut() {
+                    text.push_str(&event.delta);
+                } else {
+                    self.messages
+                        .push(UiMessage::CompactSummary { text: event.delta });
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            RuntimeToUiEvent::CompactSummaryFinished(event) => {
+                let trigger = event.trigger;
+                let summary = event.summary;
+                if summary.trim().is_empty() {
+                    self.remove_empty_compact_summary_placeholder();
+                } else if let Some(UiMessage::CompactSummary { text }) = self.messages.last_mut() {
+                    *text = summary;
+                } else {
+                    self.messages
+                        .push(UiMessage::CompactSummary { text: summary });
+                }
+                self.status_bar.current_context_tokens = event.after_tokens as i64;
+                if trigger == CompactTrigger::Manual {
+                    self.finish_manual_compact();
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
+            }
+            RuntimeToUiEvent::CompactSummaryFailed(event) => {
+                self.remove_empty_compact_summary_placeholder();
+                self.messages.push(UiMessage::Warning {
+                    text: compact_summary_failed_text(
+                        event.trigger,
+                        event.agent_label.as_deref(),
+                        &event.message,
+                    ),
+                });
+                if event.trigger == CompactTrigger::Manual {
+                    self.finish_manual_compact();
+                }
+                if self.auto_scroll {
+                    self.scroll_offset = 0;
+                }
             }
             RuntimeToUiEvent::ActiveProfileChanged(profile) => {
                 if self.status_bar.active_profile != profile {
@@ -576,6 +660,7 @@ impl UiState {
         self.pending_assistant = None;
         self.pending_proposed_plan = None;
         self.run_timer = None;
+        self.manual_compact_running = false;
         self.queued_user_inputs.clear();
         self.input.clear();
         self.input_mentions.clear();
@@ -593,10 +678,24 @@ impl UiState {
     }
 }
 
+fn compact_summary_failed_text(
+    trigger: crate::types::events::CompactTrigger,
+    agent_label: Option<&str>,
+    message: &str,
+) -> String {
+    let subject = agent_label
+        .map(|label| format!("subagent {label}"))
+        .unwrap_or_else(|| "session".to_string());
+    format!("Failed to summarize compacted {subject} context ({trigger}): {message}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::events::ActiveProfile;
+    use crate::types::events::{
+        ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
+        CompactSummaryFinishedEvent, CompactTrigger,
+    };
 
     #[test]
     fn entering_plan_mode_resets_plan_message_hint_state() {
@@ -619,6 +718,200 @@ mod tests {
         state.apply_event(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan));
         state.mark_plan_mode_message_sent();
         assert!(state.status_bar.plan_mode_message_sent);
+    }
+
+    #[test]
+    fn usage_totals_changed_preserves_current_context_usage() {
+        let mut state = UiState::new();
+        state.status_bar.current_context_tokens = 123;
+        state.status_bar.context_window = Some(456);
+
+        state.apply_event(RuntimeToUiEvent::UsageTotalsChanged {
+            total_tokens: 789,
+            total_cached_tokens: 12,
+        });
+
+        assert_eq!(state.status_bar.current_context_tokens, 123);
+        assert_eq!(state.status_bar.context_window, Some(456));
+        assert_eq!(state.status_bar.total_tokens, 789);
+        assert_eq!(state.status_bar.total_cached_tokens, 12);
+    }
+
+    #[test]
+    fn compact_summary_delta_streams_into_single_ui_message() {
+        let mut state = UiState::new();
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryDelta(
+            CompactSummaryDeltaEvent {
+                trigger: CompactTrigger::Manual,
+                delta: "first ".to_string(),
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+        state.apply_event(RuntimeToUiEvent::CompactSummaryDelta(
+            CompactSummaryDeltaEvent {
+                trigger: CompactTrigger::Manual,
+                delta: "second".to_string(),
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.messages.len(), 1);
+        let Some(UiMessage::CompactSummary { text }) = state.messages.first() else {
+            panic!("expected compact summary message");
+        };
+        assert!(text.contains("first second"));
+    }
+
+    #[test]
+    fn compact_summary_started_creates_new_summary_message() {
+        let mut state = UiState::new();
+        state.messages.push(UiMessage::CompactSummary {
+            text: "previous".to_string(),
+        });
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+            trigger: CompactTrigger::Manual,
+            session_id: Some("session".to_string()),
+            agent_label: None,
+        }));
+        state.apply_event(RuntimeToUiEvent::CompactSummaryDelta(
+            CompactSummaryDeltaEvent {
+                trigger: CompactTrigger::Manual,
+                delta: "new".to_string(),
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.messages.len(), 2);
+        let Some(UiMessage::CompactSummary { text }) = state.messages.last() else {
+            panic!("expected compact summary message");
+        };
+        assert_eq!(text, "new");
+    }
+
+    #[test]
+    fn compact_summary_finished_replaces_streamed_text_and_updates_context_tokens() {
+        let mut state = UiState::new();
+        state.messages.push(UiMessage::CompactSummary {
+            text: "partial".to_string(),
+        });
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
+            CompactSummaryFinishedEvent {
+                trigger: CompactTrigger::Manual,
+                summary: "final summary".to_string(),
+                after_tokens: 250,
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.status_bar.current_context_tokens, 250);
+        let Some(UiMessage::CompactSummary { text }) = state.messages.last() else {
+            panic!("expected compact summary message");
+        };
+        assert_eq!(text, "final summary");
+    }
+
+    #[test]
+    fn manual_compact_summary_lifecycle_returns_status_to_idle() {
+        let mut state = UiState::new();
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+            trigger: CompactTrigger::Manual,
+            session_id: Some("session".to_string()),
+            agent_label: None,
+        }));
+
+        assert_eq!(state.agent_status, AgentStatus::Working);
+        assert!(state.manual_compact_running);
+        assert!(state.run_timer.is_some());
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
+            CompactSummaryFinishedEvent {
+                trigger: CompactTrigger::Manual,
+                summary: "final summary".to_string(),
+                after_tokens: 250,
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.agent_status, AgentStatus::Idle);
+        assert!(!state.manual_compact_running);
+        assert!(state.run_timer.is_none());
+    }
+
+    #[test]
+    fn empty_compact_summary_finished_removes_loading_placeholder() {
+        let mut state = UiState::new();
+        state.messages.push(UiMessage::CompactSummary {
+            text: String::new(),
+        });
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
+            CompactSummaryFinishedEvent {
+                trigger: CompactTrigger::Manual,
+                summary: String::new(),
+                after_tokens: 250,
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn auto_compact_summary_finished_does_not_force_idle() {
+        let mut state = UiState::new();
+        state.agent_status = AgentStatus::Working;
+        state.messages.push(UiMessage::CompactSummary {
+            text: "partial".to_string(),
+        });
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
+            CompactSummaryFinishedEvent {
+                trigger: CompactTrigger::Auto,
+                summary: "final summary".to_string(),
+                after_tokens: 250,
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.agent_status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn manual_compact_summary_failed_clears_empty_placeholder_and_status() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+            trigger: CompactTrigger::Manual,
+            session_id: Some("session".to_string()),
+            agent_label: None,
+        }));
+
+        state.apply_event(RuntimeToUiEvent::CompactSummaryFailed(
+            CompactSummaryFailedEvent {
+                trigger: CompactTrigger::Manual,
+                message: "nope".to_string(),
+                session_id: Some("session".to_string()),
+                agent_label: None,
+            },
+        ));
+
+        assert_eq!(state.agent_status, AgentStatus::Idle);
+        assert!(!state.manual_compact_running);
+        assert!(state.run_timer.is_none());
+        assert!(matches!(
+            state.messages.as_slice(),
+            [UiMessage::Warning { .. }]
+        ));
     }
 }
 

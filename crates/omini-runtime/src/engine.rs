@@ -1,5 +1,6 @@
 use crate::api::{ApiRequest, FinishReason, LlmClient};
 use crate::permissions::PermissionEngine;
+use crate::runtime::compact::{self, AutoCompactState};
 use crate::tools::{
     PendingToolPause, PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult,
     ToolRuntimeContext,
@@ -64,6 +65,7 @@ pub struct QueryEngine {
     permission_engine: Arc<PermissionEngine>,
     cancel_notify: Arc<Notify>,
     pending_user_messages: Mutex<VecDeque<Message>>,
+    auto_compact_state: Mutex<AutoCompactState>,
 }
 
 impl QueryEngine {
@@ -74,6 +76,7 @@ impl QueryEngine {
             permission_engine,
             cancel_notify: Arc::new(Notify::new()),
             pending_user_messages: Mutex::new(VecDeque::new()),
+            auto_compact_state: Mutex::new(AutoCompactState::default()),
         }
     }
 
@@ -87,6 +90,7 @@ impl QueryEngine {
             permission_engine,
             cancel_notify,
             pending_user_messages: Mutex::new(VecDeque::new()),
+            auto_compact_state: Mutex::new(AutoCompactState::default()),
         }
     }
 
@@ -199,6 +203,31 @@ impl QueryEngine {
             }
 
             let _ = event_tx.send(EngineToRuntimeEvent::TurnStarted).await;
+
+            let mut compact_state = {
+                let mut state = self
+                    .auto_compact_state
+                    .lock()
+                    .expect("auto compact state mutex poisoned");
+                std::mem::take(&mut *state)
+            };
+            let _ = compact::auto_compact_if_needed(
+                ctx.messages,
+                &ctx.settings,
+                &ctx.llm_client,
+                &tool_definitions,
+                ctx.runtime_context.clone(),
+                &event_tx,
+                &mut compact_state,
+            )
+            .await;
+            {
+                let mut state = self
+                    .auto_compact_state
+                    .lock()
+                    .expect("auto compact state mutex poisoned");
+                *state = compact_state;
+            }
 
             let request = ApiRequest {
                 messages: ctx.messages,

@@ -40,7 +40,7 @@ pub(super) fn render(
         main_spans.push(Span::styled("Read", Style::default().fg(read_color)));
         main_spans.push(Span::raw(format!(" {}", display_file_path)));
     }
-    if result.is_none() {
+    if result.is_none() && !is_permission_preview {
         main_spans.push(Span::styled(
             format!(" {}", spinner()),
             Style::default().fg(Color::Rgb(212, 182, 106)),

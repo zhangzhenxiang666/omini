@@ -3,7 +3,7 @@ use crate::markdown::build_markdown_lines;
 use crate::types::proposed_plan::{ProposedPlanParser, ProposedPlanSegment};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(super) fn build_assistant_text_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
     let mut parser = ProposedPlanParser::new();
@@ -71,30 +71,133 @@ fn append_assistant_lines(lines: &mut Vec<Line<'static>>, segment: Vec<Line<'sta
 }
 
 pub(super) fn build_proposed_plan_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    let width = content_width.max(1);
-    let bg_style = Style::default().bg(INPUT_BG);
-    let inner_width = width.saturating_sub(4).max(1);
-    let mut lines = vec![
-        Line::from(Span::styled(
-            "• Proposed Plan",
-            Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6)),
-        )),
-        Line::from(""),
-        padded_bg_line(Vec::new(), width, bg_style),
-    ];
+    build_markdown_panel_lines("• Proposed Plan", text, content_width)
+}
 
-    let plan = text.trim_matches('\n');
-    if plan.trim().is_empty() {
+pub(super) fn build_llm_summary_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
+    let width = content_width.max(1);
+    let body = text.trim_matches('\n');
+    let loading = body.trim().is_empty();
+    let mut lines = vec![compact_summary_divider_line(width, loading)];
+    if loading {
         return lines;
     }
 
-    let escaped = escape_plan_markdown_blocks(plan);
+    let bg_style = Style::default().bg(INPUT_BG);
+    let inner_width = width.saturating_sub(4).max(1);
+    lines.push(Line::from(""));
+    lines.push(padded_bg_line(Vec::new(), width, bg_style));
+
+    let escaped = escape_plan_markdown_blocks(body);
     let markdown_lines = build_markdown_lines(&escaped, inner_width);
     for line in markdown_lines {
         lines.push(padded_plan_markdown_line(line, width, bg_style));
     }
     lines.push(padded_bg_line(Vec::new(), width, bg_style));
     lines
+}
+
+fn build_markdown_panel_lines(title: &str, text: &str, content_width: usize) -> Vec<Line<'static>> {
+    let width = content_width.max(1);
+    let bg_style = Style::default().bg(INPUT_BG);
+    let inner_width = width.saturating_sub(4).max(1);
+    let mut lines = vec![
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6)),
+        )),
+        Line::from(""),
+        padded_bg_line(Vec::new(), width, bg_style),
+    ];
+
+    let body = text.trim_matches('\n');
+    if body.trim().is_empty() {
+        return lines;
+    }
+
+    let escaped = escape_plan_markdown_blocks(body);
+    let markdown_lines = build_markdown_lines(&escaped, inner_width);
+    for line in markdown_lines {
+        lines.push(padded_plan_markdown_line(line, width, bg_style));
+    }
+    lines.push(padded_bg_line(Vec::new(), width, bg_style));
+    lines
+}
+
+fn compact_summary_divider_line(content_width: usize, loading: bool) -> Line<'static> {
+    let width = content_width.max(1);
+    let line_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
+    let icon_style = Style::default().fg(Color::Rgb(0xc8, 0xa9, 0xee));
+    let title_style = Style::default().fg(Color::Rgb(0xa5, 0xac, 0xb6));
+    let title = "Compact Summary";
+    let title_width = UnicodeWidthStr::width(title);
+    let label_width = title_width + 4;
+    let title_spans = compact_summary_title_spans(title, title_width, loading, title_style);
+
+    if width <= label_width {
+        let mut spans = vec![Span::styled("◆", icon_style)];
+        if width > 1 {
+            spans.push(Span::styled(" ", line_style));
+            spans.extend(compact_summary_title_spans(
+                title,
+                width.saturating_sub(2),
+                loading,
+                title_style,
+            ));
+        }
+        return Line::from(spans);
+    }
+
+    let left_width = (width - label_width) / 2;
+    let right_width = width - label_width - left_width;
+    let mut spans = Vec::new();
+    if left_width > 0 {
+        spans.push(Span::styled("─".repeat(left_width), line_style));
+    }
+    spans.push(Span::styled(" ", line_style));
+    spans.push(Span::styled("◆", icon_style));
+    spans.push(Span::styled(" ", line_style));
+    spans.extend(title_spans);
+    spans.push(Span::styled(" ", line_style));
+    if right_width > 0 {
+        spans.push(Span::styled("─".repeat(right_width), line_style));
+    }
+    Line::from(spans)
+}
+
+fn compact_summary_title_spans(
+    title: &str,
+    max_width: usize,
+    loading: bool,
+    title_style: Style,
+) -> Vec<Span<'static>> {
+    let spans = if loading {
+        super::status::animated_status_spans_with_palette(
+            title,
+            Color::Rgb(0xc8, 0xa9, 0xee),
+            Color::Rgb(0x55, 0x47, 0x65),
+        )
+    } else {
+        vec![Span::styled(title.to_string(), title_style)]
+    };
+    truncate_spans_to_width(spans, max_width)
+}
+
+fn truncate_spans_to_width(spans: Vec<Span<'static>>, max_width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        let style = span.style;
+        for ch in span.content.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + width > max_width {
+                return out;
+            }
+            used += width;
+            out.push(Span::styled(ch.to_string(), style));
+        }
+    }
+    out
 }
 
 fn escape_plan_markdown_blocks(text: &str) -> String {
@@ -382,6 +485,48 @@ mod tests {
         );
         assert!(!rendered.iter().any(|line| line.contains("<proposed_plan>")));
         assert!(!rendered.iter().any(|line| line.contains("**")));
+    }
+
+    #[test]
+    fn llm_summary_uses_compact_divider_and_body_panel() {
+        let lines = build_llm_summary_lines("# Summary\n\n- Preserve **context**", 80);
+        let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert!(
+            rendered
+                .first()
+                .is_some_and(|line| line.contains("◆ Compact Summary")),
+            "{rendered:?}"
+        );
+        assert!(rendered.iter().any(|line| line.contains("  # Summary")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("  - Preserve context"))
+        );
+        assert_eq!(lines.first().and_then(|line| line.style.bg), None);
+        assert_eq!(lines.get(1).and_then(|line| line.style.bg), None);
+        assert!(
+            lines
+                .iter()
+                .skip(2)
+                .all(|line| line.style.bg == Some(INPUT_BG))
+        );
+    }
+
+    #[test]
+    fn empty_llm_summary_renders_loading_divider_without_body_panel() {
+        let lines = build_llm_summary_lines("", 80);
+        let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(lines.len(), 1);
+        assert!(
+            rendered
+                .first()
+                .is_some_and(|line| line.contains("◆ Compact Summary")),
+            "{rendered:?}"
+        );
+        assert!(lines.iter().all(|line| line.style.bg != Some(INPUT_BG)));
     }
 
     #[test]

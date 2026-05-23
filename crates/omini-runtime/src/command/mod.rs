@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod compact;
 pub mod effort;
 pub mod exit;
 pub mod help;
@@ -137,6 +138,7 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));
     registry.register(Arc::new(plan::PlanCommand));
+    registry.register(Arc::new(compact::CompactCommand));
     registry.register(Arc::new(rename::RenameCommand));
     registry.register(Arc::new(init::InitCommand));
     registry.register(Arc::new(help::HelpCommand));
@@ -148,6 +150,9 @@ pub fn register_skill_commands(
     skills: &crate::skills::SkillRegistry,
 ) {
     for spec in skills.skills.values() {
+        if !spec.user_invocable {
+            continue;
+        }
         registry.register(Arc::new(skill::SkillCommand::new(spec.clone())));
     }
 }
@@ -170,8 +175,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "sessions", "new", "plan", "model", "agents", "effort", "init", "rename", "help",
-                "exit"
+                "sessions", "new", "plan", "compact", "model", "agents", "effort", "init",
+                "rename", "help", "exit"
             ]
         );
     }
@@ -194,6 +199,35 @@ mod tests {
                 .description()
                 .contains("Create or update Omini skills")
         );
+        let _ = std::fs::remove_dir_all(cwd);
+    }
+
+    #[test]
+    fn user_invocable_false_skills_are_not_registered_as_commands() {
+        let mut registry = CommandRegistry::new();
+        let cwd = std::env::temp_dir().join(format!(
+            "omini-hidden-skill-command-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let skill_dir = cwd.join(".omini").join("skills").join("background");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: background
+description: Background knowledge
+user-invocable: false
+---
+Body
+"#,
+        )
+        .unwrap();
+        let skills = crate::skills::load_skill_registry(&cwd);
+
+        register_skill_commands(&mut registry, &skills);
+
+        assert!(skills.get("background").is_some());
+        assert!(registry.get("background").is_none());
         let _ = std::fs::remove_dir_all(cwd);
     }
 }

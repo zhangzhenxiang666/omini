@@ -182,6 +182,7 @@ pub enum UiMessage {
     ProposedPlan { text: String },
     RunDivider { elapsed: Duration },
     Notice { text: String },
+    CompactSummary { text: String },
     Warning { text: String },
     Error { text: String },
 }
@@ -219,6 +220,9 @@ impl UiMessage {
                 HistoryItem::Plan(plan) => Self::ProposedPlan {
                     text: plan.markdown,
                 },
+                HistoryItem::Summary(summary) => Self::CompactSummary {
+                    text: summary.markdown,
+                },
             })
             .collect()
     }
@@ -230,6 +234,7 @@ impl UiMessage {
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notice { .. }
+            | Self::CompactSummary { .. }
             | Self::Warning { .. }
             | Self::Error { .. } => None,
         }
@@ -242,6 +247,7 @@ impl UiMessage {
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notice { .. }
+            | Self::CompactSummary { .. }
             | Self::Warning { .. }
             | Self::Error { .. } => None,
         }
@@ -352,6 +358,8 @@ pub struct UiState {
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
+    /// 手动 /compact 命令是否正在执行。compact 不走普通 query 生命周期。
+    pub manual_compact_running: bool,
     /// 当前 query 的有效运行计时器；等待用户授权/回答时暂停。
     pub run_timer: Option<RunTimer>,
     /// 从底部向上滚动的行数（0 = 位于底部，显示最新消息）
@@ -445,6 +453,7 @@ impl UiState {
             pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
+            manual_compact_running: false,
             run_timer: None,
             scroll_offset: 0,
             auto_scroll: true,
@@ -493,6 +502,23 @@ impl UiState {
 
     pub fn start_run_timer(&mut self) {
         self.run_timer = Some(RunTimer::started_at(Instant::now()));
+    }
+
+    pub fn begin_manual_compact(&mut self) {
+        self.manual_compact_running = true;
+        self.agent_status = AgentStatus::Working;
+        if self.run_timer.is_none() {
+            self.start_run_timer();
+        }
+    }
+
+    pub fn finish_manual_compact(&mut self) {
+        if !self.manual_compact_running {
+            return;
+        }
+        self.manual_compact_running = false;
+        self.run_timer = None;
+        self.agent_status = AgentStatus::Idle;
     }
 
     pub fn clear_run_dividers(&mut self) {

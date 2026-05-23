@@ -1,4 +1,5 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
+use crate::types::events::{PermissionPreview, SearchPermissionPreview};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -59,6 +60,7 @@ pub struct PreparedSearch {
     mode: SearchMode,
     query: String,
     cwd: PathBuf,
+    search_path: PathBuf,
     path_arg: OsString,
     globs: Vec<String>,
     case_sensitive: bool,
@@ -100,13 +102,27 @@ impl Tool for SearchTool {
             "  max_results     Optional returned result line limit, capped at 500.\n",
             "\n",
             "Rules:\n",
-            "  - Search is read-only and limited to the current workspace or /tmp.\n",
+            "  - Search is read-only.\n",
+            "  - Searches inside the current workspace or /tmp are allowed by default.\n",
+            "  - Searches outside those locations, or inside private paths, require permission.\n",
             "  - Use `read` after search when you need a larger code window."
         )
     }
 
     async fn prepare(&self, input: SearchInput) -> Result<Self::Prepared, ToolResult> {
         prepare_search(input).map_err(ToolResult::error)
+    }
+
+    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
+        Some(PermissionPreview::Search(SearchPermissionPreview {
+            query: prepared.query.clone(),
+            mode: match prepared.mode {
+                SearchMode::Content => "content",
+                SearchMode::Files => "files",
+            }
+            .to_string(),
+            path: prepared.search_path.display().to_string(),
+        }))
     }
 
     async fn execute_prepared(
@@ -142,18 +158,6 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
         .canonicalize()
         .map_err(|e| format!("Failed to canonicalize search path: {e}"))?;
 
-    if !is_allowed_search_path(&cwd, &search_path) {
-        return Err(format!(
-            "search path must be inside the current workspace or /tmp: {}",
-            search_path.display()
-        ));
-    }
-    if is_private_path(&search_path) {
-        return Err(format!(
-            "refusing to search private path with default-allowed search: {}",
-            search_path.display()
-        ));
-    }
     if input.mode == SearchMode::Files && !search_path.is_dir() {
         return Err("files mode requires path to be a directory".to_string());
     }
@@ -175,28 +179,13 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
         mode: input.mode,
         query: input.query,
         cwd,
+        search_path,
         path_arg,
         globs,
         case_sensitive: input.case_sensitive,
         literal: input.literal,
         context,
         max_results,
-    })
-}
-
-fn is_allowed_search_path(cwd: &Path, path: &Path) -> bool {
-    path.starts_with(cwd) || path.starts_with("/tmp")
-}
-
-fn is_private_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
-        name == ".env"
-            || name.starts_with(".env.")
-            || name == ".ssh"
-            || name.contains("token")
-            || name.contains("secret")
-            || name.contains("credential")
     })
 }
 
@@ -422,16 +411,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_paths_outside_workspace_and_tmp() {
-        let err = SearchTool
+    async fn prepares_paths_outside_workspace_for_permission_check() {
+        let prepared = SearchTool
             .prepare(SearchInput {
                 path: Some("/".to_string()),
                 ..input("anything", Path::new("."))
             })
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.output.contains("current workspace or /tmp"));
+        let preview = SearchTool
+            .permission_preview(&prepared)
+            .expect("search should provide permission preview");
+        assert_eq!(prepared.search_path, PathBuf::from("/"));
+        assert!(matches!(
+            preview,
+            PermissionPreview::Search(SearchPermissionPreview { path, .. }) if path == "/"
+        ));
     }
 
     #[tokio::test]

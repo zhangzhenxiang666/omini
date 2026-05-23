@@ -33,7 +33,7 @@ pub(super) fn render(
     let mut lines = Vec::new();
     let mut title = vec![
         Span::raw("· "),
-        Span::styled("UpdateTodo", Style::default().fg(accent)),
+        Span::styled("Todo", Style::default().fg(accent)),
     ];
     if result.is_none() {
         title.push(Span::styled(

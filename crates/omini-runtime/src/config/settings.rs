@@ -1,6 +1,7 @@
 use crate::permissions::RawPermissionConfig;
 pub use crate::types::config::{
-    ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
+    CompactConfig, ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings,
+    ThinkingEffort,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -16,6 +17,8 @@ pub struct UserConfig {
     pub language: Option<String>,
     /// Optional tool permission rules.
     pub permissions: Option<RawPermissionConfig>,
+    /// Optional conversation compaction settings.
+    pub compact: Option<CompactConfig>,
 }
 
 /// 单个供应商配置（用户配置文件中）
@@ -119,6 +122,7 @@ impl UserConfig {
             cwd: std::env::current_dir()?,
             thinking_effort,
             permissions: self.permissions.clone(),
+            compact: self.compact.clone().unwrap_or_default(),
         })
     }
 

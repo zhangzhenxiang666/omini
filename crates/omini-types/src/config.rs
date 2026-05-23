@@ -86,6 +86,53 @@ pub struct Settings {
     pub cwd: PathBuf,
     pub thinking_effort: Option<ThinkingEffort>,
     pub permissions: Option<RawPermissionConfig>,
+    pub compact: CompactConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompactConfig {
+    #[serde(default = "default_compact_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_preserve_recent")]
+    pub preserve_recent: usize,
+    #[serde(default = "default_buffer_tokens")]
+    pub buffer_tokens: usize,
+    #[serde(default = "default_summary_output_tokens")]
+    pub summary_output_tokens: usize,
+    #[serde(default = "default_max_consecutive_failures")]
+    pub max_consecutive_failures: usize,
+}
+
+impl Default for CompactConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_compact_enabled(),
+            preserve_recent: default_preserve_recent(),
+            buffer_tokens: default_buffer_tokens(),
+            summary_output_tokens: default_summary_output_tokens(),
+            max_consecutive_failures: default_max_consecutive_failures(),
+        }
+    }
+}
+
+fn default_compact_enabled() -> bool {
+    true
+}
+
+fn default_preserve_recent() -> usize {
+    6
+}
+
+fn default_buffer_tokens() -> usize {
+    13_000
+}
+
+fn default_summary_output_tokens() -> usize {
+    20_000
+}
+
+fn default_max_consecutive_failures() -> usize {
+    3
 }
 
 // 配置错误

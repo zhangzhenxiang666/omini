@@ -1,4 +1,4 @@
-use crate::types::display::{DisplayMessage, DisplayPlan};
+use crate::types::display::{DisplayMessage, DisplayPlan, DisplaySummary};
 use crate::types::message::ContentBlock;
 use crate::types::usage::Usage;
 use chrono::{DateTime, Utc};
@@ -317,6 +317,10 @@ impl Database {
         id: &str,
         usage: Usage,
     ) -> Result<(), DbError> {
+        self.record_session_total_usage(id, usage).await
+    }
+
+    pub async fn record_session_total_usage(&self, id: &str, usage: Usage) -> Result<(), DbError> {
         let now = Utc::now();
         let total_tokens = usage_tokens_i64(usage);
         let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
@@ -461,6 +465,26 @@ impl Database {
         Ok(())
     }
 
+    pub async fn insert_compact_summary_message(
+        &self,
+        session_id: &str,
+        summary: &DisplaySummary,
+    ) -> Result<(), DbError> {
+        let content = serde_json::to_string(summary)?;
+        sqlx::query(
+            "INSERT INTO messages (session_id, role, content, kind, created_at)
+            VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(session_id)
+        .bind("assistant")
+        .bind(content)
+        .bind("compact_summary")
+        .bind(summary.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, DbError> {
         let rows = sqlx::query_as::<_, StoredMessage>(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
@@ -517,6 +541,9 @@ fn usage_usize_to_i64(value: usize) -> i64 {
 pub fn extract_message_text(content_json: &str) -> String {
     if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
         return display.text.replace('\n', " ").replace('\r', "");
+    }
+    if let Ok(summary) = serde_json::from_str::<DisplaySummary>(content_json) {
+        return summary.markdown.replace('\n', " ").replace('\r', "");
     }
 
     if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(content_json) {
@@ -652,6 +679,45 @@ mod tests {
         )
         .await
         .expect("subagent usage should update");
+
+        let session = db
+            .get_session("s1")
+            .await
+            .expect("session should load")
+            .expect("session should exist");
+
+        assert_eq!(session.current_context_tokens, 15);
+        assert_eq!(session.total_tokens, 30);
+        assert_eq!(session.total_cached_tokens, 7);
+    }
+
+    #[tokio::test]
+    async fn record_session_total_usage_only_updates_totals() {
+        let db = temp_db().await;
+        db.create_session(&test_session("s1"))
+            .await
+            .expect("session should insert");
+        db.record_session_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: 3,
+            },
+        )
+        .await
+        .expect("usage should update");
+
+        db.record_session_total_usage(
+            "s1",
+            Usage {
+                prompt_tokens: 7,
+                completion_tokens: 8,
+                cached_tokens: 4,
+            },
+        )
+        .await
+        .expect("total usage should update");
 
         let session = db
             .get_session("s1")

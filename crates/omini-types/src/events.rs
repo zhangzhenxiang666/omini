@@ -127,6 +127,22 @@ pub enum EngineToRuntimeEvent {
     PlanSubmitted(SubmittedPlan),
     /// 当前 engine/session 的一轮 LLM usage。
     UsageRecorded(Usage),
+    /// 当前 engine/session 开始快速收缩上下文。
+    CompactShrinkStarted(CompactEvent),
+    /// 当前 engine/session 完成快速收缩上下文。
+    CompactShrinkFinished(CompactShrinkFinishedEvent),
+    /// 当前 engine/session 快速收缩上下文失败。
+    CompactShrinkFailed(CompactShrinkFailedEvent),
+    /// 当前 engine/session 开始 LLM 压缩摘要。
+    CompactSummaryStarted(CompactEvent),
+    /// 当前 engine/session 正在流式输出压缩摘要。
+    CompactSummaryDelta(CompactSummaryDeltaEvent),
+    /// 当前 engine/session 完成 LLM 压缩摘要。
+    CompactSummaryFinished(CompactSummaryFinishedEvent),
+    /// 当前 engine/session LLM 压缩摘要失败。
+    CompactSummaryFailed(CompactSummaryFailedEvent),
+    /// 当前 engine/session 的 LLM 摘要 usage。
+    CompactSummaryUsageRecorded(Usage),
 
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),
@@ -178,6 +194,11 @@ pub enum RuntimeToUiEvent {
     },
     /// 当前会话 token usage 状态已变更。
     UsageChanged(SessionUsageSnapshot),
+    /// 当前会话累计 token usage 已变更，但当前 context used 不应同步。
+    UsageTotalsChanged {
+        total_tokens: i64,
+        total_cached_tokens: i64,
+    },
     /// 会话已切换
     SessionChanged {
         session_id: Option<String>,
@@ -225,6 +246,14 @@ pub enum RuntimeToUiEvent {
     ToolUse(ToolUseBlock),
     /// 工具执行完成，产出结果
     ToolResult(ToolResultBlock),
+    /// 当前 session 开始 LLM 压缩摘要。
+    CompactSummaryStarted(CompactEvent),
+    /// 当前 session 正在流式输出压缩摘要。
+    CompactSummaryDelta(CompactSummaryDeltaEvent),
+    /// 当前 session 完成 LLM 压缩摘要。
+    CompactSummaryFinished(CompactSummaryFinishedEvent),
+    /// 当前 session LLM 压缩摘要失败。
+    CompactSummaryFailed(CompactSummaryFailedEvent),
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
@@ -294,6 +323,79 @@ pub enum SubagentStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactTrigger {
+    Auto,
+    Manual,
+}
+
+impl CompactTrigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Manual => "manual",
+        }
+    }
+}
+
+impl std::fmt::Display for CompactTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactEvent {
+    pub trigger: CompactTrigger,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactSummaryDeltaEvent {
+    pub trigger: CompactTrigger,
+    pub delta: String,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactShrinkFinishedEvent {
+    pub trigger: CompactTrigger,
+    pub before_tokens: usize,
+    pub after_tokens: usize,
+    pub before_messages: usize,
+    pub after_messages: usize,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactShrinkFailedEvent {
+    pub trigger: CompactTrigger,
+    pub message: String,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactSummaryFinishedEvent {
+    pub trigger: CompactTrigger,
+    pub summary: String,
+    pub after_tokens: usize,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactSummaryFailedEvent {
+    pub trigger: CompactTrigger,
+    pub message: String,
+    pub session_id: Option<String>,
+    pub agent_label: Option<String>,
 }
 
 pub type SubmittedPlan = DisplayPlan;
@@ -466,6 +568,7 @@ pub enum PermissionPreview {
     Edit(EditPermissionPreview),
     Write(EditPermissionPreview),
     Read(ReadPermissionPreview),
+    Search(SearchPermissionPreview),
     Custom {
         tool_name: String,
         payload: serde_json::Map<String, Value>,
@@ -483,6 +586,13 @@ pub struct BashPermissionPreview {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReadPermissionPreview {
     pub file_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchPermissionPreview {
+    pub query: String,
+    pub mode: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -376,6 +376,14 @@ fn spawn_subagent_bridge(
                 | EngineToRuntimeEvent::TurnEnded
                 | EngineToRuntimeEvent::ThinkingDelta(_)
                 | EngineToRuntimeEvent::TextDelta(_)
+                | EngineToRuntimeEvent::CompactShrinkStarted(_)
+                | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                | EngineToRuntimeEvent::CompactShrinkFailed(_)
+                | EngineToRuntimeEvent::CompactSummaryStarted(_)
+                | EngineToRuntimeEvent::CompactSummaryDelta(_)
+                | EngineToRuntimeEvent::CompactSummaryFinished(_)
+                | EngineToRuntimeEvent::CompactSummaryFailed(_)
+                | EngineToRuntimeEvent::CompactSummaryUsageRecorded(_)
                 | EngineToRuntimeEvent::SubagentStarted(_)
                 | EngineToRuntimeEvent::SubagentUsageRecorded { .. }
                 | EngineToRuntimeEvent::SubagentMessageProduced(_)
@@ -512,6 +520,7 @@ mod tests {
             cwd: PathBuf::from("/tmp"),
             thinking_effort: None,
             permissions: None,
+            compact: Default::default(),
         }
     }
 

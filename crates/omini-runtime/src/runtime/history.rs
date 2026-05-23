@@ -1,7 +1,7 @@
 use super::service::RunStart;
 use crate::config::project::{ProjectDir, SessionDir};
 use crate::db::{self, NewMessage};
-use crate::types::display::{DisplayMessage, DisplayPlan, HistoryItem};
+use crate::types::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use crate::types::events::{SubagentSnapshot, SubagentStatus};
 use crate::types::message::{ContentBlock, Message, Role};
 use crate::types::proposed_plan::{extract_proposed_plan_text, strip_proposed_plan_blocks};
@@ -27,6 +27,10 @@ fn history_item_text(item: &HistoryItem) -> Option<String> {
         }
         HistoryItem::Plan(plan) => {
             let title = plan.title.trim();
+            (!title.is_empty()).then(|| title.to_string())
+        }
+        HistoryItem::Summary(summary) => {
+            let title = summary.title.trim();
             (!title.is_empty()).then(|| title.to_string())
         }
     }
@@ -74,6 +78,14 @@ pub(super) async fn load_messages_from_db(session_id: &str, blocks_dir: &Path) -
             match serde_json::from_str::<DisplayPlan>(&sm.content) {
                 Ok(plan) => messages.push(HistoryItem::Plan(plan)),
                 Err(e) => eprintln!("load_messages_from_db: parse plan failed: {e}"),
+            }
+            continue;
+        }
+
+        if sm.kind == "compact_summary" {
+            match serde_json::from_str::<DisplaySummary>(&sm.content) {
+                Ok(summary) => messages.push(HistoryItem::Summary(summary)),
+                Err(e) => eprintln!("load_messages_from_db: parse compact summary failed: {e}"),
             }
             continue;
         }
@@ -140,7 +152,7 @@ pub(super) async fn load_subagents_for_session(
             .into_iter()
             .filter_map(|item| match item {
                 HistoryItem::Message(message) => Some(message),
-                HistoryItem::Display(_) | HistoryItem::Plan(_) => None,
+                HistoryItem::Display(_) | HistoryItem::Plan(_) | HistoryItem::Summary(_) => None,
             })
             .collect();
         subagents.push(SubagentSnapshot {
@@ -223,6 +235,12 @@ pub(super) async fn persist_db_only(session_id: &str, blocks_dir: &Path, msg: &M
 
 pub(super) async fn persist_plan_db_only(session_id: &str, plan: &DisplayPlan) {
     let _ = db::global_db().insert_plan_message(session_id, plan).await;
+}
+
+pub(super) async fn persist_compact_summary_db_only(session_id: &str, summary: &DisplaySummary) {
+    let _ = db::global_db()
+        .insert_compact_summary_message(session_id, summary)
+        .await;
 }
 
 fn split_embedded_plan_blocks(

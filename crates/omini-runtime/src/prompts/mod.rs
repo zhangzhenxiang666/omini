@@ -120,6 +120,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             thinking_effort: None,
             permissions: None,
+            compact: Default::default(),
         }
     }
 

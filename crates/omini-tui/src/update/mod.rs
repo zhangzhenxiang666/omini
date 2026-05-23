@@ -237,6 +237,40 @@ mod tests {
         assert_eq!(state.input, "a");
         assert_eq!(state.cursor_char, 1);
     }
+
+    #[tokio::test]
+    async fn compact_command_sets_manual_compact_working_state() {
+        let mut state = UiState::new();
+        state.input = "/compact".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert_eq!(state.agent_status, AgentStatus::Working);
+        assert!(state.manual_compact_running);
+        assert!(state.run_timer.is_some());
+        let Some(UiToRuntimeEvent::SendCommand(command)) = rx.recv().await else {
+            panic!("expected compact command");
+        };
+        assert_eq!(command, "/compact");
+    }
+
+    #[tokio::test]
+    async fn manual_compact_does_not_queue_normal_user_input() {
+        let mut state = UiState::new();
+        state.begin_manual_compact();
+        state.input = "hello".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert!(state.queued_user_inputs.is_empty());
+        let Some(UiToRuntimeEvent::SendMessage(_)) = rx.recv().await else {
+            panic!("expected user message");
+        };
+    }
 }
 
 pub(super) async fn handle_input_event(
@@ -715,6 +749,13 @@ fn handle_mention_autocomplete_key(state: &mut UiState, code: KeyCode, modifiers
     }
 }
 
+fn is_compact_command(text: &str) -> bool {
+    let Some(rest) = text.trim().strip_prefix('/') else {
+        return false;
+    };
+    rest.split_whitespace().next() == Some("compact")
+}
+
 async fn handle_composer_key(
     state: &mut UiState,
     code: KeyCode,
@@ -754,10 +795,13 @@ async fn handle_composer_key(
 
             if let Some(draft) = state.take_input_draft() {
                 if draft.text.starts_with('/') {
+                    if !state.is_run_active() && is_compact_command(&draft.text) {
+                        state.begin_manual_compact();
+                    }
                     let _ = request_tx
                         .send(UiToRuntimeEvent::SendCommand(draft.text))
                         .await;
-                } else if state.is_run_active() {
+                } else if state.is_run_active() && !state.manual_compact_running {
                     state.mark_plan_mode_message_sent();
                     state.queued_user_inputs.push_back(draft);
                 } else {
@@ -772,6 +816,11 @@ async fn handle_composer_key(
                         crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                             text: plan.markdown,
                         },
+                        crate::types::display::HistoryItem::Summary(summary) => {
+                            UiMessage::CompactSummary {
+                                text: summary.markdown,
+                            }
+                        }
                     };
                     state.messages.push(ui_message);
                     state.mark_plan_mode_message_sent();

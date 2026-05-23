@@ -24,6 +24,14 @@ pub struct DisplayPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct DisplaySummary {
+    pub id: String,
+    pub title: String,
+    pub markdown: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayMention {
     pub start_char: usize,
     pub end_char: usize,
@@ -58,6 +66,7 @@ pub enum HistoryItem {
     Message(Message),
     Display(DisplayMessage),
     Plan(DisplayPlan),
+    Summary(DisplaySummary),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -452,7 +452,7 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, 80, None);
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
-        assert_eq!(rendered[0], "· UpdateTodo");
+        assert_eq!(rendered[0], "· Todo");
         assert_eq!(rendered[1], "  └─ ✔ Read existing flow");
         assert_eq!(rendered[2], "     □ Add UpdateTodo widget");
         assert_eq!(rendered[3], "     □ Run focused tests");

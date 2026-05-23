@@ -11,12 +11,13 @@ use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
-use crate::types::display::{DisplayMessage, HistoryItem};
+use crate::types::display::{DisplayMessage, DisplaySummary, HistoryItem};
 use crate::types::events::{
     ActiveProfile, CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest,
     PlanApprovalAction, RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, UiToRuntimeEvent,
 };
 use crate::types::message::Message;
+use crate::types::usage::Usage;
 use chrono::Utc;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -24,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use super::compact;
 use super::history;
 use super::plan;
 
@@ -479,7 +481,9 @@ impl AgentRuntime {
                     .iter()
                     .filter_map(|item| match item {
                         HistoryItem::Message(message) => Some(message.clone()),
-                        HistoryItem::Display(_) | HistoryItem::Plan(_) => None,
+                        HistoryItem::Display(_)
+                        | HistoryItem::Plan(_)
+                        | HistoryItem::Summary(_) => None,
                     })
                     .collect()
             }
@@ -600,6 +604,94 @@ impl AgentRuntime {
                     .await;
             }
         }
+    }
+
+    pub(crate) async fn force_compact_current_session(
+        &mut self,
+        custom_instructions: Option<&str>,
+    ) -> Result<(), String> {
+        if self.messages.is_empty() {
+            return Err("没有可压缩的会话历史".to_string());
+        }
+        if self.session_id.is_none() || self.session_dir.is_none() {
+            return Err("当前没有已创建的会话，无法压缩历史".to_string());
+        }
+
+        let subagent_registry = self.capabilities.subagent_registry();
+        let skill_registry = self.capabilities.skill_registry();
+        let runtime_context = Arc::new(ToolRuntimeContext {
+            session_id: self
+                .session_id
+                .clone()
+                .expect("session id checked before compact"),
+            session_type: "main".to_string(),
+            agent_label: None,
+            session_dir: self
+                .session_dir
+                .clone()
+                .expect("session dir checked before compact"),
+            subagent_registry,
+            skill_registry,
+            subagent_runner: Some(Arc::clone(&self.subagent_runner)),
+            project: self.project.clone(),
+        });
+        let (compact_tx, mut compact_rx) = mpsc::channel(16);
+        let event_tx = self.event_tx.clone();
+        let session_id = self
+            .session_id
+            .clone()
+            .expect("session id checked before compact");
+        let forwarder = tokio::spawn(async move {
+            while let Some(event) = compact_rx.recv().await {
+                match event {
+                    EngineToRuntimeEvent::CompactShrinkStarted(_)
+                    | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                    | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
+                        // TODO(compact): 收缩操作暂不通知 UI，后续再决定是否记录内部状态。
+                    }
+                    EngineToRuntimeEvent::CompactSummaryStarted(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryStarted(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryDelta(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryDelta(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFinished(event) => {
+                        persist_compact_summary_event(&session_id, &event).await;
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryFinished(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFailed(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryFailed(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
+                        record_total_usage_and_notify(&session_id, usage, &event_tx).await;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let tool_definitions = self.tool_registry.definitions();
+        let result = compact::force_compact(
+            &mut self.messages,
+            &self.settings,
+            &self.llm_client,
+            &tool_definitions,
+            custom_instructions,
+            Some(runtime_context),
+            &compact_tx,
+        )
+        .await;
+        drop(compact_tx);
+        let _ = forwarder.await;
+
+        result.map(|_| ())
     }
 
     pub(crate) fn set_active_profile(&mut self, profile: ActiveProfile) {
@@ -918,6 +1010,35 @@ impl AgentRuntime {
                                 .await;
                         }
                     }
+                    EngineToRuntimeEvent::CompactShrinkStarted(_)
+                    | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                    | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
+                        // TODO(compact): 收缩操作暂不通知 UI，后续再决定是否记录内部状态。
+                    }
+                    EngineToRuntimeEvent::CompactSummaryStarted(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryStarted(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryDelta(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryDelta(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFinished(event) => {
+                        persist_compact_summary_event(&session_id, &event).await;
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryFinished(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFailed(event) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::CompactSummaryFailed(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
+                        record_total_usage_and_notify(&session_id, usage, &event_tx).await;
+                    }
                     EngineToRuntimeEvent::SubagentStarted(event) => {
                         let _ = event_tx
                             .send(RuntimeToUiEvent::SubagentStarted(event))
@@ -1095,6 +1216,37 @@ fn usage_snapshot_from_session(
     }
 }
 
+async fn persist_compact_summary_event(
+    session_id: &str,
+    event: &crate::types::events::CompactSummaryFinishedEvent,
+) {
+    let summary = DisplaySummary {
+        id: Uuid::new_v4().to_string(),
+        title: "LLM Summary".to_string(),
+        markdown: event.summary.clone(),
+        created_at: Utc::now(),
+    };
+    history::persist_compact_summary_db_only(session_id, &summary).await;
+}
+
+async fn record_total_usage_and_notify(
+    session_id: &str,
+    usage: Usage,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+) {
+    let _ = db::global_db()
+        .record_session_total_usage(session_id, usage)
+        .await;
+    if let Ok(Some(session)) = db::global_db().get_session(session_id).await {
+        let _ = event_tx
+            .send(RuntimeToUiEvent::UsageTotalsChanged {
+                total_tokens: session.total_tokens,
+                total_cached_tokens: session.total_cached_tokens,
+            })
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1163,6 +1315,7 @@ mod tests {
             providers,
             language: None,
             permissions: None,
+            compact: None,
         }
     }
 
@@ -1375,6 +1528,55 @@ mod tests {
         let loaded = history::load_messages_from_db(&session_id, &blocks_dir).await;
         assert!(loaded.iter().any(|item| {
             matches!(item, HistoryItem::Plan(loaded_plan) if loaded_plan.markdown == plan.markdown)
+        }));
+    }
+
+    #[tokio::test]
+    async fn compact_summary_is_persisted_as_special_db_message() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("compact-summary-db");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("seed".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let event = crate::types::events::CompactSummaryFinishedEvent {
+            trigger: crate::types::events::CompactTrigger::Manual,
+            summary: "# Summary\n\n- Keep this.".to_string(),
+            after_tokens: 42,
+            session_id: Some(session_id.clone()),
+            agent_label: None,
+        };
+
+        persist_compact_summary_event(&session_id, &event).await;
+
+        let rows = db::global_db()
+            .get_messages(&session_id)
+            .await
+            .expect("messages should load");
+        assert!(rows.iter().any(|row| row.kind == "compact_summary"));
+
+        let blocks_dir = runtime
+            .session_dir
+            .as_ref()
+            .expect("session dir should exist")
+            .path()
+            .join("blocks");
+        let loaded = history::load_messages_from_db(&session_id, &blocks_dir).await;
+        assert!(loaded.iter().any(|item| {
+            matches!(item, HistoryItem::Summary(summary) if summary.markdown == event.summary)
         }));
     }
 

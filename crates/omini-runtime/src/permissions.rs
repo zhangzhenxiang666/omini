@@ -275,8 +275,13 @@ impl PermissionEngine {
                 Some(_) => PermissionDecision::Ask,
                 None => PermissionDecision::Ask,
             },
+            "search" => match search_path(preview, raw_input).map(|path| self.input_path(path)) {
+                Some(path) if is_private_path(&path) => PermissionDecision::Ask,
+                Some(path) if self.is_under_cwd_or_tmp(&path) => PermissionDecision::Allow,
+                Some(_) => PermissionDecision::Ask,
+                None => PermissionDecision::Allow,
+            },
             "edit" | "write" => PermissionDecision::Ask,
-            "search" => PermissionDecision::Allow,
             "todo_write" => PermissionDecision::Allow,
             "ask_user" | "skill" | "subagent" => PermissionDecision::Allow,
             _ => PermissionDecision::Ask,
@@ -368,6 +373,14 @@ impl PermissionEngine {
         path.starts_with(&self.cwd) || path.starts_with("/tmp")
     }
 
+    fn input_path(&self, path: PathBuf) -> PathBuf {
+        if path.is_absolute() {
+            path
+        } else {
+            self.cwd.join(path)
+        }
+    }
+
     fn normalize_rule_path(&self, specifier: &str) -> PathMatcher {
         let raw = specifier.trim();
         if let Some(rest) = raw.strip_prefix("//") {
@@ -435,7 +448,7 @@ impl ToolRule {
             return true;
         };
         match normalize_tool_name(tool_name).as_str() {
-            "read" | "edit" | "write" => {
+            "read" | "search" | "edit" | "write" => {
                 let Some(path) = permission_path(preview, raw_input) else {
                     return false;
                 };
@@ -1107,11 +1120,22 @@ fn shell_words(command: &str) -> Vec<String> {
 fn permission_path(preview: Option<&PermissionPreview>, raw_input: &Value) -> Option<PathBuf> {
     match preview {
         Some(PermissionPreview::Read(preview)) => Some(PathBuf::from(&preview.file_path)),
+        Some(PermissionPreview::Search(preview)) => Some(PathBuf::from(&preview.path)),
         Some(PermissionPreview::Edit(preview)) | Some(PermissionPreview::Write(preview)) => {
             Some(PathBuf::from(&preview.path))
         }
         _ => raw_input
             .get("file_path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from),
+    }
+}
+
+fn search_path(preview: Option<&PermissionPreview>, raw_input: &Value) -> Option<PathBuf> {
+    match preview {
+        Some(PermissionPreview::Search(preview)) => Some(PathBuf::from(&preview.path)),
+        _ => raw_input
+            .get("path")
             .and_then(Value::as_str)
             .map(PathBuf::from),
     }
@@ -1469,10 +1493,46 @@ prefix_rule(
             engine.decide("search", None, &input),
             PermissionDecision::Allow
         );
+        let input = serde_json::json!({"query": "ToolRegistry", "path": "/repo/src"});
+        assert_eq!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Allow
+        );
+        let input = serde_json::json!({"query": "ToolRegistry", "path": "/tmp/cache"});
+        assert_eq!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Allow
+        );
+        let input = serde_json::json!({"query": "KEY", "path": "/repo/.env"});
+        assert_eq!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Ask
+        );
+        let input = serde_json::json!({"query": "ToolRegistry", "path": "/home/user/.omini"});
+        assert_eq!(
+            engine.decide("search", None, &input),
+            PermissionDecision::Ask
+        );
 
         let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Search"]));
         assert!(matches!(
             engine.decide("search", None, &input),
+            PermissionDecision::Deny { .. }
+        ));
+    }
+
+    #[test]
+    fn search_path_rules_match_search_preview_path() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Search(**/.env)"]));
+        let preview = PermissionPreview::Search(crate::types::events::SearchPermissionPreview {
+            query: "KEY".to_string(),
+            mode: "content".to_string(),
+            path: "/repo/.env".to_string(),
+        });
+        let input = serde_json::json!({"query": "KEY", "path": "/repo/.env"});
+
+        assert!(matches!(
+            engine.decide("search", Some(&preview), &input),
             PermissionDecision::Deny { .. }
         ));
     }

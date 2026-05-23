@@ -10,6 +10,7 @@ pub(crate) struct SkillSpec {
     pub(crate) body: String,
     pub(crate) directory: PathBuf,
     pub(crate) inject: bool,
+    pub(crate) user_invocable: bool,
     source: SkillSource,
 }
 
@@ -232,7 +233,9 @@ fn parse_skill_content(
 
     let name = frontmatter::required_string(&raw, "name")?;
     let description = frontmatter::required_string(&raw, "description")?;
-    let inject = frontmatter::optional_bool_path(&raw, &["metadata", "inject"])?.unwrap_or(true);
+    let inject = frontmatter::optional_bool_path(&raw, &["inject"])?.unwrap_or(true);
+    let user_invocable =
+        frontmatter::optional_bool_path(&raw, &["user-invocable"])?.unwrap_or(true);
     let body = body.trim().to_string();
     if body.is_empty() {
         return Err("skill body must not be empty".to_string());
@@ -244,6 +247,7 @@ fn parse_skill_content(
         body,
         directory,
         inject,
+        user_invocable,
         source,
     })
 }
@@ -385,7 +389,7 @@ Use the writing workflow.
     }
 
     #[test]
-    fn metadata_inject_defaults_to_true() {
+    fn inject_defaults_to_true() {
         let root = temp_root();
         write_skill(
             &root,
@@ -409,7 +413,7 @@ Body
     }
 
     #[test]
-    fn metadata_inject_false_suppresses_prompt_summary() {
+    fn top_level_inject_false_suppresses_prompt_summary() {
         let root = temp_root();
         write_skill(
             &root,
@@ -417,8 +421,7 @@ Body
             r#"---
 name: hidden
 description: Hidden skill
-metadata:
-  inject: false
+inject: false
 ---
 Body
 "#,
@@ -433,6 +436,72 @@ Body
                 .iter()
                 .any(|summary| summary.name == "hidden")
         );
+    }
+
+    #[test]
+    fn metadata_inject_is_ignored() {
+        let root = temp_root();
+        write_skill(
+            &root,
+            "legacy-hidden",
+            r#"---
+name: legacy-hidden
+description: Legacy hidden skill
+metadata:
+  inject: false
+---
+Body
+"#,
+        );
+
+        let registry = load_project_skill_registry(&root);
+
+        assert!(registry.get("legacy-hidden").is_some());
+        assert!(
+            registry
+                .injected_summaries()
+                .iter()
+                .any(|summary| summary.name == "legacy-hidden")
+        );
+    }
+
+    #[test]
+    fn user_invocable_defaults_to_true() {
+        let root = temp_root();
+        write_skill(
+            &root,
+            "default-invocable",
+            r#"---
+name: default-invocable
+description: Invocable by default
+---
+Body
+"#,
+        );
+
+        let registry = load_project_skill_registry(&root);
+
+        assert!(registry.get("default-invocable").unwrap().user_invocable);
+    }
+
+    #[test]
+    fn user_invocable_false_is_parsed() {
+        let root = temp_root();
+        write_skill(
+            &root,
+            "background",
+            r#"---
+name: background
+description: Background knowledge
+user-invocable: false
+---
+Body
+"#,
+        );
+
+        let registry = load_project_skill_registry(&root);
+
+        assert!(!registry.get("background").unwrap().user_invocable);
     }
 
     #[test]

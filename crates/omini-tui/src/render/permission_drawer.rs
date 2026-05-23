@@ -1,7 +1,7 @@
 use super::*;
 
 const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
-const EDIT_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
+const LARGE_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
 const USER_INPUT_NONE_LABEL: &str = "以上都不是";
 const USER_INPUT_NONE_DESCRIPTION: &str = "可按 Tab 在备注中补充说明。";
 const USER_INPUT_NOTE_PREFIX: &str = "› ";
@@ -67,16 +67,17 @@ pub(super) fn render_permission_drawer(
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
     let note_height = if note_line.is_some() { 1 } else { 0 };
-    let is_edit_preview = matches!(
+    let is_large_preview = matches!(
         request.kind,
-        ToolPauseKind::Permission(PermissionPreview::Edit(_))
+        ToolPauseKind::Permission(PermissionPreview::Bash(_))
+            | ToolPauseKind::Permission(PermissionPreview::Edit(_))
             | ToolPauseKind::Permission(PermissionPreview::Write(_))
     );
 
     let terminal_cap = ((area.height as f32) * 0.8).floor() as u16;
-    let max_height = if is_edit_preview {
+    let max_height = if is_large_preview {
         terminal_cap
-            .min(EDIT_PERMISSION_DRAWER_MAX_HEIGHT)
+            .min(LARGE_PERMISSION_DRAWER_MAX_HEIGHT)
             .min(area.height.saturating_sub(1))
             .max(1)
     } else {
@@ -347,6 +348,7 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
         ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
+        ToolPauseKind::Permission(PermissionPreview::Search(_)) => ("search path", "skip search"),
         ToolPauseKind::Permission(PermissionPreview::Custom { .. }) => ("allow tool", "deny tool"),
         ToolPauseKind::UserInput(_) => ("提交回答", "取消请求"),
     }
@@ -384,19 +386,10 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 ]));
                 lines.push(Line::from(""));
             }
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    "$ ",
-                    Style::default()
-                        .fg(Color::Rgb(0x50, 0xc8, 0x78))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    preview.command.clone(),
-                    Style::default().fg(Color::Rgb(220, 220, 225)),
-                ),
-            ]));
+            lines.extend(bash_permission_command_lines(
+                &preview.command,
+                content_width,
+            ));
             DrawerLines {
                 lines,
                 note_line: None,
@@ -446,6 +439,44 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                     ),
                 ])]
             };
+            DrawerLines {
+                lines,
+                note_line: None,
+                note_cursor_column: None,
+            }
+        }
+        ToolPauseKind::Permission(PermissionPreview::Search(preview)) => {
+            let mode = match preview.mode.as_str() {
+                "files" => "文件名",
+                _ => "内容",
+            };
+            let mut lines = vec![Line::from("")];
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("模式：", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled(
+                    mode.to_string(),
+                    Style::default().fg(Color::Rgb(220, 220, 225)),
+                ),
+            ]));
+            if !preview.query.trim().is_empty() {
+                lines.push(Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled("查询：", Style::default().fg(Color::Rgb(140, 145, 155))),
+                    Span::styled(
+                        preview.query.trim().to_string(),
+                        Style::default().fg(Color::Rgb(220, 220, 225)),
+                    ),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled("路径：", Style::default().fg(Color::Rgb(140, 145, 155))),
+                Span::styled(
+                    display_path(&preview.path, project_dir),
+                    Style::default().fg(Color::Rgb(220, 220, 225)),
+                ),
+            ]));
             DrawerLines {
                 lines,
                 note_line: None,
@@ -573,6 +604,75 @@ fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseReque
     drawer.lines.insert(insert_at, Line::from(""));
 }
 
+fn bash_permission_command_lines(command: &str, content_width: usize) -> Vec<Line<'static>> {
+    let prompt_style = Style::default()
+        .fg(Color::Rgb(0x50, 0xc8, 0x78))
+        .add_modifier(Modifier::BOLD);
+    let command_style = Style::default().fg(Color::Rgb(220, 220, 225));
+    let prefix = "  ";
+    let prompt = "$ ";
+    let continuation = "    ";
+    let command_width = content_width
+        .saturating_sub(prefix.width())
+        .saturating_sub(prompt.width())
+        .max(1);
+    let wrapped = wrap_preserving_display_width(command, command_width);
+
+    if wrapped.is_empty() {
+        return vec![Line::from(vec![
+            Span::raw(prefix),
+            Span::styled(prompt, prompt_style),
+        ])];
+    }
+
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(idx, segment)| {
+            if idx == 0 {
+                Line::from(vec![
+                    Span::raw(prefix),
+                    Span::styled(prompt, prompt_style),
+                    Span::styled(segment, command_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(continuation),
+                    Span::styled(segment, command_style),
+                ])
+            }
+        })
+        .collect()
+}
+
+fn wrap_preserving_display_width(text: &str, max_width: usize) -> Vec<String> {
+    let max_width = max_width.max(1);
+    let mut lines = Vec::new();
+
+    for source_line in text.split('\n') {
+        if source_line.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+
+        let mut current = String::new();
+        let mut current_width = 0;
+        for ch in source_line.chars() {
+            let char_width = ch.width().unwrap_or(0);
+            if current_width > 0 && current_width + char_width > max_width {
+                lines.push(current);
+                current = String::new();
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += char_width;
+        }
+        lines.push(current);
+    }
+
+    lines
+}
+
 fn user_input_note_line(note: &str, editing: bool) -> Line<'static> {
     let marker_style = if editing {
         Style::default()
@@ -661,6 +761,7 @@ fn permission_drawer_title(preview: &PermissionPreview) -> &'static str {
         PermissionPreview::Edit(_) => "Edit File",
         PermissionPreview::Write(_) => "Write File",
         PermissionPreview::Read(_) => "Read File",
+        PermissionPreview::Search(_) => "Search Files",
         PermissionPreview::Custom { .. } => "Tool Permission",
     }
 }
@@ -739,6 +840,87 @@ mod tests {
                 .iter()
                 .any(|line| line_text(line).contains("Use English comments"))
         );
+    }
+
+    #[test]
+    fn search_permission_renders_query_and_path() {
+        let request = ToolPauseRequest {
+            tool_use_id: "search-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "search".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Search(
+                crate::types::events::SearchPermissionPreview {
+                    query: "POST /api/v1/skills".to_string(),
+                    mode: "content".to_string(),
+                    path: "/home/zzx/.omini/skills/uumit-agent".to_string(),
+                },
+            )),
+        };
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 80,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "",
+            user_input_note_cursor: 0,
+            user_input_note_mode: false,
+        });
+        let rendered = drawer.lines.iter().map(line_text).collect::<String>();
+
+        assert!(rendered.contains("POST /api/v1/skills"));
+        assert!(rendered.contains("~/.omini/skills/uumit-agent"));
+    }
+
+    #[test]
+    fn bash_permission_wraps_long_command_without_truncating() {
+        let command = "cargo test -p omini-tui permission_drawer_with_a_very_long_filter_name_that_exceeds_the_drawer_width -- --nocapture";
+        let request = ToolPauseRequest {
+            tool_use_id: "bash-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Bash(
+                crate::types::events::BashPermissionPreview {
+                    command: command.to_string(),
+                    description: None,
+                    workdir: None,
+                    timeout: 120_000,
+                },
+            )),
+        };
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 32,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "",
+            user_input_note_cursor: 0,
+            user_input_note_mode: false,
+        });
+        let command_lines: Vec<String> = drawer
+            .lines
+            .iter()
+            .map(line_text)
+            .filter(|line| line.starts_with("  $ ") || line.starts_with("    "))
+            .map(|line| {
+                line.strip_prefix("  $ ")
+                    .or_else(|| line.strip_prefix("    "))
+                    .unwrap_or(&line)
+                    .to_string()
+            })
+            .collect();
+
+        assert!(command_lines.len() > 1);
+        assert_eq!(command_lines.concat(), command);
     }
 }
 
