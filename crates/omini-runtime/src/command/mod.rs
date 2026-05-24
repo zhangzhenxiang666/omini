@@ -10,6 +10,7 @@ pub mod plan;
 pub mod rename;
 pub mod sessions;
 pub mod skill;
+pub mod thinking;
 
 use crate::runtime::AgentRuntime;
 use crate::types::events::{CommandKind, CommandResult, CommandSummary};
@@ -135,6 +136,7 @@ pub fn register_default_commands(registry: &mut CommandRegistry) {
     registry.register(Arc::new(effort::EffortCommand));
     registry.register(Arc::new(model::ModelCommand));
     registry.register(Arc::new(agents::AgentsCommand));
+    registry.register(Arc::new(thinking::ThinkingCommand));
     registry.register(Arc::new(sessions::SessionsCommand));
     registry.register(Arc::new(new::NewCommand));
     registry.register(Arc::new(plan::PlanCommand));
@@ -176,7 +178,7 @@ mod tests {
             names,
             vec![
                 "sessions", "new", "plan", "compact", "model", "agents", "effort", "init",
-                "rename", "help", "exit"
+                "rename", "thinking", "help", "exit"
             ]
         );
     }

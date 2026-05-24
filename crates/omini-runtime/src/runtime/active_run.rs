@@ -38,6 +38,21 @@ pub(super) async fn handle_command(
         "effort" => {
             apply_effort_selection(settings, project, session_id, parsed.args, event_tx).await;
         }
+        "thinking" => match command::thinking::apply_thinking_display(project, parsed.args) {
+            Ok(show) => {
+                let _ = event_tx
+                    .send(RuntimeToUiEvent::ThinkingDisplayChanged { show })
+                    .await;
+                let _ = event_tx
+                    .send(RuntimeToUiEvent::CommandNotice(
+                        command::thinking::thinking_display_notice(show),
+                    ))
+                    .await;
+            }
+            Err(error) => {
+                let _ = event_tx.send(RuntimeToUiEvent::Error(error)).await;
+            }
+        },
         "help" | "?" => {
             let _ = event_tx
                 .send(RuntimeToUiEvent::ShowHelpDrawer(

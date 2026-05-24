@@ -463,6 +463,9 @@ impl UiState {
                 self.interaction_step = None;
                 self.interaction_request = None;
             }
+            RuntimeToUiEvent::ThinkingDisplayChanged { show } => {
+                self.show_thinking_blocks = show;
+            }
             RuntimeToUiEvent::UsageChanged(usage) => {
                 self.status_bar.current_context_tokens = usage.current_context_tokens;
                 self.status_bar.total_tokens = usage.total_tokens;
@@ -721,6 +724,19 @@ mod tests {
         assert_eq!(state.status_bar.context_window, Some(456));
         assert_eq!(state.status_bar.total_tokens, 789);
         assert_eq!(state.status_bar.total_cached_tokens, 12);
+    }
+
+    #[test]
+    fn thinking_display_changed_updates_ui_state() {
+        let mut state = UiState::new();
+
+        state.apply_event(RuntimeToUiEvent::ThinkingDisplayChanged { show: false });
+
+        assert!(!state.show_thinking_blocks);
+
+        state.apply_event(RuntimeToUiEvent::ThinkingDisplayChanged { show: true });
+
+        assert!(state.show_thinking_blocks);
     }
 
     #[test]

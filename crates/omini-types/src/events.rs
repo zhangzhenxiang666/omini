@@ -194,6 +194,8 @@ pub enum RuntimeToUiEvent {
         thinking_effort: Option<ThinkingEffort>,
         context_window: Option<u32>,
     },
+    /// thinking 块显示偏好已变更。
+    ThinkingDisplayChanged { show: bool },
     /// 当前会话 token usage 状态已变更。
     UsageChanged(SessionUsageSnapshot),
     /// 当前会话累计 token usage 已变更，但当前 context used 不应同步。

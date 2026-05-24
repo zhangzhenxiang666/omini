@@ -56,6 +56,7 @@ impl ProjectsDir {
                 default_provider,
                 default_model,
                 thinking_effort: None,
+                show_thinking_blocks: true,
                 created_at: now,
                 accessed_at: now,
             })?;
@@ -115,6 +116,7 @@ impl ProjectDir {
                 default_provider: None,
                 default_model: None,
                 thinking_effort: None,
+                show_thinking_blocks: true,
                 created_at: now,
                 accessed_at: now,
             });
@@ -245,8 +247,15 @@ pub struct ProjectState {
     pub default_model: Option<String>,
     /// 当前选择的思考程度（项目级默认）
     pub thinking_effort: Option<ThinkingEffort>,
+    /// 是否在消息区展示 thinking 块。
+    #[serde(default = "default_show_thinking_blocks")]
+    pub show_thinking_blocks: bool,
     /// 项目创建时间
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// 最近一次访问时间（每次启动刷新）
     pub accessed_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn default_show_thinking_blocks() -> bool {
+    true
 }

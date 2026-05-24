@@ -425,6 +425,8 @@ pub struct UiState {
     pub interaction_step: Option<InteractionStep>,
     /// /help 底部抽屉状态。
     pub help_drawer: Option<HelpDrawerState>,
+    /// 是否在消息区展示 thinking 块。
+    pub show_thinking_blocks: bool,
     /// 待审批的计划。
     pub plan_approval: Option<SubmittedPlan>,
     /// 计划审批抽屉当前选中的操作。
@@ -492,6 +494,7 @@ impl UiState {
             interaction_request: None,
             interaction_step: None,
             help_drawer: None,
+            show_thinking_blocks: true,
             plan_approval: None,
             plan_approval_selected: 0,
             plan_approval_auto: false,

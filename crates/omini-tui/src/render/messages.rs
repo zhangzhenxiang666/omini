@@ -345,6 +345,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                     }
                 }
                 ContentBlock::Thinking(tb) => {
+                    if !state.show_thinking_blocks {
+                        continue;
+                    }
                     let mut lines = build_thinking_lines(&tb.thinking, content_width);
                     block_lines.append(&mut lines);
                 }
@@ -403,6 +406,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                 }
                 ContentBlock::Image(_) => {}
                 ContentBlock::Thinking(tb) => {
+                    if !state.show_thinking_blocks {
+                        continue;
+                    }
                     let mut lines = build_thinking_lines(&tb.thinking, content_width);
                     block_lines.append(&mut lines);
                 }
@@ -563,6 +569,9 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::message::{ContentBlock, Message, Role};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     #[test]
     fn run_divider_renders_elapsed_duration() {
@@ -581,5 +590,62 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(UnicodeWidthStr::width(text.as_str()) <= 4);
+    }
+
+    #[test]
+    fn thinking_blocks_render_when_enabled() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.messages.push(UiMessage::Message(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_thinking("checking context".to_string()),
+                ContentBlock::from_text("done".to_string()),
+            ],
+        )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
+            .unwrap();
+
+        assert!(
+            state
+                .selectable_message_lines
+                .iter()
+                .any(|line| line.contains("Thinking: checking context"))
+        );
+    }
+
+    #[test]
+    fn thinking_blocks_are_hidden_when_disabled() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.show_thinking_blocks = false;
+        state.messages.push(UiMessage::Message(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_thinking("checking context".to_string()),
+                ContentBlock::from_text("done".to_string()),
+            ],
+        )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
+            .unwrap();
+
+        assert!(
+            !state
+                .selectable_message_lines
+                .iter()
+                .any(|line| line.contains("Thinking: checking context"))
+        );
+        assert!(
+            state
+                .selectable_message_lines
+                .iter()
+                .any(|line| line.contains("done"))
+        );
     }
 }

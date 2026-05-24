@@ -74,6 +74,10 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
+    state.show_thinking_blocks = project
+        .load_state()
+        .map(|state| state.show_thinking_blocks)
+        .unwrap_or(true);
     state.status_bar.context_window =
         settings
             .providers

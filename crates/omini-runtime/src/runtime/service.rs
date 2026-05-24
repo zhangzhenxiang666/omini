@@ -1608,6 +1608,25 @@ mod tests {
         }));
 
         active_run::handle_command(
+            "/thinking off",
+            &mut runtime.pending_interaction,
+            &runtime.command_registry,
+            &mut runtime.settings,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            &event_tx,
+        )
+        .await;
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::ThinkingDisplayChanged { show: false }
+            )
+        }));
+        assert!(!runtime.project.load_state().unwrap().show_thinking_blocks);
+
+        active_run::handle_command(
             "/help",
             &mut runtime.pending_interaction,
             &runtime.command_registry,
