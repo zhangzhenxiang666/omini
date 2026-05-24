@@ -2,6 +2,7 @@ use super::*;
 
 const PERMISSION_DRAWER_MAX_HEIGHT: u16 = 18;
 const LARGE_PERMISSION_DRAWER_MAX_HEIGHT: u16 = 50;
+const PERMISSION_DRAWER_DIVIDER_HEIGHT: u16 = 1;
 const USER_INPUT_NONE_LABEL: &str = "以上都不是";
 const USER_INPUT_NONE_DESCRIPTION: &str = "可按 Tab 在备注中补充说明。";
 const USER_INPUT_NOTE_MAX_LINES: usize = 4;
@@ -36,6 +37,28 @@ struct PermissionDrawerLinesInput<'a> {
     user_input_note_cursor: usize,
     user_input_note_mode: bool,
 }
+
+pub(super) fn permission_drawer_height(state: &UiState, area: Rect) -> u16 {
+    let Some(request) = state.active_tool_pause() else {
+        return 0;
+    };
+    if area.width == 0 || area.height == 0 {
+        return 0;
+    }
+
+    let DrawerLines {
+        lines, note_lines, ..
+    } = build_permission_drawer_lines_for_state(state, request, area.width);
+    let scroll_line_count = lines.len().saturating_sub(1);
+    let note_height = note_lines.len() as u16;
+    let content_height =
+        permission_drawer_content_height(request, scroll_line_count, note_height, area.height);
+
+    content_height
+        .saturating_add(PERMISSION_DRAWER_DIVIDER_HEIGHT)
+        .min(area.height)
+}
+
 pub(super) fn render_permission_drawer(
     state: &mut UiState,
     frame: &mut ratatui::Frame,
@@ -54,54 +77,15 @@ pub(super) fn render_permission_drawer(
         return;
     }
 
-    let project_dir = state.status_bar.cwd.clone();
-    let preview_tool_use_id = request
-        .preview_tool_use_id
-        .as_deref()
-        .unwrap_or(&request.tool_use_id);
-    let tool_use = find_tool_use(state, preview_tool_use_id);
-    let content_width = area.width.saturating_sub(6) as usize;
     let DrawerLines {
         lines,
         note_lines,
         note_cursor,
-    } = build_permission_drawer_lines(PermissionDrawerLinesInput {
-        request: &request,
-        tool_use,
-        content_width,
-        project_dir: Some(project_dir.as_path()),
-        question_index: state.user_input_question_index,
-        user_input_selected: state.current_user_input_selected(),
-        current_user_input_note: state.current_user_input_note(),
-        user_input_note_cursor: state.current_user_input_note_cursor(),
-        user_input_note_mode: state.user_input_note_mode,
-    });
+    } = build_permission_drawer_lines_for_state(state, &request, area.width);
     let fixed_header = lines.first().cloned();
     let scroll_lines: Vec<Line<'static>> = lines.into_iter().skip(1).collect();
     let note_height = note_lines.len() as u16;
-    let is_large_preview = matches!(
-        request.kind,
-        ToolPauseKind::Permission(PermissionPreview::Bash(_))
-            | ToolPauseKind::Permission(PermissionPreview::Edit(_))
-            | ToolPauseKind::Permission(PermissionPreview::Write(_))
-    );
-
-    let terminal_cap = ((area.height as f32) * 0.8).floor() as u16;
-    let max_height = if is_large_preview {
-        terminal_cap
-            .min(LARGE_PERMISSION_DRAWER_MAX_HEIGHT)
-            .min(area.height.saturating_sub(1))
-            .max(1)
-    } else {
-        area.height
-            .saturating_sub(4)
-            .clamp(7, PERMISSION_DRAWER_MAX_HEIGHT)
-            .min(area.height)
-    };
-    let desired_height = (scroll_lines.len() as u16)
-        .saturating_add(8)
-        .saturating_add(note_height)
-        .clamp(1, max_height.min(area.height));
+    let desired_height = area.height.saturating_sub(PERMISSION_DRAWER_DIVIDER_HEIGHT);
     let body_height = desired_height.saturating_sub(7 + note_height) as usize;
     let scroll_line_count = scroll_lines.len();
     let max_scroll = scroll_line_count.saturating_sub(body_height);
@@ -117,7 +101,7 @@ pub(super) fn render_permission_drawer(
 
     let drawer_area = Rect {
         x: area.x,
-        y: area.y + area.height.saturating_sub(desired_height + 1),
+        y: area.y.saturating_add(PERMISSION_DRAWER_DIVIDER_HEIGHT),
         width: area.width,
         height: desired_height,
     };
@@ -132,9 +116,25 @@ pub(super) fn render_permission_drawer(
     state.permission_drawer_area = drawer_area;
     state.permission_drawer_body_area = body_area;
 
-    frame.render_widget(Clear, drawer_area);
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+    let divider_line = Line::from(Span::styled(
+        "━".repeat(area.width.saturating_sub(1) as usize),
+        Style::default().fg(accent),
+    ));
+    frame.render_widget(
+        Paragraph::new(divider_line),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: area.width,
+            height: PERMISSION_DRAWER_DIVIDER_HEIGHT,
+        },
+    );
+    if drawer_area.height == 0 {
+        return;
+    }
 
+    frame.render_widget(Clear, drawer_area);
     let title = match &request.kind {
         ToolPauseKind::UserInput(preview) => format!(
             " 问题 {}/{}（{} 个未回答） ",
@@ -144,19 +144,6 @@ pub(super) fn render_permission_drawer(
         ),
         ToolPauseKind::Permission(preview) => format!(" {} ", permission_drawer_title(preview)),
     };
-    let divider_line = Line::from(Span::styled(
-        "━".repeat(drawer_area.width.saturating_sub(1) as usize),
-        Style::default().fg(accent),
-    ));
-    frame.render_widget(
-        Paragraph::new(divider_line),
-        Rect {
-            x: drawer_area.x,
-            y: drawer_area.y.saturating_sub(1),
-            width: drawer_area.width,
-            height: 1,
-        },
-    );
     if drawer_area.height > 1 {
         let mut title_line = Line::from(Span::styled(
             title,
@@ -235,6 +222,66 @@ pub(super) fn render_permission_drawer(
         register_and_highlight_lines(state, options_area, &mut option_lines);
         frame.render_widget(Paragraph::new(Text::from(option_lines)), options_area);
     }
+}
+
+fn build_permission_drawer_lines_for_state(
+    state: &UiState,
+    request: &ToolPauseRequest,
+    area_width: u16,
+) -> DrawerLines {
+    let preview_tool_use_id = request
+        .preview_tool_use_id
+        .as_deref()
+        .unwrap_or(&request.tool_use_id);
+    let tool_use = find_tool_use(state, preview_tool_use_id);
+    let content_width = area_width.saturating_sub(6) as usize;
+    build_permission_drawer_lines(PermissionDrawerLinesInput {
+        request,
+        tool_use,
+        content_width,
+        project_dir: Some(state.status_bar.cwd.as_path()),
+        question_index: state.user_input_question_index,
+        user_input_selected: state.current_user_input_selected(),
+        current_user_input_note: state.current_user_input_note(),
+        user_input_note_cursor: state.current_user_input_note_cursor(),
+        user_input_note_mode: state.user_input_note_mode,
+    })
+}
+
+fn permission_drawer_content_height(
+    request: &ToolPauseRequest,
+    scroll_line_count: usize,
+    note_height: u16,
+    area_height: u16,
+) -> u16 {
+    let available_height = area_height.saturating_sub(PERMISSION_DRAWER_DIVIDER_HEIGHT);
+    if available_height == 0 {
+        return 0;
+    }
+
+    let is_large_preview = matches!(
+        &request.kind,
+        ToolPauseKind::Permission(PermissionPreview::Bash(_))
+            | ToolPauseKind::Permission(PermissionPreview::Edit(_))
+            | ToolPauseKind::Permission(PermissionPreview::Write(_))
+    );
+    let terminal_cap = ((area_height as f32) * 0.8).floor() as u16;
+    let max_height = if is_large_preview {
+        terminal_cap
+            .min(LARGE_PERMISSION_DRAWER_MAX_HEIGHT)
+            .min(available_height)
+            .max(1)
+    } else {
+        area_height
+            .saturating_sub(4)
+            .clamp(7, PERMISSION_DRAWER_MAX_HEIGHT)
+            .min(available_height)
+    };
+
+    (scroll_line_count as u16)
+        .saturating_add(8)
+        .saturating_add(note_height)
+        .clamp(1, max_height)
 }
 
 fn build_permission_action_lines(state: &UiState, request: &ToolPauseRequest) -> Text<'static> {
@@ -535,18 +582,27 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
             let mut lines = Vec::new();
             lines.extend(user_input_question_lines(question, content_width));
             lines.push(Line::from(""));
+            let none_label = format!("{}. {}", question.options.len() + 1, USER_INPUT_NONE_LABEL);
+            let mut option_label_width = none_label.width();
+            for (idx, option) in question.options.iter().enumerate() {
+                let label = format!("{}. {}", idx + 1, option.label);
+                option_label_width = option_label_width.max(label.width());
+            }
             for (idx, option) in question.options.iter().enumerate() {
                 let selected = idx == user_input_selected;
+                let label = format!("{}. {}", idx + 1, option.label);
                 lines.push(user_input_option_line(
                     selected,
-                    &format!("{}. {}", idx + 1, option.label),
+                    &label,
                     &option.description,
+                    option_label_width,
                 ));
             }
             lines.push(user_input_option_line(
                 user_input_selected == question.options.len(),
-                &format!("{}. {}", question.options.len() + 1, USER_INPUT_NONE_LABEL),
+                &none_label,
                 USER_INPUT_NONE_DESCRIPTION,
+                option_label_width,
             ));
             let mut drawer = DrawerLines {
                 lines,
@@ -890,7 +946,12 @@ fn wrap_note_value(note: &str, cursor_char: usize, max_width: usize) -> (Vec<Str
     (lines, cursor.expect("note cursor should be set"))
 }
 
-fn user_input_option_line(selected: bool, label: &str, description: &str) -> Line<'static> {
+fn user_input_option_line(
+    selected: bool,
+    label: &str,
+    description: &str,
+    label_width: usize,
+) -> Line<'static> {
     let marker_style = if selected {
         Style::default()
             .fg(Color::Rgb(0x42, 0xd9, 0xe8))
@@ -907,7 +968,7 @@ fn user_input_option_line(selected: bool, label: &str, description: &str) -> Lin
     };
     Line::from(vec![
         Span::styled(if selected { "› " } else { "  " }, marker_style),
-        Span::styled(label.to_string(), label_style),
+        Span::styled(pad_display_width(label, label_width), label_style),
         Span::raw("   "),
         Span::styled(
             description.to_string(),
@@ -1089,6 +1150,67 @@ mod tests {
 
         assert!(drawer.note_lines.len() > 1);
         assert!(drawer.note_cursor.is_some());
+    }
+
+    #[test]
+    fn user_input_option_descriptions_align_with_wide_labels() {
+        let request = ToolPauseRequest {
+            tool_use_id: "ask-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "ask_user".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(crate::types::events::UserInputPreview {
+                questions: vec![crate::types::events::UserInputQuestion {
+                    id: "choice".to_string(),
+                    header: "Choice".to_string(),
+                    question: "Pick one".to_string(),
+                    options: vec![
+                        crate::types::events::UserInputOption {
+                            label: "A".to_string(),
+                            description: "Short desc".to_string(),
+                        },
+                        crate::types::events::UserInputOption {
+                            label: "中文选项".to_string(),
+                            description: "Wide desc".to_string(),
+                        },
+                    ],
+                }],
+            }),
+        };
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 80,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "",
+            user_input_note_cursor: 0,
+            user_input_note_mode: false,
+        });
+        let rendered: Vec<String> = drawer.lines.iter().map(line_text).collect();
+        let short = rendered
+            .iter()
+            .find(|line| line.contains("Short desc"))
+            .expect("short option should render");
+        let wide = rendered
+            .iter()
+            .find(|line| line.contains("Wide desc"))
+            .expect("wide option should render");
+        let short_prefix_width = short
+            .split("Short desc")
+            .next()
+            .expect("short description prefix")
+            .width();
+        let wide_prefix_width = wide
+            .split("Wide desc")
+            .next()
+            .expect("wide description prefix")
+            .width();
+
+        assert_eq!(short_prefix_width, wide_prefix_width);
     }
 
     #[test]

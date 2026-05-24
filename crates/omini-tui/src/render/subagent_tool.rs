@@ -107,7 +107,7 @@ pub(super) fn render_subagent_tool(
                 .is_some_and(|active| active.tool_use_id == pause.tool_use_id)
         });
         let prefix = if tool_pause_active {
-            "  › "
+            "  •  "
         } else if rendered_tools == 0 {
             "  └─ "
         } else {
@@ -361,6 +361,8 @@ fn truncate_to_width(value: &str, max_width: usize) -> String {
 mod tests {
     use super::*;
     use crate::render::line_to_plain_text;
+    use crate::types::events::{PermissionPreview, ReadPermissionPreview};
+    use crate::types::message::{Message, Role};
 
     #[test]
     fn rejected_subagent_without_started_event_renders_finished() {
@@ -390,5 +392,60 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("subagent is not available"))
         );
+    }
+
+    #[test]
+    fn active_child_tool_marker_keeps_tool_label_aligned() {
+        let tool_use = ToolUseBlock {
+            id: "spawn-1".to_string(),
+            name: "subagent".to_string(),
+            input: std::collections::HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String("explorer".to_string()),
+            )]),
+        };
+        let read_tool = |id: &str, path: &str| ToolUseBlock {
+            id: id.to_string(),
+            name: "read".to_string(),
+            input: std::collections::HashMap::from([(
+                "file_path".to_string(),
+                serde_json::Value::String(path.to_string()),
+            )]),
+        };
+        let node = SubagentNode {
+            session_id: "subagent-1".to_string(),
+            parent_session_id: "main".to_string(),
+            spawn_tool_use_id: "spawn-1".to_string(),
+            agent_label: "explorer".to_string(),
+            status: SubagentStatus::Running,
+            messages: vec![Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::ToolUse(read_tool("read-1", "README.md")),
+                    ContentBlock::ToolUse(read_tool("read-2", "Cargo.toml")),
+                ],
+            )],
+        };
+        let pending_tool_pauses = VecDeque::from([ToolPauseRequest {
+            tool_use_id: "subagent-1:pause-read-2".to_string(),
+            preview_tool_use_id: Some("read-2".to_string()),
+            tool_name: "read".to_string(),
+            permission_source: None,
+            source_session_id: Some("subagent-1".to_string()),
+            source_agent_label: Some("Explorer".to_string()),
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                file_path: "Cargo.toml".to_string(),
+            })),
+        }]);
+
+        let lines =
+            render_subagent_tool(&tool_use, None, Some(&node), &pending_tool_pauses, 80, None);
+        let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+        let first_read_prefix = rendered[1].split("Read").next().unwrap().width();
+        let active_read_prefix = rendered[2].split("Read").next().unwrap().width();
+
+        assert_eq!(rendered[1], "  └─ Read README.md");
+        assert!(rendered[2].starts_with("  •  Read Cargo.toml"));
+        assert_eq!(first_read_prefix, active_read_prefix);
     }
 }

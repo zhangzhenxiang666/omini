@@ -51,7 +51,8 @@ mod tests {
     use crate::types::config::ModelConfig;
     use crate::types::display::DisplayPlan;
     use crate::types::events::{
-        PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent, ToolPauseKind, ToolPauseRequest,
+        PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent, ToolPauseKind,
+        ToolPauseRequest, UserInputOption, UserInputPreview, UserInputQuestion,
     };
     use crate::types::message::{Message, Role};
     use chrono::Utc;
@@ -151,7 +152,73 @@ mod tests {
         assert!(rendered.contains("Read File"));
         assert!(rendered.contains("Cargo.toml"));
         assert!(rendered.contains("Waiting for permission"));
-        assert!(rendered.contains("›"));
+        assert!(rendered.contains("•"));
+    }
+
+    #[test]
+    fn permission_drawer_layout_leaves_gap_above_divider() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let mut input = std::collections::HashMap::new();
+        input.insert("file_path".to_string(), serde_json::json!("Cargo.toml"));
+        state.pending_assistant = Some(Message::new(
+            Role::Assistant,
+            vec![ContentBlock::ToolUse(ToolUseBlock {
+                id: "read-1".to_string(),
+                name: "read".to_string(),
+                input,
+            })],
+        ));
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(ToolPauseRequest {
+            tool_use_id: "read-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "read".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                file_path: "Cargo.toml".to_string(),
+            })),
+        }));
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+        let divider_top = state.permission_drawer_area.y.saturating_sub(1);
+        assert_eq!(messages_bottom + 1, divider_top);
+    }
+
+    #[test]
+    fn user_input_drawer_layout_leaves_gap_above_divider() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(ToolPauseRequest {
+            tool_use_id: "ask-1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "ask_user".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(UserInputPreview {
+                questions: vec![UserInputQuestion {
+                    id: "choice".to_string(),
+                    header: "Choice".to_string(),
+                    question: "Pick one".to_string(),
+                    options: vec![UserInputOption {
+                        label: "First".to_string(),
+                        description: "Use the first option".to_string(),
+                    }],
+                }],
+            }),
+        }));
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+        let divider_top = state.permission_drawer_area.y.saturating_sub(1);
+        assert_eq!(messages_bottom + 1, divider_top);
     }
 
     #[test]

@@ -7,6 +7,10 @@ use ratatui::widgets::Paragraph;
 const PLAN_APPROVAL_TOP_SPACER_HEIGHT: u16 = 1;
 const PLAN_APPROVAL_MIN_MESSAGES_HEIGHT: u16 = 1;
 const PLAN_APPROVAL_MESSAGE_GAP_HEIGHT: u16 = 1;
+const TOOL_PAUSE_TOP_SPACER_HEIGHT: u16 = 1;
+const TOOL_PAUSE_MIN_MESSAGES_HEIGHT: u16 = 1;
+const TOOL_PAUSE_MESSAGE_GAP_HEIGHT: u16 = 1;
+const TOOL_PAUSE_FOOTER_HEIGHT: u16 = 1;
 
 pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
@@ -34,6 +38,34 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         state.messages_area = chunks[1];
         super::render_messages(state, frame, chunks[1]);
         super::plan_approval_drawer::render_plan_approval_drawer(state, frame, chunks[3]);
+        return;
+    }
+
+    if state.active_tool_pause().is_some() {
+        let reserved_height = TOOL_PAUSE_TOP_SPACER_HEIGHT
+            + TOOL_PAUSE_MIN_MESSAGES_HEIGHT
+            + TOOL_PAUSE_MESSAGE_GAP_HEIGHT
+            + TOOL_PAUSE_FOOTER_HEIGHT;
+        let drawer_height = super::permission_drawer::permission_drawer_height(state, area)
+            .min(area.height.saturating_sub(reserved_height).max(1));
+        let chunks = Layout::vertical([
+            Constraint::Length(TOOL_PAUSE_TOP_SPACER_HEIGHT),
+            Constraint::Min(TOOL_PAUSE_MIN_MESSAGES_HEIGHT),
+            Constraint::Length(TOOL_PAUSE_MESSAGE_GAP_HEIGHT),
+            Constraint::Length(drawer_height),
+            Constraint::Length(TOOL_PAUSE_FOOTER_HEIGHT),
+        ])
+        .split(area);
+        state.messages_area = chunks[1];
+        super::render_messages(state, frame, chunks[1]);
+        super::status::render_footer(state, frame, chunks[4]);
+
+        if state.interaction_request.is_some() {
+            super::interactions::render_interaction(state, frame, area);
+        }
+
+        super::help_drawer::render_help_drawer(state, frame, area);
+        super::permission_drawer::render_permission_drawer(state, frame, chunks[3]);
         return;
     }
 

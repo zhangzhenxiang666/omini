@@ -451,9 +451,9 @@ fn decorate_paused_tool(
             .first()
             .is_some_and(|span| span.content.as_ref() == "· ")
         {
-            first.spans[0] = Span::styled("› ", active_style);
+            first.spans[0] = Span::styled("• ", active_style);
         } else {
-            first.spans.insert(0, Span::styled("› ", active_style));
+            first.spans.insert(0, Span::styled("• ", active_style));
         }
     }
 
