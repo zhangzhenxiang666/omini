@@ -17,6 +17,8 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
 
 const DEFAULT_CONTEXT_WINDOW: usize = 256_000;
+const SOFT_COMPACT_USAGE_PERCENT: usize = 80;
+const HARD_COMPACT_USAGE_PERCENT: usize = 85;
 const TOKEN_ESTIMATION_PADDING_NUMERATOR: usize = 4;
 const TOKEN_ESTIMATION_PADDING_DENOMINATOR: usize = 3;
 const IMAGE_TOKEN_ESTIMATE: usize = 3_072;
@@ -58,6 +60,19 @@ struct CollectedSummary {
     visible: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutoCompactThresholds {
+    soft: usize,
+    hard: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoCompactDecision {
+    Skip,
+    LocalOnly,
+    FullIfLocalInsufficient,
+}
+
 pub async fn auto_compact_if_needed(
     messages: &mut Vec<Message>,
     settings: &Settings,
@@ -86,8 +101,9 @@ pub async fn auto_compact_if_needed(
         settings.system_prompt.as_deref(),
         tool_definitions,
     );
-    let threshold = auto_compact_threshold(settings);
-    if before_tokens < threshold {
+    let thresholds = auto_compact_thresholds(settings);
+    let decision = auto_compact_decision(before_tokens, thresholds);
+    if decision == AutoCompactDecision::Skip {
         return false;
     }
 
@@ -107,7 +123,7 @@ pub async fn auto_compact_if_needed(
         settings.system_prompt.as_deref(),
         tool_definitions,
     );
-    if changed && after_micro < threshold {
+    if changed && after_micro < thresholds.soft {
         rewrite_runtime_history(runtime_context.as_deref(), messages);
         let outcome = CompactOutcome {
             before_tokens,
@@ -136,7 +152,7 @@ pub async fn auto_compact_if_needed(
         settings.system_prompt.as_deref(),
         tool_definitions,
     );
-    if changed && after_collapse < threshold {
+    if changed && after_collapse < thresholds.soft {
         rewrite_runtime_history(runtime_context.as_deref(), messages);
         let outcome = CompactOutcome {
             before_tokens,
@@ -153,6 +169,27 @@ pub async fn auto_compact_if_needed(
         .await;
         state.consecutive_failures = 0;
         return true;
+    }
+
+    if decision == AutoCompactDecision::LocalOnly {
+        if changed {
+            rewrite_runtime_history(runtime_context.as_deref(), messages);
+            let outcome = CompactOutcome {
+                before_tokens,
+                after_tokens: after_collapse,
+                before_messages,
+                after_messages: messages.len(),
+            };
+            emit_compact_shrink_finished(
+                event_tx,
+                CompactTrigger::Auto,
+                runtime_context.as_deref(),
+                outcome,
+            )
+            .await;
+            state.consecutive_failures = 0;
+        }
+        return changed;
     }
 
     let compact_context = CompactRequestContext {
@@ -320,11 +357,31 @@ fn normalized_config(config: &CompactConfig) -> CompactConfig {
     }
 }
 
-fn auto_compact_threshold(settings: &Settings) -> usize {
+fn auto_compact_thresholds(settings: &Settings) -> AutoCompactThresholds {
     let config = normalized_config(&settings.compact);
-    context_window(settings)
+    let context_window = context_window(settings);
+    let reserve_threshold = context_window
         .saturating_sub(config.summary_output_tokens)
-        .saturating_sub(config.buffer_tokens)
+        .saturating_sub(config.buffer_tokens);
+    let soft =
+        usage_percent_threshold(context_window, SOFT_COMPACT_USAGE_PERCENT).min(reserve_threshold);
+    let hard =
+        usage_percent_threshold(context_window, HARD_COMPACT_USAGE_PERCENT).min(reserve_threshold);
+    AutoCompactThresholds { soft, hard }
+}
+
+fn usage_percent_threshold(context_window: usize, percent: usize) -> usize {
+    context_window.saturating_mul(percent) / 100
+}
+
+fn auto_compact_decision(tokens: usize, thresholds: AutoCompactThresholds) -> AutoCompactDecision {
+    if tokens < thresholds.soft {
+        AutoCompactDecision::Skip
+    } else if tokens < thresholds.hard {
+        AutoCompactDecision::LocalOnly
+    } else {
+        AutoCompactDecision::FullIfLocalInsufficient
+    }
 }
 
 fn context_window(settings: &Settings) -> usize {
@@ -1166,8 +1223,10 @@ fn _preserve_block_types(_: &ThinkingBlock, _: &ToolUseBlock) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
     use crate::types::message::ContentBlock;
     use std::collections::HashMap;
+    use std::path::PathBuf;
 
     fn tool_use(id: &str, name: &str) -> ContentBlock {
         ContentBlock::ToolUse(ToolUseBlock {
@@ -1184,6 +1243,96 @@ mod tests {
             content: content.to_string(),
             metadata: None,
         })
+    }
+
+    fn settings_with_limit(limit: u32) -> Settings {
+        let model = "test-model".to_string();
+        let provider = "test".to_string();
+        let mut providers = HashMap::new();
+        providers.insert(
+            provider.clone(),
+            ProviderProfile {
+                name: "Test".to_string(),
+                endpoint: ProviderType::OpenAI,
+                api_key: String::new(),
+                base_url: String::new(),
+                models: vec![ModelConfig {
+                    id: model.clone(),
+                    name: None,
+                    limit,
+                    thinking: false,
+                }],
+            },
+        );
+
+        Settings {
+            api_key: String::new(),
+            base_url: String::new(),
+            model,
+            endpoint: ProviderType::OpenAI,
+            providers,
+            active_provider: provider,
+            system_prompt: None,
+            language: None,
+            max_turns: None,
+            cwd: PathBuf::from("."),
+            thinking_effort: None,
+            permissions: None,
+            compact: CompactConfig::default(),
+        }
+    }
+
+    #[test]
+    fn auto_compact_thresholds_cap_default_window_at_hard_percent() {
+        let settings = settings_with_limit(256_000);
+
+        let thresholds = auto_compact_thresholds(&settings);
+
+        assert_eq!(thresholds.soft, 204_800);
+        assert_eq!(thresholds.hard, 217_600);
+    }
+
+    #[test]
+    fn auto_compact_thresholds_keep_reserve_limit_when_lower_than_percent() {
+        let settings = settings_with_limit(100_000);
+
+        let thresholds = auto_compact_thresholds(&settings);
+
+        assert_eq!(thresholds.soft, 67_000);
+        assert_eq!(thresholds.hard, 67_000);
+    }
+
+    #[test]
+    fn auto_compact_thresholds_keep_soft_at_or_below_hard() {
+        let settings = settings_with_limit(200_000);
+
+        let thresholds = auto_compact_thresholds(&settings);
+
+        assert_eq!(thresholds.soft, 160_000);
+        assert_eq!(thresholds.hard, 167_000);
+        assert!(thresholds.soft <= thresholds.hard);
+    }
+
+    #[test]
+    fn auto_compact_decision_splits_skip_local_and_full_ranges() {
+        let thresholds = AutoCompactThresholds { soft: 80, hard: 85 };
+
+        assert_eq!(
+            auto_compact_decision(79, thresholds),
+            AutoCompactDecision::Skip
+        );
+        assert_eq!(
+            auto_compact_decision(80, thresholds),
+            AutoCompactDecision::LocalOnly
+        );
+        assert_eq!(
+            auto_compact_decision(84, thresholds),
+            AutoCompactDecision::LocalOnly
+        );
+        assert_eq!(
+            auto_compact_decision(85, thresholds),
+            AutoCompactDecision::FullIfLocalInsufficient
+        );
     }
 
     #[test]
