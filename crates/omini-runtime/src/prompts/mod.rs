@@ -206,6 +206,19 @@ mod tests {
     }
 
     #[test]
+    fn auto_system_prompt_uses_main_prompt_without_mode_overlay() {
+        let settings = test_settings(None);
+
+        let auto_prompt = build_system_prompt_for_profile(&settings, ActiveProfile::Auto);
+        let main_prompt = build_system_prompt_for_profile(&settings, ActiveProfile::Main);
+
+        assert_eq!(auto_prompt, main_prompt);
+        assert!(!auto_prompt.contains("<plan_mode_instructions>"));
+        assert!(!auto_prompt.contains("Auto Mode"));
+        assert!(!auto_prompt.contains("auto mode"));
+    }
+
+    #[test]
     fn plan_mode_instructions_follow_project_instructions() {
         let settings = test_settings(None);
 
@@ -271,8 +284,11 @@ mod tests {
             build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Plan);
         let main_prompt =
             build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
+        let auto_prompt =
+            build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Auto);
 
         assert!(main_prompt.contains("focused implementation work"));
+        assert!(auto_prompt.contains("focused implementation work"));
         assert!(!plan_prompt.contains("focused implementation work"));
         assert!(plan_prompt.contains("use subagents only for non-mutating exploration"));
     }

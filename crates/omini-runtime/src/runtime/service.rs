@@ -701,7 +701,8 @@ impl AgentRuntime {
 
     async fn toggle_active_profile(&mut self) {
         let next = match self.active_profile {
-            ActiveProfile::Main => ActiveProfile::Plan,
+            ActiveProfile::Main => ActiveProfile::Auto,
+            ActiveProfile::Auto => ActiveProfile::Plan,
             ActiveProfile::Plan => ActiveProfile::Main,
         };
         self.set_active_profile(next);
@@ -727,9 +728,9 @@ impl AgentRuntime {
                 self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
                     .await;
             }
-            PlanApprovalAction::Approve => {
+            PlanApprovalAction::Approve { profile } => {
                 let plan_message = Message::from_user_text(plan::approval_message());
-                self.set_active_profile(ActiveProfile::Main);
+                self.set_active_profile(profile.active_profile());
                 self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
                     .await;
                 self.messages.push(plan_message.clone());
@@ -739,7 +740,7 @@ impl AgentRuntime {
                 .await;
                 self.process_run(RunStart::UserMessage).await;
             }
-            PlanApprovalAction::ApproveAndCompact => {
+            PlanApprovalAction::ApproveAndCompact { profile } => {
                 let path = self.plan_path(plan_id);
                 let plan_content = match std::fs::read_to_string(&path) {
                     Ok(content) => content,
@@ -756,7 +757,7 @@ impl AgentRuntime {
                 self.session_id = None;
                 self.session_dir = None;
                 self.messages = vec![plan_message.clone()];
-                self.set_active_profile(ActiveProfile::Main);
+                self.set_active_profile(profile.active_profile());
                 self.create_session(Some(HistoryItem::Message(plan_message.clone())))
                     .await;
                 self.persist_compacted_plan_initial_message(plan_message)
@@ -1254,6 +1255,7 @@ mod tests {
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
     use crate::db::Database;
     use crate::types::config::{ProviderType, Settings};
+    use crate::types::events::PlanExecutionProfile;
     use crate::types::message::{ContentBlock, Role};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1332,6 +1334,47 @@ mod tests {
             panic!("expected first content block to be text");
         };
         &text.text
+    }
+
+    #[tokio::test]
+    async fn toggle_active_profile_cycles_main_auto_plan() {
+        let root = unique_temp_root("toggle-active-profile");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+
+        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+
+        runtime.toggle_active_profile().await;
+        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
+
+        runtime.toggle_active_profile().await;
+        assert_eq!(runtime.active_profile, ActiveProfile::Plan);
+
+        runtime.toggle_active_profile().await;
+        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+
+        let mut profiles = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            if let RuntimeToUiEvent::ActiveProfileChanged(profile) = event {
+                profiles.push(profile);
+            }
+        }
+        assert_eq!(
+            profiles,
+            vec![
+                ActiveProfile::Auto,
+                ActiveProfile::Plan,
+                ActiveProfile::Main
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1608,7 +1651,12 @@ mod tests {
             .await;
 
         runtime
-            .resolve_plan_approval("unused-plan-id", PlanApprovalAction::Approve)
+            .resolve_plan_approval(
+                "unused-plan-id",
+                PlanApprovalAction::Approve {
+                    profile: PlanExecutionProfile::Main,
+                },
+            )
             .await;
 
         let approval = runtime
@@ -1632,6 +1680,45 @@ mod tests {
             }
         }
         assert!(saw_short_approval_event);
+    }
+
+    #[tokio::test]
+    async fn approve_plan_can_start_in_auto_profile() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("approve-plan-auto");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let mut settings = settings_for_cwd(&config, &cwd);
+        settings.max_turns = Some(0);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
+            )],
+        )];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+
+        runtime
+            .resolve_plan_approval(
+                "unused-plan-id",
+                PlanApprovalAction::Approve {
+                    profile: PlanExecutionProfile::Auto,
+                },
+            )
+            .await;
+
+        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
     }
 
     #[tokio::test]
@@ -1667,7 +1754,12 @@ mod tests {
         .expect("failed to write plan");
 
         runtime
-            .resolve_plan_approval(plan_id, PlanApprovalAction::ApproveAndCompact)
+            .resolve_plan_approval(
+                plan_id,
+                PlanApprovalAction::ApproveAndCompact {
+                    profile: PlanExecutionProfile::Main,
+                },
+            )
             .await;
 
         let new_session_id = runtime.session_id.clone();
@@ -1675,7 +1767,11 @@ mod tests {
         assert_eq!(runtime.active_profile, ActiveProfile::Main);
         assert_eq!(runtime.messages.len(), 1);
         assert_eq!(runtime.messages[0].role, Role::User);
-        assert!(text_content(&runtime.messages[0]).contains("Final approved plan:"));
+        assert!(
+            text_content(&runtime.messages[0]).contains("Implement the plan in a fresh context")
+        );
+        assert!(text_content(&runtime.messages[0]).contains("re-read files as needed"));
+        assert!(text_content(&runtime.messages[0]).contains("Approved plan:"));
         assert!(text_content(&runtime.messages[0]).contains("# Approved plan"));
 
         let session_dir = runtime
@@ -1704,6 +1800,52 @@ mod tests {
             }
         }
         assert!(saw_new_session_event);
+    }
+
+    #[tokio::test]
+    async fn approve_and_compact_can_start_new_session_in_auto_profile() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("approve-compact-auto");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let mut settings = settings_for_cwd(&config, &cwd);
+        settings.max_turns = Some(0);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project.clone());
+
+        runtime.messages = vec![Message::from_user_text("old conversation".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let old_session_id = runtime.session_id.clone();
+
+        let plans_dir = project.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).expect("failed to create plans dir");
+        std::fs::write(
+            plans_dir.join("plan.md"),
+            "# Approved plan\n\n1. Execute it.",
+        )
+        .expect("failed to write plan");
+
+        runtime
+            .resolve_plan_approval(
+                "plan",
+                PlanApprovalAction::ApproveAndCompact {
+                    profile: PlanExecutionProfile::Auto,
+                },
+            )
+            .await;
+
+        assert_ne!(runtime.session_id, old_session_id);
+        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
+        assert_eq!(runtime.messages.len(), 1);
+        assert!(text_content(&runtime.messages[0]).contains("Approved plan:"));
     }
 
     #[tokio::test]

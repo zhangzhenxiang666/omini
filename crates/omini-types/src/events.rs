@@ -14,6 +14,7 @@ use std::collections::HashMap;
 pub enum ActiveProfile {
     #[default]
     Main,
+    Auto,
     Plan,
 }
 
@@ -21,6 +22,7 @@ impl ActiveProfile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Main => "main",
+            Self::Auto => "auto",
             Self::Plan => "plan",
         }
     }
@@ -401,9 +403,24 @@ pub struct CompactSummaryFailedEvent {
 pub type SubmittedPlan = DisplayPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanExecutionProfile {
+    Main,
+    Auto,
+}
+
+impl PlanExecutionProfile {
+    pub fn active_profile(self) -> ActiveProfile {
+        match self {
+            Self::Main => ActiveProfile::Main,
+            Self::Auto => ActiveProfile::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanApprovalAction {
-    Approve,
-    ApproveAndCompact,
+    Approve { profile: PlanExecutionProfile },
+    ApproveAndCompact { profile: PlanExecutionProfile },
     ContinueDiscussing,
 }
 
@@ -629,6 +646,31 @@ pub struct UserInputOption {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn active_profile_serializes_auto_value() {
+        assert_eq!(ActiveProfile::Auto.as_str(), "auto");
+        assert_eq!(
+            serde_json::to_value(ActiveProfile::Auto).unwrap(),
+            json!("auto")
+        );
+        assert_eq!(
+            serde_json::from_value::<ActiveProfile>(json!("auto")).unwrap(),
+            ActiveProfile::Auto
+        );
+    }
+
+    #[test]
+    fn plan_execution_profile_maps_to_active_profile() {
+        assert_eq!(
+            PlanExecutionProfile::Main.active_profile(),
+            ActiveProfile::Main
+        );
+        assert_eq!(
+            PlanExecutionProfile::Auto.active_profile(),
+            ActiveProfile::Auto
+        );
+    }
 
     #[test]
     fn permission_response_deserializes_without_note() {

@@ -429,6 +429,8 @@ pub struct UiState {
     pub plan_approval: Option<SubmittedPlan>,
     /// 计划审批抽屉当前选中的操作。
     pub plan_approval_selected: usize,
+    /// 计划审批抽屉是否使用 Auto 模式执行。
+    pub plan_approval_auto: bool,
 }
 
 impl Default for UiState {
@@ -492,6 +494,7 @@ impl UiState {
             help_drawer: None,
             plan_approval: None,
             plan_approval_selected: 0,
+            plan_approval_auto: false,
         }
     }
 

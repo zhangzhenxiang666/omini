@@ -95,8 +95,8 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
     let debug_session_id = None;
 
     let width = area.width as usize;
-    let plan_hint = plan_mode_hint(state, width);
-    let left_width = left_status_budget(width, plan_hint.as_ref());
+    let profile_hint = active_profile_hint(state, width);
+    let left_width = left_status_budget(width, profile_hint.as_ref());
     let debug_style = choose_debug_session_style(
         state,
         &model_thinking,
@@ -105,7 +105,7 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
         left_width,
     );
     let left = build_left_status_line(state, &model_thinking, &path_display, debug_style);
-    let mut line = compose_footer_line(left, plan_hint, width);
+    let mut line = compose_footer_line(left, profile_hint, width);
     state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
     apply_selection_highlight(state, area, &mut line);
 
@@ -259,28 +259,41 @@ fn choose_debug_session_style(
     DebugSessionStyle::Hidden
 }
 
-fn plan_mode_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
-    if state.status_bar.active_profile != ActiveProfile::Plan {
-        return None;
+fn active_profile_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
+    match state.status_bar.active_profile {
+        ActiveProfile::Main => None,
+        ActiveProfile::Auto => mode_hint(width, "Auto mode", "AUTO", None, auto_mode_hint_style()),
+        ActiveProfile::Plan => {
+            let suffix =
+                (!state.status_bar.plan_mode_message_sent).then_some(" (Shift+Tab 切换模式)");
+            mode_hint(width, "Plan mode", "PLAN", suffix, plan_mode_hint_style())
+        }
     }
+}
 
-    let style = plan_mode_hint_style();
-    if !state.status_bar.plan_mode_message_sent {
+fn mode_hint(
+    width: usize,
+    label: &str,
+    compact_label: &str,
+    suffix: Option<&str>,
+    style: Style,
+) -> Option<Line<'static>> {
+    if let Some(suffix) = suffix {
         let full = Line::from(vec![
-            Span::styled("Plan mode", style),
-            Span::styled(" (Shift+Tab 切换模式)", style),
+            Span::styled(label.to_string(), style),
+            Span::styled(suffix.to_string(), style),
         ]);
         if line_width(&full) < width {
             return Some(full);
         }
     }
 
-    let medium = Line::from(Span::styled("Plan mode", style));
+    let medium = Line::from(Span::styled(label.to_string(), style));
     if line_width(&medium) < width {
         return Some(medium);
     }
 
-    let compact = Line::from(Span::styled("PLAN", style));
+    let compact = Line::from(Span::styled(compact_label.to_string(), style));
     if line_width(&compact) <= width {
         return Some(compact);
     }
@@ -288,10 +301,16 @@ fn plan_mode_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
     None
 }
 
+fn auto_mode_hint_style() -> Style {
+    profile_hint_style(Color::Rgb(0x42, 0xd9, 0xe8))
+}
+
 fn plan_mode_hint_style() -> Style {
-    Style::default()
-        .fg(Color::Rgb(0xd7, 0x66, 0xff))
-        .add_modifier(Modifier::BOLD)
+    profile_hint_style(Color::Rgb(0xd7, 0x66, 0xff))
+}
+
+fn profile_hint_style(color: Color) -> Style {
+    Style::default().fg(color).add_modifier(Modifier::BOLD)
 }
 
 fn left_status_budget(width: usize, hint: Option<&Line<'_>>) -> usize {
@@ -418,7 +437,7 @@ mod tests {
         let mut state = UiState::new();
         state.status_bar.active_profile = ActiveProfile::Plan;
 
-        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
+        let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 40), 40);
 
         let text = line_to_plain_text(&line);
         assert!(text.ends_with("Plan mode (Shift+Tab 切换模式)"));
@@ -431,7 +450,7 @@ mod tests {
         state.status_bar.active_profile = ActiveProfile::Plan;
         state.status_bar.plan_mode_message_sent = true;
 
-        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
+        let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 40), 40);
 
         let text = line_to_plain_text(&line);
         assert!(text.ends_with("Plan mode"));
@@ -440,10 +459,38 @@ mod tests {
     }
 
     #[test]
+    fn auto_mode_hint_is_right_aligned_in_footer() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Auto;
+
+        let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 24), 24);
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("Auto mode"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 24);
+    }
+
+    #[test]
+    fn auto_mode_hint_falls_back_to_compact_label_when_narrow() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Auto;
+
+        let line = compose_footer_line(
+            Line::from("very long left status"),
+            active_profile_hint(&state, 8),
+            8,
+        );
+
+        let text = line_to_plain_text(&line);
+        assert!(text.ends_with("AUTO"));
+        assert_eq!(UnicodeWidthStr::width(text.as_str()), 8);
+    }
+
+    #[test]
     fn main_profile_omits_plan_mode_hint() {
         let state = UiState::new();
 
-        let line = compose_footer_line(Line::from("left"), plan_mode_hint(&state, 40), 40);
+        let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 40), 40);
 
         assert_eq!(line_to_plain_text(&line), "left");
     }
@@ -455,7 +502,7 @@ mod tests {
 
         let line = compose_footer_line(
             Line::from("very long left status"),
-            plan_mode_hint(&state, 8),
+            active_profile_hint(&state, 8),
             8,
         );
 
@@ -471,7 +518,7 @@ mod tests {
 
         let line = compose_footer_line(
             Line::from("very long left status that would otherwise hide the mode"),
-            plan_mode_hint(&state, 24),
+            active_profile_hint(&state, 24),
             24,
         );
 
@@ -489,7 +536,7 @@ mod tests {
         state.status_bar.cwd = "/tmp/project".into();
         state.current_session_id = Some("12345678-1234-1234-1234-123456789abc".to_string());
         let width = 24;
-        let plan_hint = plan_mode_hint(&state, width);
+        let plan_hint = active_profile_hint(&state, width);
         let left_width = left_status_budget(width, plan_hint.as_ref());
         let debug_style = choose_debug_session_style(
             &state,

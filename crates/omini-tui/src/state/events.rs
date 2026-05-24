@@ -366,6 +366,7 @@ impl UiState {
             RuntimeToUiEvent::PlanSubmitted(plan) => {
                 self.plan_approval = Some(plan);
                 self.plan_approval_selected = 0;
+                self.plan_approval_auto = false;
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -433,6 +434,7 @@ impl UiState {
             }
             RuntimeToUiEvent::Warning(text) => {
                 self.messages.push(UiMessage::Warning { text });
+                self.finish_manual_compact();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -443,7 +445,6 @@ impl UiState {
             }
             RuntimeToUiEvent::CommandNotice(text) => {
                 self.messages.push(UiMessage::Notice { text });
-                self.finish_manual_compact();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -658,6 +659,7 @@ impl UiState {
         self.help_drawer = None;
         self.plan_approval = None;
         self.plan_approval_selected = 0;
+        self.plan_approval_auto = false;
         self.scroll_to_bottom();
     }
 }
@@ -887,6 +889,24 @@ mod tests {
                 session_id: Some("session".to_string()),
                 agent_label: None,
             },
+        ));
+
+        assert_eq!(state.agent_status, AgentStatus::Idle);
+        assert!(!state.manual_compact_running);
+        assert!(state.run_timer.is_none());
+        assert!(matches!(
+            state.messages.as_slice(),
+            [UiMessage::Warning { .. }]
+        ));
+    }
+
+    #[test]
+    fn manual_compact_warning_returns_status_to_idle() {
+        let mut state = UiState::new();
+        state.begin_manual_compact();
+
+        state.apply_event(RuntimeToUiEvent::Warning(
+            "没有可压缩的会话历史".to_string(),
         ));
 
         assert_eq!(state.agent_status, AgentStatus::Idle);

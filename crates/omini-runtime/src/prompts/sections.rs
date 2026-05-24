@@ -114,7 +114,7 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
         "- For multiple independent codebase questions, run multiple `explorer` subagents in the same assistant turn when practical.\n",
     );
     match active_profile {
-        ActiveProfile::Main => {
+        ActiveProfile::Main | ActiveProfile::Auto => {
             section.push_str(
                 "- For focused implementation work that can be separated by file or module ownership, use `worker` subagents; give each worker a bounded scope and explicit files or responsibilities.\n",
             );
@@ -132,7 +132,7 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
         "- Keep urgent blocking work local when the next step cannot proceed without your own immediate inspection or judgment.\n",
     );
     match active_profile {
-        ActiveProfile::Main => {
+        ActiveProfile::Main | ActiveProfile::Auto => {
             section.push_str(
                 "- The main agent remains responsible for synthesis, final decisions, user communication, and verifying code changes before reporting completion.\n\n",
             );

@@ -28,7 +28,12 @@ pub(super) fn render_plan_approval_drawer(
         let bg = Style::default().bg(INPUT_BG);
         frame.render_widget(Paragraph::new(Line::from("")).style(bg), panel_area);
 
-        let mut lines = build_panel_lines(state.plan_approval_selected, panel_area.height).lines;
+        let mut lines = build_panel_lines(
+            state.plan_approval_selected,
+            state.plan_approval_auto,
+            panel_area.height,
+        )
+        .lines;
         register_and_highlight_lines(state, panel_area, &mut lines);
         frame.render_widget(Paragraph::new(lines).style(bg), panel_area);
     }
@@ -44,11 +49,11 @@ pub(super) fn render_plan_approval_drawer(
     frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn build_panel_lines(selected: usize, height: u16) -> Text<'static> {
+fn build_panel_lines(selected: usize, auto: bool, height: u16) -> Text<'static> {
     let mut lines = Vec::new();
     let bg = Style::default().bg(INPUT_BG);
 
-    if height >= 6 {
+    if height >= 7 {
         lines.push(Line::from(Span::styled("", bg)));
     }
 
@@ -63,16 +68,37 @@ fn build_panel_lines(selected: usize, height: u16) -> Text<'static> {
         ),
     ]));
 
-    if height >= 5 {
+    if height >= 6 {
+        lines.push(build_execution_mode_line(auto));
+    }
+
+    if height >= 7 {
         lines.push(Line::from(Span::styled("", bg)));
     }
 
     lines.extend(build_action_lines(selected));
-    if height >= 7 {
+    if height >= 8 {
         lines.push(Line::from(Span::styled("", bg)));
     }
     lines.truncate(height as usize);
     Text::from(lines)
+}
+
+fn build_execution_mode_line(auto: bool) -> Line<'static> {
+    let label_style = Style::default().fg(Color::Rgb(140, 145, 155)).bg(INPUT_BG);
+    let value_style = if auto {
+        Style::default()
+            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
+            .bg(INPUT_BG)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Rgb(220, 220, 225)).bg(INPUT_BG)
+    };
+    let value = if auto { "Auto" } else { "Default" };
+    Line::from(vec![
+        Span::styled("  Execution mode: ", label_style),
+        Span::styled(value, value_style),
+    ])
 }
 
 fn build_footer_line() -> Line<'static> {
@@ -81,6 +107,8 @@ fn build_footer_line() -> Line<'static> {
         Span::raw("  "),
         Span::styled("Enter", hint_style),
         Span::styled(" 确认当前选项，", hint_style),
+        Span::styled("A", hint_style),
+        Span::styled(" 切换 Auto，", hint_style),
         Span::styled("Esc", hint_style),
         Span::styled(" 返回继续讨论", hint_style),
     ])
@@ -88,7 +116,7 @@ fn build_footer_line() -> Line<'static> {
 
 fn build_action_lines(selected: usize) -> Vec<Line<'static>> {
     let actions = [
-        ("Yes, implement this plan", "切换到 Default 并开始编码。"),
+        ("Yes, implement this plan", "在当前会话中开始编码。"),
         (
             "Yes, clear context and implement",
             "开启新上下文，仅保留计划内容。",
@@ -143,7 +171,7 @@ mod tests {
 
         assert!(rendered[0].starts_with("  1."));
         assert!(rendered[0].contains("Yes, implement this plan"));
-        assert!(rendered[0].contains("切换到 Default 并开始编码。"));
+        assert!(rendered[0].contains("在当前会话中开始编码。"));
         assert!(rendered[1].starts_with("› 2."));
         assert!(rendered[1].contains("Yes, clear context and implement"));
         assert!(rendered[1].contains("开启新上下文，仅保留计划内容。"));
@@ -154,7 +182,7 @@ mod tests {
 
     #[test]
     fn plan_approval_panel_lines_keep_footer_outside_panel() {
-        let text = build_panel_lines(0, 7);
+        let text = build_panel_lines(0, true, 8);
         let rendered = text
             .lines
             .iter()
@@ -162,6 +190,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(rendered.iter().any(|line| line == "  Implement this plan?"));
+        assert!(rendered.iter().any(|line| line == "  Execution mode: Auto"));
         assert!(
             !rendered
                 .iter()
@@ -185,7 +214,7 @@ mod tests {
         let rendered = line_to_plain_text(&footer);
 
         assert!(rendered.starts_with("  Enter"));
-        assert!(rendered.contains("Enter 确认当前选项，Esc 返回继续讨论"));
+        assert!(rendered.contains("Enter 确认当前选项，A 切换 Auto，Esc 返回继续讨论"));
         assert!(
             footer
                 .spans
@@ -208,6 +237,7 @@ mod tests {
             path: "/tmp/plan.md".into(),
             created_at: Utc::now(),
         });
+        state.plan_approval_auto = true;
 
         terminal
             .draw(|frame| {
@@ -242,6 +272,7 @@ mod tests {
 
         let selected = selected_text(&state).expect("drawer text should be selectable");
         assert!(selected.contains("Implement this plan?"));
+        assert!(selected.contains("Execution mode: Auto"));
         assert!(selected.contains("Yes, implement this plan"));
         assert!(selected.contains("Enter"));
     }
