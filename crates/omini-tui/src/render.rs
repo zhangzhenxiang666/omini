@@ -94,6 +94,57 @@ mod tests {
     }
 
     #[test]
+    fn model_drawer_layout_leaves_gap_above_divider() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.interaction_step = Some(InteractionStep::ModelSelection {
+            entries: vec![ModelSelectionEntry::Model {
+                provider_key: "test".to_string(),
+                model: ModelConfig {
+                    id: "test-model".to_string(),
+                    name: None,
+                    limit: 1_000,
+                    thinking: true,
+                },
+            }],
+            selected: 0,
+            thinking_idx: 0,
+            active_provider: "test".to_string(),
+            active_model: "test-model".to_string(),
+        });
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let area = Rect::new(0, 0, 80, 18);
+        let drawer_height = interactions::interaction_drawer_height(&state, area)
+            .expect("model drawer should have a height");
+        let drawer_top = area.height - drawer_height;
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+
+        assert_eq!(messages_bottom + 1, drawer_top);
+    }
+
+    #[test]
+    fn help_drawer_layout_leaves_gap_above_divider() {
+        let backend = TestBackend::new(80, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.help_drawer = Some(HelpDrawerState::new(Vec::new()));
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let area = Rect::new(0, 0, 80, 18);
+        let reserved_height = 3;
+        let drawer_height = help_drawer::help_drawer_height(area)
+            .min(area.height.saturating_sub(reserved_height).max(1));
+        let drawer_top = area.height - drawer_height;
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+
+        assert_eq!(messages_bottom + 1, drawer_top);
+    }
+
+    #[test]
     fn permission_drawer_renders_in_tiny_terminal() {
         let backend = TestBackend::new(80, 4);
         let mut terminal = Terminal::new(backend).unwrap();

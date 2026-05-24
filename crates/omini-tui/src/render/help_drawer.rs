@@ -16,6 +16,10 @@ struct CommandListRender<'a> {
     empty_text: &'a str,
 }
 
+pub(super) fn help_drawer_height(area: Rect) -> u16 {
+    area.height.min(HELP_DRAWER_MAX_HEIGHT)
+}
+
 pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     let Some(drawer) = state.help_drawer.clone() else {
         return;
@@ -25,12 +29,13 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
     }
     state.clear_selectable_screen_lines();
 
-    let desired_height = area.height.min(HELP_DRAWER_MAX_HEIGHT);
+    let desired_height = help_drawer_height(area);
+    let panel_height = desired_height.saturating_sub(1);
     let drawer_area = Rect {
         x: area.x,
-        y: area.y + area.height.saturating_sub(desired_height),
+        y: area.y + area.height.saturating_sub(panel_height),
         width: area.width,
-        height: desired_height,
+        height: panel_height,
     };
 
     frame.render_widget(Clear, drawer_area);

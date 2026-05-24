@@ -5,8 +5,8 @@ use super::selection::{
 };
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
 use crate::types::events::{
-    ActiveProfile, PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent,
-    ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent,
+    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent, ToolPauseKind,
+    ToolPauseResponse, UiToRuntimeEvent,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
@@ -37,8 +37,8 @@ impl UpdateOutcome {
 mod tests {
     use super::*;
     use crate::types::events::{
-        EditPermissionPreview, PermissionPreview, PlanApprovalAction, PlanExecutionProfile,
-        SubmittedPlan, ToolPauseRequest,
+        ActiveProfile, EditPermissionPreview, PermissionPreview, PlanApprovalAction,
+        PlanExecutionProfile, SubmittedPlan, ToolPauseRequest,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_profile_permission_pause_auto_approves_without_drawer() {
+    async fn auto_profile_permission_pause_uses_drawer_when_forwarded() {
         let mut state = UiState::new();
         state.status_bar.active_profile = ActiveProfile::Auto;
         let (tx, mut rx) = mpsc::channel(1);
@@ -339,23 +339,9 @@ mod tests {
         .await;
 
         assert!(outcome.redraw);
-        assert!(state.active_tool_pause().is_none());
-        assert_ne!(state.agent_status, AgentStatus::AwaitingInput);
-        let Some(UiToRuntimeEvent::ResolveToolPause {
-            tool_use_id,
-            response,
-        }) = rx.recv().await
-        else {
-            panic!("expected tool pause response");
-        };
-        assert_eq!(tool_use_id, "tool_1");
-        assert_eq!(
-            response,
-            ToolPauseResponse::Permission {
-                approved: true,
-                note: None,
-            }
-        );
+        assert!(state.active_tool_pause().is_some());
+        assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -478,10 +464,6 @@ pub(super) async fn handle_runtime_event(
         return UpdateOutcome::exit();
     }
 
-    if auto_approve_permission_pause(state, &event, request_tx).await {
-        return UpdateOutcome::redraw();
-    }
-
     if let RuntimeToUiEvent::SessionChanged {
         session_id,
         messages,
@@ -499,33 +481,6 @@ pub(super) async fn handle_runtime_event(
     }
 
     UpdateOutcome::redraw()
-}
-
-async fn auto_approve_permission_pause(
-    state: &UiState,
-    event: &RuntimeToUiEvent,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
-) -> bool {
-    if state.status_bar.active_profile != ActiveProfile::Auto {
-        return false;
-    }
-    let RuntimeToUiEvent::ToolPauseRequested(req) = event else {
-        return false;
-    };
-    if !matches!(req.kind, ToolPauseKind::Permission(_)) {
-        return false;
-    }
-
-    let _ = request_tx
-        .send(UiToRuntimeEvent::ResolveToolPause {
-            tool_use_id: req.tool_use_id.clone(),
-            response: ToolPauseResponse::Permission {
-                approved: true,
-                note: None,
-            },
-        })
-        .await;
-    true
 }
 
 pub(super) async fn drain_runtime_events(

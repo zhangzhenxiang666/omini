@@ -26,7 +26,7 @@ impl Command for PlanCommand {
     async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
         runtime.set_active_profile(ActiveProfile::Plan);
         CommandResult::Ok(vec![CommandEffect::emit(
-            RuntimeToUiEvent::ActiveProfileChanged(runtime.active_profile),
+            RuntimeToUiEvent::ActiveProfileChanged(runtime.active_profile()),
         )])
     }
 }

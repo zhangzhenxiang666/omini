@@ -4,7 +4,7 @@ use crate::config::project::ProjectDir;
 use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
 use crate::db;
-use crate::engine::{QueryContext, QueryEngine};
+use crate::engine::{QueryContext, QueryEngine, ToolPauseResolver};
 use crate::permissions::PermissionEngine;
 use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
@@ -14,7 +14,8 @@ use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, DisplaySummary, HistoryItem};
 use crate::types::events::{
     ActiveProfile, CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest,
-    PlanApprovalAction, RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, UiToRuntimeEvent,
+    PlanApprovalAction, RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
+    ToolPauseRequest, ToolPauseResponse, UiToRuntimeEvent,
 };
 use crate::types::message::Message;
 use crate::types::usage::Usage;
@@ -25,6 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use super::active_run;
 use super::compact;
 use super::history;
 use super::plan;
@@ -48,7 +50,7 @@ pub(super) enum RunStart {
 }
 
 #[derive(Debug)]
-struct CapabilityStore {
+pub(super) struct CapabilityStore {
     subagents: RwLock<Arc<AgentRegistry>>,
     skills: RwLock<Arc<SkillRegistry>>,
 }
@@ -63,7 +65,7 @@ impl CapabilityStore {
         }
     }
 
-    fn subagent_registry(&self) -> Arc<AgentRegistry> {
+    pub(super) fn subagent_registry(&self) -> Arc<AgentRegistry> {
         self.subagents
             .read()
             .expect("subagent registry lock poisoned")
@@ -79,7 +81,7 @@ impl CapabilityStore {
         registry
     }
 
-    fn skill_registry(&self) -> Arc<SkillRegistry> {
+    pub(super) fn skill_registry(&self) -> Arc<SkillRegistry> {
         self.skills
             .read()
             .expect("skill registry lock poisoned")
@@ -130,8 +132,8 @@ pub struct AgentRuntime {
     cancelled: Arc<AtomicBool>,
     /// 命令注册表
     pub(crate) command_registry: CommandRegistry,
-    /// 当前运行 profile
-    pub(crate) active_profile: ActiveProfile,
+    /// 当前运行 profile，供 runtime 主循环和运行中事件处理器共享读取。
+    pub(crate) active_profile: Arc<RwLock<ActiveProfile>>,
     /// 当前等待 UI 回传的交互类型
     pending_interaction: Option<PendingInteraction>,
 }
@@ -206,7 +208,7 @@ impl AgentRuntime {
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
             command_registry,
-            active_profile: ActiveProfile::Main,
+            active_profile: Arc::new(RwLock::new(ActiveProfile::Main)),
             pending_interaction: None,
         }
     }
@@ -380,49 +382,19 @@ impl AgentRuntime {
         model: &str,
         thinking_effort: Option<ThinkingEffort>,
     ) {
-        if let Some(profile) = self.settings.providers.get(provider) {
-            self.settings.active_provider = provider.to_string();
-            self.settings.model = model.to_string();
-            self.settings.thinking_effort = thinking_effort;
-            self.settings.api_key = profile.api_key.clone();
-            self.settings.base_url = profile.base_url.clone();
-            self.settings.endpoint = profile.endpoint;
-
-            // 重建 LLM 客户端
-            self.llm_client = LlmClient::new(
-                profile.endpoint,
-                profile.api_key.clone(),
-                profile.base_url.clone(),
-            );
-
-            // 持久化：新会话 → 项目状态；已有会话 → 数据库会话记录
-            if let Some(sid) = &self.session_id {
-                let te = thinking_effort.map(|t| t.to_string());
-                let _ = db::global_db()
-                    .update_session_config(sid, provider, model, te.as_deref())
-                    .await;
-            } else if let Ok(mut state) = self.project.load_state() {
-                state.default_provider = Some(provider.to_string());
-                state.default_model = Some(model.to_string());
-                state.thinking_effort = thinking_effort;
-                let _ = self.project.save_state(&state);
-            }
-
-            // 通知 UI
-            self.send_event(RuntimeToUiEvent::ModelChanged {
-                provider: provider.to_string(),
-                model: model.to_string(),
-                thinking_effort: self.settings.thinking_effort,
-                context_window: self.current_context_window(),
-            })
-            .await;
-            self.send_current_usage_snapshot().await;
-        } else {
-            self.send_event(RuntimeToUiEvent::Error(format!(
-                "提供商 '{provider}' 不存在"
-            )))
-            .await;
-        }
+        active_run::apply_model_selection(
+            &mut self.settings,
+            &mut self.llm_client,
+            &self.project,
+            self.session_id.as_deref(),
+            active_run::ModelSelection {
+                provider,
+                model,
+                thinking_effort,
+            },
+            &self.event_tx,
+        )
+        .await;
     }
 
     /// 切换会话（/sessions 交互完成后回调）。
@@ -505,8 +477,10 @@ impl AgentRuntime {
         })
         .await;
 
-        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
-            .await;
+        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+            self.active_profile(),
+        ))
+        .await;
 
         self.send_event(RuntimeToUiEvent::SessionChanged {
             session_id: Some(session_id.to_string()),
@@ -567,7 +541,7 @@ impl AgentRuntime {
             &self.settings,
             &registry.summaries(),
             &skill_registry.injected_summaries(),
-            self.active_profile,
+            self.active_profile(),
         ));
         self.send_event(RuntimeToUiEvent::AgentList(registry.summaries()))
             .await;
@@ -695,44 +669,54 @@ impl AgentRuntime {
     }
 
     pub(crate) fn set_active_profile(&mut self, profile: ActiveProfile) {
-        self.active_profile = profile;
+        *self
+            .active_profile
+            .write()
+            .expect("active profile lock poisoned") = profile;
         self.rebuild_system_prompt();
     }
 
+    pub(crate) fn active_profile(&self) -> ActiveProfile {
+        *self
+            .active_profile
+            .read()
+            .expect("active profile lock poisoned")
+    }
+
     async fn toggle_active_profile(&mut self) {
-        let next = match self.active_profile {
+        let next = match self.active_profile() {
             ActiveProfile::Main => ActiveProfile::Auto,
             ActiveProfile::Auto => ActiveProfile::Plan,
             ActiveProfile::Plan => ActiveProfile::Main,
         };
         self.set_active_profile(next);
-        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
-            .await;
+        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+            self.active_profile(),
+        ))
+        .await;
     }
 
     fn rebuild_system_prompt(&mut self) {
-        let subagent_registry = self.capabilities.subagent_registry();
-        let skill_registry = self.capabilities.skill_registry();
-        self.settings.system_prompt = Some(crate::prompts::build_system_prompt_with_capabilities(
-            &self.settings,
-            &subagent_registry.summaries(),
-            &skill_registry.injected_summaries(),
-            self.active_profile,
-        ));
+        let active_profile = self.active_profile();
+        active_run::rebuild_system_prompt(&mut self.settings, &self.capabilities, active_profile);
     }
 
     async fn resolve_plan_approval(&mut self, plan_id: &str, action: PlanApprovalAction) {
         match action {
             PlanApprovalAction::ContinueDiscussing => {
                 self.set_active_profile(ActiveProfile::Plan);
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
-                    .await;
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                    self.active_profile(),
+                ))
+                .await;
             }
             PlanApprovalAction::Approve { profile } => {
                 let plan_message = Message::from_user_text(plan::approval_message());
                 self.set_active_profile(profile.active_profile());
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
-                    .await;
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                    self.active_profile(),
+                ))
+                .await;
                 self.messages.push(plan_message.clone());
                 self.send_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
                     plan_message,
@@ -762,8 +746,10 @@ impl AgentRuntime {
                     .await;
                 self.persist_compacted_plan_initial_message(plan_message)
                     .await;
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(self.active_profile))
-                    .await;
+                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                    self.active_profile(),
+                ))
+                .await;
                 self.process_run(RunStart::Continue).await;
             }
         }
@@ -787,7 +773,7 @@ impl AgentRuntime {
 
     async fn persist_latest_proposed_plan(&self) -> Result<Option<SubmittedPlan>, String> {
         let submitted =
-            plan::persist_latest(&self.project, self.active_profile, &self.messages).await?;
+            plan::persist_latest(&self.project, self.active_profile(), &self.messages).await?;
         if let Some(plan) = submitted.as_ref()
             && let Some(session_id) = self.session_id.as_deref()
         {
@@ -818,10 +804,18 @@ impl AgentRuntime {
 
         // 创建 engine → runtime 的内部通信通道
         let (engine_tx, engine_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
+        let active_profile = self.active_profile();
+        let active_profile_handle = Arc::clone(&self.active_profile);
+        let tool_pause_resolver = self.query_engine.tool_pause_resolver();
 
         // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
         let processor = self
-            .spawn_event_processor(engine_rx, self.active_profile)
+            .spawn_event_processor(
+                engine_rx,
+                active_profile,
+                Arc::clone(&active_profile_handle),
+                tool_pause_resolver,
+            )
             .await;
 
         {
@@ -835,7 +829,7 @@ impl AgentRuntime {
                 settings: Arc::clone(&run_settings),
                 llm_client: self.llm_client.clone(),
                 tool_registry: Arc::clone(&self.tool_registry),
-                active_profile: self.active_profile,
+                active_profile,
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
                     session_id: self
                         .session_id
@@ -899,19 +893,57 @@ impl AgentRuntime {
                                     ))
                                     .await;
                             }
+                            UiToRuntimeEvent::SendCommand(text) => {
+                                active_run::handle_command(
+                                    &text,
+                                    &mut self.pending_interaction,
+                                    &self.command_registry,
+                                    &mut self.settings,
+                                    &self.project,
+                                    self.session_id.as_deref(),
+                                    &event_tx,
+                                )
+                                .await;
+                            }
+                            UiToRuntimeEvent::ToggleActiveProfile => {
+                                let mut active_profile = *active_profile_handle
+                                    .read()
+                                    .expect("active profile lock poisoned");
+                                active_run::toggle_active_profile(
+                                    &mut active_profile,
+                                    &mut self.settings,
+                                    &self.capabilities,
+                                    &event_tx,
+                                )
+                                .await;
+                                *active_profile_handle
+                                    .write()
+                                    .expect("active profile lock poisoned") = active_profile;
+                            }
+                            UiToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
+                                if self.pending_interaction == Some(PendingInteraction::ModelSelect) {
+                                    active_run::apply_model_selection(
+                                        &mut self.settings,
+                                        &mut self.llm_client,
+                                        &self.project,
+                                        self.session_id.as_deref(),
+                                        active_run::ModelSelection {
+                                            provider: &provider,
+                                            model: &model,
+                                            thinking_effort,
+                                        },
+                                        &event_tx,
+                                    )
+                                    .await;
+                                    self.pending_interaction = None;
+                                }
+                            }
                             UiToRuntimeEvent::SendMessage(_)
-                            | UiToRuntimeEvent::SendCommand(_)
-                            | UiToRuntimeEvent::ToggleActiveProfile
-                            | UiToRuntimeEvent::ModelSelected { .. }
                             | UiToRuntimeEvent::SessionSelected { .. }
                             | UiToRuntimeEvent::AgentSaveRequested { .. }
                             | UiToRuntimeEvent::AgentDeleteRequested { .. }
                             | UiToRuntimeEvent::AgentGenerateRequested { .. } => {
-                                let _ = event_tx
-                                    .send(RuntimeToUiEvent::Error(
-                                        "Cannot handle this request while a run is active".to_string(),
-                                    ))
-                                    .await;
+                                active_run::reject_request(&event_tx).await;
                             }
                         }
                     }
@@ -942,6 +974,8 @@ impl AgentRuntime {
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
         active_profile: ActiveProfile,
+        active_profile_handle: Arc<RwLock<ActiveProfile>>,
+        tool_pause_resolver: ToolPauseResolver,
     ) -> tokio::task::JoinHandle<()> {
         let session_id = self
             .session_id
@@ -991,6 +1025,19 @@ impl AgentRuntime {
                         let _ = event_tx.send(RuntimeToUiEvent::ToolResult(tr)).await;
                     }
                     EngineToRuntimeEvent::ToolPauseRequested(req) => {
+                        if Self::should_auto_approve_permission_pause(&active_profile_handle, &req)
+                        {
+                            if let Err(e) = tool_pause_resolver.resolve_tool_pause(
+                                &req.tool_use_id,
+                                ToolPauseResponse::Permission {
+                                    approved: true,
+                                    note: None,
+                                },
+                            ) {
+                                let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
+                            }
+                            continue;
+                        }
                         let _ = event_tx
                             .send(RuntimeToUiEvent::ToolPauseRequested(req))
                             .await;
@@ -1109,6 +1156,16 @@ impl AgentRuntime {
         let _ = self.event_tx.send(event).await;
     }
 
+    fn should_auto_approve_permission_pause(
+        active_profile_handle: &RwLock<ActiveProfile>,
+        req: &ToolPauseRequest,
+    ) -> bool {
+        let active_profile = *active_profile_handle
+            .read()
+            .expect("active profile lock poisoned");
+        active_profile == ActiveProfile::Auto && matches!(req.kind, ToolPauseKind::Permission(_))
+    }
+
     /// 首次提交时创建 session：生成 UUID、建目录、写 DB。
     async fn create_session(&mut self, initial_display_message: Option<HistoryItem>) {
         let id = Uuid::new_v4().to_string();
@@ -1170,38 +1227,11 @@ impl AgentRuntime {
     }
 
     fn current_context_window(&self) -> Option<u32> {
-        self.settings
-            .providers
-            .get(&self.settings.active_provider)
-            .and_then(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .find(|model| model.id == self.settings.model)
-                    .map(|model| model.limit)
-            })
+        active_run::current_context_window(&self.settings)
     }
 
     fn usage_snapshot_from_session(&self, session: &crate::db::Session) -> SessionUsageSnapshot {
         usage_snapshot_from_session(session, self.current_context_window())
-    }
-
-    async fn send_current_usage_snapshot(&self) {
-        let Some(session_id) = self.session_id.as_deref() else {
-            self.send_event(RuntimeToUiEvent::UsageChanged(SessionUsageSnapshot {
-                context_window: self.current_context_window(),
-                ..SessionUsageSnapshot::default()
-            }))
-            .await;
-            return;
-        };
-
-        if let Ok(Some(session)) = db::global_db().get_session(session_id).await {
-            self.send_event(RuntimeToUiEvent::UsageChanged(
-                self.usage_snapshot_from_session(&session),
-            ))
-            .await;
-        }
     }
 }
 
@@ -1259,7 +1289,8 @@ mod tests {
     use crate::types::message::{ContentBlock, Role};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::Mutex;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::sync::OnceCell;
 
     static TEST_DB: OnceCell<()> = OnceCell::const_new();
@@ -1336,6 +1367,51 @@ mod tests {
         &text.text
     }
 
+    fn drain_events(event_rx: &mut mpsc::Receiver<RuntimeToUiEvent>) -> Vec<RuntimeToUiEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(crate::types::events::PermissionPreview::Custom {
+                tool_name: "bash".to_string(),
+                payload: serde_json::Map::new(),
+            }),
+        }
+    }
+
+    fn empty_tool_pause_resolver() -> ToolPauseResolver {
+        ToolPauseResolver::new(Arc::new(Mutex::new(HashMap::new())))
+    }
+
+    fn permission_tool_pause_resolver(
+        tool_use_id: &str,
+    ) -> (
+        ToolPauseResolver,
+        tokio::sync::oneshot::Receiver<ToolPauseResponse>,
+    ) {
+        let pending = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        pending
+            .lock()
+            .expect("pending tool pause mutex poisoned")
+            .insert(
+                tool_use_id.to_string(),
+                crate::tools::PendingToolPause::Permission(tx),
+            );
+        (ToolPauseResolver::new(pending), rx)
+    }
+
     #[tokio::test]
     async fn toggle_active_profile_cycles_main_auto_plan() {
         let root = unique_temp_root("toggle-active-profile");
@@ -1350,16 +1426,16 @@ mod tests {
         let (_request_tx, request_rx) = mpsc::channel(1);
         let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
 
-        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
 
         runtime.toggle_active_profile().await;
-        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Auto);
 
         runtime.toggle_active_profile().await;
-        assert_eq!(runtime.active_profile, ActiveProfile::Plan);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Plan);
 
         runtime.toggle_active_profile().await;
-        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
 
         let mut profiles = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
@@ -1375,6 +1451,214 @@ mod tests {
                 ActiveProfile::Main
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn active_run_profile_toggle_switches_main_and_auto_only() {
+        let root = unique_temp_root("active-run-toggle-profile");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx.clone(), request_rx, settings, project);
+        drain_events(&mut event_rx);
+
+        let mut active_profile = runtime.active_profile();
+        active_run::toggle_active_profile(
+            &mut active_profile,
+            &mut runtime.settings,
+            &runtime.capabilities,
+            &event_tx,
+        )
+        .await;
+        assert_eq!(active_profile, ActiveProfile::Auto);
+
+        active_run::toggle_active_profile(
+            &mut active_profile,
+            &mut runtime.settings,
+            &runtime.capabilities,
+            &event_tx,
+        )
+        .await;
+        assert_eq!(active_profile, ActiveProfile::Main);
+
+        let profiles: Vec<_> = drain_events(&mut event_rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                RuntimeToUiEvent::ActiveProfileChanged(profile) => Some(profile),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(profiles, vec![ActiveProfile::Auto, ActiveProfile::Main]);
+
+        runtime.set_active_profile(ActiveProfile::Plan);
+        let mut active_profile = runtime.active_profile();
+        active_run::toggle_active_profile(
+            &mut active_profile,
+            &mut runtime.settings,
+            &runtime.capabilities,
+            &event_tx,
+        )
+        .await;
+        assert_eq!(active_profile, ActiveProfile::Plan);
+
+        let profiles: Vec<_> = drain_events(&mut event_rx)
+            .into_iter()
+            .filter_map(|event| match event {
+                RuntimeToUiEvent::ActiveProfileChanged(profile) => Some(profile),
+                _ => None,
+            })
+            .collect();
+        assert!(profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn active_run_allows_model_and_effort_commands() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("active-run-model-effort");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx.clone(), request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("hello".to_string())];
+        runtime.create_session(None).await;
+        drain_events(&mut event_rx);
+
+        active_run::handle_command(
+            "/model",
+            &mut runtime.pending_interaction,
+            &runtime.command_registry,
+            &mut runtime.settings,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            &event_tx,
+        )
+        .await;
+        assert_eq!(
+            runtime.pending_interaction,
+            Some(PendingInteraction::ModelSelect)
+        );
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::InteractionRequest(InteractionRequest::ModelSelection { .. })
+            )
+        }));
+
+        active_run::apply_model_selection(
+            &mut runtime.settings,
+            &mut runtime.llm_client,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            active_run::ModelSelection {
+                provider: "openai",
+                model: "gpt-test",
+                thinking_effort: Some(ThinkingEffort::High),
+            },
+            &event_tx,
+        )
+        .await;
+        runtime.pending_interaction = None;
+        assert_eq!(runtime.settings.thinking_effort, Some(ThinkingEffort::High));
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::ModelChanged {
+                    thinking_effort: Some(ThinkingEffort::High),
+                    ..
+                }
+            )
+        }));
+
+        active_run::handle_command(
+            "/effort low",
+            &mut runtime.pending_interaction,
+            &runtime.command_registry,
+            &mut runtime.settings,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            &event_tx,
+        )
+        .await;
+        assert_eq!(runtime.settings.thinking_effort, Some(ThinkingEffort::Low));
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::ModelChanged {
+                    thinking_effort: Some(ThinkingEffort::Low),
+                    ..
+                }
+            )
+        }));
+
+        active_run::handle_command(
+            "/help",
+            &mut runtime.pending_interaction,
+            &runtime.command_registry,
+            &mut runtime.settings,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            &event_tx,
+        )
+        .await;
+        let events = drain_events(&mut event_rx);
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeToUiEvent::ShowHelpDrawer(_)))
+        );
+    }
+
+    #[tokio::test]
+    async fn active_run_rejects_other_commands() {
+        let root = unique_temp_root("active-run-reject-command");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx.clone(), request_rx, settings, project);
+        drain_events(&mut event_rx);
+
+        active_run::handle_command(
+            "/new",
+            &mut runtime.pending_interaction,
+            &runtime.command_registry,
+            &mut runtime.settings,
+            &runtime.project,
+            runtime.session_id.as_deref(),
+            &event_tx,
+        )
+        .await;
+
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::Error(message)
+                    if message == "Cannot handle this request while a run is active"
+            )
+        }));
     }
 
     #[tokio::test]
@@ -1718,7 +2002,7 @@ mod tests {
             )
             .await;
 
-        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Auto);
     }
 
     #[tokio::test]
@@ -1764,7 +2048,7 @@ mod tests {
 
         let new_session_id = runtime.session_id.clone();
         assert_ne!(new_session_id, old_session_id);
-        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
         assert_eq!(runtime.messages.len(), 1);
         assert_eq!(runtime.messages[0].role, Role::User);
         assert!(
@@ -1843,7 +2127,7 @@ mod tests {
             .await;
 
         assert_ne!(runtime.session_id, old_session_id);
-        assert_eq!(runtime.active_profile, ActiveProfile::Auto);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Auto);
         assert_eq!(runtime.messages.len(), 1);
         assert!(text_content(&runtime.messages[0]).contains("Approved plan:"));
     }
@@ -1874,7 +2158,7 @@ mod tests {
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.switch_session(&session_id).await;
 
-        assert_eq!(runtime.active_profile, ActiveProfile::Main);
+        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
         assert!(
             runtime
                 .settings
@@ -1902,6 +2186,114 @@ mod tests {
             }
         }
         assert!(saw_main_mode_event);
+    }
+
+    #[tokio::test]
+    async fn event_processor_auto_profile_resolves_permission_pause_without_ui() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("auto-profile-pause-runtime");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+        runtime.create_session(None).await;
+        runtime.set_active_profile(ActiveProfile::Auto);
+        drain_events(&mut event_rx);
+
+        let (engine_tx, engine_rx) = mpsc::channel(4);
+        let active_profile_handle = Arc::clone(&runtime.active_profile);
+        let (tool_pause_resolver, permission_rx) = permission_tool_pause_resolver("tool_1");
+        let processor = runtime
+            .spawn_event_processor(
+                engine_rx,
+                ActiveProfile::Main,
+                active_profile_handle,
+                tool_pause_resolver,
+            )
+            .await;
+
+        engine_tx
+            .send(EngineToRuntimeEvent::ToolPauseRequested(permission_pause(
+                "tool_1",
+            )))
+            .await
+            .expect("pause event should send");
+
+        let response = tokio::time::timeout(Duration::from_secs(1), permission_rx)
+            .await
+            .expect("auto permission response should arrive")
+            .expect("auto permission waiter should stay open");
+        assert_eq!(
+            response,
+            ToolPauseResponse::Permission {
+                approved: true,
+                note: None,
+            }
+        );
+        assert!(
+            !drain_events(&mut event_rx)
+                .into_iter()
+                .any(|event| matches!(event, RuntimeToUiEvent::ToolPauseRequested(_)))
+        );
+
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
+    }
+
+    #[tokio::test]
+    async fn event_processor_main_profile_forwards_permission_pause_to_ui() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("main-profile-pause-ui");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+        runtime.create_session(None).await;
+        drain_events(&mut event_rx);
+
+        let (engine_tx, engine_rx) = mpsc::channel(4);
+        let active_profile_handle = Arc::clone(&runtime.active_profile);
+        let processor = runtime
+            .spawn_event_processor(
+                engine_rx,
+                ActiveProfile::Main,
+                active_profile_handle,
+                empty_tool_pause_resolver(),
+            )
+            .await;
+
+        engine_tx
+            .send(EngineToRuntimeEvent::ToolPauseRequested(permission_pause(
+                "tool_1",
+            )))
+            .await
+            .expect("pause event should send");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("ui pause event should arrive")
+            .expect("ui event channel should stay open");
+        let RuntimeToUiEvent::ToolPauseRequested(req) = event else {
+            panic!("expected tool pause event");
+        };
+        assert_eq!(req.tool_use_id, "tool_1");
+
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
     }
 
     #[tokio::test]
@@ -1950,8 +2342,14 @@ mod tests {
             .expect("subagent session should insert");
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
+        let active_profile_handle = Arc::clone(&runtime.active_profile);
         let processor = runtime
-            .spawn_event_processor(engine_rx, ActiveProfile::Main)
+            .spawn_event_processor(
+                engine_rx,
+                ActiveProfile::Main,
+                active_profile_handle,
+                empty_tool_pause_resolver(),
+            )
             .await;
 
         engine_tx

@@ -61,64 +61,30 @@ pub struct QueryContext<'a> {
 
 /// 查询引擎。
 pub struct QueryEngine {
-    pending_tool_pauses: PendingToolPauses,
+    tool_pause_resolver: ToolPauseResolver,
     permission_engine: Arc<PermissionEngine>,
     cancel_notify: Arc<Notify>,
     pending_user_messages: Mutex<VecDeque<Message>>,
     auto_compact_state: Mutex<AutoCompactState>,
 }
 
-impl QueryEngine {
-    /// 创建新的查询引擎。
-    pub fn new(permission_engine: Arc<PermissionEngine>) -> Self {
-        Self {
-            pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
-            permission_engine,
-            cancel_notify: Arc::new(Notify::new()),
-            pending_user_messages: Mutex::new(VecDeque::new()),
-            auto_compact_state: Mutex::new(AutoCompactState::default()),
-        }
-    }
+#[derive(Clone)]
+pub(crate) struct ToolPauseResolver {
+    pending_tool_pauses: PendingToolPauses,
+}
 
-    pub fn with_shared_tool_controls(
-        pending_tool_pauses: PendingToolPauses,
-        permission_engine: Arc<PermissionEngine>,
-        cancel_notify: Arc<Notify>,
-    ) -> Self {
+impl ToolPauseResolver {
+    pub(crate) fn new(pending_tool_pauses: PendingToolPauses) -> Self {
         Self {
             pending_tool_pauses,
-            permission_engine,
-            cancel_notify,
-            pending_user_messages: Mutex::new(VecDeque::new()),
-            auto_compact_state: Mutex::new(AutoCompactState::default()),
         }
     }
 
-    /// 将用户干预消息排队，等待当前轮结束后、下一轮 LLM 调用前插入历史。
-    pub fn enqueue_user_message(&self, msg: Message) {
-        let mut pending = self
-            .pending_user_messages
-            .lock()
-            .expect("pending user messages mutex poisoned");
-        pending.push_back(msg);
+    pub(crate) fn pending_tool_pauses(&self) -> PendingToolPauses {
+        Arc::clone(&self.pending_tool_pauses)
     }
 
-    fn clear_pending_user_messages(&self) {
-        let mut pending = self
-            .pending_user_messages
-            .lock()
-            .expect("pending user messages mutex poisoned");
-        pending.clear();
-    }
-
-    /// 通知当前 query 取消，唤醒权限等待和工具收集逻辑。
-    pub fn cancel_current_run(&self) {
-        self.drain_pending_tool_pauses();
-        self.cancel_notify.notify_waiters();
-    }
-
-    /// 用户响应工具暂停请求。
-    pub fn resolve_tool_pause(
+    pub(crate) fn resolve_tool_pause(
         &self,
         tool_use_id: &str,
         response: ToolPauseResponse,
@@ -153,7 +119,7 @@ impl QueryEngine {
         }
     }
 
-    fn drain_pending_tool_pauses(&self) {
+    pub(crate) fn drain_pending_tool_pauses(&self) {
         let waiters: Vec<PendingToolPause> = {
             let mut pending = self
                 .pending_tool_pauses
@@ -169,6 +135,70 @@ impl QueryEngine {
                 }
             }
         }
+    }
+}
+
+impl QueryEngine {
+    /// 创建新的查询引擎。
+    pub fn new(permission_engine: Arc<PermissionEngine>) -> Self {
+        Self {
+            tool_pause_resolver: ToolPauseResolver::new(Arc::new(Mutex::new(HashMap::new()))),
+            permission_engine,
+            cancel_notify: Arc::new(Notify::new()),
+            pending_user_messages: Mutex::new(VecDeque::new()),
+            auto_compact_state: Mutex::new(AutoCompactState::default()),
+        }
+    }
+
+    pub fn with_shared_tool_controls(
+        pending_tool_pauses: PendingToolPauses,
+        permission_engine: Arc<PermissionEngine>,
+        cancel_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            tool_pause_resolver: ToolPauseResolver::new(pending_tool_pauses),
+            permission_engine,
+            cancel_notify,
+            pending_user_messages: Mutex::new(VecDeque::new()),
+            auto_compact_state: Mutex::new(AutoCompactState::default()),
+        }
+    }
+
+    /// 将用户干预消息排队，等待当前轮结束后、下一轮 LLM 调用前插入历史。
+    pub fn enqueue_user_message(&self, msg: Message) {
+        let mut pending = self
+            .pending_user_messages
+            .lock()
+            .expect("pending user messages mutex poisoned");
+        pending.push_back(msg);
+    }
+
+    fn clear_pending_user_messages(&self) {
+        let mut pending = self
+            .pending_user_messages
+            .lock()
+            .expect("pending user messages mutex poisoned");
+        pending.clear();
+    }
+
+    /// 通知当前 query 取消，唤醒权限等待和工具收集逻辑。
+    pub fn cancel_current_run(&self) {
+        self.tool_pause_resolver.drain_pending_tool_pauses();
+        self.cancel_notify.notify_waiters();
+    }
+
+    /// 用户响应工具暂停请求。
+    pub fn resolve_tool_pause(
+        &self,
+        tool_use_id: &str,
+        response: ToolPauseResponse,
+    ) -> Result<(), String> {
+        self.tool_pause_resolver
+            .resolve_tool_pause(tool_use_id, response)
+    }
+
+    pub(crate) fn tool_pause_resolver(&self) -> ToolPauseResolver {
+        self.tool_pause_resolver.clone()
     }
 
     /// 执行一次完整的查询（可能包含多轮 LLM 调用 + 工具执行）。
@@ -186,7 +216,7 @@ impl QueryEngine {
         event_tx: mpsc::Sender<EngineToRuntimeEvent>,
         cancelled: Arc<AtomicBool>,
     ) -> QueryResult {
-        self.drain_pending_tool_pauses();
+        self.tool_pause_resolver.drain_pending_tool_pauses();
         self.clear_pending_user_messages();
         let max_turns = ctx.settings.max_turns.unwrap_or(200);
         let mut turns = 0;
@@ -300,7 +330,8 @@ impl QueryEngine {
                             let tx = event_tx.clone();
                             let cancelled = cancelled.clone();
                             let tool_registry = ctx.tool_registry.clone();
-                            let pending_tool_pauses = Arc::clone(&self.pending_tool_pauses);
+                            let pending_tool_pauses =
+                                self.tool_pause_resolver.pending_tool_pauses();
                             let permission_engine = Arc::clone(&self.permission_engine);
                             let cancel_notify = Arc::clone(&self.cancel_notify);
                             let runtime_context = ctx.runtime_context.clone();
@@ -341,7 +372,7 @@ impl QueryEngine {
                         .await;
                     ctx.messages.push(msg);
 
-                    self.drain_pending_tool_pauses();
+                    self.tool_pause_resolver.drain_pending_tool_pauses();
                     let tool_results = Self::cancel_and_collect_tool_results(
                         &mut tool_tasks,
                         ctx.messages.last().expect("assistant message just pushed"),
@@ -364,7 +395,7 @@ impl QueryEngine {
                         ctx.messages.push(tool_msg);
                     }
                 } else {
-                    self.drain_pending_tool_pauses();
+                    self.tool_pause_resolver.drain_pending_tool_pauses();
                     tool_tasks.abort_all();
                     while tool_tasks.join_next().await.is_some() {}
                 }
@@ -483,7 +514,7 @@ impl QueryEngine {
             }
         }
 
-        self.drain_pending_tool_pauses();
+        self.tool_pause_resolver.drain_pending_tool_pauses();
         self.clear_pending_user_messages();
 
         QueryResult {
@@ -511,7 +542,7 @@ impl QueryEngine {
                 .await;
             messages.push(msg);
 
-            self.drain_pending_tool_pauses();
+            self.tool_pause_resolver.drain_pending_tool_pauses();
             let tool_results = Self::cancel_and_collect_tool_results(
                 tool_tasks,
                 messages.last().expect("assistant message just pushed"),
@@ -534,7 +565,7 @@ impl QueryEngine {
                 messages.push(tool_msg);
             }
         } else {
-            self.drain_pending_tool_pauses();
+            self.tool_pause_resolver.drain_pending_tool_pauses();
             tool_tasks.abort_all();
             while tool_tasks.join_next().await.is_some() {}
         }

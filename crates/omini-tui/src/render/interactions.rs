@@ -1,5 +1,17 @@
 use super::*;
 
+pub(super) fn interaction_drawer_height(state: &UiState, area: Rect) -> Option<u16> {
+    let Some(InteractionStep::ModelSelection {
+        entries, selected, ..
+    }) = &state.interaction_step
+    else {
+        return None;
+    };
+
+    let panel_height = model_panel_height(entries, *selected, area.height.saturating_sub(1));
+    Some(panel_height.saturating_add(1).min(area.height))
+}
+
 pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -28,15 +40,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         return;
     };
 
-    // Panel height
-    let has_thinking = entries
-        .get(selected)
-        .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
-    // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
-    let extra: u16 = if has_thinking { 6 } else { 4 };
-    let panel_height = ((entries.len() as u16) + extra)
-        .clamp(5, 22)
-        .min(area.height);
+    let panel_height = model_panel_height(&entries, selected, area.height.saturating_sub(1));
 
     let panel_area = Rect {
         x: area.x,
@@ -126,6 +130,17 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
             },
         );
     }
+}
+
+fn model_panel_height(entries: &[ModelSelectionEntry], selected: usize, area_height: u16) -> u16 {
+    let has_thinking = entries
+        .get(selected)
+        .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
+    // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
+    let extra: u16 = if has_thinking { 6 } else { 4 };
+    ((entries.len() as u16) + extra)
+        .clamp(5, 22)
+        .min(area_height)
 }
 
 struct ModelPanelParams<'a> {

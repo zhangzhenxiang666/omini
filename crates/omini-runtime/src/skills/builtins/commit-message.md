@@ -21,15 +21,16 @@ Use this skill to suggest commit messages from current repository changes. This 
    - If staged and unstaged changes are mixed, keep that distinction visible in the recommendation.
 
 3. Suggest atomic commit groups when useful.
-   - One suggested commit should represent one coherent intent.
-   - Separate feature work, bug fixes, refactors, tests, docs, and formatting when they can stand alone.
+   - Prefer one commit per coherent intent, and recommend splitting only when the changes can stand alone.
+   - Separate feature work, bug fixes, refactors, tests, docs, and formatting when they are independently meaningful.
    - Include the related files for each suggested atomic commit whenever the grouping is clear.
-   - If the grouping is ambiguous, say what is ambiguous instead of inventing certainty.
+   - If the grouping is ambiguous or the changes are tightly coupled, suggest one message and explain the ambiguity.
 
 4. Match project message style.
-   - Infer language, prefix style, tense, and scope conventions from recent commits.
+   - Infer the dominant language, prefix style, scope style, tense, casing, and subject length from recent commits.
+   - Preserve the commit language used by recent history by default; only switch languages when the user explicitly asks.
    - If the repo uses Conventional Commits, follow it.
-   - If the repo uses short Chinese messages, match that style.
+   - If the repo uses Chinese, English, or mixed-language subjects, match that language pattern.
    - Keep the subject concise and specific.
 
 ## Output

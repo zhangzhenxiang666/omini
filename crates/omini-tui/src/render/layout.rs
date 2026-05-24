@@ -11,6 +11,9 @@ const TOOL_PAUSE_TOP_SPACER_HEIGHT: u16 = 1;
 const TOOL_PAUSE_MIN_MESSAGES_HEIGHT: u16 = 1;
 const TOOL_PAUSE_MESSAGE_GAP_HEIGHT: u16 = 1;
 const TOOL_PAUSE_FOOTER_HEIGHT: u16 = 1;
+const BOTTOM_DRAWER_TOP_SPACER_HEIGHT: u16 = 1;
+const BOTTOM_DRAWER_MIN_MESSAGES_HEIGHT: u16 = 1;
+const BOTTOM_DRAWER_MESSAGE_GAP_HEIGHT: u16 = 1;
 
 pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
@@ -69,6 +72,29 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         return;
     }
 
+    if let Some(drawer_height) = bottom_drawer_height(state, area) {
+        let reserved_height = BOTTOM_DRAWER_TOP_SPACER_HEIGHT
+            + BOTTOM_DRAWER_MIN_MESSAGES_HEIGHT
+            + BOTTOM_DRAWER_MESSAGE_GAP_HEIGHT;
+        let drawer_height = drawer_height.min(area.height.saturating_sub(reserved_height).max(1));
+        let chunks = Layout::vertical([
+            Constraint::Length(BOTTOM_DRAWER_TOP_SPACER_HEIGHT),
+            Constraint::Min(BOTTOM_DRAWER_MIN_MESSAGES_HEIGHT),
+            Constraint::Length(BOTTOM_DRAWER_MESSAGE_GAP_HEIGHT),
+            Constraint::Length(drawer_height),
+        ])
+        .split(area);
+        state.messages_area = chunks[1];
+        super::render_messages(state, frame, chunks[1]);
+
+        if state.help_drawer.is_some() {
+            super::help_drawer::render_help_drawer(state, frame, chunks[3]);
+        } else if super::interactions::interaction_drawer_height(state, area).is_some() {
+            super::interactions::render_interaction(state, frame, chunks[3]);
+        }
+        return;
+    }
+
     let drawer_len = super::input::queued_drawer_inputs(state).len();
     let queued_height = if drawer_len == 0 {
         0
@@ -107,6 +133,13 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     super::help_drawer::render_help_drawer(state, frame, area);
     super::permission_drawer::render_permission_drawer(state, frame, area);
+}
+
+fn bottom_drawer_height(state: &UiState, area: Rect) -> Option<u16> {
+    if state.help_drawer.is_some() {
+        return Some(super::help_drawer::help_drawer_height(area));
+    }
+    super::interactions::interaction_drawer_height(state, area)
 }
 
 fn render_background(frame: &mut ratatui::Frame, area: Rect) {
