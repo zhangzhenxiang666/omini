@@ -102,7 +102,12 @@ impl Command for InitCommand {
         50
     }
 
-    async fn execute(&self, _runtime: &mut AgentRuntime, args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        _runtime: &mut AgentRuntime,
+        args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let (llm_message, display_message) = build_init_query(args, self.description());
         CommandResult::Ok(vec![CommandEffect::inject_user_query(
             llm_message,

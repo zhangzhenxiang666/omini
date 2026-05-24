@@ -13,6 +13,7 @@ pub mod skill;
 pub mod thinking;
 
 use crate::runtime::AgentRuntime;
+use crate::types::display::UserDraft;
 use crate::types::events::{CommandKind, CommandResult, CommandSummary};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -63,8 +64,13 @@ pub trait Command: Send + Sync {
     fn kind(&self) -> CommandKind {
         CommandKind::Builtin
     }
-    /// 执行命令。
-    async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult;
+    /// 执行命令。`draft` 保留 UI 富文本元数据，供发送给 LLM 的命令复用 mention 上下文。
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        args: &str,
+        draft: &UserDraft,
+    ) -> CommandResult;
 }
 
 /// 命令注册表，按名称和别名索引。

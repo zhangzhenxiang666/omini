@@ -235,9 +235,9 @@ impl AgentRuntime {
                                     self.process_run(RunStart::UserMessage).await;
                                 }
                             }
-                            UiToRuntimeEvent::SendCommand(text) => {
-                                if let Some(parsed) = command::parse(&text) {
-                                    self.handle_command(&parsed).await;
+                            UiToRuntimeEvent::SendCommand(draft) => {
+                                if let Some(parsed) = command::parse(&draft.text) {
+                                    self.handle_command(&parsed, &draft).await;
                                 }
                             }
                             UiToRuntimeEvent::ToggleActiveProfile => {
@@ -303,10 +303,14 @@ impl AgentRuntime {
     }
 
     /// 处理命令分发。
-    async fn handle_command(&mut self, parsed: &command::ParsedCommand<'_>) {
+    async fn handle_command(
+        &mut self,
+        parsed: &command::ParsedCommand<'_>,
+        draft: &crate::types::display::UserDraft,
+    ) {
         if let Some(cmd) = self.command_registry.get(parsed.name) {
             let cmd = Arc::clone(cmd);
-            let result = cmd.execute(self, parsed.args).await;
+            let result = cmd.execute(self, parsed.args, draft).await;
             match result {
                 CommandResult::Ok(effects) => {
                     for effect in effects {
@@ -893,9 +897,9 @@ impl AgentRuntime {
                                     ))
                                     .await;
                             }
-                            UiToRuntimeEvent::SendCommand(text) => {
+                            UiToRuntimeEvent::SendCommand(draft) => {
                                 active_run::handle_command(
-                                    &text,
+                                    &draft.text,
                                     &mut self.pending_interaction,
                                     &self.command_registry,
                                     &mut self.settings,

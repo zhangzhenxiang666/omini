@@ -33,7 +33,12 @@ impl Command for EffortCommand {
         Some("<none | low | medium | high>")
     }
 
-    async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let mut parts = args.split_whitespace();
         let Some(value) = parts.next() else {
             return CommandResult::Error(

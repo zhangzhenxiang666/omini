@@ -23,7 +23,12 @@ impl Command for PlanCommand {
         25
     }
 
-    async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         runtime.set_active_profile(ActiveProfile::Plan);
         CommandResult::Ok(vec![CommandEffect::emit(
             RuntimeToUiEvent::ActiveProfileChanged(runtime.active_profile()),

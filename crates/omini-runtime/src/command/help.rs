@@ -19,7 +19,12 @@ impl Command for HelpCommand {
     fn sort_weight(&self) -> i32 {
         900
     }
-    async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         CommandResult::Ok(vec![CommandEffect::emit(RuntimeToUiEvent::ShowHelpDrawer(
             runtime.command_registry.summaries(),
         ))])

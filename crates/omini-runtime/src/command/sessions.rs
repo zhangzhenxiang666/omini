@@ -20,7 +20,12 @@ impl Command for SessionsCommand {
     fn sort_weight(&self) -> i32 {
         10
     }
-    async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let project_path = crate::config::project::sanitize(&runtime.settings.cwd);
         let sessions = match db::global_db().list_sessions(&project_path).await {
             Ok(s) => s,

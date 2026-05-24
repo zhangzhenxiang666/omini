@@ -25,7 +25,12 @@ impl Command for AgentsCommand {
         35
     }
 
-    async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let records = crate::subagents::list_agent_records(&runtime.settings.cwd);
         let providers: HashMap<String, ProviderProfile> = runtime.settings.providers.clone();
         CommandResult::Ok(vec![CommandEffect::ShowInteraction(

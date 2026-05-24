@@ -20,6 +20,10 @@ impl CommandAutocomplete {
             self.visible = false;
             return;
         }
+        if input[1..].contains(char::is_whitespace) {
+            self.visible = false;
+            return;
+        }
         self.visible = true;
 
         let partial = input[1..].to_lowercase();
@@ -65,5 +69,37 @@ impl CommandAutocomplete {
             return;
         }
         self.selected = self.selected.saturating_sub(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::events::{CommandKind, CommandSummary};
+
+    fn command(name: &str) -> CommandSummary {
+        CommandSummary {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            kind: CommandKind::Builtin,
+            has_args: true,
+            args_description: Some("[prompt]"),
+        }
+    }
+
+    #[test]
+    fn command_autocomplete_hides_in_argument_region() {
+        let mut autocomplete = CommandAutocomplete {
+            all_commands: vec![command("commit-message")],
+            ..CommandAutocomplete::default()
+        };
+
+        autocomplete.update("/commit");
+        assert!(autocomplete.visible);
+
+        autocomplete.update("/commit-message @src");
+        assert!(!autocomplete.visible);
     }
 }

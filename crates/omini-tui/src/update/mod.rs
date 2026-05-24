@@ -36,6 +36,8 @@ impl UpdateOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::InputMention;
+    use crate::types::display::MentionKind;
     use crate::types::events::{
         ActiveProfile, EditPermissionPreview, PermissionPreview, PlanApprovalAction,
         PlanExecutionProfile, SubmittedPlan, ToolPauseRequest,
@@ -399,7 +401,32 @@ mod tests {
         let Some(UiToRuntimeEvent::SendCommand(command)) = rx.recv().await else {
             panic!("expected compact command");
         };
-        assert_eq!(command, "/compact");
+        assert_eq!(command.text, "/compact");
+    }
+
+    #[tokio::test]
+    async fn command_submit_preserves_argument_mentions() {
+        let mut state = UiState::new();
+        state.input = "/commit-message summarize @src/main.rs".to_string();
+        state.cursor_char = state.input.chars().count();
+        state.input_mentions.push(InputMention {
+            start_char: 26,
+            end_char: 38,
+            kind: MentionKind::File,
+            label: "src/main.rs".to_string(),
+            target: "src/main.rs".to_string(),
+            description: "file".to_string(),
+        });
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(UiToRuntimeEvent::SendCommand(command)) = rx.recv().await else {
+            panic!("expected command draft");
+        };
+        assert_eq!(command.text, "/commit-message summarize @src/main.rs");
+        assert_eq!(command.mentions.len(), 1);
+        assert_eq!(command.mentions[0].target, "src/main.rs");
     }
 
     #[tokio::test]
@@ -812,7 +839,11 @@ async fn handle_command_autocomplete_key(
                     let msg = std::mem::take(&mut state.input);
                     state.cursor_char = 0;
                     if !msg.is_empty() {
-                        let _ = request_tx.send(UiToRuntimeEvent::SendCommand(msg)).await;
+                        let _ = request_tx
+                            .send(UiToRuntimeEvent::SendCommand(
+                                crate::types::display::UserDraft::plain(msg),
+                            ))
+                            .await;
                     }
                 }
             }
@@ -949,9 +980,7 @@ async fn handle_composer_key(
                     if !state.is_run_active() && is_compact_command(&draft.text) {
                         state.begin_manual_compact();
                     }
-                    let _ = request_tx
-                        .send(UiToRuntimeEvent::SendCommand(draft.text))
-                        .await;
+                    let _ = request_tx.send(UiToRuntimeEvent::SendCommand(draft)).await;
                 } else if state.is_run_active() && !state.manual_compact_running {
                     state.mark_plan_mode_message_sent();
                     state.queued_user_inputs.push_back(draft);

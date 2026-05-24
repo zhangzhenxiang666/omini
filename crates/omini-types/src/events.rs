@@ -46,7 +46,7 @@ pub enum UiToRuntimeEvent {
     /// 用户发送一条消息给 runtime
     SendMessage(UserDraft),
     /// 用户执行一条命令
-    SendCommand(String),
+    SendCommand(UserDraft),
     /// 用户切换当前 active profile
     ToggleActiveProfile,
     /// 用户发送一条消息插入正在运行的 query，在下一轮 LLM 调用前生效

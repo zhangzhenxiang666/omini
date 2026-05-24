@@ -137,6 +137,11 @@ impl UserSubmission {
 }
 
 fn build_llm_text(text: &str, mentions: &[DisplayMention]) -> Option<String> {
+    let context = referenced_context_text(mentions)?;
+    Some(format!("{text}\n\n{context}"))
+}
+
+pub fn referenced_context_text(mentions: &[DisplayMention]) -> Option<String> {
     let context_mentions = mentions
         .iter()
         .filter(|mention| mention.kind != MentionKind::Command)
@@ -145,8 +150,7 @@ fn build_llm_text(text: &str, mentions: &[DisplayMention]) -> Option<String> {
         return None;
     }
 
-    let mut output = text.to_string();
-    output.push_str("\n\nReferenced context:\n");
+    let mut output = String::from("Referenced context:\n");
     for mention in context_mentions {
         output.push_str("- ");
         output.push_str(&mention_llm_text(mention));

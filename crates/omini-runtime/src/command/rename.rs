@@ -26,7 +26,12 @@ impl Command for RenameCommand {
     fn args_description(&self) -> Option<&'static str> {
         Some("<name>")
     }
-    async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let session_id = match &runtime.session_id {
             Some(id) => id.clone(),
             None => {

@@ -19,7 +19,12 @@ impl Command for NewCommand {
     fn sort_weight(&self) -> i32 {
         20
     }
-    async fn execute(&self, runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         // 清空 runtime 状态
         runtime.session_id = None;
         runtime.session_dir = None;

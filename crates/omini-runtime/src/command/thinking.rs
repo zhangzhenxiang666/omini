@@ -32,7 +32,12 @@ impl Command for ThinkingCommand {
         Some("[on | off]")
     }
 
-    async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         match apply_thinking_display(&runtime.project, args) {
             Ok(show) => CommandResult::Ok(vec![
                 CommandEffect::emit(RuntimeToUiEvent::ThinkingDisplayChanged { show }),

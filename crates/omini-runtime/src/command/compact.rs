@@ -31,7 +31,12 @@ impl Command for CompactCommand {
         30
     }
 
-    async fn execute(&self, runtime: &mut AgentRuntime, args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        runtime: &mut AgentRuntime,
+        args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         let custom_instructions = (!args.trim().is_empty()).then_some(args.trim());
         match runtime
             .force_compact_current_session(custom_instructions)

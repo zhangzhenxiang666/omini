@@ -19,7 +19,12 @@ impl Command for ExitCommand {
     fn sort_weight(&self) -> i32 {
         1000
     }
-    async fn execute(&self, _runtime: &mut AgentRuntime, _args: &str) -> CommandResult {
+    async fn execute(
+        &self,
+        _runtime: &mut AgentRuntime,
+        _args: &str,
+        _draft: &crate::types::display::UserDraft,
+    ) -> CommandResult {
         CommandResult::Ok(vec![CommandEffect::emit(RuntimeToUiEvent::Shutdown)])
     }
 }
