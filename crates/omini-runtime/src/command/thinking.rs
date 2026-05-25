@@ -39,10 +39,9 @@ impl Command for ThinkingCommand {
         _draft: &crate::types::display::UserDraft,
     ) -> CommandResult {
         match apply_thinking_display(&runtime.project, args) {
-            Ok(show) => CommandResult::Ok(vec![
-                CommandEffect::emit(RuntimeToUiEvent::ThinkingDisplayChanged { show }),
-                CommandEffect::Notice(thinking_display_notice(show)),
-            ]),
+            Ok(show) => CommandResult::Ok(vec![CommandEffect::emit(
+                RuntimeToUiEvent::ThinkingDisplayChanged { show },
+            )]),
             Err(error) => CommandResult::Error(error),
         }
     }
@@ -58,14 +57,6 @@ pub(crate) fn apply_thinking_display(project: &ProjectDir, args: &str) -> Result
         .save_state(&state)
         .map_err(|e| format!("保存项目状态失败: {e}"))?;
     Ok(show)
-}
-
-pub(crate) fn thinking_display_notice(show: bool) -> String {
-    if show {
-        "thinking 块展示已开启".to_string()
-    } else {
-        "thinking 块展示已关闭".to_string()
-    }
 }
 
 fn parse_thinking_display(args: &str, current: bool) -> Result<bool, String> {

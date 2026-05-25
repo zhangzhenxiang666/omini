@@ -44,7 +44,7 @@ impl Tool for WriteTool {
             "\n",
             "Rules:\n",
             "  - file_path must be absolute; relative paths are rejected.\n",
-            "  - The parent directory must already exist.\n",
+            "  - Missing parent directories are created automatically after permission approval.\n",
             "  - The target path must not be a directory.\n",
             "  - The tool validates the path before permission approval and validates it again before writing."
         )
@@ -103,6 +103,17 @@ struct WriteReport {
 
 async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> {
     let existed = validate_target(&prepared.input)?;
+    let path = Path::new(&prepared.input.file_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Path has no parent directory: {}", prepared.input.file_path))?;
+
+    fs::create_dir_all(parent).await.map_err(|e| {
+        format!(
+            "Failed to create parent directory {}: {e}",
+            parent.display()
+        )
+    })?;
 
     fs::write(&prepared.input.file_path, &prepared.input.content)
         .await
@@ -130,13 +141,7 @@ fn validate_target(input: &WriteInput) -> Result<bool, String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("Path has no parent directory: {}", input.file_path))?;
-    if !parent.exists() {
-        return Err(format!(
-            "Parent directory does not exist: {}",
-            parent.display()
-        ));
-    }
-    if !parent.is_dir() {
+    if parent.exists() && !parent.is_dir() {
         return Err(format!(
             "Parent path is not a directory: {}",
             parent.display()
@@ -207,6 +212,40 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
 
         let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn test_write_creates_missing_parent_directories() {
+        let path = std::env::temp_dir()
+            .join(format!(
+                "omini_write_test_{}_{}_missing",
+                std::process::id(),
+                line!()
+            ))
+            .join("nested")
+            .join("create.txt");
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .expect("test path should have root")
+            .to_path_buf();
+        let _ = fs::remove_dir_all(&root).await;
+
+        let input = WriteInput {
+            file_path: path.display().to_string(),
+            content: "created\n".to_string(),
+        };
+        let prepared = WriteTool.prepare(input).await.unwrap();
+        assert!(!prepared.existed);
+        assert!(!path.parent().unwrap().exists());
+
+        let result = WriteTool
+            .execute_prepared(prepared, ToolExecutionContext::test("write"))
+            .await;
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(fs::read_to_string(&path).await.unwrap(), "created\n");
+
+        let _ = fs::remove_dir_all(root).await;
     }
 
     #[tokio::test]

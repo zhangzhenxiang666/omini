@@ -43,11 +43,6 @@ pub(super) async fn handle_command(
                 let _ = event_tx
                     .send(RuntimeToUiEvent::ThinkingDisplayChanged { show })
                     .await;
-                let _ = event_tx
-                    .send(RuntimeToUiEvent::CommandNotice(
-                        command::thinking::thinking_display_notice(show),
-                    ))
-                    .await;
             }
             Err(error) => {
                 let _ = event_tx.send(RuntimeToUiEvent::Error(error)).await;
