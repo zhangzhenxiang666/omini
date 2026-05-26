@@ -3,7 +3,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{tool_error_display_text, tool_title_style, truncate_display_width, word_wrap};
+use super::{
+    bash_highlight, tool_error_display_text, tool_title_style, truncate_display_width, word_wrap,
+};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -43,7 +45,11 @@ pub(super) fn render(
             .saturating_sub(used_width)
             .saturating_sub(parens_width);
         title.push(Span::raw("("));
-        title.push(Span::raw(truncate_display_width(cmd, cmd_width)));
+        title.extend(bash_highlight::truncated_command_spans(
+            cmd,
+            cmd_width,
+            Style::default(),
+        ));
         title.push(Span::raw(")"));
     } else {
         let used_width: usize = title.iter().map(|s| s.width()).sum();

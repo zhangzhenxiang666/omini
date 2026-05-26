@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 mod ask_user;
 mod bash;
+pub(crate) mod bash_highlight;
 mod file_mutation;
 mod mcp;
 mod read;
@@ -416,7 +417,11 @@ fn compact_waiting_tool_lines(
                 .saturating_sub(used_width)
                 .saturating_sub(UnicodeWidthStr::width("()"));
             spans.push(Span::raw("("));
-            spans.push(Span::raw(truncate_display_width(command, command_width)));
+            spans.extend(bash_highlight::truncated_command_spans(
+                command,
+                command_width,
+                Style::default(),
+            ));
             spans.push(Span::raw(")"));
         }
         "ask_user" => {

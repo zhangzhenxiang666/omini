@@ -782,7 +782,11 @@ fn bash_permission_command_lines(command: &str, content_width: usize) -> Vec<Lin
         .saturating_sub(prefix.width())
         .saturating_sub(prompt.width())
         .max(1);
-    let wrapped = wrap_preserving_display_width(command, command_width);
+    let wrapped = crate::widgets::bash_highlight::wrapped_command_spans(
+        command,
+        command_width,
+        command_style,
+    );
 
     if wrapped.is_empty() {
         return vec![Line::from(vec![
@@ -794,18 +798,15 @@ fn bash_permission_command_lines(command: &str, content_width: usize) -> Vec<Lin
     wrapped
         .into_iter()
         .enumerate()
-        .map(|(idx, segment)| {
+        .map(|(idx, mut segment)| {
             if idx == 0 {
-                Line::from(vec![
-                    Span::raw(prefix),
-                    Span::styled(prompt, prompt_style),
-                    Span::styled(segment, command_style),
-                ])
+                let mut spans = vec![Span::raw(prefix), Span::styled(prompt, prompt_style)];
+                spans.append(&mut segment);
+                Line::from(spans)
             } else {
-                Line::from(vec![
-                    Span::raw(continuation),
-                    Span::styled(segment, command_style),
-                ])
+                let mut spans = vec![Span::raw(continuation)];
+                spans.append(&mut segment);
+                Line::from(spans)
             }
         })
         .collect()
@@ -845,13 +846,7 @@ fn user_input_note_lines(
     editing: bool,
     content_width: usize,
 ) -> NoteRender {
-    let marker_style = if editing {
-        Style::default()
-            .fg(Color::Rgb(0x42, 0xd9, 0xe8))
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::Rgb(140, 145, 155))
-    };
+    let marker_style = Style::default().fg(Color::Rgb(140, 145, 155));
     let value_style = if note.is_empty() {
         Style::default().fg(Color::Rgb(140, 145, 155))
     } else {
@@ -1410,6 +1405,32 @@ mod tests {
 
         assert!(command_lines.len() > 1);
         assert_eq!(command_lines.concat(), command);
+    }
+
+    #[test]
+    fn bash_permission_highlights_string_tokens_but_not_command_name() {
+        let command = "cargo test -p omini-tui 'quoted value'";
+        let lines = bash_permission_command_lines(command, 80);
+        let first = &lines[0];
+
+        assert_eq!(
+            line_text(first),
+            "  $ cargo test -p omini-tui 'quoted value'"
+        );
+        assert!(
+            first
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "cargo"
+                    && span.style.fg == Some(Color::Rgb(220, 220, 225)))
+        );
+        assert!(
+            first
+                .spans
+                .iter()
+                .any(|span| span.content.as_ref() == "'quoted value'"
+                    && span.style.fg == Some(Color::Rgb(0xab, 0xdf, 0xa7)))
+        );
     }
 }
 
