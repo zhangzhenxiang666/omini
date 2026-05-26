@@ -103,7 +103,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     let show_bot = scroll_off + item_lines < total;
 
     let max_visible = item_lines.min(total.saturating_sub(scroll_off));
-    let time_col_w = 8; // "59分钟前" / "23小时前" are both 8 display cells.
+    let time_col_w = 8; // "59分钟前" / "23h前" fit in this column.
     let prefix_w = UnicodeWidthStr::width("❯ ");
     let separator_w = UnicodeWidthStr::width("  ");
     let max_msg_w = content_w.saturating_sub(prefix_w + time_col_w + separator_w);
@@ -145,7 +145,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         };
 
         let prefix = if is_selected { "❯ " } else { "  " };
-        let time_str = pad_display_width(&relative_time(session.created_at), time_col_w);
+        let time_str = pad_display_width(&relative_time(session.updated_at), time_col_w);
         let msg = truncate_str(&session.title, max_msg_w);
         let line_content = format!("{}{}  {}", prefix, time_str, msg);
         let padded = pad_display_width(&line_content, content_w);
@@ -235,8 +235,8 @@ fn render_session_row_backgrounds(
     }
 }
 
-/// 将 UTC 时间格式化为相对时间（如 "3分钟前", "2小时前", "5天前"）。
-fn relative_time(utc: DateTime<Utc>) -> String {
+/// 将 UTC 时间格式化为相对时间（如 "刚刚", "3分钟前", "2h前"）。
+pub(super) fn relative_time(utc: DateTime<Utc>) -> String {
     let now = Utc::now();
     let duration = now.signed_duration_since(utc);
     let seconds = duration.num_seconds().max(0);
@@ -245,7 +245,7 @@ fn relative_time(utc: DateTime<Utc>) -> String {
     } else if seconds < 3600 {
         format!("{}分钟前", seconds / 60)
     } else if seconds < 86400 {
-        format!("{}小时前", seconds / 3600)
+        format!("{}h前", seconds / 3600)
     } else if seconds < 604800 {
         format!("{}天前", seconds / 86400)
     } else if seconds < 2592000 {

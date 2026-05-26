@@ -81,6 +81,7 @@ impl UiState {
     }
 
     pub fn open_interaction_request(&mut self, req: &InteractionRequest) {
+        self.show_start_screen = false;
         self.help_drawer = None;
         self.interaction_step = match req {
             InteractionRequest::ModelSelection {
@@ -122,7 +123,7 @@ impl UiState {
             }
             InteractionRequest::SessionSelection { sessions } => {
                 let mut sorted = sessions.clone();
-                sorted.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 let all_sessions = sorted.clone();
                 Some(InteractionStep::Session {
                     sessions: sorted,
@@ -146,6 +147,7 @@ impl UiState {
     }
 
     pub fn open_help_drawer(&mut self, commands: Vec<CommandSummary>) {
+        self.show_start_screen = false;
         self.autocomplete.visible = false;
         self.mention_autocomplete.visible = false;
         self.help_drawer = Some(super::HelpDrawerState::new(commands));
@@ -233,6 +235,7 @@ impl UiState {
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
         match event {
             RuntimeToUiEvent::RunStarted => {
+                self.show_start_screen = false;
                 self.manual_compact_running = false;
                 self.activity_status_title = None;
                 self.pending_assistant = None;
@@ -242,6 +245,7 @@ impl UiState {
                 self.agent_status = AgentStatus::Thinking;
             }
             RuntimeToUiEvent::UserMessageInjected(item) => {
+                self.show_start_screen = false;
                 let ui_message = match item {
                     HistoryItem::Message(message) => UiMessage::Message(message),
                     HistoryItem::Display(display) => UiMessage::Display(display),
@@ -438,6 +442,7 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::Notification(notification) => {
+                self.show_start_screen = false;
                 match notification.kind {
                     NotificationKind::Info => {}
                     NotificationKind::Warn => {
@@ -579,6 +584,13 @@ impl UiState {
                     .set_candidates(mention::agent_summaries_to_mention_candidates(agents));
                 self.update_input_autocomplete();
             }
+            RuntimeToUiEvent::StartupSessionsLoaded { sessions } => {
+                self.startup_recent_sessions = sessions
+                    .into_iter()
+                    .filter(|session| !session.title.trim().is_empty())
+                    .take(3)
+                    .collect();
+            }
             RuntimeToUiEvent::AgentManagementUpdated { records } => {
                 if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
                     let keep_view = matches!(
@@ -649,6 +661,7 @@ impl UiState {
         subagents: Vec<SubagentSnapshot>,
         usage: crate::types::events::SessionUsageSnapshot,
     ) {
+        self.show_start_screen = false;
         self.current_session_id = session_id;
         self.messages = UiMessage::from_history_items(messages);
         self.status_bar.current_context_tokens = usage.current_context_tokens;

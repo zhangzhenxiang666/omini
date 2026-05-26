@@ -74,6 +74,16 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     state.status_bar.active_provider = settings.active_provider.clone();
     state.status_bar.cwd = settings.cwd.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
+    state.startup_mcp_server_count = settings
+        .mcp_servers
+        .values()
+        .filter(|server| server.enabled)
+        .count();
+    state.startup_has_project_instructions = settings
+        .cwd
+        .join("AGENTS.md")
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
     state.show_thinking_blocks = project
         .load_state()
         .map(|state| state.show_thinking_blocks)

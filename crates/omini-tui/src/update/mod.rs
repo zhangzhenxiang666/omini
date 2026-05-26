@@ -839,6 +839,7 @@ async fn handle_command_autocomplete_key(
                     let msg = std::mem::take(&mut state.input);
                     state.cursor_char = 0;
                     if !msg.is_empty() {
+                        state.show_start_screen = false;
                         let _ = request_tx
                             .send(UiToRuntimeEvent::SendCommand(
                                 crate::types::display::UserDraft::plain(msg),
@@ -976,6 +977,7 @@ async fn handle_composer_key(
             }
 
             if let Some(draft) = state.take_input_draft() {
+                state.show_start_screen = false;
                 if draft.text.starts_with('/') {
                     if !state.is_run_active() && is_compact_command(&draft.text) {
                         state.begin_manual_compact();

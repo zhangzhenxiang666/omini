@@ -1,8 +1,8 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
-    ActiveProfile, CommandSummary, InteractionRequest, Notification, SubagentSnapshot,
-    SubagentStatus, SubmittedPlan, ToolPauseRequest,
+    ActiveProfile, CommandSummary, InteractionRequest, Notification, SessionSummary,
+    SubagentSnapshot, SubagentStatus, SubmittedPlan, ToolPauseRequest,
 };
 use crate::types::message::Message;
 use rand::Rng;
@@ -44,6 +44,16 @@ const INPUT_PLACEHOLDERS: &[&str] = &[
     "用 /agents 创建一个适合当前任务的 subagent",
     "上下文太长了？用 /compact 留下决策和关键线索",
     "用 /help 查看命令、技能和输入技巧",
+];
+const START_SCREEN_TIPS: &[&str] = &[
+    "先用 /plan 把方案聊清楚，再进入实现会更稳。",
+    "用 @文件 或 @目录 限定上下文，答案会更贴近当前代码。",
+    "陌生项目可以先让 omini 梳理模块职责和调用链。",
+    "复杂问题先交给 @subagent 调研，再让主会话做决策。",
+    "改动前可以说明验收标准，omini 会更容易选择合适测试。",
+    "上下文变长后用 /compact 保留关键决策和线索。",
+    "用 /agents 管理适合当前项目的专用 subagent。",
+    "让 omini 总结当前 diff，可以快速检查风险和漏测点。",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +368,16 @@ pub struct UiState {
     pub message_scroll_y: usize,
     /// 当前屏幕上可由鼠标拖选复制的文本行。
     pub selectable_screen_lines: Vec<SelectableScreenLine>,
+    /// TUI 刚启动、尚未进入任何会话/交互前展示的一次性启动页。
+    pub show_start_screen: bool,
+    /// 启动时配置的 MCP server 数量，用于首屏项目仪表盘。
+    pub startup_mcp_server_count: usize,
+    /// 当前项目目录下是否存在非空 AGENTS.md，用于首屏项目仪表盘。
+    pub startup_has_project_instructions: bool,
+    /// 启动时读取的最近会话，用于首屏提供可恢复的上下文线索。
+    pub startup_recent_sessions: Vec<SessionSummary>,
+    /// 启动页中文提示，初始化时从静态列表随机选择一次。
+    pub startup_tip: String,
     /// 鼠标拖选状态。
     pub text_selection: Option<TextSelection>,
     pub is_selecting_text: bool,
@@ -464,6 +484,11 @@ impl UiState {
             selectable_message_lines: Vec::new(),
             message_scroll_y: 0,
             selectable_screen_lines: Vec::new(),
+            show_start_screen: true,
+            startup_mcp_server_count: 0,
+            startup_has_project_instructions: false,
+            startup_recent_sessions: Vec::new(),
+            startup_tip: pick_start_screen_tip(),
             text_selection: None,
             is_selecting_text: false,
             input: String::new(),
@@ -658,6 +683,12 @@ fn pick_input_placeholder() -> String {
     let mut rng = rand::rng();
     let idx = rng.random_range(0..INPUT_PLACEHOLDERS.len());
     INPUT_PLACEHOLDERS[idx].to_string()
+}
+
+fn pick_start_screen_tip() -> String {
+    let mut rng = rand::rng();
+    let idx = rng.random_range(0..START_SCREEN_TIPS.len());
+    START_SCREEN_TIPS[idx].to_string()
 }
 
 #[cfg(test)]

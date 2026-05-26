@@ -101,6 +101,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     } else {
         drawer_len.min(4) as u16 + 2
     };
+    let show_start_screen = should_render_start_screen(state);
     state.set_input_wrap_width(area.width as usize);
     let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
     let activity_height = if state.is_run_active() { 3 } else { 1 };
@@ -114,7 +115,11 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     .split(area);
     state.messages_area = chunks[1];
 
-    super::render_messages(state, frame, chunks[1]);
+    if show_start_screen {
+        super::render_start_screen(state, frame, chunks[1]);
+    } else {
+        super::render_messages(state, frame, chunks[1]);
+    }
     render_activity(state, frame, chunks[2]);
     super::autocomplete::render_autocomplete(state, frame, chunks[3]);
     super::status::render_footer(state, frame, chunks[4]);
@@ -133,6 +138,18 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     super::help_drawer::render_help_drawer(state, frame, area);
     super::permission_drawer::render_permission_drawer(state, frame, area);
+}
+
+fn should_render_start_screen(state: &UiState) -> bool {
+    state.show_start_screen
+        && state.messages.is_empty()
+        && state.pending_assistant.is_none()
+        && state.pending_proposed_plan.is_none()
+        && state.interaction_step.is_none()
+        && state.interaction_request.is_none()
+        && state.help_drawer.is_none()
+        && state.active_tool_pause().is_none()
+        && state.plan_approval.is_none()
 }
 
 fn bottom_drawer_height(state: &UiState, area: Rect) -> Option<u16> {

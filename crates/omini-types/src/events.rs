@@ -263,6 +263,8 @@ pub enum RuntimeToUiEvent {
     CommandList(Vec<CommandSummary>),
     /// Runtime 启动时推送 subagent 列表（供 @ mention 自动补全使用）
     AgentList(Vec<AgentSummary>),
+    /// Runtime 启动时推送当前项目最近会话（供首屏展示使用）
+    StartupSessionsLoaded { sessions: Vec<SessionSummary> },
     /// Runtime 刷新 `/agents` 面板数据
     AgentManagementUpdated { records: Vec<AgentRecord> },
     /// LLM 已生成 agent 草稿，供 `/agents` 面板预览和保存
@@ -508,6 +510,7 @@ pub struct SessionSummary {
     pub model: String,
     pub provider: String,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

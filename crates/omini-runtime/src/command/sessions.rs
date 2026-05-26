@@ -39,6 +39,7 @@ impl Command for SessionsCommand {
                 model: s.model,
                 provider: s.provider,
                 created_at: s.created_at,
+                updated_at: s.updated_at,
             });
         }
         CommandResult::Ok(vec![CommandEffect::ShowInteraction(

@@ -24,6 +24,7 @@ mod permission_drawer;
 mod plan_approval_drawer;
 mod scroll;
 mod session_list;
+mod start_screen;
 mod status;
 mod subagent_tool;
 mod text;
@@ -33,6 +34,7 @@ use assistant::{build_assistant_text_lines, build_llm_summary_lines, build_propo
 use messages::render_messages;
 use scroll::{ScrollableLine, scrollable_lines};
 use session_list::render_session_list;
+use start_screen::render_start_screen;
 use subagent_tool::render_subagent_tool;
 use text::{
     apply_text_selection_highlight, line_to_plain_text, line_width, pad_display_width,
@@ -48,11 +50,12 @@ pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 mod tests {
     use super::*;
     use crate::state::HelpDrawerState;
-    use crate::types::config::ModelConfig;
+    use crate::types::config::{ModelConfig, ThinkingEffort};
     use crate::types::display::DisplayPlan;
     use crate::types::events::{
-        PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent, ToolPauseKind,
-        ToolPauseRequest, UserInputOption, UserInputPreview, UserInputQuestion,
+        CommandKind, CommandSummary, PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent,
+        SessionSummary, SessionUsageSnapshot, ToolPauseKind, ToolPauseRequest, UserInputOption,
+        UserInputPreview, UserInputQuestion,
     };
     use crate::types::message::{Message, Role};
     use chrono::Utc;
@@ -67,6 +70,145 @@ mod tests {
         state.help_drawer = Some(HelpDrawerState::new(Vec::new()));
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
+    }
+
+    #[test]
+    fn start_screen_renders_on_initial_empty_state() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.status_bar.model = "test-model".to_string();
+        state.status_bar.active_provider = "test-provider".to_string();
+        state.status_bar.thinking_effort = Some(ThinkingEffort::Medium);
+        state.autocomplete.all_commands = vec![
+            command_summary("help", CommandKind::Builtin),
+            command_summary("commit-message", CommandKind::Skill),
+        ];
+        let now = Utc::now();
+        state.startup_recent_sessions = vec![SessionSummary {
+            id: "session-1".to_string(),
+            title: "Fix flaky CI".to_string(),
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            created_at: now,
+            updated_at: now,
+        }];
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("██████"));
+        assert!(rendered.contains("test-model"));
+        assert!(rendered.contains("medium"));
+        assert!(rendered.contains("test-provider"));
+        assert!(rendered.contains("Fix flaky CI"));
+        assert!(rendered.contains("Recent Sessions"));
+        assert!(rendered.contains("Startup Tip"));
+        assert!(rendered.contains("/sessions"));
+        assert_eq!(rendered.matches("skill").count(), 1);
+        assert!(
+            state
+                .selectable_screen_lines
+                .iter()
+                .any(|line| line.text.contains("Welcome back!"))
+        );
+    }
+
+    #[test]
+    fn start_screen_is_hidden_after_empty_session_change() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.apply_session_changed(None, vec![], vec![], SessionUsageSnapshot::default());
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains("██████"));
+        assert!(!state.show_start_screen);
+    }
+
+    #[test]
+    fn start_screen_is_hidden_while_help_drawer_is_open() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.open_help_drawer(vec![command_summary("help", CommandKind::Builtin)]);
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(!rendered.contains("██████"));
+        assert!(!state.show_start_screen);
+    }
+
+    #[test]
+    fn start_screen_keeps_normal_footer_and_input_layout() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.status_bar.model = "footer-model".to_string();
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let prompt_idx = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .position(|cell| cell.symbol() == "❯")
+            .expect("input prompt should render");
+        let input_row = prompt_idx / 100;
+        let input_col = prompt_idx % 100;
+        assert_eq!(input_row, 21);
+        assert_eq!(input_col, 0);
+
+        let bottom_row = buffer
+            .content()
+            .chunks(100)
+            .last()
+            .expect("terminal has a bottom row")
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(bottom_row.contains("footer-model"));
+    }
+
+    #[test]
+    fn start_screen_renders_in_tiny_terminal() {
+        let backend = TestBackend::new(30, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("omini"));
     }
 
     #[test]
@@ -91,6 +233,18 @@ mod tests {
         });
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
+    }
+
+    fn command_summary(name: &str, kind: CommandKind) -> CommandSummary {
+        CommandSummary {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            kind,
+            has_args: false,
+            args_description: None,
+        }
     }
 
     #[test]

@@ -15,8 +15,8 @@ use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayMessage, DisplaySummary, HistoryItem};
 use crate::types::events::{
     ActiveProfile, CommandEffect, CommandResult, EngineToRuntimeEvent, InteractionRequest,
-    PlanApprovalAction, RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
-    ToolPauseRequest, ToolPauseResponse, UiToRuntimeEvent,
+    PlanApprovalAction, RuntimeToUiEvent, SessionSummary, SessionUsageSnapshot, SubmittedPlan,
+    ToolPauseKind, ToolPauseRequest, ToolPauseResponse, UiToRuntimeEvent,
 };
 use crate::types::message::Message;
 use crate::types::usage::Usage;
@@ -225,6 +225,7 @@ impl AgentRuntime {
     pub fn run(mut self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             self.start_mcp_initialization();
+            self.send_startup_sessions().await;
             loop {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
@@ -309,6 +310,27 @@ impl AgentRuntime {
                 }
             }
         })
+    }
+
+    async fn send_startup_sessions(&self) {
+        let project_path = sanitize(&self.settings.cwd);
+        let Ok(sessions) = db::global_db().list_sessions(&project_path).await else {
+            return;
+        };
+        let sessions = sessions
+            .into_iter()
+            .take(5)
+            .map(|session| SessionSummary {
+                id: session.id,
+                title: session.title.unwrap_or_default(),
+                model: session.model,
+                provider: session.provider,
+                created_at: session.created_at,
+                updated_at: session.updated_at,
+            })
+            .collect();
+        self.send_event(RuntimeToUiEvent::StartupSessionsLoaded { sessions })
+            .await;
     }
 
     /// 处理命令分发。

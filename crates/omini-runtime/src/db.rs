@@ -272,7 +272,7 @@ impl Database {
 
     pub async fn list_sessions(&self, project_path: &str) -> Result<Vec<Session>, DbError> {
         let rows = sqlx::query_as::<_, Session>(
-            "SELECT * FROM sessions WHERE project_path = ? AND session_type = 'main' ORDER BY created_at DESC",
+            "SELECT * FROM sessions WHERE project_path = ? AND session_type = 'main' ORDER BY updated_at DESC, created_at DESC",
         )
         .bind(project_path)
         .fetch_all(&self.pool)
