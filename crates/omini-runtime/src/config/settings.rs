@@ -1,7 +1,7 @@
 use crate::permissions::RawPermissionConfig;
 pub use crate::types::config::{
-    CompactConfig, ConfigError, ModelConfig, ProviderProfile, ProviderType, Settings,
-    ThinkingEffort,
+    CompactConfig, ConfigError, McpServerConfig, McpServerTransportConfig, ModelConfig,
+    ProviderProfile, ProviderType, Settings, ThinkingEffort,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -19,6 +19,9 @@ pub struct UserConfig {
     pub permissions: Option<RawPermissionConfig>,
     /// Optional conversation compaction settings.
     pub compact: Option<CompactConfig>,
+    /// Optional MCP server configurations, keyed by server name.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, McpServerConfig>,
 }
 
 /// 单个供应商配置（用户配置文件中）
@@ -123,6 +126,7 @@ impl UserConfig {
             thinking_effort,
             permissions: self.permissions.clone(),
             compact: self.compact.clone().unwrap_or_default(),
+            mcp_servers: self.mcp_servers.clone(),
         })
     }
 
@@ -250,5 +254,74 @@ gpt-test = {{ name = "GPT Test" }}
         let settings = config.to_settings(None, None, None).unwrap();
 
         assert_eq!(settings.language, None);
+    }
+
+    #[test]
+    fn mcp_servers_reach_runtime_settings() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+gpt-test = { name = "GPT Test" }
+
+[mcp_servers.docs]
+command = "docs-server"
+args = ["--stdio"]
+startup_timeout_sec = 1.5
+enabled_tools = ["search"]
+
+[mcp_servers.remote]
+url = "https://example.test/mcp"
+bearer_token_env_var = "TOKEN_ENV"
+enabled = false
+"#,
+        );
+
+        let settings = config.to_settings(None, None, None).unwrap();
+
+        let docs = settings.mcp_servers.get("docs").unwrap();
+        assert!(docs.enabled);
+        assert_eq!(docs.startup_timeout_sec, Some(1.5));
+        assert_eq!(
+            docs.enabled_tools.as_deref(),
+            Some(&["search".to_string()][..])
+        );
+        assert!(matches!(
+            docs.transport,
+            McpServerTransportConfig::Stdio { .. }
+        ));
+
+        let remote = settings.mcp_servers.get("remote").unwrap();
+        assert!(!remote.enabled);
+        assert!(matches!(
+            remote.transport,
+            McpServerTransportConfig::StreamableHttp { .. }
+        ));
+    }
+
+    #[test]
+    fn mcp_server_rejects_invalid_transport_mix() {
+        let error = toml::from_str::<UserConfig>(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+gpt-test = { name = "GPT Test" }
+
+[mcp_servers.bad]
+command = "docs-server"
+url = "https://example.test/mcp"
+"#,
+        )
+        .expect_err("config should reject command plus url");
+
+        assert!(error.to_string().contains("either command or url"));
     }
 }

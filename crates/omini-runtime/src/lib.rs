@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod engine;
 pub mod frontmatter;
+pub mod mcp;
 pub mod permissions;
 pub mod prompts;
 pub mod runtime;

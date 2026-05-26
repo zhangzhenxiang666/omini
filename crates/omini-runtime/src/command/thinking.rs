@@ -1,7 +1,7 @@
 use crate::command::Command;
 use crate::config::project::ProjectDir;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandEffect, CommandResult, RuntimeToUiEvent};
+use crate::types::events::{CommandEffect, CommandResult, Notification, RuntimeToUiEvent};
 use async_trait::async_trait;
 
 pub struct ThinkingCommand;
@@ -39,9 +39,10 @@ impl Command for ThinkingCommand {
         _draft: &crate::types::display::UserDraft,
     ) -> CommandResult {
         match apply_thinking_display(&runtime.project, args) {
-            Ok(show) => CommandResult::Ok(vec![CommandEffect::emit(
-                RuntimeToUiEvent::ThinkingDisplayChanged { show },
-            )]),
+            Ok(show) => CommandResult::Ok(vec![
+                CommandEffect::emit(RuntimeToUiEvent::ThinkingDisplayChanged { show }),
+                CommandEffect::notification(thinking_display_notification(show)),
+            ]),
             Err(error) => CommandResult::Error(error),
         }
     }
@@ -57,6 +58,16 @@ pub(crate) fn apply_thinking_display(project: &ProjectDir, args: &str) -> Result
         .save_state(&state)
         .map_err(|e| format!("保存项目状态失败: {e}"))?;
     Ok(show)
+}
+
+pub(crate) fn thinking_display_notification(show: bool) -> Notification {
+    let status = if show { "on" } else { "off" };
+    let detail = if show {
+        "已打开思考内容块展示"
+    } else {
+        "已关闭思考内容块展示"
+    };
+    Notification::info(format!("/thinking {status}")).with_details(vec![detail.to_string()])
 }
 
 fn parse_thinking_display(args: &str, current: bool) -> Result<bool, String> {
@@ -126,6 +137,7 @@ mod tests {
             language: None,
             permissions: None,
             compact: None,
+            mcp_servers: HashMap::new(),
         }
     }
 
@@ -169,5 +181,18 @@ mod tests {
 
         assert!(show);
         assert!(project.load_state().unwrap().show_thinking_blocks);
+    }
+
+    #[test]
+    fn notification_describes_final_display_state() {
+        let notification = thinking_display_notification(false);
+
+        assert_eq!(notification.message, "/thinking off");
+        assert_eq!(notification.details, vec!["已关闭思考内容块展示"]);
+
+        let notification = thinking_display_notification(true);
+
+        assert_eq!(notification.message, "/thinking on");
+        assert_eq!(notification.details, vec!["已打开思考内容块展示"]);
     }
 }

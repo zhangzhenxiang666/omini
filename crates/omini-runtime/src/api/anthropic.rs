@@ -439,33 +439,48 @@ fn set_if_missing(current: &mut usize, value: Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::message::{ContentBlock, ToolResultBlock};
+    use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
+    use std::collections::HashMap;
 
     #[test]
     fn messages_with_cache_control_strips_tool_result_metadata() {
         let mut metadata = Map::new();
         metadata.insert("permission_denied".to_string(), serde_json::json!(true));
         let messages = vec![Message::new(
-            Role::User,
-            vec![ContentBlock::ToolResult(ToolResultBlock {
-                tool_use_id: "toolu_1".to_string(),
-                is_error: true,
-                content: "Permission denied for tool: bash".to_string(),
-                metadata: Some(metadata),
-            })],
+            Role::Assistant,
+            vec![
+                ContentBlock::ToolUse(ToolUseBlock {
+                    id: "toolu_1".to_string(),
+                    name: "mcp__docs__search".to_string(),
+                    input: HashMap::new(),
+                }),
+                ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "toolu_1".to_string(),
+                    is_error: true,
+                    content: "Permission denied for tool: bash".to_string(),
+                    metadata: Some(metadata),
+                }),
+            ],
         )];
 
         let value = messages_with_cache_control(&messages).expect("messages serialize");
-        let tool_result = value
+        let content = value
             .as_array()
             .and_then(|messages| messages.first())
             .and_then(|message| message.get("content"))
             .and_then(Value::as_array)
-            .and_then(|content| content.first())
+            .expect("message content");
+        let tool_use = content
+            .first()
+            .and_then(Value::as_object)
+            .expect("tool use object");
+        let tool_result = content
+            .get(1)
             .and_then(Value::as_object)
             .expect("tool result object");
 
         assert!(!tool_result.contains_key("metadata"));
+        assert!(!tool_use.contains_key("metadata"));
         assert!(tool_result.contains_key("cache_control"));
     }
 

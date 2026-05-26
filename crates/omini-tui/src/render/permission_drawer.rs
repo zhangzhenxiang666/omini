@@ -264,6 +264,7 @@ fn permission_drawer_content_height(
         ToolPauseKind::Permission(PermissionPreview::Bash(_))
             | ToolPauseKind::Permission(PermissionPreview::Edit(_))
             | ToolPauseKind::Permission(PermissionPreview::Write(_))
+            | ToolPauseKind::Permission(PermissionPreview::Mcp(_))
     );
     let terminal_cap = ((area_height as f32) * 0.8).floor() as u16;
     let max_height = if is_large_preview {
@@ -408,6 +409,7 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
         ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
         ToolPauseKind::Permission(PermissionPreview::Search(_)) => ("search path", "skip search"),
+        ToolPauseKind::Permission(PermissionPreview::Mcp(_)) => ("call tool", "deny tool"),
         ToolPauseKind::Permission(PermissionPreview::Custom { .. }) => ("allow tool", "deny tool"),
         ToolPauseKind::UserInput(_) => ("提交回答", "取消请求"),
     }
@@ -566,6 +568,11 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
                 note_cursor: None,
             }
         }
+        ToolPauseKind::Permission(PermissionPreview::Mcp(preview)) => DrawerLines {
+            lines: mcp_permission_lines(preview, content_width),
+            note_lines: Vec::new(),
+            note_cursor: None,
+        },
         ToolPauseKind::Permission(_preview) => DrawerLines {
             lines: vec![Line::from("")],
             note_lines: Vec::new(),
@@ -632,6 +639,55 @@ fn build_permission_drawer_lines(input: PermissionDrawerLinesInput<'_>) -> Drawe
     }
     add_permission_source_line(&mut drawer, request);
     drawer
+}
+
+fn mcp_permission_lines(
+    preview: &crate::types::events::McpPermissionPreview,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let label_style = Style::default().fg(Color::Rgb(140, 145, 155));
+    let text_style = Style::default()
+        .fg(Color::Rgb(220, 220, 225))
+        .add_modifier(Modifier::BOLD);
+    let json_style = Style::default().fg(Color::Rgb(165, 172, 182));
+    let mut lines = vec![Line::from("")];
+
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(preview.server_name.clone(), text_style),
+        Span::styled(" / ", Style::default().fg(Color::Rgb(95, 101, 113))),
+        Span::styled(preview.server_tool_name.clone(), text_style),
+    ]));
+
+    let json = serde_json::to_string_pretty(&serde_json::Value::Object(preview.inputs.clone()))
+        .unwrap_or_else(|_| "{}".to_string());
+    if json == "{}" {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("输入 ", label_style),
+            Span::styled("{}", json_style),
+        ]));
+        return lines;
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("输入", label_style),
+    ]));
+
+    let json_width = content_width.saturating_sub(2).max(1);
+    for line in json.lines() {
+        let wrapped = wrap_preserving_display_width(line, json_width);
+        for segment in wrapped {
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(segment, json_style),
+            ]));
+        }
+    }
+    lines
 }
 
 fn set_note_line(
@@ -984,6 +1040,7 @@ fn permission_drawer_title(preview: &PermissionPreview) -> &'static str {
         PermissionPreview::Write(_) => "Write File",
         PermissionPreview::Read(_) => "Read File",
         PermissionPreview::Search(_) => "Search Files",
+        PermissionPreview::Mcp(_) => "MCP Tool",
         PermissionPreview::Custom { .. } => "Tool Permission",
     }
 }
@@ -1037,6 +1094,49 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    #[test]
+    fn mcp_permission_drawer_renders_service_tool_and_inputs() {
+        let mut inputs = serde_json::Map::new();
+        inputs.insert("query".to_string(), serde_json::json!("rust"));
+        let request = ToolPauseRequest {
+            tool_use_id: "tool_1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "mcp__docs__search".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Mcp(
+                crate::types::events::McpPermissionPreview {
+                    server_name: "docs".to_string(),
+                    server_tool_name: "search".to_string(),
+                    registered_tool_name: "mcp__docs__search".to_string(),
+                    inputs,
+                },
+            )),
+        };
+
+        let drawer = build_permission_drawer_lines(PermissionDrawerLinesInput {
+            request: &request,
+            tool_use: None,
+            content_width: 80,
+            project_dir: None,
+            question_index: 0,
+            user_input_selected: 0,
+            current_user_input_note: "",
+            user_input_note_cursor: 0,
+            user_input_note_mode: false,
+        });
+        let lines = drawer.lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|line| line.contains("docs / search")));
+        assert!(!lines.iter().any(|line| line.contains("mcp__docs__search")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\"query\": \"rust\""))
+        );
     }
 
     #[test]

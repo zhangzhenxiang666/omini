@@ -6,8 +6,8 @@ use super::{
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::events::{
-    CommandKind, CommandSummary, CompactTrigger, InteractionRequest, RuntimeToUiEvent,
-    SubagentSnapshot, SubagentStatus,
+    CommandKind, CommandSummary, CompactTrigger, InteractionRequest, Notification,
+    NotificationKind, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus,
 };
 use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
 use std::collections::VecDeque;
@@ -420,21 +420,22 @@ impl UiState {
                     node.status = event.status;
                 }
             }
-            RuntimeToUiEvent::Error(e) => {
-                self.messages.push(UiMessage::Error { text: e });
-                self.fail_running_subagents();
-                if !self.pending_tool_pauses.is_empty() {
-                    self.agent_status = AgentStatus::AwaitingInput;
-                } else if !self.is_run_active() {
-                    self.agent_status = AgentStatus::Idle;
+            RuntimeToUiEvent::Notification(notification) => {
+                match notification.kind {
+                    NotificationKind::Info => {}
+                    NotificationKind::Warn => {
+                        self.finish_manual_compact();
+                    }
+                    NotificationKind::Error => {
+                        self.fail_running_subagents();
+                        if !self.pending_tool_pauses.is_empty() {
+                            self.agent_status = AgentStatus::AwaitingInput;
+                        } else if !self.is_run_active() {
+                            self.agent_status = AgentStatus::Idle;
+                        }
+                    }
                 }
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
-            }
-            RuntimeToUiEvent::Warning(text) => {
-                self.messages.push(UiMessage::Warning { text });
-                self.finish_manual_compact();
+                self.messages.push(UiMessage::Notification(notification));
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -442,12 +443,6 @@ impl UiState {
             // ===== 命令系统事件 =====
             RuntimeToUiEvent::Shutdown => {
                 // TUI 主循环检测到此状态后会 break
-            }
-            RuntimeToUiEvent::CommandNotice(text) => {
-                self.messages.push(UiMessage::Notice { text });
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
             }
             RuntimeToUiEvent::ModelChanged {
                 provider,
@@ -525,13 +520,14 @@ impl UiState {
             }
             RuntimeToUiEvent::CompactSummaryFailed(event) => {
                 self.remove_empty_compact_summary_placeholder();
-                self.messages.push(UiMessage::Warning {
-                    text: compact_summary_failed_text(
-                        event.trigger,
-                        event.agent_label.as_deref(),
-                        &event.message,
-                    ),
-                });
+                self.messages
+                    .push(UiMessage::Notification(Notification::warning(
+                        compact_summary_failed_text(
+                            event.trigger,
+                            event.agent_label.as_deref(),
+                            &event.message,
+                        ),
+                    )));
                 if event.trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
                 }
@@ -586,7 +582,8 @@ impl UiState {
                 if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
                     manager.fail_generation(message);
                 } else {
-                    self.messages.push(UiMessage::Notice { text: message });
+                    self.messages
+                        .push(UiMessage::Notification(Notification::info(message)));
                 }
             }
             // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
@@ -912,7 +909,8 @@ mod tests {
         assert!(state.run_timer.is_none());
         assert!(matches!(
             state.messages.as_slice(),
-            [UiMessage::Warning { .. }]
+            [UiMessage::Notification(notification)]
+                if notification.kind == NotificationKind::Warn
         ));
     }
 
@@ -921,7 +919,7 @@ mod tests {
         let mut state = UiState::new();
         state.begin_manual_compact();
 
-        state.apply_event(RuntimeToUiEvent::Warning(
+        state.apply_event(RuntimeToUiEvent::warning(
             "没有可压缩的会话历史".to_string(),
         ));
 
@@ -930,7 +928,8 @@ mod tests {
         assert!(state.run_timer.is_none());
         assert!(matches!(
             state.messages.as_slice(),
-            [UiMessage::Warning { .. }]
+            [UiMessage::Notification(notification)]
+                if notification.kind == NotificationKind::Warn
         ));
     }
 }

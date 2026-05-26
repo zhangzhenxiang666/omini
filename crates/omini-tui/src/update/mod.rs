@@ -1145,6 +1145,7 @@ fn active_permission_drawer_captures_scroll(state: &UiState) -> bool {
         &request.kind,
         ToolPauseKind::Permission(PermissionPreview::Edit(_))
             | ToolPauseKind::Permission(PermissionPreview::Write(_))
+            | ToolPauseKind::Permission(PermissionPreview::Mcp(_))
     );
     is_large_file_preview
         && state.permission_drawer_body_area.height > 0

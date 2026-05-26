@@ -87,6 +87,159 @@ pub struct Settings {
     pub thinking_effort: Option<ThinkingEffort>,
     pub permissions: Option<RawPermissionConfig>,
     pub compact: CompactConfig,
+    pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct McpServerConfig {
+    #[serde(flatten)]
+    pub transport: McpServerTransportConfig,
+    #[serde(default = "default_mcp_server_enabled")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_timeout_sec: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_tools: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_tools: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum McpServerTransportConfig {
+    Stdio {
+        command: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        args: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env: Option<HashMap<String, String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<PathBuf>,
+    },
+    StreamableHttp {
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bearer_token_env_var: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_headers: Option<HashMap<String, String>>,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcpServerConfig {
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    env: Option<HashMap<String, String>>,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+    url: Option<String>,
+    #[serde(default)]
+    bearer_token_env_var: Option<String>,
+    #[serde(default)]
+    http_headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    startup_timeout_sec: Option<f64>,
+    #[serde(default)]
+    tool_timeout_sec: Option<f64>,
+    #[serde(default)]
+    enabled_tools: Option<Vec<String>>,
+    #[serde(default)]
+    disabled_tools: Option<Vec<String>>,
+}
+
+impl TryFrom<RawMcpServerConfig> for McpServerConfig {
+    type Error = String;
+
+    fn try_from(raw: RawMcpServerConfig) -> Result<Self, Self::Error> {
+        let RawMcpServerConfig {
+            command,
+            args,
+            env,
+            cwd,
+            url,
+            bearer_token_env_var,
+            http_headers,
+            enabled,
+            startup_timeout_sec,
+            tool_timeout_sec,
+            enabled_tools,
+            disabled_tools,
+        } = raw;
+
+        let transport = match (command, url) {
+            (Some(command), None) => {
+                if bearer_token_env_var.is_some() {
+                    return Err(
+                        "bearer_token_env_var is not supported for stdio MCP servers".to_string(),
+                    );
+                }
+                if http_headers.is_some() {
+                    return Err("http_headers is not supported for stdio MCP servers".to_string());
+                }
+                McpServerTransportConfig::Stdio {
+                    command,
+                    args: args.unwrap_or_default(),
+                    env,
+                    cwd,
+                }
+            }
+            (None, Some(url)) => {
+                if args.is_some() {
+                    return Err("args is not supported for streamable HTTP MCP servers".to_string());
+                }
+                if env.is_some() {
+                    return Err("env is not supported for streamable HTTP MCP servers".to_string());
+                }
+                if cwd.is_some() {
+                    return Err("cwd is not supported for streamable HTTP MCP servers".to_string());
+                }
+                McpServerTransportConfig::StreamableHttp {
+                    url,
+                    bearer_token_env_var,
+                    http_headers,
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(
+                    "MCP server config must set either command or url, not both".to_string()
+                );
+            }
+            (None, None) => {
+                return Err("MCP server config must set command or url".to_string());
+            }
+        };
+
+        Ok(Self {
+            transport,
+            enabled: enabled.unwrap_or_else(default_mcp_server_enabled),
+            startup_timeout_sec,
+            tool_timeout_sec,
+            enabled_tools,
+            disabled_tools,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        RawMcpServerConfig::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn default_mcp_server_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

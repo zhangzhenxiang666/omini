@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 mod ask_user;
 mod bash;
 mod file_mutation;
+mod mcp;
 mod read;
 mod search;
 mod skill;
@@ -317,34 +318,38 @@ pub fn render_tool(
         return lines;
     }
 
-    let mut lines = match tool_use.name.as_str() {
-        "bash" => bash::render(tool_use, tool_result, content_width),
-        "search" => search::render(tool_use, tool_result, content_width, project_dir),
-        "read" => read::render(
-            tool_use,
-            tool_result,
-            tool_preview,
-            content_width,
-            project_dir,
-        ),
-        "skill" => skill::render(tool_use, tool_result, content_width),
-        "todo_write" => todo_write::render(tool_use, tool_result, content_width),
-        "edit" => file_mutation::render_edit(
-            tool_use,
-            tool_result,
-            tool_preview,
-            content_width,
-            project_dir,
-        ),
-        "write" => file_mutation::render_write(
-            tool_use,
-            tool_result,
-            tool_preview,
-            content_width,
-            project_dir,
-        ),
-        "ask_user" => ask_user::render(tool_use, tool_result, content_width),
-        _ => Vec::new(),
+    let mut lines = if mcp::is_mcp_tool(tool_use) {
+        mcp::render(tool_use, tool_result, content_width)
+    } else {
+        match tool_use.name.as_str() {
+            "bash" => bash::render(tool_use, tool_result, content_width),
+            "search" => search::render(tool_use, tool_result, content_width, project_dir),
+            "read" => read::render(
+                tool_use,
+                tool_result,
+                tool_preview,
+                content_width,
+                project_dir,
+            ),
+            "skill" => skill::render(tool_use, tool_result, content_width),
+            "todo_write" => todo_write::render(tool_use, tool_result, content_width),
+            "edit" => file_mutation::render_edit(
+                tool_use,
+                tool_result,
+                tool_preview,
+                content_width,
+                project_dir,
+            ),
+            "write" => file_mutation::render_write(
+                tool_use,
+                tool_result,
+                tool_preview,
+                content_width,
+                project_dir,
+            ),
+            "ask_user" => ask_user::render(tool_use, tool_result, content_width),
+            _ => Vec::new(),
+        }
     };
 
     if lines.is_empty() && tool_preview.is_some() {
@@ -374,6 +379,14 @@ fn compact_waiting_tool_lines(
 ) -> Vec<Line<'static>> {
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
     let title_style = tool_title_style(accent, !tool_pause_active);
+    if mcp::is_mcp_tool(tool_use) {
+        return vec![mcp::title_line(
+            tool_use,
+            title_style,
+            content_width,
+            !tool_pause_active,
+        )];
+    }
     let mut spans = vec![Span::raw("· ")];
 
     match tool_use.name.as_str() {
@@ -468,7 +481,7 @@ fn decorate_paused_tool(
     ]));
 }
 
-fn truncate_display_width(s: &str, max_width: usize) -> String {
+pub(crate) fn truncate_display_width(s: &str, max_width: usize) -> String {
     let width = UnicodeWidthStr::width(s);
     if width <= max_width {
         return s.to_string();
@@ -605,6 +618,49 @@ mod tests {
             Some(Color::Rgb(0x42, 0xb3, 0xc2))
         );
         assert_eq!(lines[2].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
+    }
+
+    #[test]
+    fn mcp_tool_renders_service_tool_input_and_text_result() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("query".to_string(), serde_json::json!("rust"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "mcp__docs__search".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: false,
+            content: serde_json::json!({
+                "content": [{"type": "text", "text": "found docs"}]
+            })
+            .to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
+        let rendered: Vec<_> = lines.iter().map(plain).collect();
+
+        assert_eq!(rendered[0], "· MCP docs/search {\"query\":\"rust\"}");
+        assert_eq!(rendered[1], "  └─ found docs");
+    }
+
+    #[test]
+    fn pending_mcp_tool_breathes_across_call_summary() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("query".to_string(), serde_json::json!("rust"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "mcp__docs__search".to_string(),
+            input,
+        };
+
+        let lines = render_tool(&tool_use, None, None, None, 80, None);
+
+        assert_eq!(plain(&lines[0]), "· MCP docs/search {\"query\":\"rust\"}");
+        assert_eq!(lines[0].spans[1].content.as_ref(), "MCP");
+        assert_eq!(lines[0].spans[2].style.fg, Some(Color::Rgb(140, 142, 150)));
     }
 
     #[test]

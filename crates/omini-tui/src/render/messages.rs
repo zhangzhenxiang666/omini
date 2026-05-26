@@ -5,9 +5,11 @@ use super::{
 };
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::display::DisplayMessage;
+use crate::types::events::{Notification, NotificationKind};
 use crate::types::message::ContentBlock;
 use crate::widgets::{
     build_bordered_lines, build_thinking_lines, render_tool, tool_error_display_text,
+    truncate_display_width,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -46,41 +48,64 @@ fn build_display_message_lines(
     lines
 }
 
-enum AlertKind {
-    Notice,
-    Warning,
-    Error,
-}
-
-fn build_alert_lines(text: &str, content_width: usize, kind: AlertKind) -> Vec<Line<'static>> {
-    let (label, color) = match kind {
-        AlertKind::Notice => ("info", Color::Rgb(0x7a, 0xba, 0xff)),
-        AlertKind::Warning => ("warn", Color::Rgb(0xd4, 0xb6, 0x6a)),
-        AlertKind::Error => ("error", Color::Rgb(255, 100, 100)),
+fn build_notification_lines(
+    notification: &Notification,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let color = match notification.kind {
+        NotificationKind::Info => Color::Rgb(0x7a, 0xba, 0xff),
+        NotificationKind::Warn => Color::Rgb(0xd4, 0xb6, 0x6a),
+        NotificationKind::Error => Color::Rgb(255, 100, 100),
     };
-    let prefix = format!("[{label}] ");
-    let wrap_width = content_width
-        .saturating_sub(UnicodeWidthStr::width(prefix.as_str()))
-        .max(1);
-    let wrapped = crate::widgets::word_wrap(text, wrap_width);
     let style = Style::default().fg(color);
-    if wrapped.is_empty() {
-        return vec![Line::from(vec![Span::styled(prefix, style)])];
+    let detail_style = Style::default().fg(Color::Rgb(140, 142, 150));
+    let mut lines = Vec::new();
+
+    let prefix = "· ";
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    if content_width <= prefix_width {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(prefix.trim_end(), content_width),
+            style,
+        )));
+    } else {
+        let wrap_width = content_width.saturating_sub(prefix_width).max(1);
+        let wrapped = crate::widgets::word_wrap(&notification.message, wrap_width);
+        if wrapped.is_empty() {
+            lines.push(Line::from(Span::styled(prefix, style)));
+        } else {
+            let continuation = " ".repeat(prefix_width);
+            for (idx, line) in wrapped.into_iter().enumerate() {
+                let current_prefix = if idx == 0 {
+                    prefix.to_string()
+                } else {
+                    continuation.clone()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(current_prefix, style),
+                    Span::styled(line, style),
+                ]));
+            }
+        }
     }
 
-    let continuation = " ".repeat(UnicodeWidthStr::width(prefix.as_str()));
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(idx, line)| {
-            let prefix = if idx == 0 {
-                prefix.clone()
-            } else {
-                continuation.clone()
-            };
-            Line::from(vec![Span::styled(format!("{prefix}{line}"), style)])
-        })
-        .collect()
+    let mut first_detail = true;
+    for detail in notification
+        .details
+        .iter()
+        .map(|detail| detail.trim())
+        .filter(|detail| !detail.is_empty())
+    {
+        let detail_prefix = if first_detail { "  └─ " } else { "     " };
+        first_detail = false;
+        let detail_width = content_width.saturating_sub(UnicodeWidthStr::width(detail_prefix));
+        lines.push(Line::from(vec![
+            Span::styled(detail_prefix, detail_style),
+            Span::styled(truncate_display_width(detail, detail_width), detail_style),
+        ]));
+    }
+
+    lines
 }
 
 fn build_run_divider_line(elapsed: Duration, content_width: usize) -> Vec<Line<'static>> {
@@ -198,14 +223,8 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
         let UiMessage::Message(message) = ui_message else {
             let block_lines = match ui_message {
-                UiMessage::Notice { text } => {
-                    build_alert_lines(text, content_width, AlertKind::Notice)
-                }
-                UiMessage::Warning { text } => {
-                    build_alert_lines(text, content_width, AlertKind::Warning)
-                }
-                UiMessage::Error { text } => {
-                    build_alert_lines(text, content_width, AlertKind::Error)
+                UiMessage::Notification(notification) => {
+                    build_notification_lines(notification, content_width)
                 }
                 UiMessage::RunDivider { .. } => unreachable!(),
                 UiMessage::Display(_) => unreachable!(),
@@ -590,6 +609,36 @@ mod tests {
 
         assert_eq!(lines.len(), 1);
         assert!(UnicodeWidthStr::width(text.as_str()) <= 4);
+    }
+
+    #[test]
+    fn notification_details_use_single_connector_and_truncate_by_display_width() {
+        let notification = Notification::warning("主消息").with_details(vec![
+            "ok".to_string(),
+            "中文abcdef".to_string(),
+            "   ".to_string(),
+            "done".to_string(),
+        ]);
+
+        let lines = build_notification_lines(&notification, 14);
+        let plain = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(
+            plain,
+            vec!["· 主消息", "  └─ ok", "     中文ab...", "     done"]
+        );
+        assert!(
+            plain
+                .iter()
+                .all(|line| UnicodeWidthStr::width(line.as_str()) <= 14)
+        );
+    }
+
+    #[test]
+    fn notification_kind_sets_main_line_color() {
+        let lines = build_notification_lines(&Notification::error("failed"), 80);
+
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Rgb(255, 100, 100)));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
-    ActiveProfile, CommandSummary, InteractionRequest, SubagentSnapshot, SubagentStatus,
-    SubmittedPlan, ToolPauseRequest,
+    ActiveProfile, CommandSummary, InteractionRequest, Notification, SubagentSnapshot,
+    SubagentStatus, SubmittedPlan, ToolPauseRequest,
 };
 use crate::types::message::Message;
 use ratatui::layout::Rect;
@@ -188,10 +188,8 @@ pub enum UiMessage {
     Display(DisplayMessage),
     ProposedPlan { text: String },
     RunDivider { elapsed: Duration },
-    Notice { text: String },
+    Notification(Notification),
     CompactSummary { text: String },
-    Warning { text: String },
-    Error { text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,10 +238,8 @@ impl UiMessage {
             Self::Display(_)
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
-            | Self::Notice { .. }
-            | Self::CompactSummary { .. }
-            | Self::Warning { .. }
-            | Self::Error { .. } => None,
+            | Self::Notification(_)
+            | Self::CompactSummary { .. } => None,
         }
     }
 
@@ -253,10 +249,8 @@ impl UiMessage {
             Self::Display(_)
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
-            | Self::Notice { .. }
-            | Self::CompactSummary { .. }
-            | Self::Warning { .. }
-            | Self::Error { .. } => None,
+            | Self::Notification(_)
+            | Self::CompactSummary { .. } => None,
         }
     }
 }

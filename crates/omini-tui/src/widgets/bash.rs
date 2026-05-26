@@ -1,9 +1,9 @@
 use crate::types::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
-use super::{tool_error_display_text, tool_title_style, word_wrap};
+use super::{tool_error_display_text, tool_title_style, truncate_display_width, word_wrap};
 
 pub(super) fn render(
     tool_use: &ToolUseBlock,
@@ -155,33 +155,4 @@ fn push_tool_error(
             Span::styled(line, style),
         ]));
     }
-}
-
-fn truncate_display_width(s: &str, max_width: usize) -> String {
-    let width = UnicodeWidthStr::width(s);
-    if width <= max_width {
-        return s.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let ellipsis = "...";
-    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
-    if max_width <= ellipsis_width {
-        return ellipsis.chars().take(max_width).collect();
-    }
-
-    let target = max_width - ellipsis_width;
-    let mut result = String::new();
-    let mut current_width = 0;
-    for ch in s.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + ch_width > target {
-            break;
-        }
-        result.push(ch);
-        current_width += ch_width;
-    }
-    result.push_str(ellipsis);
-    result
 }

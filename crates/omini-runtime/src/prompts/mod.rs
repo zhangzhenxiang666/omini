@@ -121,6 +121,7 @@ mod tests {
             thinking_effort: None,
             permissions: None,
             compact: Default::default(),
+            mcp_servers: HashMap::new(),
         }
     }
 

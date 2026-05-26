@@ -169,6 +169,47 @@ pub enum EngineToRuntimeEvent {
 // 第三层：Runtime → UI 的事件
 // ===========================================================================
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    Info,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub kind: NotificationKind,
+    pub message: String,
+    pub details: Vec<String>,
+}
+
+impl Notification {
+    pub fn new(kind: NotificationKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+            details: Vec::new(),
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(NotificationKind::Info, message)
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(NotificationKind::Warn, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(NotificationKind::Error, message)
+    }
+
+    pub fn with_details(mut self, details: Vec<String>) -> Self {
+        self.details = details;
+        self
+    }
+}
+
 /// Runtime → UI 的事件。
 #[derive(Debug)]
 pub enum RuntimeToUiEvent {
@@ -182,10 +223,8 @@ pub enum RuntimeToUiEvent {
     /// 请求关闭整个程序
     Shutdown,
 
-    /// 命令产生的提示信息（显示在消息区，但不作为对话消息）
-    CommandNotice(String),
-    /// 运行时产生的警告信息（显示在消息区，但不作为对话消息）
-    Warning(String),
+    /// 运行时产生的通知信息（显示在消息区，但不作为对话消息）
+    Notification(Notification),
 
     /// 模型已切换（TUI 更新状态栏用）
     ModelChanged {
@@ -274,9 +313,20 @@ pub enum RuntimeToUiEvent {
     SubagentToolResult(SubagentToolResultEvent),
     /// 子 agent 运行结束。
     SubagentFinished(SubagentFinishedEvent),
+}
 
-    /// 运行时出错
-    Error(String),
+impl RuntimeToUiEvent {
+    pub fn notice(message: impl Into<String>) -> Self {
+        Self::Notification(Notification::info(message))
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::Notification(Notification::warning(message))
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::Notification(Notification::error(message))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -498,8 +548,8 @@ pub enum CommandResult {
 /// 命令执行后需要 runtime 统一应用的语义化效果。
 #[derive(Debug)]
 pub enum CommandEffect {
-    /// 无状态提示信息，仅用于 UI 展示。
-    Notice(String),
+    /// 无状态通知信息，仅用于 UI 展示。
+    Notification(Notification),
     /// 请求 UI 打开一个交互面板。
     ShowInteraction(InteractionRequest),
     /// 注入一条用户消息并立即启动 query。
@@ -516,6 +566,14 @@ pub enum CommandEffect {
 }
 
 impl CommandEffect {
+    pub fn notification(notification: Notification) -> Self {
+        Self::Notification(notification)
+    }
+
+    pub fn notice(message: impl Into<String>) -> Self {
+        Self::Notification(Notification::info(message))
+    }
+
     pub fn emit(event: RuntimeToUiEvent) -> Self {
         Self::Emit(Box::new(event))
     }
@@ -588,6 +646,7 @@ pub enum PermissionPreview {
     Write(EditPermissionPreview),
     Read(ReadPermissionPreview),
     Search(SearchPermissionPreview),
+    Mcp(McpPermissionPreview),
     Custom {
         tool_name: String,
         payload: serde_json::Map<String, Value>,
@@ -612,6 +671,14 @@ pub struct SearchPermissionPreview {
     pub query: String,
     pub mode: String,
     pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpPermissionPreview {
+    pub server_name: String,
+    pub server_tool_name: String,
+    pub registered_tool_name: String,
+    pub inputs: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

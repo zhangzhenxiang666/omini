@@ -5,6 +5,7 @@ use crate::config::project::SessionDir;
 use crate::config::project::sanitize;
 use crate::db;
 use crate::engine::{QueryContext, QueryEngine, ToolPauseResolver};
+use crate::mcp::McpManager;
 use crate::permissions::PermissionEngine;
 use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
@@ -124,6 +125,10 @@ pub struct AgentRuntime {
     query_engine: QueryEngine,
     /// 工具注册表（持有所有注册的工具）
     tool_registry: Arc<ToolRegistry>,
+    /// MCP service manager loaded from user config.
+    mcp_manager: Arc<McpManager>,
+    /// Whether this runtime has waited for MCP startup before a query.
+    mcp_initialized: bool,
     /// Runtime-side subagent lifecycle service.
     subagent_runner: Arc<RuntimeSubagentRunner>,
     /// Runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
@@ -151,6 +156,7 @@ impl AgentRuntime {
             settings.base_url.clone(),
         );
         let tool_registry = Arc::new(crate::tools::create_main_registry());
+        let mcp_manager = Arc::new(McpManager::from_settings(&settings));
         let subagent_runner = Arc::new(RuntimeSubagentRunner);
         let capabilities = CapabilityStore::load(&settings);
         let subagent_registry = capabilities.subagent_registry();
@@ -176,19 +182,19 @@ impl AgentRuntime {
         let _ = event_tx.try_send(RuntimeToUiEvent::CommandList(command_registry.summaries()));
         let _ = event_tx.try_send(RuntimeToUiEvent::AgentList(subagent_registry.summaries()));
         for diagnostic in &subagent_registry.diagnostics {
-            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
                 "Subagent: {}",
                 diagnostic.message()
             )));
         }
         for diagnostic in &skill_registry.diagnostics {
-            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
                 "Skill: {}",
                 diagnostic.message()
             )));
         }
         for diagnostic in permission_engine.diagnostics() {
-            let _ = event_tx.try_send(RuntimeToUiEvent::Warning(format!(
+            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
                 "Permission: {diagnostic}"
             )));
         }
@@ -204,6 +210,8 @@ impl AgentRuntime {
             cancelled: Arc::new(AtomicBool::new(false)),
             llm_client,
             tool_registry,
+            mcp_manager,
+            mcp_initialized: false,
             subagent_runner,
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
@@ -216,6 +224,7 @@ impl AgentRuntime {
     /// 启动运行时，返回 JoinHandle。
     pub fn run(mut self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            self.start_mcp_initialization();
             loop {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
@@ -224,7 +233,7 @@ impl AgentRuntime {
                                 let submission = match draft.into_submission() {
                                     Ok(submission) => submission,
                                     Err(error) => {
-                                        self.send_event(RuntimeToUiEvent::Error(error)).await;
+                                        self.send_event(RuntimeToUiEvent::error(error)).await;
                                         continue;
                                     }
                                 };
@@ -245,7 +254,7 @@ impl AgentRuntime {
                             }
                             UiToRuntimeEvent::InterveneMessage(draft) => {
                                 let _ = draft;
-                                self.send_event(RuntimeToUiEvent::Error(
+                                self.send_event(RuntimeToUiEvent::error(
                                     "Cannot intervene because no run is active".to_string(),
                                 ))
                                 .await;
@@ -286,7 +295,7 @@ impl AgentRuntime {
                                 }
                             }
                             UiToRuntimeEvent::ResolveToolPause { .. } => {
-                                self.send_event(RuntimeToUiEvent::Error(
+                                self.send_event(RuntimeToUiEvent::error(
                                     "Cannot resolve tool pause because no run is active".to_string(),
                                 ))
                                 .await;
@@ -318,11 +327,11 @@ impl AgentRuntime {
                     }
                 }
                 CommandResult::Error(e) => {
-                    self.send_event(RuntimeToUiEvent::Error(e)).await;
+                    self.send_event(RuntimeToUiEvent::error(e)).await;
                 }
             }
         } else {
-            self.send_event(RuntimeToUiEvent::CommandNotice(format!(
+            self.send_event(RuntimeToUiEvent::notice(format!(
                 "未知命令: /{}. 输入 /help 查看可用命令。",
                 parsed.name
             )))
@@ -332,8 +341,9 @@ impl AgentRuntime {
 
     async fn apply_command_effect(&mut self, effect: CommandEffect) {
         match effect {
-            CommandEffect::Notice(text) => {
-                self.send_event(RuntimeToUiEvent::CommandNotice(text)).await;
+            CommandEffect::Notification(notification) => {
+                self.send_event(RuntimeToUiEvent::Notification(notification))
+                    .await;
             }
             CommandEffect::ShowInteraction(req) => {
                 self.pending_interaction = match &req {
@@ -408,7 +418,7 @@ impl AgentRuntime {
         let db_session = match db::global_db().get_session(session_id).await {
             Ok(Some(s)) => s,
             _ => {
-                self.send_event(RuntimeToUiEvent::Error("会话不存在".to_string()))
+                self.send_event(RuntimeToUiEvent::error("会话不存在".to_string()))
                     .await;
                 return;
             }
@@ -449,7 +459,7 @@ impl AgentRuntime {
         let runtime_messages = match session_dir.load_history() {
             Ok(messages) => messages,
             Err(e) => {
-                self.send_event(RuntimeToUiEvent::Warning(format!(
+                self.send_event(RuntimeToUiEvent::warning(format!(
                     "加载 JSONL 历史失败，已降级使用数据库消息: {e}"
                 )))
                 .await;
@@ -502,7 +512,7 @@ impl AgentRuntime {
         draft: &crate::subagents::AgentDraft,
     ) {
         if crate::subagents::agent_name_exists(&self.settings.cwd, &draft.name, original_path) {
-            self.send_event(RuntimeToUiEvent::Error(format!(
+            self.send_event(RuntimeToUiEvent::error(format!(
                 "agent '{}' 已存在",
                 draft.name
             )))
@@ -517,13 +527,13 @@ impl AgentRuntime {
                     let _ = crate::subagents::delete_agent_file(path);
                 }
                 self.refresh_agents_after_change().await;
-                self.send_event(RuntimeToUiEvent::CommandNotice(format!(
+                self.send_event(RuntimeToUiEvent::notice(format!(
                     "agent '{}' 已保存",
                     draft.name
                 )))
                 .await;
             }
-            Err(e) => self.send_event(RuntimeToUiEvent::Error(e)).await,
+            Err(e) => self.send_event(RuntimeToUiEvent::error(e)).await,
         }
     }
 
@@ -531,10 +541,10 @@ impl AgentRuntime {
         match crate::subagents::delete_agent_file(path) {
             Ok(()) => {
                 self.refresh_agents_after_change().await;
-                self.send_event(RuntimeToUiEvent::CommandNotice("agent 已删除".to_string()))
+                self.send_event(RuntimeToUiEvent::notice("agent 已删除".to_string()))
                     .await;
             }
-            Err(e) => self.send_event(RuntimeToUiEvent::Error(e)).await,
+            Err(e) => self.send_event(RuntimeToUiEvent::error(e)).await,
         }
     }
 
@@ -655,7 +665,7 @@ impl AgentRuntime {
                 }
             }
         });
-        let tool_definitions = self.tool_registry.definitions();
+        let tool_definitions = self.tool_registry_snapshot().definitions();
         let result = compact::force_compact(
             &mut self.messages,
             &self.settings,
@@ -733,7 +743,7 @@ impl AgentRuntime {
                 let plan_content = match std::fs::read_to_string(&path) {
                     Ok(content) => content,
                     Err(e) => {
-                        self.send_event(RuntimeToUiEvent::Error(format!(
+                        self.send_event(RuntimeToUiEvent::error(format!(
                             "无法压缩规划上下文，读取计划失败 {}: {e}",
                             path.display()
                         )))
@@ -805,6 +815,8 @@ impl AgentRuntime {
         .await;
 
         self.send_event(RuntimeToUiEvent::RunStarted).await;
+        self.ensure_mcp_initialized().await;
+        let tool_registry = self.tool_registry_snapshot();
 
         // 创建 engine → runtime 的内部通信通道
         let (engine_tx, engine_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
@@ -832,7 +844,7 @@ impl AgentRuntime {
                 messages: &mut self.messages,
                 settings: Arc::clone(&run_settings),
                 llm_client: self.llm_client.clone(),
-                tool_registry: Arc::clone(&self.tool_registry),
+                tool_registry: Arc::clone(&tool_registry),
                 active_profile,
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
                     session_id: self
@@ -875,14 +887,14 @@ impl AgentRuntime {
                                     .query_engine
                                     .resolve_tool_pause(&tool_use_id, response)
                                 {
-                                    let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
+                                    let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
                                 }
                             }
                             UiToRuntimeEvent::InterveneMessage(draft) => {
                                 let submission = match draft.into_submission() {
                                     Ok(submission) => submission,
                                     Err(error) => {
-                                        let _ = event_tx.send(RuntimeToUiEvent::Error(error)).await;
+                                        let _ = event_tx.send(RuntimeToUiEvent::error(error)).await;
                                         continue;
                                     }
                                 };
@@ -892,7 +904,7 @@ impl AgentRuntime {
                             UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 let _ = (plan_id, action);
                                 let _ = event_tx
-                                    .send(RuntimeToUiEvent::Error(
+                                    .send(RuntimeToUiEvent::error(
                                         "Cannot resolve plan approval while a run is active".to_string(),
                                     ))
                                     .await;
@@ -968,9 +980,40 @@ impl AgentRuntime {
             }
             Ok(None) => {}
             Err(error) => {
-                self.send_event(RuntimeToUiEvent::Error(error)).await;
+                self.send_event(RuntimeToUiEvent::error(error)).await;
             }
         }
+    }
+
+    async fn ensure_mcp_initialized(&mut self) {
+        if self.mcp_initialized {
+            return;
+        }
+        self.mcp_initialized = true;
+
+        if !self.mcp_manager.is_empty() {
+            let _ = self.mcp_manager.initialize().await;
+        }
+    }
+
+    fn tool_registry_snapshot(&self) -> Arc<ToolRegistry> {
+        let mut registry = self.tool_registry.as_ref().clone();
+        self.mcp_manager.register_available_tools(&mut registry);
+        Arc::new(registry)
+    }
+
+    fn start_mcp_initialization(&self) {
+        if self.mcp_manager.is_empty() {
+            return;
+        }
+
+        let manager = Arc::clone(&self.mcp_manager);
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            for warning in manager.initialize().await {
+                let _ = event_tx.send(RuntimeToUiEvent::warning(warning)).await;
+            }
+        });
     }
 
     /// 启动事件处理器
@@ -1038,7 +1081,7 @@ impl AgentRuntime {
                                     note: None,
                                 },
                             ) {
-                                let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
+                                let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
                             }
                             continue;
                         }
@@ -1145,10 +1188,10 @@ impl AgentRuntime {
                             .await;
                     }
                     EngineToRuntimeEvent::Error(e) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::Error(e)).await;
+                        let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
                     }
                     EngineToRuntimeEvent::Warning(warning) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::Warning(warning)).await;
+                        let _ = event_tx.send(RuntimeToUiEvent::warning(warning)).await;
                     }
                 }
             }
@@ -1289,7 +1332,7 @@ mod tests {
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
     use crate::db::Database;
     use crate::types::config::{ProviderType, Settings};
-    use crate::types::events::PlanExecutionProfile;
+    use crate::types::events::{NotificationKind, PlanExecutionProfile};
     use crate::types::message::{ContentBlock, Role};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1353,6 +1396,7 @@ mod tests {
             language: None,
             permissions: None,
             compact: None,
+            mcp_servers: HashMap::new(),
         }
     }
 
@@ -1628,6 +1672,15 @@ mod tests {
                 RuntimeToUiEvent::ThinkingDisplayChanged { show: false }
             )
         }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::Notification(notification)
+                    if notification.kind == NotificationKind::Info
+                        && notification.message == "/thinking off"
+                        && notification.details == ["已关闭思考内容块展示"]
+            )
+        }));
         assert!(!runtime.project.load_state().unwrap().show_thinking_blocks);
 
         active_run::handle_command(
@@ -1678,8 +1731,9 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                RuntimeToUiEvent::Error(message)
-                    if message == "Cannot handle this request while a run is active"
+                RuntimeToUiEvent::Notification(notification)
+                    if notification.kind == NotificationKind::Error
+                        && notification.message == "Cannot handle this request while a run is active"
             )
         }));
     }

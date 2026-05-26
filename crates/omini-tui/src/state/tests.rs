@@ -236,7 +236,7 @@ fn runtime_error_fails_running_subagent_state() {
     let mut state = UiState::new();
     start_subagent(&mut state);
 
-    state.apply_event(RuntimeToUiEvent::Error(
+    state.apply_event(RuntimeToUiEvent::error(
         "Stream error: Stream ended unexpectedly".to_string(),
     ));
 

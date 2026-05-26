@@ -346,7 +346,7 @@ pub trait Tool: Send + Sync + 'static {
     ) -> ToolResult;
 }
 
-fn sanitize_tool_schema(value: &mut Value) {
+pub(crate) fn sanitize_tool_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
             map.remove("$schema");
@@ -541,7 +541,11 @@ impl ToolRegistry {
     /// 返回所有已注册工具的 `ToolDefinition` 列表（供 LLM API 注册使用）
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         let mut definitions: Vec<_> = self.tools.values().map(|t| t.definition()).collect();
-        definitions.sort_by_key(|definition| tool_definition_priority(&definition.name));
+        definitions.sort_by(|left, right| {
+            tool_definition_priority(&left.name)
+                .cmp(&tool_definition_priority(&right.name))
+                .then_with(|| left.name.cmp(&right.name))
+        });
         definitions
     }
 

@@ -1,6 +1,6 @@
 use crate::command::Command;
 use crate::runtime::AgentRuntime;
-use crate::types::events::{CommandEffect, CommandResult};
+use crate::types::events::{CommandEffect, CommandResult, Notification};
 use async_trait::async_trait;
 
 pub struct CompactCommand;
@@ -43,9 +43,9 @@ impl Command for CompactCommand {
             .await
         {
             Ok(()) => CommandResult::Ok(Vec::new()),
-            Err(error) => CommandResult::Ok(vec![CommandEffect::Emit(Box::new(
-                omini_types::events::RuntimeToUiEvent::Warning(error),
-            ))]),
+            Err(error) => CommandResult::Ok(vec![CommandEffect::notification(
+                Notification::warning(error),
+            )]),
         }
     }
 }

@@ -43,9 +43,14 @@ pub(super) async fn handle_command(
                 let _ = event_tx
                     .send(RuntimeToUiEvent::ThinkingDisplayChanged { show })
                     .await;
+                let _ = event_tx
+                    .send(RuntimeToUiEvent::Notification(
+                        command::thinking::thinking_display_notification(show),
+                    ))
+                    .await;
             }
             Err(error) => {
-                let _ = event_tx.send(RuntimeToUiEvent::Error(error)).await;
+                let _ = event_tx.send(RuntimeToUiEvent::error(error)).await;
             }
         },
         "help" | "?" => {
@@ -81,7 +86,7 @@ pub(super) async fn toggle_active_profile(
 
 pub(super) async fn reject_request(event_tx: &mpsc::Sender<RuntimeToUiEvent>) {
     let _ = event_tx
-        .send(RuntimeToUiEvent::Error(
+        .send(RuntimeToUiEvent::error(
             "Cannot handle this request while a run is active".to_string(),
         ))
         .await;
@@ -177,7 +182,7 @@ pub(super) async fn apply_model_selection(
         send_usage_snapshot(event_tx, session_id, settings).await;
     } else {
         let _ = event_tx
-            .send(RuntimeToUiEvent::Error(format!(
+            .send(RuntimeToUiEvent::error(format!(
                 "提供商 '{provider}' 不存在"
             )))
             .await;
@@ -194,7 +199,7 @@ async fn apply_effort_selection(
     let mut parts = args.split_whitespace();
     let Some(value) = parts.next() else {
         let _ = event_tx
-            .send(RuntimeToUiEvent::Error(
+            .send(RuntimeToUiEvent::error(
                 "请提供思考程度，用法: /effort none | low | medium | high".to_string(),
             ))
             .await;
@@ -202,7 +207,7 @@ async fn apply_effort_selection(
     };
     if parts.next().is_some() {
         let _ = event_tx
-            .send(RuntimeToUiEvent::Error(
+            .send(RuntimeToUiEvent::error(
                 "参数过多，用法: /effort none | low | medium | high".to_string(),
             ))
             .await;
@@ -213,7 +218,7 @@ async fn apply_effort_selection(
         Ok(effort) => effort,
         Err(()) => {
             let _ = event_tx
-                .send(RuntimeToUiEvent::Error(format!(
+                .send(RuntimeToUiEvent::error(format!(
                     "无效的思考程度 '{value}'，可用值: none | low | medium | high"
                 )))
                 .await;
@@ -233,7 +238,7 @@ async fn apply_effort_selection(
             .is_some_and(|model| model.thinking);
         if !supports_thinking {
             let _ = event_tx
-                .send(RuntimeToUiEvent::Error(format!(
+                .send(RuntimeToUiEvent::error(format!(
                     "当前模型 '{}' 不支持思考模式",
                     settings.model
                 )))
@@ -249,7 +254,7 @@ async fn apply_effort_selection(
             .await
         {
             let _ = event_tx
-                .send(RuntimeToUiEvent::Error(format!("更新思考程度失败: {e}")))
+                .send(RuntimeToUiEvent::error(format!("更新思考程度失败: {e}")))
                 .await;
             return;
         }
@@ -258,7 +263,7 @@ async fn apply_effort_selection(
             Ok(state) => state,
             Err(e) => {
                 let _ = event_tx
-                    .send(RuntimeToUiEvent::Error(format!("读取项目状态失败: {e}")))
+                    .send(RuntimeToUiEvent::error(format!("读取项目状态失败: {e}")))
                     .await;
                 return;
             }
@@ -266,7 +271,7 @@ async fn apply_effort_selection(
         state.thinking_effort = Some(effort);
         if let Err(e) = project.save_state(&state) {
             let _ = event_tx
-                .send(RuntimeToUiEvent::Error(format!("保存项目状态失败: {e}")))
+                .send(RuntimeToUiEvent::error(format!("保存项目状态失败: {e}")))
                 .await;
             return;
         }
