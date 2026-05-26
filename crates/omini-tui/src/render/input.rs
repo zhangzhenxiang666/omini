@@ -49,12 +49,15 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
 
     let prefix_style = Style::default().fg(Color::Rgb(0xab, 0xab, 0xab));
     let cmd_color = Style::default().fg(Color::Rgb(0x42, 0xd9, 0xe8));
-    let placeholder_style = Style::default().fg(Color::DarkGray);
+    let placeholder_style = Style::default()
+        .fg(Color::Rgb(0x82, 0x87, 0x91))
+        .bg(Color::Rgb(65, 69, 76))
+        .add_modifier(Modifier::DIM);
 
     let mut lines = if state.input.is_empty() {
         vec![Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
-            Span::styled("输入消息...", placeholder_style),
+            Span::styled(state.input_placeholder.clone(), placeholder_style),
         ])]
     } else {
         input_lines(state, prefix_style, cmd_color)

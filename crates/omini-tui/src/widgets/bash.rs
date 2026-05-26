@@ -48,7 +48,7 @@ pub(super) fn render(
         title.extend(bash_highlight::truncated_command_spans(
             cmd,
             cmd_width,
-            Style::default(),
+            Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
         ));
         title.push(Span::raw(")"));
     } else {

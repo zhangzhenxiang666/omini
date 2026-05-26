@@ -167,7 +167,7 @@ fn render_activity(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     let bright = Color::Rgb(0xa6, 0xaf, 0xb9);
     let dim = Color::Rgb(0x5a, 0x62, 0x6f);
     let label = match state.agent_status {
-        AgentStatus::Thinking => "Thinking",
+        AgentStatus::Thinking => state.activity_status_title.as_deref().unwrap_or("Thinking"),
         AgentStatus::Working => "Working",
         AgentStatus::AwaitingInput => "Waiting for you",
         AgentStatus::Idle => return,

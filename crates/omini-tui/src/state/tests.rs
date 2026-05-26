@@ -164,6 +164,16 @@ fn run_finished_appends_elapsed_divider_and_clears_timer() {
 }
 
 #[test]
+fn run_finished_refreshes_input_placeholder() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    assert!(INPUT_PLACEHOLDERS.contains(&state.input_placeholder.as_str()));
+}
+
+#[test]
 fn run_started_removes_previous_elapsed_divider() {
     let mut state = UiState::new();
     state.messages.push(UiMessage::RunDivider {

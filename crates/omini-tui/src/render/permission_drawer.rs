@@ -771,10 +771,8 @@ fn add_permission_source_line(drawer: &mut DrawerLines, request: &ToolPauseReque
 }
 
 fn bash_permission_command_lines(command: &str, content_width: usize) -> Vec<Line<'static>> {
-    let prompt_style = Style::default()
-        .fg(Color::Rgb(0x50, 0xc8, 0x78))
-        .add_modifier(Modifier::BOLD);
-    let command_style = Style::default().fg(Color::Rgb(220, 220, 225));
+    let prompt_style = Style::default().fg(crate::widgets::bash_highlight::PROMPT_FG);
+    let command_style = Style::default().fg(crate::widgets::bash_highlight::COMMAND_TEXT_FG);
     let prefix = "  ";
     let prompt = "$ ";
     let continuation = "    ";
@@ -1089,6 +1087,12 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect()
+    }
+
+    fn has_exact_fg(line: &Line<'_>, text: &str, color: Color) -> bool {
+        line.spans
+            .iter()
+            .any(|span| span.content.as_ref() == text && span.style.fg == Some(color))
     }
 
     #[test]
@@ -1408,7 +1412,7 @@ mod tests {
     }
 
     #[test]
-    fn bash_permission_highlights_string_tokens_but_not_command_name() {
+    fn bash_permission_uses_codex_command_palette() {
         let command = "cargo test -p omini-tui 'quoted value'";
         let lines = bash_permission_command_lines(command, 80);
         let first = &lines[0];
@@ -1417,20 +1421,20 @@ mod tests {
             line_text(first),
             "  $ cargo test -p omini-tui 'quoted value'"
         );
-        assert!(
-            first
-                .spans
-                .iter()
-                .any(|span| span.content.as_ref() == "cargo"
-                    && span.style.fg == Some(Color::Rgb(220, 220, 225)))
-        );
-        assert!(
-            first
-                .spans
-                .iter()
-                .any(|span| span.content.as_ref() == "'quoted value'"
-                    && span.style.fg == Some(Color::Rgb(0xab, 0xdf, 0xa7)))
-        );
+        assert!(has_exact_fg(first, "$ ", Color::Rgb(0x8f, 0xa1, 0xb7)));
+        assert!(has_exact_fg(first, "cargo", Color::Rgb(0x89, 0xb4, 0xfa)));
+        assert!(has_exact_fg(first, "test", Color::Rgb(0xcd, 0xd6, 0xf4)));
+        assert!(has_exact_fg(first, "-p", Color::Rgb(0xeb, 0xa0, 0xaa)));
+        assert!(has_exact_fg(
+            first,
+            "omini-tui",
+            Color::Rgb(0xcd, 0xd6, 0xf4)
+        ));
+        assert!(has_exact_fg(
+            first,
+            "'quoted value'",
+            Color::Rgb(0xa5, 0xe3, 0xa1)
+        ));
     }
 }
 

@@ -2,7 +2,11 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Span;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-const STRING_FG: Color = Color::Rgb(0xab, 0xdf, 0xa7);
+pub(crate) const COMMAND_TEXT_FG: Color = Color::Rgb(0xcd, 0xd6, 0xf4);
+pub(crate) const PROMPT_FG: Color = Color::Rgb(0x8f, 0xa1, 0xb7);
+const MAIN_COMMAND_FG: Color = Color::Rgb(0x89, 0xb4, 0xfa);
+const FLAG_FG: Color = Color::Rgb(0xeb, 0xa0, 0xaa);
+const STRING_FG: Color = Color::Rgb(0xa5, 0xe3, 0xa1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
@@ -40,12 +44,29 @@ pub(crate) fn wrapped_command_spans(
 
 fn style_tokens(command: &str, base_style: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
+    let mut expect_command = true;
 
     for token in tokenize(command) {
         let style = match token.kind {
             TokenKind::String => base_style.fg(STRING_FG),
-            TokenKind::Whitespace | TokenKind::Word | TokenKind::Operator => base_style,
+            TokenKind::Whitespace => base_style,
+            TokenKind::Operator => base_style,
+            TokenKind::Word if is_flag(token.text) => {
+                expect_command = false;
+                base_style.fg(FLAG_FG)
+            }
+            TokenKind::Word if expect_command && is_assignment_word(token.text) => base_style,
+            TokenKind::Word if expect_command => {
+                expect_command = false;
+                base_style.fg(MAIN_COMMAND_FG)
+            }
+            TokenKind::Word => base_style,
         };
+        if (token.kind == TokenKind::Operator && starts_command_segment(token.text))
+            || (token.kind == TokenKind::Whitespace && token.text.contains('\n'))
+        {
+            expect_command = true;
+        }
         spans.push(Span::styled(token.text.to_string(), style));
     }
 
@@ -153,6 +174,28 @@ fn is_operator_char(ch: char) -> bool {
     matches!(ch, '|' | '&' | ';' | '<' | '>')
 }
 
+fn starts_command_segment(operator: &str) -> bool {
+    matches!(operator, "|" | "||" | "&&" | ";")
+}
+
+fn is_flag(word: &str) -> bool {
+    word.starts_with('-') && word.len() > 1
+}
+
+fn is_assignment_word(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+}
+
 fn truncate_spans(
     spans: Vec<Span<'static>>,
     max_width: usize,
@@ -258,33 +301,27 @@ mod tests {
             .collect::<String>()
     }
 
+    fn has_exact_fg(spans: &[Span<'_>], text: &str, color: Color) -> bool {
+        spans
+            .iter()
+            .any(|span| span.content.as_ref() == text && span.style.fg == Some(color))
+    }
+
     #[test]
     fn highlights_command_parts_without_changing_text() {
         let command = "FOO=bar cargo test -p omini-tui 'quoted value' | rg src/main.rs";
-        let spans = command_spans(command, Style::default());
+        let spans = command_spans(command, Style::default().fg(COMMAND_TEXT_FG));
 
         assert_eq!(plain(&spans), command);
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.as_ref() == "'quoted value'"
-                    && span.style.fg == Some(STRING_FG))
-        );
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.as_ref() == "cargo" && span.style.fg.is_none())
-        );
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.as_ref() == "-p" && span.style.fg.is_none())
-        );
-        assert!(
-            spans
-                .iter()
-                .any(|span| span.content.as_ref() == "|" && span.style.fg.is_none())
-        );
+        assert!(has_exact_fg(&spans, "FOO=bar", COMMAND_TEXT_FG));
+        assert!(has_exact_fg(&spans, "cargo", MAIN_COMMAND_FG));
+        assert!(has_exact_fg(&spans, "test", COMMAND_TEXT_FG));
+        assert!(has_exact_fg(&spans, "-p", FLAG_FG));
+        assert!(has_exact_fg(&spans, "omini-tui", COMMAND_TEXT_FG));
+        assert!(has_exact_fg(&spans, "'quoted value'", STRING_FG));
+        assert!(has_exact_fg(&spans, "|", COMMAND_TEXT_FG));
+        assert!(has_exact_fg(&spans, "rg", MAIN_COMMAND_FG));
+        assert!(has_exact_fg(&spans, "src/main.rs", COMMAND_TEXT_FG));
     }
 
     #[test]

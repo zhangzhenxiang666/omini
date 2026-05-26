@@ -5,6 +5,7 @@ use crate::types::events::{
     SubagentStatus, SubmittedPlan, ToolPauseRequest,
 };
 use crate::types::message::Message;
+use rand::Rng;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -30,6 +31,20 @@ pub const PASTE_MARKER_THRESHOLD_CHARS: usize = 512;
 pub const PASTE_MARKER_THRESHOLD_NEWLINES: usize = 2;
 pub const MAX_INPUT_VISIBLE_LINES: usize = 3;
 const DEFAULT_INPUT_WRAP_WIDTH: usize = 80;
+const INPUT_PLACEHOLDERS: &[&str] = &[
+    "用 /init 生成 AGENTS.md, 先让 omini 认识这个项目",
+    "接手陌生项目？让 omini 先画一张结构地图",
+    "总结当前改动：做了什么、风险在哪、还缺什么测试",
+    "读取 @文件，解释它在整个项目里的职责",
+    "读取 @目录，帮我梳理核心模块和调用链",
+    "为 @文件 补一组最小但有效的测试",
+    "让 @subagent 先调研这个问题，再给我结论",
+    "结合 @文件 和 @目录，找出最可能出错的位置",
+    "先用 /plan 讨论方案，别急着动代码",
+    "用 /agents 创建一个适合当前任务的 subagent",
+    "上下文太长了？用 /compact 留下决策和关键线索",
+    "用 /help 查看命令、技能和输入技巧",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InputPasteMarker {
@@ -350,6 +365,7 @@ pub struct UiState {
     pub input_mentions: Vec<InputMention>,
     pub input_images: Vec<InputImageAttachment>,
     pub input_paste_markers: Vec<InputPasteMarker>,
+    pub input_placeholder: String,
     pub input_scroll_line: usize,
     pub input_wrap_width: usize,
     /// 当前 query 运行期间由普通 Enter 暂存在 UI 侧的用户输入。
@@ -359,6 +375,8 @@ pub struct UiState {
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
+    /// 当前运行状态行优先展示的动态标题，通常从 thinking 内容的首个 Markdown 粗体标题提取。
+    pub activity_status_title: Option<String>,
     /// 手动 /compact 命令是否正在执行。compact 不走普通 query 生命周期。
     pub manual_compact_running: bool,
     /// 当前 query 的有效运行计时器；等待用户授权/回答时暂停。
@@ -452,12 +470,14 @@ impl UiState {
             input_mentions: Vec::new(),
             input_images: Vec::new(),
             input_paste_markers: Vec::new(),
+            input_placeholder: pick_input_placeholder(),
             input_scroll_line: 0,
             input_wrap_width: DEFAULT_INPUT_WRAP_WIDTH,
             queued_user_inputs: VecDeque::new(),
             pending_intervention_inputs: VecDeque::new(),
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
+            activity_status_title: None,
             manual_compact_running: false,
             run_timer: None,
             scroll_offset: 0,
@@ -493,6 +513,10 @@ impl UiState {
             plan_approval_selected: 0,
             plan_approval_auto: false,
         }
+    }
+
+    fn refresh_input_placeholder(&mut self) {
+        self.input_placeholder = pick_input_placeholder();
     }
 
     pub fn active_tool_pause(&self) -> Option<&ToolPauseRequest> {
@@ -628,6 +652,12 @@ impl UiState {
             text,
         });
     }
+}
+
+fn pick_input_placeholder() -> String {
+    let mut rng = rand::rng();
+    let idx = rng.random_range(0..INPUT_PLACEHOLDERS.len());
+    INPUT_PLACEHOLDERS[idx].to_string()
 }
 
 #[cfg(test)]

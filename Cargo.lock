@@ -1650,6 +1650,7 @@ dependencies = [
  "omini-runtime",
  "omini-types",
  "pulldown-cmark",
+ "rand 0.9.4",
  "ratatui",
  "serde_json",
  "tokio",

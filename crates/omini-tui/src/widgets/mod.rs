@@ -420,7 +420,7 @@ fn compact_waiting_tool_lines(
             spans.extend(bash_highlight::truncated_command_spans(
                 command,
                 command_width,
-                Style::default(),
+                Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
             ));
             spans.push(Span::raw(")"));
         }
