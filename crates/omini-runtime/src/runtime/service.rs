@@ -1067,6 +1067,12 @@ impl AgentRuntime {
                     EngineToRuntimeEvent::UserMessageProduced(msg) => {
                         history::persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
                     }
+                    EngineToRuntimeEvent::LlmHistoryProduced(msg) => {
+                        history::persist_llm_history_only(&session_dir, &msg);
+                    }
+                    EngineToRuntimeEvent::ToolResultsDisplayProduced(msg) => {
+                        history::persist_db_only(&session_id, &blocks_dir, &msg).await;
+                    }
                     EngineToRuntimeEvent::MessageProduced(msg)
                     | EngineToRuntimeEvent::ToolResultsProduced(msg) => {
                         history::persist_one(&session_dir, &session_id, &blocks_dir, msg).await;
@@ -1398,6 +1404,7 @@ mod tests {
                 name: None,
                 limit: Some(256000),
                 thinking: Some(true),
+                input_modalities: None,
             },
         );
 
@@ -2393,6 +2400,89 @@ mod tests {
 
         drop(engine_tx);
         processor.await.expect("processor should finish");
+    }
+
+    #[tokio::test]
+    async fn split_tool_result_history_writes_image_only_to_jsonl() {
+        ensure_test_db().await;
+
+        let root = unique_temp_root("split-tool-result-history");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(event_tx, request_rx, settings, project);
+        runtime.create_session(None).await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let session_dir = runtime
+            .session_dir
+            .clone()
+            .expect("session dir should exist");
+        let blocks_dir = session_dir.path().join("blocks");
+
+        let (engine_tx, engine_rx) = mpsc::channel(4);
+        let active_profile_handle = Arc::clone(&runtime.active_profile);
+        let processor = runtime
+            .spawn_event_processor(
+                engine_rx,
+                ActiveProfile::Main,
+                active_profile_handle,
+                empty_tool_pause_resolver(),
+            )
+            .await;
+
+        let display_msg = Message::new(
+            Role::User,
+            vec![ContentBlock::from_tool_result(
+                "toolu_image".to_string(),
+                false,
+                "Loaded image".to_string(),
+            )],
+        );
+        let llm_msg = Message::new(
+            Role::User,
+            vec![
+                ContentBlock::from_tool_result(
+                    "toolu_image".to_string(),
+                    false,
+                    "Loaded image".to_string(),
+                ),
+                ContentBlock::from_base64_image("image/png".to_string(), "abc123".to_string()),
+            ],
+        );
+
+        engine_tx
+            .send(EngineToRuntimeEvent::LlmHistoryProduced(llm_msg.clone()))
+            .await
+            .expect("llm history event should send");
+        engine_tx
+            .send(EngineToRuntimeEvent::ToolResultsDisplayProduced(
+                display_msg.clone(),
+            ))
+            .await
+            .expect("display history event should send");
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
+
+        assert_eq!(session_dir.load_history().unwrap(), vec![llm_msg]);
+
+        let loaded = history::load_messages_from_db(&session_id, &blocks_dir).await;
+        assert_eq!(loaded.len(), 1);
+        let HistoryItem::Message(message) = &loaded[0] else {
+            panic!("expected normal display message");
+        };
+        assert_eq!(message, &display_msg);
+        assert!(
+            !message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image(_)))
+        );
     }
 
     #[tokio::test]

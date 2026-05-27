@@ -108,6 +108,12 @@ pub enum EngineToRuntimeEvent {
     /// 引擎收集完所有工具结果，打包成一条 User Message。
     ToolResultsProduced(Message),
 
+    /// 一条只写入 LLM JSONL 历史、不会进入 SQLite/UI 历史的 Message。
+    LlmHistoryProduced(Message),
+
+    /// 工具结果的 UI/SQLite 展示消息，不写入 LLM JSONL 历史。
+    ToolResultsDisplayProduced(Message),
+
     /// 当前轮完整结束（助理消息 + 工具结果均已产出）。
     /// Runtime 收到后转发 `RuntimeToUiEvent::TurnEnded` 给 UI。
     TurnEnded,

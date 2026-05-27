@@ -332,6 +332,13 @@ pub fn render_tool(
                 content_width,
                 project_dir,
             ),
+            "view_image" => read::render_view_image(
+                tool_use,
+                tool_result,
+                tool_preview,
+                content_width,
+                project_dir,
+            ),
             "skill" => skill::render(tool_use, tool_result, content_width),
             "todo_write" => todo_write::render(tool_use, tool_result, content_width),
             "edit" => file_mutation::render_edit(
@@ -391,9 +398,10 @@ fn compact_waiting_tool_lines(
     let mut spans = vec![Span::raw("· ")];
 
     match tool_use.name.as_str() {
-        "read" | "edit" | "write" => {
+        "read" | "view_image" | "edit" | "write" => {
             let title = match tool_use.name.as_str() {
                 "read" => "Read",
+                "view_image" => "View Image",
                 "edit" => "Edit",
                 "write" => "Write",
                 _ => unreachable!(),
@@ -447,9 +455,14 @@ fn compact_waiting_tool_lines(
 }
 
 fn compact_tool_path(tool_use: &ToolUseBlock, project_dir: Option<&Path>) -> String {
+    let path_key = if tool_use.name == "view_image" {
+        "path"
+    } else {
+        "file_path"
+    };
     let path = tool_use
         .input
-        .get("file_path")
+        .get(path_key)
         .and_then(|value| value.as_str())
         .unwrap_or("<unknown>");
     display_path(path, project_dir)
@@ -591,6 +604,80 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
         assert_eq!(plain(&lines[0]), "· Skill commit-message");
+    }
+
+    #[test]
+    fn view_image_tool_renders_like_read_with_view_image_title() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("/tmp/image.png"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "view_image".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: false,
+            content: "Loaded image: /tmp/image.png".to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+    }
+
+    #[test]
+    fn view_image_tool_error_aligns_like_read_error() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("/tmp/image.png"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "view_image".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: true,
+            content: "Failed to read image /tmp/image.png".to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
+
+        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+        assert_eq!(plain(&lines[1]), "  Failed to read image /tmp/image.png");
+        assert_eq!(lines[1].spans[1].style.fg, Some(Color::Rgb(255, 100, 100)));
+    }
+
+    #[test]
+    fn paused_view_image_tool_renders_name_and_path() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("path".to_string(), serde_json::json!("/tmp/image.png"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "view_image".to_string(),
+            input,
+        };
+        let preview = ToolPauseRequest {
+            tool_use_id: "toolu_1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "view_image".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(crate::types::events::PermissionPreview::Read(
+                crate::types::events::ReadPermissionPreview {
+                    file_path: "/tmp/image.png".to_string(),
+                },
+            )),
+        };
+
+        let lines = render_tool(&tool_use, None, Some(&preview), Some(false), 80, None);
+
+        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+        assert_eq!(plain(&lines[1]), "  └─ Waiting for permission");
     }
 
     #[test]

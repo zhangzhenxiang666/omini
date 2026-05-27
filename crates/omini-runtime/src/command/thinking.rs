@@ -117,6 +117,7 @@ mod tests {
                 name: None,
                 limit: Some(256000),
                 thinking: Some(true),
+                input_modalities: None,
             },
         );
 

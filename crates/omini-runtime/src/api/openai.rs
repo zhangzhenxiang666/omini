@@ -3,7 +3,7 @@ use crate::api::{
     api_channel, send_with_retry, sse::IntoSseStream,
 };
 use crate::types::config::ThinkingEffort;
-use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
+use crate::types::message::{ContentBlock, Message, Role, ToolUseBlock};
 use crate::types::usage::Usage;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -464,65 +464,34 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
         match msg.role {
             Role::User => {
                 // Anthropic 风格的 tool_result 内联在 user message 中，
-                // OpenAI 需要拆成独立的 tool 消息
-                let tool_results: Vec<&ToolResultBlock> = msg
+                // OpenAI 需要拆成独立的 tool 消息；其余 text/image 块仍作为 user 消息发送。
+                let has_tool_result = msg
                     .content
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolResult(tr) => Some(tr),
-                        _ => None,
-                    })
-                    .collect();
-
-                if !tool_results.is_empty() {
-                    for tr in tool_results {
+                    .any(|block| matches!(block, ContentBlock::ToolResult(_)));
+                if has_tool_result {
+                    for block in &msg.content {
+                        let ContentBlock::ToolResult(tr) = block else {
+                            continue;
+                        };
                         result.push(serde_json::json!({
                             "role": "tool",
                             "tool_call_id": tr.tool_use_id,
                             "content": tr.content,
                         }));
                     }
+                    push_openai_user_content_message(
+                        &mut result,
+                        msg.content.iter().filter_map(openai_user_content_part),
+                    );
                     continue;
                 }
 
                 // 普通 user 消息：OpenAI 的图片块需要转换为 image_url data URL。
-                let content_parts: Vec<Value> = msg
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text(t) => Some(serde_json::json!({
-                            "type": "text",
-                            "text": t.text,
-                        })),
-                        ContentBlock::Image(image) => Some(serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": format!(
-                                    "data:{};base64,{}",
-                                    image.source.media_type, image.source.data
-                                ),
-                            },
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-
-                if content_parts.is_empty() {
-                    continue;
-                }
-
-                let content = if content_parts.len() == 1
-                    && let Some(text) = content_parts[0].get("text").and_then(Value::as_str)
-                {
-                    Value::String(text.to_string())
-                } else {
-                    Value::Array(content_parts)
-                };
-
-                result.push(serde_json::json!({
-                    "role": "user",
-                    "content": content,
-                }));
+                push_openai_user_content_message(
+                    &mut result,
+                    msg.content.iter().filter_map(openai_user_content_part),
+                );
             }
 
             Role::Assistant => {
@@ -584,6 +553,48 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
     }
 
     result
+}
+
+fn openai_user_content_part(block: &ContentBlock) -> Option<Value> {
+    match block {
+        ContentBlock::Text(t) => Some(serde_json::json!({
+            "type": "text",
+            "text": t.text,
+        })),
+        ContentBlock::Image(image) => Some(serde_json::json!({
+            "type": "image_url",
+            "image_url": {
+                "url": format!(
+                    "data:{};base64,{}",
+                    image.source.media_type, image.source.data
+                ),
+            },
+        })),
+        _ => None,
+    }
+}
+
+fn push_openai_user_content_message(
+    result: &mut Vec<Value>,
+    content_parts: impl IntoIterator<Item = Value>,
+) {
+    let content_parts: Vec<Value> = content_parts.into_iter().collect();
+    if content_parts.is_empty() {
+        return;
+    }
+
+    let content = if content_parts.len() == 1
+        && let Some(text) = content_parts[0].get("text").and_then(Value::as_str)
+    {
+        Value::String(text.to_string())
+    } else {
+        Value::Array(content_parts)
+    };
+
+    result.push(serde_json::json!({
+        "role": "user",
+        "content": content,
+    }));
 }
 
 #[cfg(test)]
@@ -753,6 +764,50 @@ mod tests {
                     },
                 ],
             })]
+        );
+    }
+
+    #[test]
+    fn openai_user_message_with_tool_result_preserves_following_image_blocks() {
+        let messages = vec![Message::new(
+            Role::User,
+            vec![
+                ContentBlock::from_tool_result(
+                    "call_1".to_string(),
+                    false,
+                    "Loaded image".to_string(),
+                ),
+                ContentBlock::from_text("visual context follows".to_string()),
+                ContentBlock::from_base64_image("image/png".to_string(), "abc123".to_string()),
+            ],
+        )];
+
+        let converted = convert_messages_to_openai(&messages, None);
+
+        assert_eq!(
+            converted,
+            vec![
+                serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": "call_1",
+                    "content": "Loaded image",
+                }),
+                serde_json::json!({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "visual context follows",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,abc123",
+                            },
+                        },
+                    ],
+                }),
+            ]
         );
     }
 

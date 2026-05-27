@@ -1673,6 +1673,7 @@ mod tests {
                     name: Some(format!("Model {idx}")),
                     limit: 1000,
                     thinking: false,
+                    input_modalities: None,
                 },
             });
         }

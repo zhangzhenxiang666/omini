@@ -7,7 +7,7 @@ use crate::types::events::{
     ActiveProfile, EngineToRuntimeEvent, PermissionPreview, PermissionSource, ToolPauseKind,
     ToolPauseRequest, ToolPauseResponse, UserInputPreview,
 };
-use crate::types::message::ToolResultBlock;
+use crate::types::message::{ContentBlock, ToolResultBlock};
 use crate::types::tool::ToolDefinition;
 use async_trait::async_trait;
 use schemars::JsonSchema;
@@ -29,6 +29,7 @@ pub mod search_tool;
 pub mod skill_tool;
 pub mod subagent_tool;
 pub mod todo_tool;
+pub mod view_image_tool;
 pub mod write_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -73,6 +74,7 @@ pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
     pub metadata: Option<Map<String, Value>>,
+    pub extra_blocks: Option<Vec<ContentBlock>>,
 }
 
 pub fn tool_metadata<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
@@ -88,6 +90,7 @@ impl ToolResult {
             output: output.into(),
             is_error: false,
             metadata: None,
+            extra_blocks: None,
         }
     }
 
@@ -96,11 +99,17 @@ impl ToolResult {
             output: output.into(),
             is_error: true,
             metadata: None,
+            extra_blocks: None,
         }
     }
 
     pub fn with_metadata(mut self, metadata: Map<String, Value>) -> Self {
         self.metadata = Some(metadata);
+        self
+    }
+
+    pub fn with_extra_blocks(mut self, blocks: Vec<ContentBlock>) -> Self {
+        self.extra_blocks = Some(blocks);
         self
     }
 
@@ -112,6 +121,16 @@ impl ToolResult {
             content: self.output,
             metadata: self.metadata,
         }
+    }
+
+    pub fn into_parts(self, tool_use_id: &str) -> (ToolResultBlock, Option<Vec<ContentBlock>>) {
+        let block = ToolResultBlock {
+            tool_use_id: tool_use_id.to_string(),
+            is_error: self.is_error,
+            content: self.output,
+            metadata: self.metadata,
+        };
+        (block, self.extra_blocks)
     }
 }
 
@@ -540,7 +559,7 @@ impl ToolRegistry {
 
     /// 返回所有已注册工具的 `ToolDefinition` 列表（供 LLM API 注册使用）
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let mut definitions: Vec<_> = self.tools.values().map(|t| t.definition()).collect();
+        let mut definitions: Vec<_> = self.tools.values().map(|tool| tool.definition()).collect();
         definitions.sort_by(|left, right| {
             tool_definition_priority(&left.name)
                 .cmp(&tool_definition_priority(&right.name))
@@ -655,6 +674,7 @@ pub fn inherited_subagent_tool_names() -> Vec<String> {
         "search".to_string(),
         "skill".to_string(),
         "read".to_string(),
+        "view_image".to_string(),
         "edit".to_string(),
         "write".to_string(),
     ])
@@ -681,6 +701,9 @@ fn create_registry_with_allowed(
     if tool_allowed(allowed, "read") {
         registry.register(read_tool::ReadTool);
     }
+    if tool_allowed(allowed, "view_image") {
+        registry.register(view_image_tool::ViewImageTool);
+    }
     if tool_allowed(allowed, "edit") {
         registry.register(edit_tool::EditTool);
     }
@@ -704,13 +727,14 @@ fn tool_definition_priority(name: &str) -> usize {
     match name {
         "search" => 0,
         "read" => 1,
-        "edit" => 2,
-        "write" => 3,
-        "bash" => 4,
-        "ask_user" => 5,
-        "skill" => 6,
-        "todo_write" => 7,
-        "subagent" => 8,
+        "view_image" => 2,
+        "edit" => 3,
+        "write" => 4,
+        "bash" => 5,
+        "ask_user" => 6,
+        "skill" => 7,
+        "todo_write" => 8,
+        "subagent" => 9,
         _ => 100,
     }
 }
@@ -759,6 +783,27 @@ mod tests {
         let registry = create_main_registry();
 
         assert!(registry.contains("search"));
+    }
+
+    #[test]
+    fn tool_result_ok_and_error_have_no_extra_blocks_by_default() {
+        let ok = ToolResult::ok("done");
+        let error = ToolResult::error("failed");
+
+        assert!(ok.extra_blocks.is_none());
+        assert!(error.extra_blocks.is_none());
+    }
+
+    #[test]
+    fn view_image_definition_is_always_exposed() {
+        let registry = create_main_registry();
+
+        assert!(
+            registry
+                .definitions()
+                .iter()
+                .any(|definition| definition.name == "view_image")
+        );
     }
 
     #[test]

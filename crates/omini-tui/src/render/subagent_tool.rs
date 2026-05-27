@@ -233,6 +233,7 @@ fn format_tool_label(name: &str) -> String {
     match name {
         "ask_user" => "AskUser".to_string(),
         "todo_write" => "Todo".to_string(),
+        "view_image" => "View Image".to_string(),
         other => {
             let words = label_words(other);
             if words.is_empty() {
@@ -311,6 +312,11 @@ fn subagent_tool_summary(tool_use: &ToolUseBlock, project_dir: Option<&Path>) ->
         "read" => tool_use
             .input
             .get("file_path")
+            .and_then(|value| value.as_str())
+            .map(|path| display_path(path, project_dir)),
+        "view_image" => tool_use
+            .input
+            .get("path")
             .and_then(|value| value.as_str())
             .map(|path| display_path(path, project_dir)),
         "skill" => tool_use
@@ -447,5 +453,40 @@ mod tests {
         assert_eq!(rendered[1], "  └─ Read README.md");
         assert!(rendered[2].starts_with("  •  Read Cargo.toml"));
         assert_eq!(first_read_prefix, active_read_prefix);
+    }
+
+    #[test]
+    fn child_view_image_tool_renders_name_and_path() {
+        let tool_use = ToolUseBlock {
+            id: "spawn-1".to_string(),
+            name: "subagent".to_string(),
+            input: std::collections::HashMap::from([(
+                "name".to_string(),
+                serde_json::Value::String("explorer".to_string()),
+            )]),
+        };
+        let node = SubagentNode {
+            session_id: "subagent-1".to_string(),
+            parent_session_id: "main".to_string(),
+            spawn_tool_use_id: "spawn-1".to_string(),
+            agent_label: "explorer".to_string(),
+            status: SubagentStatus::Running,
+            messages: vec![Message::new(
+                Role::Assistant,
+                vec![ContentBlock::ToolUse(ToolUseBlock {
+                    id: "image-1".to_string(),
+                    name: "view_image".to_string(),
+                    input: std::collections::HashMap::from([(
+                        "path".to_string(),
+                        serde_json::Value::String("/tmp/image.png".to_string()),
+                    )]),
+                })],
+            )],
+        };
+
+        let lines = render_subagent_tool(&tool_use, None, Some(&node), &VecDeque::new(), 80, None);
+        let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
+
+        assert_eq!(rendered[1], "  └─ View Image /tmp/image.png");
     }
 }

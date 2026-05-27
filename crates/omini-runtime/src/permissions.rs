@@ -269,7 +269,7 @@ impl PermissionEngine {
         raw_input: &Value,
     ) -> PermissionDecision {
         match tool_name {
-            "read" => match read_path(preview, raw_input) {
+            "read" | "view_image" => match read_path(preview, raw_input) {
                 Some(path) if is_private_path(&path) => PermissionDecision::Ask,
                 Some(path) if self.is_under_cwd_or_tmp(&path) => PermissionDecision::Allow,
                 Some(_) => PermissionDecision::Ask,
@@ -448,7 +448,7 @@ impl ToolRule {
             return true;
         };
         match normalize_tool_name(tool_name).as_str() {
-            "read" | "search" | "edit" | "write" => {
+            "read" | "view_image" | "search" | "edit" | "write" => {
                 let Some(path) = permission_path(preview, raw_input) else {
                     return false;
                 };

@@ -142,7 +142,7 @@ pub(super) fn render_permission_drawer(
             preview.questions.len(),
             state.user_input_unanswered_count()
         ),
-        ToolPauseKind::Permission(preview) => format!(" {} ", permission_drawer_title(preview)),
+        ToolPauseKind::Permission(_) => format!(" {} ", permission_drawer_title(&request)),
     };
     if drawer_area.height > 1 {
         let mut title_line = Line::from(Span::styled(
@@ -407,6 +407,11 @@ fn permission_option_descriptions(request: &ToolPauseRequest) -> (&'static str, 
             ("apply changes", "reject changes")
         }
         ToolPauseKind::Permission(PermissionPreview::Write(_)) => ("write file", "reject write"),
+        ToolPauseKind::Permission(PermissionPreview::Read(_))
+            if request.tool_name == "view_image" =>
+        {
+            ("view image", "skip view")
+        }
         ToolPauseKind::Permission(PermissionPreview::Read(_)) => ("read file", "skip read"),
         ToolPauseKind::Permission(PermissionPreview::Search(_)) => ("search path", "skip search"),
         ToolPauseKind::Permission(PermissionPreview::Mcp(_)) => ("call tool", "deny tool"),
@@ -1026,7 +1031,19 @@ fn user_input_option_line(
     ])
 }
 
-fn permission_drawer_title(preview: &PermissionPreview) -> &'static str {
+fn permission_drawer_title(request: &ToolPauseRequest) -> &'static str {
+    match &request.kind {
+        ToolPauseKind::Permission(PermissionPreview::Read(_))
+            if request.tool_name == "view_image" =>
+        {
+            "View Image"
+        }
+        ToolPauseKind::Permission(preview) => permission_preview_title(preview),
+        ToolPauseKind::UserInput(_) => "Question",
+    }
+}
+
+fn permission_preview_title(preview: &PermissionPreview) -> &'static str {
     match preview {
         PermissionPreview::Bash(_) => "Run Command",
         PermissionPreview::Edit(_) => "Edit File",
@@ -1093,6 +1110,29 @@ mod tests {
         line.spans
             .iter()
             .any(|span| span.content.as_ref() == text && span.style.fg == Some(color))
+    }
+
+    #[test]
+    fn view_image_read_permission_uses_view_image_copy() {
+        let request = ToolPauseRequest {
+            tool_use_id: "tool_1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "view_image".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(
+                crate::types::events::ReadPermissionPreview {
+                    file_path: "/tmp/image.png".to_string(),
+                },
+            )),
+        };
+
+        assert_eq!(permission_drawer_title(&request), "View Image");
+        assert_eq!(
+            permission_option_descriptions(&request),
+            ("view image", "skip view")
+        );
     }
 
     #[test]

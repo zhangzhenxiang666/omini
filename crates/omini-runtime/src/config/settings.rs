@@ -1,7 +1,7 @@
 use crate::permissions::RawPermissionConfig;
 pub use crate::types::config::{
-    CompactConfig, ConfigError, McpServerConfig, McpServerTransportConfig, ModelConfig,
-    ProviderProfile, ProviderType, Settings, ThinkingEffort,
+    CompactConfig, ConfigError, InputModality, McpServerConfig, McpServerTransportConfig,
+    ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -51,6 +51,8 @@ pub struct ModelEntry {
     pub limit: Option<u32>,
     /// 是否支持思考模式（可选，默认关闭）
     pub thinking: Option<bool>,
+    /// Optional declared model input modalities.
+    pub input_modalities: Option<Vec<InputModality>>,
 }
 
 impl UserConfig {
@@ -83,6 +85,7 @@ impl UserConfig {
                             name: entry.name.clone(),
                             limit: entry.limit.unwrap_or(256000),
                             thinking: entry.thinking.unwrap_or(false),
+                            input_modalities: entry.input_modalities.clone(),
                         })
                         .collect()
                 })
@@ -254,6 +257,30 @@ gpt-test = {{ name = "GPT Test" }}
         let settings = config.to_settings(None, None, None).unwrap();
 
         assert_eq!(settings.language, None);
+    }
+
+    #[test]
+    fn model_entry_input_modalities_reach_settings() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+gpt-test = { input_modalities = ["text", "image"] }
+"#,
+        );
+
+        let settings = config.to_settings(None, None, None).unwrap();
+        let model = settings.current_model_config().unwrap();
+
+        assert_eq!(
+            model.input_modalities.as_deref(),
+            Some(&[InputModality::Text, InputModality::Image][..])
+        );
+        assert!(settings.supports_input_modality(InputModality::Image));
     }
 
     #[test]

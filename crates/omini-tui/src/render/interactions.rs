@@ -375,6 +375,7 @@ mod tests {
             name: Some("GPT 5.4 Mini".to_string()),
             limit: 1_000_000,
             thinking: true,
+            input_modalities: None,
         };
 
         assert_eq!(
@@ -390,6 +391,7 @@ mod tests {
             name: None,
             limit: 1_000_000,
             thinking: false,
+            input_modalities: None,
         };
 
         assert_eq!(model_meta_text(&model, "gpt-5.4-mini"), "1m 上下文");

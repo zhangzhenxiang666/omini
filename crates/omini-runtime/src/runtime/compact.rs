@@ -1261,6 +1261,7 @@ mod tests {
                     name: None,
                     limit,
                     thinking: false,
+                    input_modalities: None,
                 }],
             },
         );

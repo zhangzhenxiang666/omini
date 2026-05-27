@@ -328,6 +328,16 @@ fn spawn_subagent_bridge(
                         ))
                         .await;
                 }
+                EngineToRuntimeEvent::ToolResultsDisplayProduced(msg) => {
+                    let _ = parent_tx
+                        .send(EngineToRuntimeEvent::SubagentMessageProduced(
+                            SubagentMessageEvent {
+                                session_id: session_id.clone(),
+                                message: msg,
+                            },
+                        ))
+                        .await;
+                }
                 EngineToRuntimeEvent::ToolUse(tool_use) => {
                     let _ = parent_tx
                         .send(EngineToRuntimeEvent::SubagentToolUse(
@@ -373,6 +383,7 @@ fn spawn_subagent_bridge(
                     let _ = parent_tx.send(EngineToRuntimeEvent::Warning(warning)).await;
                 }
                 EngineToRuntimeEvent::TurnStarted
+                | EngineToRuntimeEvent::LlmHistoryProduced(_)
                 | EngineToRuntimeEvent::TurnEnded
                 | EngineToRuntimeEvent::ThinkingDelta(_)
                 | EngineToRuntimeEvent::TextDelta(_)
@@ -488,6 +499,7 @@ mod tests {
                     name: None,
                     limit: 256000,
                     thinking: true,
+                    input_modalities: None,
                 }],
             },
         );
@@ -503,6 +515,7 @@ mod tests {
                     name: None,
                     limit: 200000,
                     thinking: false,
+                    input_modalities: None,
                 }],
             },
         );

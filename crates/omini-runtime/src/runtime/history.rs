@@ -209,6 +209,10 @@ pub(super) async fn persist_one(
     persist_db_only(session_id, blocks_dir, &msg).await;
 }
 
+pub(super) fn persist_llm_history_only(session_dir: &SessionDir, msg: &Message) {
+    let _ = session_dir.append_history(msg);
+}
+
 async fn persist_split_display_message(
     session_dir: &SessionDir,
     session_id: &str,

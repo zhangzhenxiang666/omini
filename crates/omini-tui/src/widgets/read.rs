@@ -13,11 +13,49 @@ pub(super) fn render(
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
+    render_path_tool(
+        tool_use,
+        result,
+        preview,
+        content_width,
+        project_dir,
+        "Read",
+        "file_path",
+    )
+}
+
+pub(super) fn render_view_image(
+    tool_use: &ToolUseBlock,
+    result: Option<&ToolResultBlock>,
+    preview: Option<&ToolPauseRequest>,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Vec<Line<'static>> {
+    render_path_tool(
+        tool_use,
+        result,
+        preview,
+        content_width,
+        project_dir,
+        "View Image",
+        "path",
+    )
+}
+
+fn render_path_tool(
+    tool_use: &ToolUseBlock,
+    result: Option<&ToolResultBlock>,
+    preview: Option<&ToolPauseRequest>,
+    content_width: usize,
+    project_dir: Option<&Path>,
+    title: &'static str,
+    path_key: &'static str,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
 
     let file_path = tool_use
         .input
-        .get("file_path")
+        .get(path_key)
         .and_then(|v| v.as_str())
         .unwrap_or("<unknown>");
     let display_file_path = display_path(file_path, project_dir);
@@ -36,7 +74,7 @@ pub(super) fn render(
     if is_permission_preview {
         main_spans.push(Span::styled(display_file_path, title_style));
     } else {
-        main_spans.push(Span::styled("Read", title_style));
+        main_spans.push(Span::styled(title, title_style));
         main_spans.push(Span::raw(format!(" {}", display_file_path)));
     }
 

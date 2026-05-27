@@ -586,6 +586,7 @@ mod tests {
                     name: Some("GPT Test".to_string()),
                     limit: 1000,
                     thinking: false,
+                    input_modalities: None,
                 }],
             },
         )])

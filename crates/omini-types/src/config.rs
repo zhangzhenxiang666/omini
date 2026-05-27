@@ -49,6 +49,23 @@ impl FromStr for ThinkingEffort {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum InputModality {
+    Text,
+    Image,
+}
+
+impl fmt::Display for InputModality {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            InputModality::Text => "text",
+            InputModality::Image => "image",
+        };
+        f.write_str(value)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelConfig {
     /// 模型 ID
@@ -59,6 +76,9 @@ pub struct ModelConfig {
     pub limit: u32,
     /// 是否支持思考模式
     pub thinking: bool,
+    /// Optional declared input modalities. `None` means undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_modalities: Option<Vec<InputModality>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,6 +108,20 @@ pub struct Settings {
     pub permissions: Option<RawPermissionConfig>,
     pub compact: CompactConfig,
     pub mcp_servers: HashMap<String, McpServerConfig>,
+}
+
+impl Settings {
+    pub fn current_model_config(&self) -> Option<&ModelConfig> {
+        self.providers
+            .get(&self.active_provider)
+            .and_then(|provider| provider.models.iter().find(|model| model.id == self.model))
+    }
+
+    pub fn supports_input_modality(&self, modality: InputModality) -> bool {
+        self.current_model_config()
+            .and_then(|model| model.input_modalities.as_ref())
+            .is_some_and(|modalities| modalities.contains(&modality))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -313,4 +347,40 @@ pub enum ConfigError {
     TomlSer(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn model_config_input_modalities_can_be_undeclared() {
+        let model: ModelConfig = serde_json::from_value(json!({
+            "id": "gpt-test",
+            "name": null,
+            "limit": 256000,
+            "thinking": false
+        }))
+        .unwrap();
+
+        assert_eq!(model.input_modalities, None);
+    }
+
+    #[test]
+    fn model_config_input_modalities_parse_image() {
+        let model: ModelConfig = serde_json::from_value(json!({
+            "id": "gpt-test",
+            "name": null,
+            "limit": 256000,
+            "thinking": false,
+            "input_modalities": ["text", "image"]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            model.input_modalities.as_deref(),
+            Some(&[InputModality::Text, InputModality::Image][..])
+        );
+    }
 }

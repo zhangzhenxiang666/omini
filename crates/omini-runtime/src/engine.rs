@@ -29,9 +29,24 @@ pub struct QueryResult {
     pub had_tool_use: bool,
 }
 
+#[derive(Debug, Clone)]
+struct ToolRunResult {
+    block: ToolResultBlock,
+    extra_blocks: Option<Vec<ContentBlock>>,
+}
+
+impl ToolRunResult {
+    fn new(block: ToolResultBlock, extra_blocks: Option<Vec<ContentBlock>>) -> Self {
+        Self {
+            block,
+            extra_blocks,
+        }
+    }
+}
+
 enum ToolCollection {
-    Completed(Vec<ToolResultBlock>),
-    Cancelled(Vec<ToolResultBlock>),
+    Completed(Vec<ToolRunResult>),
+    Cancelled(Vec<ToolRunResult>),
 }
 
 struct ToolRunControls {
@@ -223,7 +238,7 @@ impl QueryEngine {
         let mut finish_reason = FinishReason::Stop;
         let mut had_tool_use = false;
         // 在整个 query 生命周期内复用同一个 JoinSet，每轮 drain 后自动清空
-        let mut tool_tasks: JoinSet<ToolResultBlock> = JoinSet::new();
+        let mut tool_tasks: JoinSet<ToolRunResult> = JoinSet::new();
         // 工具定义在一次 process_run 中不会变化，预先计算一次避免重复 clone
         let tool_definitions = ctx.tool_registry.definitions();
 
@@ -269,6 +284,7 @@ impl QueryEngine {
                 thinking_effort: ctx.settings.thinking_effort,
             };
 
+            // TODO: 需要优化api的错误处理, 对于因上下文过长的输入而失败的请求要尝试收缩上下文然后再调研llm摘要
             let mut stream = match ctx.llm_client.invoke(request).await {
                 Ok(s) => s,
                 Err(e) => {
@@ -382,17 +398,7 @@ impl QueryEngine {
 
                     if !tool_results.is_empty() {
                         had_tool_use = true;
-                        let tool_msg = Message::new(
-                            Role::User,
-                            tool_results
-                                .into_iter()
-                                .map(ContentBlock::ToolResult)
-                                .collect(),
-                        );
-                        let _ = event_tx
-                            .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
-                            .await;
-                        ctx.messages.push(tool_msg);
+                        Self::record_tool_results(ctx.messages, tool_results, &event_tx).await;
                     }
                 } else {
                     self.tool_pause_resolver.drain_pending_tool_pauses();
@@ -429,10 +435,15 @@ impl QueryEngine {
             finish_reason = completion.finish_reason.clone();
 
             let msg = completion.message;
-            let _ = event_tx
-                .send(EngineToRuntimeEvent::MessageProduced(msg.clone()))
-                .await;
-            ctx.messages.push(msg);
+            let assistant_msg_index = if msg.content.is_empty() {
+                None
+            } else {
+                let _ = event_tx
+                    .send(EngineToRuntimeEvent::MessageProduced(msg.clone()))
+                    .await;
+                ctx.messages.push(msg);
+                Some(ctx.messages.len() - 1)
+            };
 
             // JoinSet 按完成顺序返回，但 tool_result 需要与 assistant 消息中的 tool_use 顺序一致
             // 因此用 tool_use_id 建立查找表来重建顺序
@@ -446,22 +457,27 @@ impl QueryEngine {
             {
                 ToolCollection::Completed(results) => results,
                 ToolCollection::Cancelled(results) => {
-                    let results = Self::fill_cancelled_tool_results(
-                        ctx.messages.last().expect("assistant message just pushed"),
-                        results,
-                        &event_tx,
-                    )
-                    .await;
+                    let results = if let Some(index) = assistant_msg_index {
+                        Self::fill_cancelled_tool_results(&ctx.messages[index], results, &event_tx)
+                            .await
+                    } else {
+                        results
+                    };
+                    if Self::completed_turn_missing_assistant_tool_message(
+                        assistant_msg_index,
+                        &finish_reason,
+                        &results,
+                    ) {
+                        let error = Self::missing_assistant_tool_message_error();
+                        finish_reason = FinishReason::Error(error.clone());
+                        let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
+                        let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                        turns += 1;
+                        break;
+                    }
                     had_tool_use = !results.is_empty();
                     if !results.is_empty() {
-                        let tool_msg = Message::new(
-                            Role::User,
-                            results.into_iter().map(ContentBlock::ToolResult).collect(),
-                        );
-                        let _ = event_tx
-                            .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
-                            .await;
-                        ctx.messages.push(tool_msg);
+                        Self::record_tool_results(ctx.messages, results, &event_tx).await;
                     }
                     let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
                     turns += 1;
@@ -469,29 +485,36 @@ impl QueryEngine {
                 }
             };
 
+            if Self::completed_turn_missing_assistant_tool_message(
+                assistant_msg_index,
+                &finish_reason,
+                &tool_results,
+            ) {
+                let error = Self::missing_assistant_tool_message_error();
+                finish_reason = FinishReason::Error(error.clone());
+                let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
+                let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                turns += 1;
+                break;
+            }
+
             let mut stop_after_permission_denial = false;
             if !tool_results.is_empty() {
                 had_tool_use = true;
                 // 按 assistant 消息中 tool_use 的顺序重排 tool_result
-                let result_blocks = Self::order_tool_results_for_message(
-                    ctx.messages.last().expect("assistant message just pushed"),
-                    tool_results,
-                );
+                let result_blocks = if let Some(index) = assistant_msg_index {
+                    Self::order_tool_results_for_message(&ctx.messages[index], tool_results)
+                } else {
+                    tool_results
+                };
+                let display_blocks = Self::tool_result_blocks(&result_blocks);
                 stop_after_permission_denial = Self::has_main_user_permission_denial_without_note(
                     ctx.runtime_context
                         .as_ref()
                         .map(|runtime| runtime.session_type.as_str()),
-                    &result_blocks,
+                    &display_blocks,
                 );
-                let result_blocks = result_blocks
-                    .into_iter()
-                    .map(ContentBlock::ToolResult)
-                    .collect();
-                let tool_msg = Message::new(Role::User, result_blocks);
-                let _ = event_tx
-                    .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
-                    .await;
-                ctx.messages.push(tool_msg);
+                Self::record_tool_results(ctx.messages, result_blocks, &event_tx).await;
             }
 
             let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
@@ -528,7 +551,7 @@ impl QueryEngine {
         &self,
         messages: &mut Vec<Message>,
         partial_blocks: Vec<ContentBlock>,
-        tool_tasks: &mut JoinSet<ToolResultBlock>,
+        tool_tasks: &mut JoinSet<ToolRunResult>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
         error: String,
     ) -> bool {
@@ -552,17 +575,7 @@ impl QueryEngine {
 
             if !tool_results.is_empty() {
                 had_tool_use = true;
-                let tool_msg = Message::new(
-                    Role::User,
-                    tool_results
-                        .into_iter()
-                        .map(ContentBlock::ToolResult)
-                        .collect(),
-                );
-                let _ = event_tx
-                    .send(EngineToRuntimeEvent::ToolResultsProduced(tool_msg.clone()))
-                    .await;
-                messages.push(tool_msg);
+                Self::record_tool_results(messages, tool_results, event_tx).await;
             }
         } else {
             self.tool_pause_resolver.drain_pending_tool_pauses();
@@ -657,7 +670,7 @@ impl QueryEngine {
     }
 
     async fn collect_finished_tool_results(
-        tool_tasks: &mut JoinSet<ToolResultBlock>,
+        tool_tasks: &mut JoinSet<ToolRunResult>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
         cancelled: &Arc<AtomicBool>,
         cancel_notify: &Notify,
@@ -704,10 +717,10 @@ impl QueryEngine {
     }
 
     async fn cancel_and_collect_tool_results(
-        tool_tasks: &mut JoinSet<ToolResultBlock>,
+        tool_tasks: &mut JoinSet<ToolRunResult>,
         assistant_msg: &Message,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-    ) -> Vec<ToolResultBlock> {
+    ) -> Vec<ToolRunResult> {
         tool_tasks.abort_all();
         let completed = Self::drain_aborted_tool_tasks(tool_tasks, event_tx).await;
         Self::fill_cancelled_tool_results(assistant_msg, completed, event_tx).await
@@ -715,12 +728,12 @@ impl QueryEngine {
 
     async fn fill_cancelled_tool_results(
         assistant_msg: &Message,
-        completed: Vec<ToolResultBlock>,
+        completed: Vec<ToolRunResult>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-    ) -> Vec<ToolResultBlock> {
-        let mut completed_map: HashMap<String, ToolResultBlock> = completed
+    ) -> Vec<ToolRunResult> {
+        let mut completed_map: HashMap<String, ToolRunResult> = completed
             .into_iter()
-            .map(|result| (result.tool_use_id.clone(), result))
+            .map(|result| (result.block.tool_use_id.clone(), result))
             .collect();
 
         let mut ordered = Vec::new();
@@ -733,7 +746,7 @@ impl QueryEngine {
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::ToolResult(result.clone()))
                         .await;
-                    ordered.push(result);
+                    ordered.push(ToolRunResult::new(result, None));
                 }
             }
         }
@@ -741,9 +754,9 @@ impl QueryEngine {
     }
 
     async fn drain_aborted_tool_tasks(
-        tool_tasks: &mut JoinSet<ToolResultBlock>,
+        tool_tasks: &mut JoinSet<ToolRunResult>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-    ) -> Vec<ToolResultBlock> {
+    ) -> Vec<ToolRunResult> {
         let mut tool_results = Vec::new();
         while let Some(task_result) = tool_tasks.join_next().await {
             match task_result {
@@ -763,11 +776,11 @@ impl QueryEngine {
 
     fn order_tool_results_for_message(
         assistant_msg: &Message,
-        tool_results: Vec<ToolResultBlock>,
-    ) -> Vec<ToolResultBlock> {
-        let mut tool_result_map: HashMap<String, ToolResultBlock> = tool_results
+        tool_results: Vec<ToolRunResult>,
+    ) -> Vec<ToolRunResult> {
+        let mut tool_result_map: HashMap<String, ToolRunResult> = tool_results
             .into_iter()
-            .map(|r| (r.tool_use_id.clone(), r))
+            .map(|r| (r.block.tool_use_id.clone(), r))
             .collect();
 
         assistant_msg
@@ -781,6 +794,79 @@ impl QueryEngine {
                 }
             })
             .collect()
+    }
+
+    fn tool_result_blocks(tool_results: &[ToolRunResult]) -> Vec<ToolResultBlock> {
+        tool_results
+            .iter()
+            .map(|result| result.block.clone())
+            .collect()
+    }
+
+    fn completed_turn_missing_assistant_tool_message(
+        assistant_msg_index: Option<usize>,
+        finish_reason: &FinishReason,
+        tool_results: &[ToolRunResult],
+    ) -> bool {
+        assistant_msg_index.is_none()
+            && (matches!(finish_reason, FinishReason::ToolUse) || !tool_results.is_empty())
+    }
+
+    fn missing_assistant_tool_message_error() -> String {
+        "LLM stream emitted tool activity but Done did not include an assistant tool_use message"
+            .to_string()
+    }
+
+    async fn record_tool_results(
+        messages: &mut Vec<Message>,
+        tool_results: Vec<ToolRunResult>,
+        event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
+    ) {
+        if tool_results.is_empty() {
+            return;
+        }
+
+        let (llm_msg, display_msg, has_extra_blocks) = Self::tool_result_messages(tool_results);
+        if has_extra_blocks {
+            let _ = event_tx
+                .send(EngineToRuntimeEvent::LlmHistoryProduced(llm_msg.clone()))
+                .await;
+            let _ = event_tx
+                .send(EngineToRuntimeEvent::ToolResultsDisplayProduced(
+                    display_msg,
+                ))
+                .await;
+        } else {
+            let _ = event_tx
+                .send(EngineToRuntimeEvent::ToolResultsProduced(llm_msg.clone()))
+                .await;
+        }
+        messages.push(llm_msg);
+    }
+
+    fn tool_result_messages(tool_results: Vec<ToolRunResult>) -> (Message, Message, bool) {
+        let mut display_blocks = Vec::new();
+        let mut llm_blocks = Vec::new();
+        let mut has_extra_blocks = false;
+
+        for result in tool_results {
+            let block = result.block;
+            display_blocks.push(ContentBlock::ToolResult(block.clone()));
+            llm_blocks.push(ContentBlock::ToolResult(block));
+
+            if let Some(extra_blocks) = result.extra_blocks
+                && !extra_blocks.is_empty()
+            {
+                has_extra_blocks = true;
+                llm_blocks.extend(extra_blocks);
+            }
+        }
+
+        (
+            Message::new(Role::User, llm_blocks),
+            Message::new(Role::User, display_blocks),
+            has_extra_blocks,
+        )
     }
 
     fn cancelled_tool_result(tool_use_id: &str) -> ToolResultBlock {
@@ -799,14 +885,17 @@ impl QueryEngine {
         tool_use: &ToolUseBlock,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
         controls: ToolRunControls,
-    ) -> ToolResultBlock {
+    ) -> ToolRunResult {
         if controls.cancelled.load(Ordering::Relaxed) {
-            return ToolResultBlock {
-                tool_use_id: tool_use.id.clone(),
-                is_error: true,
-                content: "Execution cancelled".into(),
-                metadata: None,
-            };
+            return ToolRunResult::new(
+                ToolResultBlock {
+                    tool_use_id: tool_use.id.clone(),
+                    is_error: true,
+                    content: "Execution cancelled".into(),
+                    metadata: None,
+                },
+                None,
+            );
         }
 
         let result = if let Some(tool) = tool_registry.get(&tool_use.name) {
@@ -834,11 +923,11 @@ impl QueryEngine {
             ToolResult::error(format!("Unknown tool: {}", tool_use.name))
         };
 
-        let block = result.into_block(&tool_use.id);
+        let (block, extra_blocks) = result.into_parts(&tool_use.id);
         let _ = event_tx
             .send(EngineToRuntimeEvent::ToolResult(block.clone()))
             .await;
-        block
+        ToolRunResult::new(block, extra_blocks)
     }
 }
 
@@ -938,6 +1027,75 @@ mod tests {
         assert!(!QueryEngine::has_main_user_permission_denial_without_note(
             Some("main"),
             &tool_results
+        ));
+    }
+
+    #[test]
+    fn tool_result_messages_keep_extra_blocks_only_in_llm_message() {
+        let result = ToolRunResult::new(
+            ToolResultBlock {
+                tool_use_id: "toolu_image".to_string(),
+                is_error: false,
+                content: "Loaded image".to_string(),
+                metadata: None,
+            },
+            Some(vec![ContentBlock::from_base64_image(
+                "image/png".to_string(),
+                "abc123".to_string(),
+            )]),
+        );
+
+        let (llm_msg, display_msg, has_extra_blocks) =
+            QueryEngine::tool_result_messages(vec![result]);
+
+        assert!(has_extra_blocks);
+        assert_eq!(llm_msg.content.len(), 2);
+        assert!(matches!(llm_msg.content[0], ContentBlock::ToolResult(_)));
+        assert!(matches!(llm_msg.content[1], ContentBlock::Image(_)));
+        assert_eq!(display_msg.content.len(), 1);
+        assert!(matches!(
+            display_msg.content[0],
+            ContentBlock::ToolResult(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn record_tool_results_ignores_empty_batches() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut messages = Vec::new();
+
+        QueryEngine::record_tool_results(&mut messages, Vec::new(), &tx).await;
+
+        assert!(messages.is_empty());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn completed_turn_requires_assistant_message_for_tool_activity() {
+        let result = ToolRunResult::new(
+            ToolResultBlock {
+                tool_use_id: "toolu_image".to_string(),
+                is_error: false,
+                content: "Loaded image".to_string(),
+                metadata: None,
+            },
+            None,
+        );
+
+        assert!(QueryEngine::completed_turn_missing_assistant_tool_message(
+            None,
+            &FinishReason::ToolUse,
+            &[]
+        ));
+        assert!(QueryEngine::completed_turn_missing_assistant_tool_message(
+            None,
+            &FinishReason::Stop,
+            &[result]
+        ));
+        assert!(!QueryEngine::completed_turn_missing_assistant_tool_message(
+            Some(0),
+            &FinishReason::ToolUse,
+            &[]
         ));
     }
 
