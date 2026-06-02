@@ -4,6 +4,7 @@ use crate::runtime_state;
 use omini_core::config::settings::OminiRoot;
 use std::fs::OpenOptions;
 use std::io;
+use std::path::PathBuf;
 
 /// server 进程自己的启动选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn daemonize_process() -> io::Result<()> {
     let run_dir = runtime_state::run_dir()?;
     std::fs::create_dir_all(&run_dir)?;
+    let working_dir = ensure_daemon_working_dir()?;
     // 后台进程不能再依赖父终端，stdout/stderr 固定写到 run 目录便于排查启动失败。
     let stdout = OpenOptions::new()
         .create(true)
@@ -70,12 +72,38 @@ fn daemonize_process() -> io::Result<()> {
         .append(true)
         .open(run_dir.join("daemon.err"))?;
     daemonize::Daemonize::new()
-        .working_directory("/")
+        .working_directory(&working_dir)
         .umask(0o077)
         .stdout(stdout)
         .stderr(stderr)
         .start()
         .map_err(io::Error::other)
+}
+
+#[cfg(unix)]
+fn ensure_daemon_working_dir() -> io::Result<PathBuf> {
+    let dir = std::env::temp_dir().join("omini");
+    std::fs::create_dir_all(&dir)?;
+
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!(
+                "daemon working directory is not a directory: {}",
+                dir.display()
+            ),
+        ));
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = metadata.permissions();
+    if permissions.mode() & 0o777 != 0o700 {
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&dir, permissions)?;
+    }
+
+    Ok(dir)
 }
 
 #[cfg(not(unix))]

@@ -16,6 +16,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -324,6 +325,51 @@ fn preview_tool_use_id(pause_id: &str, tool_use_id: &str) -> Option<String> {
     (pause_id != tool_use_id).then(|| tool_use_id.to_string())
 }
 
+fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
+    match tool_name {
+        "bash" => normalize_path_field(raw_input, "workdir", cwd, true),
+        "search" => normalize_path_field(raw_input, "path", cwd, true),
+        "read" | "edit" | "write" => normalize_path_field(raw_input, "file_path", cwd, false),
+        "view_image" => normalize_path_field(raw_input, "path", cwd, false),
+        _ => {}
+    }
+}
+
+fn normalize_path_field(raw_input: &mut Value, field: &str, cwd: &Path, default_to_cwd: bool) {
+    let Some(input) = raw_input.as_object_mut() else {
+        return;
+    };
+
+    match input.get_mut(field) {
+        Some(Value::String(path)) => {
+            let raw = path.trim();
+            if raw.is_empty() {
+                if default_to_cwd {
+                    *path = cwd.display().to_string();
+                }
+                return;
+            }
+            *path = resolve_session_path(cwd, raw).display().to_string();
+        }
+        Some(Value::Null) if default_to_cwd => {
+            input.insert(field.to_string(), Value::String(cwd.display().to_string()));
+        }
+        None if default_to_cwd => {
+            input.insert(field.to_string(), Value::String(cwd.display().to_string()));
+        }
+        _ => {}
+    }
+}
+
+fn resolve_session_path(cwd: &Path, raw: &str) -> PathBuf {
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     /// 每个工具关联自己的输入参数结构体（需派生 JsonSchema + Deserialize）
@@ -428,7 +474,10 @@ impl RegisteredTool {
             move |input: HashMap<String, Value>, ctx: ToolExecutionContext| {
                 let tool = Arc::clone(&tool);
                 Box::pin(async move {
-                    let raw_input = Value::Object(input.clone().into_iter().collect());
+                    let mut raw_input = Value::Object(input.clone().into_iter().collect());
+                    if let Some(settings) = ctx.settings.as_deref() {
+                        normalize_tool_paths(tool.name(), &mut raw_input, &settings.cwd);
+                    }
                     if let Some(check) = ctx
                         .permission_engine
                         .profile_policy(ctx.active_profile, tool.name())
@@ -742,6 +791,52 @@ fn tool_definition_priority(name: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_search_default_path_uses_session_cwd() {
+        let cwd = Path::new("/repo");
+        let mut input = serde_json::json!({ "query": "needle" });
+
+        normalize_tool_paths("search", &mut input, cwd);
+
+        assert_eq!(input["path"], serde_json::json!("/repo"));
+    }
+
+    #[test]
+    fn normalize_bash_relative_workdir_uses_session_cwd() {
+        let cwd = Path::new("/repo");
+        let mut input = serde_json::json!({
+            "command": "cargo check",
+            "workdir": "crates/omini-core"
+        });
+
+        normalize_tool_paths("bash", &mut input, cwd);
+
+        assert_eq!(
+            input["workdir"],
+            serde_json::json!("/repo/crates/omini-core")
+        );
+    }
+
+    #[test]
+    fn normalize_file_tool_relative_file_path_uses_session_cwd() {
+        let cwd = Path::new("/repo");
+        let mut input = serde_json::json!({ "file_path": "src/lib.rs" });
+
+        normalize_tool_paths("read", &mut input, cwd);
+
+        assert_eq!(input["file_path"], serde_json::json!("/repo/src/lib.rs"));
+    }
+
+    #[test]
+    fn normalize_absolute_path_keeps_path() {
+        let cwd = Path::new("/repo");
+        let mut input = serde_json::json!({ "path": "/tmp/image.png" });
+
+        normalize_tool_paths("view_image", &mut input, cwd);
+
+        assert_eq!(input["path"], serde_json::json!("/tmp/image.png"));
+    }
 
     #[test]
     fn subagent_registry_inherits_parent_tools_without_subagent() {
