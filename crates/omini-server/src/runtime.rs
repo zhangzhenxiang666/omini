@@ -1,3 +1,9 @@
+//! daemon 内部的项目、会话、事件重放和控制权状态。
+//!
+//! `omini-server` 在这里把 HTTP/WS 层的会话语义适配到 `omini-core`：创建或恢复
+//! runtime session、维护客户端 presence、裁剪重连 replay、落盘 core persistence event，
+//! 并把当前运行态投影成 protocol DTO。
+
 use chrono::{DateTime, Utc};
 use omini_core::AgentCoreSession;
 use omini_core::CoreError;
@@ -7,7 +13,7 @@ use omini_core::config::settings::OminiRoot;
 use omini_core::config::settings::UserConfig;
 use omini_core::persistence::RuntimePersistenceEvent;
 use omini_core::types::display::HistoryItem;
-use omini_core::types::events::LoadedSession;
+use omini_core::types::events::{ActiveProfile, LoadedSession};
 use omini_core::types::message::{ContentBlock, Message, Role};
 use omini_protocol as protocol;
 use omini_protocol::RuntimeEvent;
@@ -21,6 +27,7 @@ use tokio::task::JoinHandle;
 use crate::history;
 use crate::store::{Database, Session};
 
+/// 项目 attach 入口的错误分类，路由层会映射成协议错误。
 pub(crate) enum ProjectAttachError {
     BadRequest(String),
     Config(String),
@@ -33,10 +40,12 @@ impl From<CoreError> for ProjectAttachError {
     }
 }
 
+/// daemon 尚未认识某个项目时的查找错误。
 pub(crate) enum ProjectLookupError {
     NotFound,
 }
 
+/// 会话查找或恢复过程中可能出现的错误。
 pub(crate) enum SessionError {
     NotFound,
     Core(CoreError),
@@ -48,6 +57,7 @@ impl From<CoreError> for SessionError {
     }
 }
 
+/// daemon 级项目注册表，负责把 project_id 路由到对应的 `SessionManager`。
 pub(crate) struct GlobalDaemonManager {
     root: OminiRoot,
     config: UserConfig,
@@ -128,6 +138,9 @@ impl GlobalDaemonManager {
     }
 }
 
+/// 单个项目下的会话管理器。
+///
+/// 它只缓存当前有客户端使用的 runtime session；持久化会话列表和历史仍来自数据库。
 pub(crate) struct SessionManager {
     settings: omini_core::types::config::Settings,
     project: ProjectDir,
@@ -384,6 +397,7 @@ impl SessionManager {
     }
 }
 
+/// 单个 runtime session 中的客户端在线状态和 controller 归属。
 #[derive(Debug, Default)]
 struct ClientPresence {
     // 同一 client_id 可能打开多个 WebSocket，计数归零才算真正离线。
@@ -477,6 +491,7 @@ fn random_index(len: usize) -> usize {
     value % len
 }
 
+/// 带本地单调序号的 runtime 事件，用于 WebSocket replay 和实时订阅去重。
 #[derive(Clone)]
 pub(crate) struct SequencedRuntimeEvent {
     // seq 只在单个 RuntimeSession 内单调递增，用来让 WebSocket replay 和订阅流去重。
@@ -484,6 +499,7 @@ pub(crate) struct SequencedRuntimeEvent {
     pub(crate) event: RuntimeEvent,
 }
 
+/// 保存重连时必须补发、但尚未被持久化 snapshot 覆盖的运行中事件尾部。
 #[derive(Default)]
 struct RuntimeReplayBuffer {
     // run_started 之前的用户注入事件先暂存，确保重连客户端能看到刚提交的输入。
@@ -492,15 +508,47 @@ struct RuntimeReplayBuffer {
     run_started: Option<SequencedRuntimeEvent>,
     // 当前 turn 尚未被持久化 snapshot 覆盖的尾部增量。
     current_tail: Vec<SequencedRuntimeEvent>,
+    // compact 不一定发生在 query run 内；单独保留它的流式尾部供新连接补齐。
+    compact_started: Option<SequencedRuntimeEvent>,
+    compact_tail: Vec<SequencedRuntimeEvent>,
+    // 计划确认发生在 run_finished 后，不能依赖 run tail；保留到任一客户端完成确认。
+    pending_plan_approval: Option<SequencedRuntimeEvent>,
 }
 
 impl RuntimeReplayBuffer {
     fn record(&mut self, event: SequencedRuntimeEvent) {
         // replay buffer 只保存“重连后需要补发”的运行中尾部事件，落盘内容交给 snapshot。
         match runtime_replay_kind(&event.event) {
+            "compact_summary_started" => {
+                self.compact_started = Some(event);
+                self.compact_tail.clear();
+            }
+            "compact_summary_delta" => {
+                if self.compact_started.is_some() {
+                    self.compact_tail.push(event);
+                }
+            }
+            "compact_summary_finished" => {
+                if self.compact_started.is_some() {
+                    self.compact_tail.push(event);
+                }
+            }
+            "compact_summary_failed" => {
+                self.clear_compact_tail();
+            }
+            "plan_submitted" => {
+                self.pending_plan_approval = Some(event);
+            }
+            "plan_approval_resolved" => {
+                if self.pending_plan_matches(&event) {
+                    self.pending_plan_approval = None;
+                }
+            }
             "session_changed" => {
-                if self.run_started.is_some() {
+                if self.run_started.is_some() || self.compact_started.is_some() {
                     self.clear();
+                } else {
+                    self.pending_plan_approval = None;
                 }
             }
             "run_finished" => self.clear(),
@@ -540,13 +588,23 @@ impl RuntimeReplayBuffer {
         let mut replay = Vec::with_capacity(
             self.pending_prefix.len()
                 + usize::from(self.run_started.is_some())
-                + self.current_tail.len(),
+                + self.current_tail.len()
+                + usize::from(self.compact_started.is_some())
+                + self.compact_tail.len()
+                + usize::from(self.pending_plan_approval.is_some()),
         );
         replay.extend(self.pending_prefix.iter().cloned());
         if let Some(run_started) = &self.run_started {
             replay.push(run_started.clone());
         }
         replay.extend(self.current_tail.iter().cloned());
+        if let Some(plan) = &self.pending_plan_approval {
+            replay.push(plan.clone());
+        }
+        if let Some(compact_started) = &self.compact_started {
+            replay.push(compact_started.clone());
+        }
+        replay.extend(self.compact_tail.iter().cloned());
         replay
     }
 
@@ -596,6 +654,26 @@ impl RuntimeReplayBuffer {
         self.pending_prefix.clear();
         self.run_started = None;
         self.current_tail.clear();
+        self.clear_compact_tail();
+        self.pending_plan_approval = None;
+    }
+
+    fn clear_compact_tail(&mut self) {
+        self.compact_started = None;
+        self.compact_tail.clear();
+    }
+
+    fn pending_plan_matches(&self, event: &SequencedRuntimeEvent) -> bool {
+        let Some(pending) = &self.pending_plan_approval else {
+            return false;
+        };
+        let Some(pending_plan_id) = plan_submitted_payload(&pending.event).map(|plan| plan.plan_id)
+        else {
+            return true;
+        };
+        plan_approval_resolved_plan_id(&event.event)
+            .map(|resolved_plan_id| resolved_plan_id == pending_plan_id)
+            .unwrap_or(true)
     }
 
     fn drop_pending_user_injection(&mut self) {
@@ -626,6 +704,7 @@ impl RuntimeReplayBuffer {
                 "compact_summary_started" | "compact_summary_delta" | "compact_summary_finished"
             )
         });
+        self.clear_compact_tail();
     }
 
     fn drop_user_injections_in_snapshot(&mut self, snapshot: &LoadedSession) {
@@ -672,6 +751,7 @@ fn runtime_replay_kind(event: &RuntimeEvent) -> &str {
         .unwrap_or(event.kind.as_str())
 }
 
+/// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
 fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &LoadedSession) -> bool {
     if runtime_replay_kind(&event.event) != "user_message_injected" {
         return false;
@@ -686,6 +766,7 @@ fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &Loade
         .any(|message| message == *item)
 }
 
+/// 把当前 assistant 流式尾部重组为完整内容块，供 snapshot 去重比较。
 fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> {
     // 增量事件需要还原成完整 ContentBlock，才能和 snapshot 中的 assistant message 比较。
     let mut blocks = Vec::new();
@@ -706,6 +787,7 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> 
     blocks
 }
 
+/// 收集当前尾部中尚未被 snapshot 覆盖的工具结果块。
 fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> {
     events
         .iter()
@@ -714,6 +796,7 @@ fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock
         .collect()
 }
 
+/// 将连续文本或 thinking delta 合并成可比较的 `ContentBlock`。
 fn push_delta_block(blocks: &mut Vec<ContentBlock>, event: &SequencedRuntimeEvent, thinking: bool) {
     let Some(delta) = event
         .event
@@ -732,6 +815,7 @@ fn push_delta_block(blocks: &mut Vec<ContentBlock>, event: &SequencedRuntimeEven
     }
 }
 
+/// 当前仍在执行的工具调用投影。
 #[derive(Debug, Clone)]
 struct RuntimeToolActivity {
     tool_use_id: String,
@@ -754,6 +838,7 @@ impl RuntimeToolActivity {
     }
 }
 
+/// 当前仍在等待客户端处理的暂停请求投影。
 #[derive(Debug, Clone)]
 struct RuntimePendingPause {
     tool_use_id: String,
@@ -775,6 +860,7 @@ impl RuntimePendingPause {
     }
 }
 
+/// 当前会话下子 agent 的运行态投影。
 #[derive(Debug, Clone)]
 struct RuntimeSubagentActivity {
     session_id: String,
@@ -798,18 +884,23 @@ impl RuntimeSubagentActivity {
     }
 }
 
+/// 从 runtime 事件流增量推导出的会话运行态。
 #[derive(Debug, Default)]
 struct RuntimeStatusProjection {
+    // active profile 不落入持久化消息；新连接只能从运行态投影拿到当前值。
+    active_profile: ActiveProfile,
     query_started_at: Option<DateTime<Utc>>,
     compact_started_at: Option<DateTime<Utc>>,
     query_pause_started_at: Option<DateTime<Utc>>,
     query_paused_ms: u64,
     query_state: protocol::SessionRuntimeState,
     pending_pauses: HashMap<String, RuntimePendingPause>,
+    pending_plan_approval: Option<protocol::PlanSubmittedEvent>,
     active_tools: HashMap<String, RuntimeToolActivity>,
     subagents: HashMap<String, RuntimeSubagentActivity>,
 }
 
+/// 生成协议状态快照时由 session 层补充的外部上下文。
 struct RuntimeStatusSnapshotContext {
     loaded: bool,
     controller_id: Option<String>,
@@ -822,9 +913,16 @@ struct RuntimeStatusSnapshotContext {
 impl RuntimeStatusProjection {
     fn record_event(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
         match runtime_replay_kind(event) {
+            "active_profile_changed" => {
+                if let Some(profile) = active_profile_payload(event) {
+                    self.active_profile = profile;
+                }
+            }
+            // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
             "run_started" => self.start_query(now),
             "run_finished" | "session_changed" => self.clear_active_run(),
-            "turn_started" | "text_delta" => self.mark_query_working(),
+            "turn_started" => self.mark_query_thinking(),
+            "text_delta" => self.mark_query_working(),
             "thinking_delta" => self.mark_query_thinking(),
             "tool_use" => self.record_tool_use(event, now, None, None),
             "tool_result" => {
@@ -839,6 +937,14 @@ impl RuntimeStatusProjection {
                 self.mark_query_working();
             }
             "tool_pause_requested" => self.record_tool_pause(event, now),
+            "plan_submitted" => {
+                self.pending_plan_approval = plan_submitted_payload(event);
+            }
+            "plan_approval_resolved" => {
+                if self.pending_plan_matches(event) {
+                    self.pending_plan_approval = None;
+                }
+            }
             "compact_summary_started" => {
                 self.compact_started_at = Some(now);
             }
@@ -888,6 +994,7 @@ impl RuntimeStatusProjection {
             connected_client_count: context.connected_client_count,
             activity: self.activity(context.now),
             pending_pauses,
+            pending_plan_approval: self.pending_plan_approval.clone(),
             active_tools,
             skills: context.skills,
             mcp_servers: context.mcp_servers,
@@ -900,8 +1007,9 @@ impl RuntimeStatusProjection {
         self.compact_started_at = None;
         self.query_pause_started_at = None;
         self.query_paused_ms = 0;
-        self.query_state = protocol::SessionRuntimeState::Working;
+        self.query_state = protocol::SessionRuntimeState::Thinking;
         self.pending_pauses.clear();
+        self.pending_plan_approval = None;
         self.active_tools.clear();
         self.subagents.clear();
     }
@@ -913,6 +1021,7 @@ impl RuntimeStatusProjection {
         self.query_paused_ms = 0;
         self.query_state = protocol::SessionRuntimeState::Idle;
         self.pending_pauses.clear();
+        self.pending_plan_approval = None;
         self.active_tools.clear();
         self.subagents.clear();
     }
@@ -1192,6 +1301,19 @@ impl RuntimeStatusProjection {
         }
     }
 
+    fn active_profile(&self) -> ActiveProfile {
+        self.active_profile
+    }
+
+    fn pending_plan_matches(&self, event: &RuntimeEvent) -> bool {
+        let Some(pending) = &self.pending_plan_approval else {
+            return false;
+        };
+        plan_approval_resolved_plan_id(event)
+            .map(|plan_id| plan_id == pending.plan_id)
+            .unwrap_or(true)
+    }
+
     fn query_elapsed_ms(&self, started_at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
         let active_pause_ms = self
             .query_pause_started_at
@@ -1229,6 +1351,57 @@ fn tool_pause_kind(event: &RuntimeEvent) -> Option<protocol::ToolPauseEventKind>
     }
 }
 
+fn active_profile_payload(event: &RuntimeEvent) -> Option<ActiveProfile> {
+    match event
+        .payload
+        .get("profile")
+        .and_then(serde_json::Value::as_str)?
+    {
+        "main" => Some(ActiveProfile::Main),
+        "auto" => Some(ActiveProfile::Auto),
+        "plan" => Some(ActiveProfile::Plan),
+        _ => None,
+    }
+}
+
+fn plan_submitted_payload(event: &RuntimeEvent) -> Option<protocol::PlanSubmittedEvent> {
+    if let Some(protocol::KeyRuntimeEvent::PlanSubmitted(plan)) = &event.event {
+        return Some(plan.clone());
+    }
+
+    let plan_id = event
+        .payload
+        .get("plan_id")
+        .or_else(|| event.payload.get("id"))
+        .and_then(serde_json::Value::as_str)?;
+    Some(protocol::PlanSubmittedEvent {
+        plan_id: plan_id.to_string(),
+        title: event
+            .payload
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        markdown: event
+            .payload
+            .get("markdown")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+fn plan_approval_resolved_plan_id(event: &RuntimeEvent) -> Option<String> {
+    if let Some(protocol::KeyRuntimeEvent::PlanApprovalResolved(resolved)) = &event.event {
+        return Some(resolved.plan_id.clone());
+    }
+    event
+        .payload
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
 fn subagent_status(status: &str) -> Option<protocol::SubagentStatus> {
     match status {
         "running" => Some(protocol::SubagentStatus::Running),
@@ -1241,6 +1414,7 @@ fn subagent_status(status: &str) -> Option<protocol::SubagentStatus> {
 
 type RuntimeLoadWaiter = oneshot::Sender<Result<(), String>>;
 
+/// core snapshot hydrate 的加载状态。
 #[derive(Default)]
 enum RuntimeLoadState {
     #[default]
@@ -1251,12 +1425,14 @@ enum RuntimeLoadState {
     Loaded,
 }
 
+/// `RuntimeLoadGate` 判断调用方该直接返回、负责加载，还是等待已有加载。
 enum RuntimeLoadAction {
     AlreadyLoaded,
     Load,
     Wait(oneshot::Receiver<Result<(), String>>),
 }
 
+/// 确保同一个 session 的 core snapshot 只被一个任务加载，其他请求共享结果。
 #[derive(Default)]
 struct RuntimeLoadGate {
     state: Mutex<RuntimeLoadState>,
@@ -1317,6 +1493,9 @@ impl RuntimeLoadGate {
     }
 }
 
+/// server 对单个 core 会话的适配层。
+///
+/// 它连接 core runtime、数据库、WebSocket fanout、controller presence 和 replay buffer。
 pub(crate) struct RuntimeSession {
     pub(crate) core: AgentCoreSession,
     session_id: String,
@@ -1556,7 +1735,12 @@ impl RuntimeSession {
             .expect("replay buffer lock poisoned")
             .record_snapshot(&snapshot);
         let context_window = self.context_window_for_snapshot(&snapshot);
-        session_snapshot_events(snapshot, context_window)
+        let active_profile = self
+            .status_projection
+            .lock()
+            .expect("status projection lock poisoned")
+            .active_profile();
+        session_snapshot_events(snapshot, context_window, active_profile)
     }
 
     async fn load_snapshot(&self) -> Result<LoadedSession, CoreError> {
@@ -1729,12 +1913,14 @@ impl RuntimeSession {
     }
 }
 
+/// 工具暂停 resolve 请求开始前的幂等检查结果。
 pub(crate) enum ToolPauseResolutionStart {
     Started,
     AlreadyResolved,
     ClientNotConnected,
 }
 
+/// runtime 事件对 pending tool pause 集合的影响。
 #[derive(Debug, PartialEq, Eq)]
 enum ToolPauseUpdate {
     Add(String),
@@ -1760,6 +1946,7 @@ fn apply_tool_pause_update(pending: &Arc<Mutex<HashSet<String>>>, event: &Runtim
     }
 }
 
+/// 从 runtime payload 提取 pending pause 的增删清空操作。
 fn tool_pause_update(event: &RuntimeEvent) -> Option<ToolPauseUpdate> {
     match event
         .payload
@@ -1797,6 +1984,7 @@ fn tool_pause_update(event: &RuntimeEvent) -> Option<ToolPauseUpdate> {
     }
 }
 
+/// 将 core 配置枚举转成 protocol re-export 的枚举。
 fn thinking_effort_to_protocol(
     effort: omini_core::types::config::ThinkingEffort,
 ) -> protocol::ThinkingEffort {
@@ -1808,6 +1996,7 @@ fn thinking_effort_to_protocol(
     }
 }
 
+/// 将数据库会话记录压缩成协议层会话摘要。
 fn session_summary_from_store(session: Session) -> protocol::SessionSummary {
     protocol::SessionSummary {
         id: session.id,
@@ -1819,14 +2008,17 @@ fn session_summary_from_store(session: Session) -> protocol::SessionSummary {
     }
 }
 
+/// 从首条用户输入生成默认会话标题。
 fn initial_session_title_from_input(input: &protocol::UserInput) -> Option<String> {
     let title = input.text.trim();
     (!title.is_empty()).then(|| title.chars().take(300).collect())
 }
 
+/// 将持久化 snapshot 转成一组 legacy runtime 事件供 TUI 恢复 UI。
 fn session_snapshot_events(
     snapshot: omini_core::types::events::LoadedSession,
     context_window: Option<u32>,
+    active_profile: ActiveProfile,
 ) -> Result<Vec<RuntimeEvent>, CoreError> {
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
@@ -1840,9 +2032,7 @@ fn session_snapshot_events(
             thinking_effort: snapshot.thinking_effort,
             context_window,
         },
-        omini_core::types::events::RuntimeToUiEvent::ActiveProfileChanged(
-            omini_core::types::events::ActiveProfile::Main,
-        ),
+        omini_core::types::events::RuntimeToUiEvent::ActiveProfileChanged(active_profile),
         omini_core::types::events::RuntimeToUiEvent::SessionChanged {
             session_id: Some(snapshot.session_id),
             messages: snapshot.messages,
@@ -1857,6 +2047,7 @@ fn session_snapshot_events(
         .collect()
 }
 
+/// 把 core/TUI 内部事件编码成协议 `RuntimeEvent`。
 fn runtime_event_from_internal(
     event: omini_core::types::events::RuntimeToUiEvent,
 ) -> Result<RuntimeEvent, CoreError> {
@@ -1865,6 +2056,7 @@ fn runtime_event_from_internal(
     Ok(RuntimeEvent::new(runtime_event_kind(&payload), payload))
 }
 
+/// 从序列化后的 runtime payload 中取出旧协议事件名。
 fn runtime_event_kind(payload: &serde_json::Value) -> String {
     payload
         .get("type")
@@ -1877,7 +2069,10 @@ fn runtime_event_kind(payload: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use omini_core::types::display::HistoryItem;
-    use omini_core::types::events::{RuntimeToUiEvent, SessionUsageSnapshot};
+    use omini_core::types::events::{
+        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, RuntimeToUiEvent,
+        SessionUsageSnapshot, SubmittedPlan,
+    };
     use omini_core::types::message::Message;
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
@@ -1897,6 +2092,13 @@ mod tests {
                     "delta": text,
                 }),
             ),
+        }
+    }
+
+    fn runtime_event(seq: u64, event: RuntimeToUiEvent) -> SequencedRuntimeEvent {
+        SequencedRuntimeEvent {
+            seq,
+            event: runtime_event_from_internal(event).expect("event should encode"),
         }
     }
 
@@ -1977,6 +2179,68 @@ mod tests {
         )
     }
 
+    #[test]
+    fn runtime_status_projection_tracks_active_profile() {
+        let mut projection = RuntimeStatusProjection::default();
+
+        projection.record_event(
+            &RuntimeEvent::new(
+                "active_profile_changed",
+                serde_json::json!({
+                    "type": "active_profile_changed",
+                    "profile": "plan"
+                }),
+            ),
+            Utc::now(),
+        );
+
+        assert_eq!(projection.active_profile(), ActiveProfile::Plan);
+    }
+
+    #[test]
+    fn runtime_status_projection_tracks_pending_plan_approval() {
+        let mut projection = RuntimeStatusProjection::default();
+        let now = Utc::now();
+
+        projection.record_event(
+            &RuntimeEvent::new(
+                "plan_submitted",
+                serde_json::json!({
+                    "type": "plan_submitted",
+                    "id": "plan_1",
+                    "title": "Plan",
+                    "markdown": "# Plan"
+                }),
+            ),
+            now,
+        );
+        let status = status_snapshot(&projection, now);
+        assert_eq!(
+            status
+                .pending_plan_approval
+                .as_ref()
+                .map(|plan| plan.plan_id.as_str()),
+            Some("plan_1")
+        );
+
+        projection.record_event(
+            &RuntimeEvent::new(
+                "plan_approval_resolved",
+                serde_json::json!({
+                    "type": "plan_approval_resolved",
+                    "plan_id": "plan_1",
+                    "action": { "type": "continue_discussing" }
+                }),
+            ),
+            now,
+        );
+        assert!(
+            status_snapshot(&projection, now)
+                .pending_plan_approval
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn runtime_load_gate_waiters_follow_successful_loader() {
         let gate = RuntimeLoadGate::default();
@@ -2028,7 +2292,7 @@ mod tests {
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(42));
-        assert_eq!(status.state, protocol::SessionRuntimeState::Working);
+        assert_eq!(status.state, protocol::SessionRuntimeState::Thinking);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.kind),
             Some(protocol::SessionRuntimeActivityKind::Query)
@@ -2038,10 +2302,22 @@ mod tests {
             Some(42)
         );
 
-        projection.record_event(&delta(2, "thinking_delta", "hmm").event, started_at);
+        projection.record_event(&sequenced(2, "turn_started").event, started_at);
         assert_eq!(
             status_snapshot(&projection, started_at).state,
             protocol::SessionRuntimeState::Thinking
+        );
+
+        projection.record_event(&delta(3, "thinking_delta", "hmm").event, started_at);
+        assert_eq!(
+            status_snapshot(&projection, started_at).state,
+            protocol::SessionRuntimeState::Thinking
+        );
+
+        projection.record_event(&delta(4, "text_delta", "hello").event, started_at);
+        assert_eq!(
+            status_snapshot(&projection, started_at).state,
+            protocol::SessionRuntimeState::Working
         );
 
         projection.record_event(
@@ -2315,6 +2591,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_buffer_replays_pending_plan_until_resolved() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(runtime_event(
+            1,
+            RuntimeToUiEvent::PlanSubmitted(SubmittedPlan {
+                id: "plan_1".to_string(),
+                title: "Plan".to_string(),
+                markdown: "# Plan".to_string(),
+                path: PathBuf::new(),
+                created_at: Utc::now(),
+            }),
+        ));
+
+        assert_eq!(replay_kinds(&buffer), vec!["plan_submitted"]);
+
+        buffer.record(runtime_event(
+            2,
+            RuntimeToUiEvent::PlanApprovalResolved {
+                plan_id: "plan_1".to_string(),
+                action: protocol::PlanApprovalAction::ContinueDiscussing,
+            },
+        ));
+
+        assert!(buffer.replay().is_empty());
+    }
+
+    #[test]
     fn replay_buffer_preserves_pending_user_until_run_starts() {
         let mut buffer = RuntimeReplayBuffer::default();
 
@@ -2512,6 +2816,39 @@ mod tests {
     }
 
     #[test]
+    fn replay_buffer_replays_in_progress_compact_tail_without_run() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(runtime_event(
+            1,
+            RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+                trigger: CompactTrigger::Manual,
+                session_id: Some("s1".to_string()),
+                agent_label: None,
+            }),
+        ));
+        buffer.record(runtime_event(
+            2,
+            RuntimeToUiEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
+                trigger: CompactTrigger::Manual,
+                delta: "partial".to_string(),
+                session_id: Some("s1".to_string()),
+                agent_label: None,
+            }),
+        ));
+
+        let replay = buffer.replay();
+        assert_eq!(
+            replay
+                .iter()
+                .map(|event| event.event.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["compact_summary_started", "compact_summary_delta"]
+        );
+        assert_eq!(replay[1].event.payload["delta"], "partial");
+    }
+
+    #[test]
     fn replay_buffer_clears_after_run_finished() {
         let mut buffer = RuntimeReplayBuffer::default();
 
@@ -2689,6 +3026,7 @@ mod tests {
                 },
             },
             Some(1000),
+            ActiveProfile::Plan,
         )
         .expect("snapshot events should encode");
 
@@ -2706,6 +3044,7 @@ mod tests {
         );
         assert_eq!(events[0].payload["title"], "hello");
         assert_eq!(events[1].payload["context_window"], 1000);
+        assert_eq!(events[2].payload["profile"], "plan");
         assert_eq!(events[3].payload["session_id"], "s1");
         assert_eq!(events[3].payload["usage"]["context_window"], 1000);
         assert_eq!(events[3].payload["messages"].as_array().unwrap().len(), 1);

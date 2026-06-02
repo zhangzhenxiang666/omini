@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use omini_protocol as protocol;
 use std::sync::Arc;
 
-use crate::routes::{ApiResult, core_error, daemon_session_or_not_found, ensure_controller};
+use crate::routes::{ApiResult, core_error, ensure_controller, require_daemon_session};
 use crate::runtime::GlobalDaemonManager;
 
 /// 列出当前会话可用的子代理配置。
@@ -12,7 +12,7 @@ pub(crate) async fn list_agents(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<protocol::AgentsResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     Ok(Json(session.core.list_agents()))
 }
 
@@ -23,7 +23,7 @@ pub(crate) async fn save_agent(
     headers: HeaderMap,
     Json(request): Json<protocol::SaveAgentRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
     session
         .core
@@ -39,7 +39,7 @@ pub(crate) async fn delete_agent(
     Path((project_id, session_id, agent_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
     session
         .core
@@ -56,7 +56,7 @@ pub(crate) async fn generate_agent(
     headers: HeaderMap,
     Json(request): Json<protocol::GenerateAgentRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
     session
         .core

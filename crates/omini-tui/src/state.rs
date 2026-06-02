@@ -615,6 +615,39 @@ impl UiState {
         }
     }
 
+    pub fn open_plan_approval(&mut self, plan: SubmittedPlan) {
+        if self
+            .plan_approval
+            .as_ref()
+            .is_some_and(|current| current.id == plan.id)
+        {
+            return;
+        }
+        self.show_start_screen = false;
+        self.plan_approval = Some(plan);
+        self.plan_approval_selected = 0;
+        self.plan_approval_auto = false;
+        if self.auto_scroll {
+            self.scroll_offset = 0;
+        }
+    }
+
+    pub fn clear_resolved_plan_approval(&mut self, plan_id: &str) {
+        if self
+            .plan_approval
+            .as_ref()
+            .is_some_and(|plan| plan.id == plan_id)
+        {
+            self.clear_plan_approval();
+        }
+    }
+
+    pub fn clear_plan_approval(&mut self) {
+        self.plan_approval = None;
+        self.plan_approval_selected = 0;
+        self.plan_approval_auto = false;
+    }
+
     pub fn start_run_timer(&mut self) {
         self.run_timer = Some(RunTimer::started_at(Instant::now()));
     }
@@ -674,12 +707,11 @@ impl UiState {
     }
 
     pub fn apply_runtime_status_sync(&mut self, status: omini_protocol::SessionRuntimeStatus) {
+        self.sync_pending_plan_approval(status.pending_plan_approval);
+
         let Some(activity) = status.activity else {
             return;
         };
-        if activity.kind != omini_protocol::SessionRuntimeActivityKind::Query {
-            return;
-        }
 
         let agent_status = match status.state {
             omini_protocol::SessionRuntimeState::Idle => return,
@@ -688,13 +720,28 @@ impl UiState {
             omini_protocol::SessionRuntimeState::Working
             | omini_protocol::SessionRuntimeState::Compacting => AgentStatus::Working,
         };
-        let paused = status.state == omini_protocol::SessionRuntimeState::Waiting
-            || !status.pending_pauses.is_empty();
+        // RuntimeStatus 是连接同步事实；compact 可能由其它客户端发起，不能标记为本地 manual compact。
+        let paused = activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
+            && (status.state == omini_protocol::SessionRuntimeState::Waiting
+                || !status.pending_pauses.is_empty());
 
         self.show_start_screen = false;
         self.manual_compact_running = false;
         self.sync_run_timer(Duration::from_millis(activity.elapsed_ms), paused);
         self.agent_status = agent_status;
+    }
+
+    fn sync_pending_plan_approval(&mut self, pending: Option<omini_protocol::PlanSubmittedEvent>) {
+        match pending {
+            Some(plan) => self.open_plan_approval(SubmittedPlan {
+                id: plan.plan_id,
+                title: plan.title,
+                markdown: plan.markdown,
+                path: PathBuf::new(),
+                created_at: chrono::Utc::now(),
+            }),
+            None => self.clear_plan_approval(),
+        }
     }
 
     pub fn is_run_timer_paused(&self) -> bool {

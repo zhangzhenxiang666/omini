@@ -3,9 +3,12 @@ use futures_util::{SinkExt, StreamExt};
 use omini_protocol as protocol;
 use omini_protocol::ProtocolError;
 use reqwest::Method;
+use serde::Deserialize;
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -112,7 +115,7 @@ pub(crate) fn spawn_project_client(
 }
 
 async fn run_project_client(
-    connection: ProjectConnection,
+    mut connection: ProjectConnection,
     event_tx: mpsc::Sender<RuntimeToUiEvent>,
     mut request_rx: mpsc::Receiver<ClientRequest>,
 ) -> Result<(), String> {
@@ -122,26 +125,56 @@ async fn run_project_client(
         .map_err(|err| format!("build HTTP client: {err}"))?;
     let mut active_session_id: Option<String> = None;
     let mut pending_request: Option<ClientRequest> = None;
+    // 每个活跃 session 只允许一次最新 daemon 地址重连；否则健康检查成功但 session
+    // 仍不可用时会在同一个断线点空转。
+    let mut refreshed_active_session = false;
 
     loop {
         if let Some(session_id) = active_session_id.take() {
             // 一次只维护一个活跃 session WebSocket；切换会话时结束旧 loop 再连接新 loop。
-            match run_connected_session(
+            let mut session_initial_request = pending_request.take();
+            let disconnect = match run_connected_session(
                 &http,
                 &connection,
                 &session_id,
                 &event_tx,
                 &mut request_rx,
-                pending_request.take(),
+                &mut session_initial_request,
             )
             .await
             {
                 Ok(SessionLoop::Switch(next_session_id)) => {
                     active_session_id = Some(next_session_id);
+                    refreshed_active_session = false;
+                    continue;
                 }
-                Ok(SessionLoop::Closed) => {}
-                Err(err) => {
-                    let _ = event_tx.send(RuntimeToUiEvent::error(err)).await;
+                Ok(SessionLoop::Closed(reason)) | Err(reason) => reason,
+            };
+
+            if refreshed_active_session {
+                // 已经用最新地址重连过一次，第二次断开就直接报告，避免隐藏真实不可恢复错误。
+                let _ = event_tx
+                    .send(RuntimeToUiEvent::error(format!(
+                        "Runtime client disconnected: {disconnect}"
+                    )))
+                    .await;
+                refreshed_active_session = false;
+            } else {
+                match reconnect_latest_daemon(&http, &mut connection).await {
+                    Ok(()) => {
+                        // 新 daemon 不认识旧 client_id；rediscovery 会重新注册并 attach 项目。
+                        active_session_id = Some(session_id);
+                        pending_request = session_initial_request;
+                        refreshed_active_session = true;
+                    }
+                    Err(reconnect_err) => {
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::error(format!(
+                                "Runtime client disconnected: {disconnect}; reconnect failed: {reconnect_err}"
+                            )))
+                            .await;
+                        refreshed_active_session = false;
+                    }
                 }
             }
             continue;
@@ -159,6 +192,7 @@ async fn run_project_client(
             } => {
                 active_session_id = Some(session_id);
                 pending_request = pending;
+                refreshed_active_session = false;
             }
             ProjectAction::Shutdown => break,
         }
@@ -179,7 +213,7 @@ enum ProjectAction {
 
 enum SessionLoop {
     Switch(String),
-    Closed,
+    Closed(String),
 }
 
 async fn handle_project_request(
@@ -246,7 +280,7 @@ async fn run_connected_session(
     session_id: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     request_rx: &mut mpsc::Receiver<ClientRequest>,
-    initial_request: Option<ClientRequest>,
+    initial_request: &mut Option<ClientRequest>,
 ) -> Result<SessionLoop, String> {
     let base = session_base_url(connection, session_id);
     let url = format!(
@@ -269,9 +303,9 @@ async fn run_connected_session(
         .map_err(|err| format!("connect {url}: {err}"))?;
     let (mut write, mut read) = socket.split();
     let client_id = connection.client_id.clone();
-    let mut pending_status_sync = fetch_query_runtime_status_sync(http, &base).await;
+    let mut did_calibrate_initial_status = false;
 
-    if let Some(request) = initial_request
+    if let Some(request) = initial_request.take()
         && let Some(next_session_id) =
             handle_local_request(http, connection, &base, &client_id, request, event_tx).await?
     {
@@ -305,15 +339,31 @@ async fn run_connected_session(
             // WebSocket 流只向 UI 注入 server 事件，连接控制帧在这里就地处理。
             message = read.next() => {
                 let Some(message) = message else {
-                    break;
+                    return Ok(SessionLoop::Closed("server event stream ended".to_string()));
                 };
                 let message = message.map_err(|err| format!("read server message: {err}"))?;
                 match message {
                     TungsteniteMessage::Text(text) => {
-                        handle_server_text(text.as_str(), event_tx, &mut pending_status_sync)
-                            .await?;
+                        let saw_runtime_status = handle_server_text(text.as_str(), event_tx).await?;
+                        if saw_runtime_status && !did_calibrate_initial_status {
+                            did_calibrate_initial_status = true;
+                            // WS 初始化 status 先让 UI 立刻恢复；随后只测一次 HTTP status
+                            // 往返，避免把 snapshot/replay/hydrate 时间算进运行耗时。
+                            if let Some(status) =
+                                fetch_calibrated_runtime_status(http, &base).await
+                            {
+                                event_tx
+                                    .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                                    .await
+                                    .map_err(|_| "TUI event receiver closed".to_string())?;
+                            }
+                        }
                     }
-                    TungsteniteMessage::Close(_) => break,
+                    TungsteniteMessage::Close(_) => {
+                        return Ok(SessionLoop::Closed(
+                            "server closed the event stream".to_string(),
+                        ));
+                    }
                     TungsteniteMessage::Ping(payload) => {
                         write
                             .send(TungsteniteMessage::Pong(payload))
@@ -325,34 +375,12 @@ async fn run_connected_session(
             }
         }
     }
-
-    Ok(SessionLoop::Closed)
-}
-
-async fn fetch_query_runtime_status_sync(
-    http: &reqwest::Client,
-    base: &str,
-) -> Option<protocol::SessionRuntimeStatus> {
-    let response: protocol::SessionRuntimeStatusResponse = timeout(
-        Duration::from_secs(2),
-        get_json(http, &format!("{base}/status")),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let status = response.status;
-    let is_query = status
-        .activity
-        .as_ref()
-        .is_some_and(|activity| activity.kind == protocol::SessionRuntimeActivityKind::Query);
-    is_query.then_some(status)
 }
 
 async fn handle_server_text(
     text: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
-    pending_status_sync: &mut Option<protocol::SessionRuntimeStatus>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     match serde_json::from_str::<protocol::ServerEnvelope>(text)
         .map_err(|err| format!("decode server envelope: {err}"))?
     {
@@ -360,41 +388,148 @@ async fn handle_server_text(
             // RuntimeEvent 保留 payload 兼容层，TUI 当前仍按历史 RuntimeToUiEvent 解码。
             let event = serde_json::from_value::<RuntimeToUiEvent>(event.payload)
                 .map_err(|err| format!("decode runtime event: {err}"))?;
-            let should_sync_status = matches!(event, RuntimeToUiEvent::RunStarted);
-            let should_drop_status =
-                should_drop_pending_status_sync(&event, pending_status_sync.as_ref());
             event_tx
                 .send(event)
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
-            if should_sync_status {
-                if let Some(status) = pending_status_sync.take() {
-                    event_tx
-                        .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
-                        .await
-                        .map_err(|_| "TUI event receiver closed".to_string())?;
-                }
-            } else if should_drop_status {
-                pending_status_sync.take();
-            }
-            Ok(())
+            Ok(false)
+        }
+        protocol::ServerEnvelope::RuntimeStatus { status } => {
+            event_tx
+                .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(true)
         }
         // controller/role envelope 先作为协议能力保留，当前 TUI 渲染还主要依赖 runtime payload。
-        protocol::ServerEnvelope::ControllerChanged { .. } => Ok(()),
-        protocol::ServerEnvelope::ClientRoleChanged { .. } => Ok(()),
+        protocol::ServerEnvelope::ControllerChanged { .. } => Ok(false),
+        protocol::ServerEnvelope::ClientRoleChanged { .. } => Ok(false),
     }
 }
 
-fn should_drop_pending_status_sync(
-    event: &RuntimeToUiEvent,
-    pending_status_sync: Option<&protocol::SessionRuntimeStatus>,
-) -> bool {
-    match event {
-        RuntimeToUiEvent::RunFinished => true,
-        RuntimeToUiEvent::SessionChanged { session_id, .. } => pending_status_sync
-            .is_some_and(|status| session_id.as_deref() != Some(status.session_id.as_str())),
-        _ => false,
+async fn fetch_calibrated_runtime_status(
+    http: &reqwest::Client,
+    base: &str,
+) -> Option<protocol::SessionRuntimeStatus> {
+    let started_at = Instant::now();
+    let response: protocol::SessionRuntimeStatusResponse = timeout(
+        Duration::from_secs(2),
+        get_json(http, &format!("{base}/status")),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    Some(apply_runtime_status_latency(
+        response.status,
+        started_at.elapsed(),
+    ))
+}
+
+fn apply_runtime_status_latency(
+    mut status: protocol::SessionRuntimeStatus,
+    latency: Duration,
+) -> protocol::SessionRuntimeStatus {
+    // server 端 query timer 会扣掉等待工具授权/输入的暂停时间；暂停态不叠加客户端延迟，
+    // 否则等待用户期间会被误算为工作耗时。
+    if should_apply_runtime_status_latency(&status)
+        && let Some(activity) = &mut status.activity
+    {
+        activity.elapsed_ms = activity
+            .elapsed_ms
+            .saturating_add(duration_millis_u64(latency));
     }
+    status
+}
+
+fn should_apply_runtime_status_latency(status: &protocol::SessionRuntimeStatus) -> bool {
+    status.activity.is_some()
+        && status.pending_pauses.is_empty()
+        && matches!(
+            status.state,
+            protocol::SessionRuntimeState::Thinking
+                | protocol::SessionRuntimeState::Working
+                | protocol::SessionRuntimeState::Compacting
+        )
+}
+
+fn duration_millis_u64(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[derive(Debug, Deserialize)]
+struct DaemonHint {
+    #[serde(default = "default_daemon_host")]
+    host: String,
+    port: u16,
+}
+
+impl DaemonHint {
+    fn addr(&self) -> Result<SocketAddr, String> {
+        format!("{}:{}", self.host, self.port)
+            .parse()
+            .map_err(|err| format!("parse daemon address: {err}"))
+    }
+}
+
+async fn reconnect_latest_daemon(
+    http: &reqwest::Client,
+    connection: &mut ProjectConnection,
+) -> Result<(), String> {
+    let addr = discover_healthy_daemon(http).await?;
+    // daemon 重启后端口和进程内 client registry 都会变；先重建身份，再 attach 原项目。
+    let register: protocol::RegisterClientResponse = post_json_without_client(
+        http,
+        &format!("http://{addr}/v1/clients"),
+        &protocol::RegisterClientRequest {
+            kind: Some("tui".to_string()),
+        },
+    )
+    .await?;
+    let cwd = connection.attach.cwd.clone();
+    let attach: protocol::ProjectAttachResponse = put_json_without_client(
+        http,
+        &format!("http://{addr}/v1/projects/{}/attach", connection.project_id),
+        &protocol::ProjectAttachRequest { cwd },
+    )
+    .await?;
+
+    connection.addr = addr;
+    connection.project_id = attach.project_id.clone();
+    connection.client_id = register.client_id;
+    connection.attach = attach;
+    Ok(())
+}
+
+async fn discover_healthy_daemon(http: &reqwest::Client) -> Result<SocketAddr, String> {
+    let hint = read_daemon_hint()?;
+    let addr = hint.addr()?;
+    let url = format!("http://{addr}/v1/health");
+    let response: protocol::DaemonHealthResponse =
+        timeout(Duration::from_millis(500), get_json(http, &url))
+            .await
+            .map_err(|_| format!("GET {url}: timed out"))??;
+    if response.ok && response.daemon == "omini-server" {
+        Ok(addr)
+    } else {
+        Err(format!("daemon health check failed at {url}"))
+    }
+}
+
+fn read_daemon_hint() -> Result<DaemonHint, String> {
+    let path = daemon_run_dir()?.join("daemon.json");
+    let content =
+        fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    serde_json::from_str(&content).map_err(|err| format!("decode {}: {err}", path.display()))
+}
+
+fn daemon_run_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".omini").join("run"))
+        .ok_or_else(|| "cannot find home dir".to_string())
+}
+
+fn default_daemon_host() -> String {
+    "127.0.0.1".to_string()
 }
 
 async fn handle_local_request(
@@ -705,6 +840,24 @@ where
         .send()
         .await
         .map_err(|err| format!("POST {url}: {err}"))?;
+    decode_response(response, url).await
+}
+
+async fn put_json_without_client<B, T>(
+    http: &reqwest::Client,
+    url: &str,
+    body: &B,
+) -> Result<T, String>
+where
+    B: serde::Serialize + ?Sized,
+    T: serde::de::DeserializeOwned,
+{
+    let response = http
+        .put(url)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| format!("PUT {url}: {err}"))?;
     decode_response(response, url).await
 }
 
@@ -1026,6 +1179,7 @@ mod tests {
                 elapsed_ms: 1_500,
             }),
             pending_pauses: Vec::new(),
+            pending_plan_approval: None,
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
@@ -1046,12 +1200,114 @@ mod tests {
         .expect("envelope should serialize")
     }
 
-    #[tokio::test]
-    async fn handle_server_text_emits_status_sync_after_run_started() {
-        let (tx, mut rx) = mpsc::channel(4);
-        let mut pending_status_sync = Some(query_runtime_status());
+    fn runtime_status_envelope_text(status: protocol::SessionRuntimeStatus) -> String {
+        serde_json::to_string(&protocol::ServerEnvelope::RuntimeStatus { status })
+            .expect("envelope should serialize")
+    }
 
-        handle_server_text(
+    fn pending_pause() -> protocol::SessionRuntimePendingPause {
+        protocol::SessionRuntimePendingPause {
+            tool_use_id: "tool_1".to_string(),
+            tool_name: "bash".to_string(),
+            kind: protocol::ToolPauseEventKind::Permission,
+            source_session_id: None,
+            source_agent_label: None,
+        }
+    }
+
+    #[test]
+    fn runtime_status_latency_adjusts_running_query() {
+        let status =
+            apply_runtime_status_latency(query_runtime_status(), Duration::from_millis(42));
+
+        assert_eq!(
+            status.activity.as_ref().map(|activity| activity.elapsed_ms),
+            Some(1_542)
+        );
+    }
+
+    #[test]
+    fn runtime_status_latency_adjusts_compact_activity() {
+        let mut status = query_runtime_status();
+        status.state = protocol::SessionRuntimeState::Compacting;
+        status.activity = Some(protocol::SessionRuntimeActivity {
+            kind: protocol::SessionRuntimeActivityKind::Compact,
+            started_at: Utc::now(),
+            elapsed_ms: 700,
+        });
+
+        let status = apply_runtime_status_latency(status, Duration::from_millis(88));
+
+        assert_eq!(
+            status.activity.as_ref().map(|activity| activity.elapsed_ms),
+            Some(788)
+        );
+    }
+
+    #[test]
+    fn runtime_status_latency_skips_waiting_or_pending_pause() {
+        let mut waiting = query_runtime_status();
+        waiting.state = protocol::SessionRuntimeState::Waiting;
+        let waiting = apply_runtime_status_latency(waiting, Duration::from_millis(42));
+        assert_eq!(
+            waiting
+                .activity
+                .as_ref()
+                .map(|activity| activity.elapsed_ms),
+            Some(1_500)
+        );
+
+        let mut pending = query_runtime_status();
+        pending.pending_pauses.push(pending_pause());
+        let pending = apply_runtime_status_latency(pending, Duration::from_millis(42));
+        assert_eq!(
+            pending
+                .activity
+                .as_ref()
+                .map(|activity| activity.elapsed_ms),
+            Some(1_500)
+        );
+    }
+
+    #[test]
+    fn runtime_status_latency_saturates_elapsed_ms() {
+        let mut status = query_runtime_status();
+        status
+            .activity
+            .as_mut()
+            .expect("query status has activity")
+            .elapsed_ms = u64::MAX - 5;
+
+        let status = apply_runtime_status_latency(status, Duration::from_millis(10));
+
+        assert_eq!(
+            status.activity.as_ref().map(|activity| activity.elapsed_ms),
+            Some(u64::MAX)
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_server_text_emits_runtime_status_sync() {
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let saw_runtime_status =
+            handle_server_text(&runtime_status_envelope_text(query_runtime_status()), &tx)
+                .await
+                .expect("runtime status should decode");
+
+        assert!(saw_runtime_status);
+        assert!(matches!(
+            rx.recv().await,
+            Some(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                if status.session_id == "session_1" && status.activity.is_some()
+        ));
+    }
+
+    #[tokio::test]
+    async fn handle_server_text_still_decodes_legacy_runtime_event() {
+        let (tx, mut rx) = mpsc::channel(4);
+
+        let saw_runtime_status = handle_server_text(
             &envelope_text(RuntimeToUiEvent::SessionChanged {
                 session_id: Some("session_1".to_string()),
                 messages: Vec::new(),
@@ -1059,34 +1315,14 @@ mod tests {
                 usage: Default::default(),
             }),
             &tx,
-            &mut pending_status_sync,
         )
         .await
         .expect("session changed should decode");
 
-        assert!(pending_status_sync.is_some());
+        assert!(!saw_runtime_status);
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeToUiEvent::SessionChanged { .. })
-        ));
-
-        handle_server_text(
-            &envelope_text(RuntimeToUiEvent::RunStarted),
-            &tx,
-            &mut pending_status_sync,
-        )
-        .await
-        .expect("run started should decode");
-
-        assert!(pending_status_sync.is_none());
-        assert!(matches!(
-            rx.recv().await,
-            Some(RuntimeToUiEvent::RunStarted)
-        ));
-        assert!(matches!(
-            rx.recv().await,
-            Some(RuntimeToUiEvent::RuntimeStatusSynced { status })
-                if status.session_id == "session_1" && status.activity.is_some()
         ));
     }
 }

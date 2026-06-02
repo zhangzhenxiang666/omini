@@ -1,3 +1,4 @@
+/// 独立 daemon 进程入口。
 fn main() {
     let options = match omini_server::process::ProcessOptions::parse_from_env() {
         Ok(options) => options,

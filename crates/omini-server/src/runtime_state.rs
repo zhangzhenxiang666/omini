@@ -1,3 +1,5 @@
+//! daemon 发现文件的读写位置和内容形状。
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
@@ -5,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process;
 
+/// 写到 run 目录中的 daemon 连接信息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonRuntimeState {
     pub host: String,

@@ -9,6 +9,7 @@ Project instructions for coding agents working in this repository.
 - Prefer the smallest implementation that solves the request. Do not add speculative features, abstractions, configurability, or error handling.
 - Make surgical changes. Touch only files and lines that directly support the requested work.
 - Match nearby style, even when it differs from personal preference.
+- Use comments in proportion to complexity: add a short orienting note when behavior is non-obvious or easy to misread, expand only for genuinely complex logic, and omit comments when the code is self-explanatory.
 - Do not refactor unrelated code, rewrite comments, or clean up pre-existing dead code unless explicitly asked.
 - If your changes make imports, variables, functions, or tests unused, clean up only the unused code introduced by your changes.
 - For non-trivial work, define success criteria and verify them with the narrowest useful check.

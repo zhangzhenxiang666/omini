@@ -263,6 +263,11 @@ pub enum RuntimeToUiEvent {
     ToolPauseRequested(ToolPauseRequest),
     /// 计划已提交，TUI 应打开计划审批抽屉
     PlanSubmitted(SubmittedPlan),
+    /// 计划审批已被任一客户端处理，所有客户端都应关闭对应抽屉。
+    PlanApprovalResolved {
+        plan_id: String,
+        action: PlanApprovalAction,
+    },
 
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),

@@ -8,8 +8,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::routes::{
-    ApiResult, api_error, client_id_from_headers, core_error, daemon_session_or_not_found,
-    ensure_connected_controller, ensure_controller, project_or_not_found, session_or_not_found,
+    ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
+    ensure_controller, require_daemon_session, require_project, require_session,
 };
 use crate::runtime::GlobalDaemonManager;
 use crate::ws;
@@ -19,7 +19,7 @@ pub(crate) async fn list_sessions(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
 ) -> ApiResult<protocol::SessionsResponse> {
-    let project = project_or_not_found(&manager, &project_id).await?;
+    let project = require_project(&manager, &project_id).await?;
     project.list_sessions().await.map(Json).map_err(core_error)
 }
 
@@ -35,7 +35,7 @@ pub(crate) async fn list_session_statuses(
     Path(project_id): Path<String>,
     Query(query): Query<SessionStatusQuery>,
 ) -> ApiResult<protocol::SessionStatusesResponse> {
-    let project = project_or_not_found(&manager, &project_id).await?;
+    let project = require_project(&manager, &project_id).await?;
     let filter = parse_status_filter(query.status.as_deref())?;
     Ok(Json(project.list_session_statuses(filter.as_deref()).await))
 }
@@ -45,7 +45,7 @@ pub(crate) async fn session_status(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<protocol::SessionRuntimeStatusResponse> {
-    let project = project_or_not_found(&manager, &project_id).await?;
+    let project = require_project(&manager, &project_id).await?;
     let Some(status) = project.session_status(&session_id).await else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
@@ -61,7 +61,7 @@ pub(crate) async fn create_session(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
 ) -> ApiResult<protocol::CreateSessionResponse> {
-    let project = project_or_not_found(&manager, &project_id).await?;
+    let project = require_project(&manager, &project_id).await?;
     project.create_session().await.map(Json).map_err(core_error)
 }
 
@@ -70,7 +70,7 @@ pub(crate) async fn list_models(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<protocol::ModelsResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     Ok(Json(session.core.list_models()))
 }
 
@@ -81,7 +81,7 @@ pub(crate) async fn set_model(
     headers: HeaderMap,
     Json(request): Json<protocol::SetModelRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -98,7 +98,7 @@ pub(crate) async fn set_thinking_effort(
     headers: HeaderMap,
     Json(request): Json<protocol::SetThinkingEffortRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -115,7 +115,7 @@ pub(crate) async fn set_profile(
     headers: HeaderMap,
     Json(request): Json<protocol::SetActiveProfileRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -131,7 +131,7 @@ pub(crate) async fn toggle_profile(
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -148,7 +148,7 @@ pub(crate) async fn set_thinking_display(
     headers: HeaderMap,
     Json(request): Json<protocol::SetThinkingDisplayRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -165,9 +165,9 @@ pub(crate) async fn open_session(
     headers: HeaderMap,
     Json(request): Json<protocol::OpenSessionRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
-    let target = daemon_session_or_not_found(&manager, &project_id, &request.session_id).await?;
+    let target = require_daemon_session(&manager, &project_id, &request.session_id).await?;
     target.ensure_loaded().await.map_err(core_error)?;
     Ok(Json(protocol::AckResponse::ok()))
 }
@@ -178,8 +178,8 @@ pub(crate) async fn new_session(
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::CreateSessionResponse> {
-    let project = project_or_not_found(&manager, &project_id).await?;
-    let session = session_or_not_found(&project, &session_id).await?;
+    let project = require_project(&manager, &project_id).await?;
+    let session = require_session(&project, &session_id).await?;
     ensure_controller(&session, &headers).await?;
     project.create_session().await.map(Json).map_err(core_error)
 }
@@ -191,7 +191,7 @@ pub(crate) async fn rename_session(
     headers: HeaderMap,
     Json(request): Json<protocol::RenameSessionRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller_claimed(&session, &headers).await?;
     let title = normalize_session_title(request.title)?;
     session
@@ -273,7 +273,7 @@ pub(crate) async fn compact_context(
     headers: HeaderMap,
     Json(request): Json<protocol::CompactContextRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -295,11 +295,11 @@ pub(crate) async fn session_events(
         Err(error) => return error.into_response(),
     };
 
-    let project = match project_or_not_found(&manager, &project_id).await {
+    let project = match require_project(&manager, &project_id).await {
         Ok(project) => project,
         Err(error) => return error.into_response(),
     };
-    match session_or_not_found(&project, &session_id).await {
+    match require_session(&project, &session_id).await {
         Ok(session) => ws
             .on_upgrade(move |socket| {
                 ws::handle_socket(socket, project, session, session_id, client_id)

@@ -1,3 +1,5 @@
+//! HTTP handler 的共享错误转换、鉴权和会话查找工具。
+
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use omini_protocol::ProtocolError;
@@ -41,7 +43,7 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
     )
 }
 
-pub(crate) async fn project_or_not_found(
+pub(crate) async fn require_project(
     manager: &GlobalDaemonManager,
     project_id: &str,
 ) -> Result<Arc<SessionManager>, ApiError> {
@@ -51,7 +53,7 @@ pub(crate) async fn project_or_not_found(
         .map_err(project_lookup_error)
 }
 
-pub(crate) async fn session_or_not_found(
+pub(crate) async fn require_session(
     manager: &SessionManager,
     session_id: &str,
 ) -> Result<Arc<RuntimeSession>, ApiError> {
@@ -61,14 +63,14 @@ pub(crate) async fn session_or_not_found(
         .map_err(session_lookup_error)
 }
 
-pub(crate) async fn daemon_session_or_not_found(
+pub(crate) async fn require_daemon_session(
     manager: &GlobalDaemonManager,
     project_id: &str,
     session_id: &str,
 ) -> Result<Arc<RuntimeSession>, ApiError> {
     // 大多数 session endpoint 都需要先确认项目已 attach，再确认 session 属于该项目。
-    let project = project_or_not_found(manager, project_id).await?;
-    session_or_not_found(&project, session_id).await
+    let project = require_project(manager, project_id).await?;
+    require_session(&project, session_id).await
 }
 
 pub(crate) fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {

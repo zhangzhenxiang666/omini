@@ -93,44 +93,44 @@ fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
 /// Agent 运行时。
 ///
 /// 维护自己的对话历史，通过 channel 与 UI 双向通信。
-/// 一次 `UiToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用 + 工具执行，
+/// 一次 `UiToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用和工具执行，
 /// 直到 LLM 自然结束或达到最大轮次。
 pub struct AgentRuntime {
-    /// 当前会话 ID（第一次提交时生成）
+    /// 当前会话 ID，第一次提交时生成。
     pub(crate) session_id: Option<String>,
-    /// 创建后缓存会话目录句柄
+    /// 创建后缓存的会话目录句柄。
     pub(crate) session_dir: Option<SessionDir>,
-    /// 向 UI 发送事件
+    /// 向 UI 发送事件。
     event_tx: mpsc::Sender<RuntimeToUiEvent>,
-    /// 向外部 server 转发 UI/SQLite 级持久化事件
+    /// 向外部 server 转发 UI/SQLite 级持久化事件。
     persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-    /// 接收 UI 发来的请求
+    /// 接收 UI 发来的请求。
     request_rx: mpsc::Receiver<UiToRuntimeEvent>,
-    /// 配置
+    /// 运行时配置。
     pub(crate) settings: Settings,
-    /// 当前项目目录
+    /// 当前项目目录。
     pub(crate) project: ProjectDir,
-    /// 运行时自主维护的对话历史
+    /// 运行时自主维护的对话历史。
     pub(crate) messages: Vec<Message>,
-    /// LLM 客户端
+    /// LLM 客户端。
     llm_client: LlmClient,
-    /// 查询引擎
+    /// 查询引擎。
     query_engine: QueryEngine,
-    /// 工具注册表（持有所有注册的工具）
+    /// 工具注册表，持有所有注册的工具。
     tool_registry: Arc<ToolRegistry>,
-    /// MCP service manager loaded from user config.
+    /// 从用户配置加载的 MCP 服务管理器。
     mcp_manager: Arc<McpManager>,
-    /// Whether this runtime has waited for MCP startup before a query.
+    /// runtime 是否已在 query 前等待过 MCP 启动。
     mcp_initialized: bool,
-    /// Runtime-side subagent lifecycle service.
+    /// runtime 侧的子代理生命周期服务。
     subagent_runner: Arc<RuntimeSubagentRunner>,
-    /// Runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
+    /// runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
     capabilities: CapabilityStore,
-    /// 取消标志（用于 CancelRun）
+    /// 取消标志，用于 CancelRun。
     cancelled: Arc<AtomicBool>,
-    /// 当前运行 profile，供 runtime 主循环和运行中事件处理器共享读取。
+    /// 当前活跃 profile，供 runtime 主循环和运行中事件处理器共享读取。
     pub(crate) active_profile: Arc<RwLock<ActiveProfile>>,
-    /// 当前 session 的 usage 快照；SQLite 落库由 server 处理，runtime 只维护 UI 增量。
+    /// 当前 session 的 usage 快照；SQLite 落库由 server 处理。
     session_usage: Arc<Mutex<SessionUsageSnapshot>>,
 }
 
@@ -183,7 +183,7 @@ impl AgentRuntime {
             settings.permissions.clone(),
         ));
 
-        // 向 UI 推送 runtime 侧能力快照（供自动补全使用）
+        // 向 UI 推送 runtime 侧能力快照，供自动补全使用。
         let _ = event_tx.try_send(RuntimeToUiEvent::AgentList(subagent_registry.summaries()));
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
@@ -297,8 +297,7 @@ impl AgentRuntime {
                                 self.generate_agent(source_kind, &description, tools, disallow_tools, model).await;
                             }
                             UiToRuntimeEvent::ResolveToolPause { .. } => {
-                                // Stale permission responses can arrive after another client
-                                // already handled the pause and the run has continued.
+                                // 过期的权限响应可能在其他客户端已处理暂停、运行继续后抵达。
                             }
                             UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 self.resolve_plan_approval(&plan_id, action).await;
@@ -341,7 +340,7 @@ impl AgentRuntime {
         }
     }
 
-    /// 切换模型 / 提供商（/model 交互完成后回调）。
+    /// 切换模型 / 提供商，在 /model 交互完成后回调。
     async fn switch_model(
         &mut self,
         provider: &str,
@@ -367,14 +366,14 @@ impl AgentRuntime {
         .await;
     }
 
-    /// 切换会话（/sessions 交互完成后回调）。
+    /// 切换会话，在 /sessions 交互完成后回调。
     async fn switch_session(&mut self, snapshot: LoadedSession) {
         self.session_id = Some(snapshot.session_id.clone());
 
         let session_dir = self.project.session(&snapshot.session_id);
         self.session_dir = Some(session_dir.clone());
 
-        // 同步会话的提供商 / 模型到运行时（若不同则切换）
+        // 同步会话的提供商 / 模型到运行时；若不同则切换。
         let provider_changed = snapshot.provider != self.settings.active_provider
             || snapshot.model != self.settings.model;
 
@@ -391,7 +390,7 @@ impl AgentRuntime {
             );
         }
 
-        // 同步思考程度
+        // 同步思考强度。
         let thinking_effort = snapshot.thinking_effort;
         self.settings.thinking_effort = thinking_effort;
         self.set_active_profile(ActiveProfile::Main);
@@ -632,7 +631,19 @@ impl AgentRuntime {
         drop(compact_tx);
         let _ = forwarder.await;
 
-        result.map(|_| ())
+        match result {
+            Ok(outcome) => {
+                if compact_outcome_is_noop(&outcome) {
+                    // 手动 compact 已经让 TUI 进入 working；无可压缩内容也要给一个终止事件。
+                    self.send_event(RuntimeToUiEvent::warning(
+                        "当前会话历史还不需要压缩".to_string(),
+                    ))
+                    .await;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub(crate) fn set_active_profile(&mut self, profile: ActiveProfile) {
@@ -676,9 +687,11 @@ impl AgentRuntime {
                     self.active_profile(),
                 ))
                 .await;
+                self.send_plan_approval_resolved(plan_id, action).await;
             }
             PlanApprovalAction::Approve { profile } => {
                 let plan_message = Message::from_user_text(plan::approval_message());
+                self.send_plan_approval_resolved(plan_id, action).await;
                 self.set_active_profile(profile.active_profile());
                 self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
                     self.active_profile(),
@@ -704,6 +717,8 @@ impl AgentRuntime {
                         return;
                     }
                 };
+                // 读到计划后才关闭所有客户端的审批抽屉，避免失败时丢掉可重试的 pending 计划。
+                self.send_plan_approval_resolved(plan_id, action).await;
                 let plan_message = Message::from_user_text(plan::compacted_context(&plan_content));
                 self.session_id = None;
                 self.session_dir = None;
@@ -720,6 +735,14 @@ impl AgentRuntime {
                 self.process_run(RunStart::Continue).await;
             }
         }
+    }
+
+    async fn send_plan_approval_resolved(&self, plan_id: &str, action: PlanApprovalAction) {
+        self.send_event(RuntimeToUiEvent::PlanApprovalResolved {
+            plan_id: plan_id.to_string(),
+            action,
+        })
+        .await;
     }
 
     fn plan_path(&self, plan_id: &str) -> std::path::PathBuf {
@@ -777,12 +800,12 @@ impl AgentRuntime {
         }
     }
 
-    /// 处理一次完整的用户请求（可能含多轮 LLM 调用）。
+    /// 处理一次完整的用户请求，可能包含多轮 LLM 调用。
     async fn process_run(&mut self, start: RunStart) {
         if self.session_id.is_none() {
             self.create_session(initial_display_message(&start)).await;
         } else {
-            // 已有 session，更新 updated_at 时间戳
+            // 已有 session，更新 updated_at 时间戳。
             let id = self.session_id.as_ref().expect("session_id should exist");
             let _ = self
                 .persistence_tx
@@ -805,13 +828,13 @@ impl AgentRuntime {
         self.ensure_mcp_initialized().await;
         let tool_registry = self.tool_registry_snapshot();
 
-        // 创建 engine → runtime 的内部通信通道
+        // 创建 engine -> runtime 的内部通信通道。
         let (engine_tx, engine_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
         let active_profile = self.active_profile();
         let active_profile_handle = Arc::clone(&self.active_profile);
         let tool_pause_resolver = self.query_engine.tool_pause_resolver();
 
-        // 启动事件处理器（独立 task），负责增量持久化 + 转发到 UI
+        // 启动事件处理器独立 task，负责增量持久化和转发到 UI。
         let processor = self
             .spawn_event_processor(
                 engine_rx,
@@ -826,7 +849,7 @@ impl AgentRuntime {
             let skill_registry = self.capabilities.skill_registry();
             let run_settings = self.settings.clone();
             let run_settings = Arc::new(run_settings);
-            // 引擎直接在当前 task 运行，&mut self.messages 零拷贝
+            // 引擎直接在当前 task 运行，让 &mut self.messages 保持零拷贝。
             let ctx = QueryContext {
                 messages: &mut self.messages,
                 settings: Arc::clone(&run_settings),
@@ -979,7 +1002,7 @@ impl AgentRuntime {
             }
         }
 
-        // 等待事件处理器自然退出（engine_tx drop 后 engine_rx 收到 None）
+        // 等待事件处理器在 engine_tx drop 后自然退出。
         let _ = processor.await;
 
         self.cancelled.store(false, Ordering::Relaxed);
@@ -1027,7 +1050,7 @@ impl AgentRuntime {
         });
     }
 
-    /// 启动事件处理器
+    /// 启动事件处理器。
     async fn spawn_event_processor(
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
@@ -1060,10 +1083,15 @@ impl AgentRuntime {
                             &session_dir,
                             &session_id,
                             &blocks_dir,
-                            msg,
+                            msg.clone(),
                             &persistence_tx,
                         )
                         .await;
+                        let _ = event_tx
+                            .send(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
+                                msg,
+                            )))
+                            .await;
                     }
                     EngineToRuntimeEvent::LlmHistoryProduced(msg) => {
                         history::persist_llm_history_only(&session_dir, &msg);
@@ -1264,7 +1292,7 @@ impl AgentRuntime {
         })
     }
 
-    /// 发送事件到 UI（忽略 send 失败）
+    /// 发送事件到 UI，忽略 send 失败。
     pub(crate) async fn send_event(&self, event: RuntimeToUiEvent) {
         let _ = self.event_tx.send(event).await;
     }
@@ -1292,7 +1320,7 @@ impl AgentRuntime {
 
         let now = Utc::now();
         let project_path = sanitize(&self.settings.cwd);
-        // 从第一条用户消息中提取标题
+        // 从第一条用户消息中提取标题。
         let title_text =
             history::title_text(initial_display_message.as_ref(), self.messages.last());
         let title = title_text.map(|text| text.chars().take(300).collect());
@@ -1370,6 +1398,11 @@ async fn persist_compact_summary_event(
     history::persist_compact_summary_ui_message(session_id, &summary, persistence_tx).await;
 }
 
+fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {
+    outcome.before_tokens == outcome.after_tokens
+        && outcome.before_messages == outcome.after_messages
+}
+
 async fn record_total_usage_and_notify(
     session_id: &str,
     usage: Usage,
@@ -1437,7 +1470,7 @@ mod tests {
     use crate::config::project::ProjectsDir;
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
     use crate::types::config::{ProviderType, Settings};
-    use crate::types::events::PlanExecutionProfile;
+    use crate::types::events::{NotificationKind, PlanExecutionProfile};
     use crate::types::message::{ContentBlock, Role};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1999,6 +2032,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_compact_noop_emits_terminal_warning() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("compact-noop-warning");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(
+            event_tx,
+            test_persistence_tx(),
+            request_rx,
+            settings,
+            project,
+        );
+
+        runtime.messages = vec![Message::from_user_text("seed".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let _ = drain_events(&mut event_rx);
+
+        runtime
+            .force_compact_current_session(None)
+            .await
+            .expect("noop compact should succeed");
+
+        let events = drain_events(&mut event_rx);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                RuntimeToUiEvent::Notification(notification)
+                    if notification.kind == NotificationKind::Warn
+                        && notification.message.contains("还不需要压缩")
+            )
+        }));
+    }
+
+    #[tokio::test]
     async fn approve_plan_adds_short_user_confirmation_only() {
         ensure_test_persistence().await;
 
@@ -2106,6 +2183,43 @@ mod tests {
             .await;
 
         assert_eq!(runtime.active_profile(), ActiveProfile::Auto);
+    }
+
+    #[tokio::test]
+    async fn resolve_plan_approval_broadcasts_resolved_event() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("resolve-plan-broadcast");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(
+            event_tx,
+            test_persistence_tx(),
+            request_rx,
+            settings,
+            project,
+        );
+
+        runtime
+            .resolve_plan_approval("plan_1", PlanApprovalAction::ContinueDiscussing)
+            .await;
+
+        let mut saw_resolved = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let RuntimeToUiEvent::PlanApprovalResolved { plan_id, action } = event {
+                assert_eq!(plan_id, "plan_1");
+                assert_eq!(action, PlanApprovalAction::ContinueDiscussing);
+                saw_resolved = true;
+            }
+        }
+        assert!(saw_resolved);
     }
 
     #[tokio::test]
@@ -2435,6 +2549,75 @@ mod tests {
             panic!("expected tool pause event");
         };
         assert_eq!(req.tool_use_id, "tool_1");
+
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
+    }
+
+    #[tokio::test]
+    async fn event_processor_forwards_produced_user_message_to_ui() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("produced-user-message-ui");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime =
+            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+        runtime.create_session(None).await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        drain_events(&mut event_rx);
+
+        let (engine_tx, engine_rx) = mpsc::channel(4);
+        let active_profile_handle = Arc::clone(&runtime.active_profile);
+        let processor = runtime
+            .spawn_event_processor(
+                engine_rx,
+                ActiveProfile::Main,
+                active_profile_handle,
+                empty_tool_pause_resolver(),
+            )
+            .await;
+        let message = Message::from_user_text("intervention".to_string());
+
+        engine_tx
+            .send(EngineToRuntimeEvent::UserMessageProduced(message.clone()))
+            .await
+            .expect("user message event should send");
+
+        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("ui user message event should arrive")
+            .expect("ui event channel should stay open");
+        let RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(event_message)) = event
+        else {
+            panic!("expected user message injection");
+        };
+        assert_eq!(event_message, message);
+
+        let mut saw_persistence_event = false;
+        while let Ok(event) = persistence_rx.try_recv() {
+            if let RuntimePersistenceEvent::InsertMessage {
+                session_id: event_session_id,
+                role,
+                blocks,
+                ..
+            } = event
+                && event_session_id == session_id
+                && role == "user"
+                && blocks == message.content
+            {
+                saw_persistence_event = true;
+            }
+        }
+        assert!(saw_persistence_event);
 
         drop(engine_tx);
         processor.await.expect("processor should finish");

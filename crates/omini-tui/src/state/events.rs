@@ -241,7 +241,10 @@ impl UiState {
                 self.pending_assistant = None;
                 self.pending_proposed_plan = None;
                 self.clear_run_dividers();
-                self.start_run_timer();
+                // 重连状态同步可能已校准活动计时器，避免被 replay 的 RunStarted 重置。
+                if self.run_timer.is_none() {
+                    self.start_run_timer();
+                }
                 self.agent_status = AgentStatus::Thinking;
             }
             RuntimeToUiEvent::UserMessageInjected(item) => {
@@ -385,12 +388,10 @@ impl UiState {
                 self.agent_status = AgentStatus::AwaitingInput;
             }
             RuntimeToUiEvent::PlanSubmitted(plan) => {
-                self.plan_approval = Some(plan);
-                self.plan_approval_selected = 0;
-                self.plan_approval_auto = false;
-                if self.auto_scroll {
-                    self.scroll_offset = 0;
-                }
+                self.open_plan_approval(plan);
+            }
+            RuntimeToUiEvent::PlanApprovalResolved { plan_id, .. } => {
+                self.clear_resolved_plan_approval(&plan_id);
             }
             RuntimeToUiEvent::SubagentStarted(event) => {
                 self.subagents_by_tool_use
@@ -451,6 +452,7 @@ impl UiState {
                         self.finish_manual_compact();
                     }
                     NotificationKind::Error => {
+                        self.finish_manual_compact();
                         self.fail_running_subagents();
                         if !self.pending_tool_pauses.is_empty() {
                             self.agent_status = AgentStatus::AwaitingInput;
@@ -697,9 +699,7 @@ impl UiState {
         self.interaction_step = None;
         self.interaction_request = None;
         self.help_drawer = None;
-        self.plan_approval = None;
-        self.plan_approval_selected = 0;
-        self.plan_approval_auto = false;
+        self.clear_plan_approval();
         self.scroll_to_bottom();
     }
 }
@@ -1092,6 +1092,25 @@ mod tests {
             state.messages.as_slice(),
             [UiMessage::Notification(notification)]
                 if notification.kind == NotificationKind::Warn
+        ));
+    }
+
+    #[test]
+    fn manual_compact_error_returns_status_to_idle() {
+        let mut state = UiState::new();
+        state.begin_manual_compact();
+
+        state.apply_event(RuntimeToUiEvent::error(
+            "This client is not connected to the session event stream".to_string(),
+        ));
+
+        assert_eq!(state.agent_status, AgentStatus::Idle);
+        assert!(!state.manual_compact_running);
+        assert!(state.run_timer.is_none());
+        assert!(matches!(
+            state.messages.as_slice(),
+            [UiMessage::Notification(notification)]
+                if notification.kind == NotificationKind::Error
         ));
     }
 }

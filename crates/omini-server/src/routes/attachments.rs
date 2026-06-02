@@ -6,7 +6,7 @@ use omini_protocol as protocol;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::routes::{ApiResult, daemon_session_or_not_found, ensure_controller};
+use crate::routes::{ApiResult, ensure_controller, require_daemon_session};
 use crate::runtime::GlobalDaemonManager;
 
 /// 上传当前会话的附件元数据，并返回附件引用信息。
@@ -16,7 +16,7 @@ pub(crate) async fn upload_attachment(
     headers: HeaderMap,
     body: Bytes,
 ) -> ApiResult<protocol::AttachmentUploadResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
     let mime_type = headers
         .get("content-type")

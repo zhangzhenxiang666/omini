@@ -5,8 +5,8 @@ use omini_protocol as protocol;
 use std::sync::Arc;
 
 use crate::routes::{
-    ApiResult, api_error, client_id_from_headers, core_error, daemon_session_or_not_found,
-    ensure_connected_controller,
+    ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
+    require_daemon_session,
 };
 use crate::runtime::{GlobalDaemonManager, ToolPauseResolutionStart};
 
@@ -17,7 +17,7 @@ pub(crate) async fn submit_run(
     headers: HeaderMap,
     Json(request): Json<protocol::SubmitRunRequest>,
 ) -> ApiResult<protocol::RunSubmittedResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     if request.mode == protocol::RunInputMode::Submit {
         session
@@ -39,7 +39,7 @@ pub(crate) async fn cancel_run(
     Path((project_id, session_id, _run_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
@@ -56,7 +56,7 @@ pub(crate) async fn resolve_tool_pause(
     headers: HeaderMap,
     Json(request): Json<protocol::ResolveToolPauseRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     let client_id = client_id_from_headers(&headers)?.to_string();
     match session
         .begin_tool_pause_resolution(client_id, &tool_use_id)
@@ -91,7 +91,7 @@ pub(crate) async fn resolve_plan(
     headers: HeaderMap,
     Json(request): Json<protocol::ResolvePlanRequest>,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
         .core

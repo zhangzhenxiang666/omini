@@ -87,10 +87,63 @@ fn query_runtime_status(
                 source_agent_label: None,
             })
             .collect(),
+        pending_plan_approval: None,
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         subagents: Vec::new(),
+    }
+}
+
+fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
+    protocol::SessionRuntimeStatus {
+        session_id: "session_1".to_string(),
+        state: protocol::SessionRuntimeState::Compacting,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: Some(protocol::SessionRuntimeActivity {
+            kind: protocol::SessionRuntimeActivityKind::Compact,
+            started_at: Utc::now(),
+            elapsed_ms,
+        }),
+        pending_pauses: Vec::new(),
+        pending_plan_approval: None,
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagents: Vec::new(),
+    }
+}
+
+fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus {
+    protocol::SessionRuntimeStatus {
+        session_id: "session_1".to_string(),
+        state: protocol::SessionRuntimeState::Idle,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: None,
+        pending_pauses: Vec::new(),
+        pending_plan_approval: Some(protocol::PlanSubmittedEvent {
+            plan_id: plan_id.to_string(),
+            title: "Plan".to_string(),
+            markdown: "# Plan".to_string(),
+        }),
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagents: Vec::new(),
+    }
+}
+
+fn submitted_plan(plan_id: &str) -> SubmittedPlan {
+    SubmittedPlan {
+        id: plan_id.to_string(),
+        title: "Plan".to_string(),
+        markdown: "# Plan".to_string(),
+        path: PathBuf::new(),
+        created_at: Utc::now(),
     }
 }
 
@@ -234,6 +287,85 @@ fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
     assert!(elapsed >= Duration::from_millis(2_500));
     assert!(elapsed < Duration::from_millis(2_600));
     assert_eq!(timer.elapsed_at(now + Duration::from_secs(5)), elapsed);
+}
+
+#[test]
+fn runtime_status_sync_applies_thinking_state() {
+    let mut state = UiState::new();
+    let status = query_runtime_status(protocol::SessionRuntimeState::Thinking, 2_500, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert_eq!(state.agent_status, AgentStatus::Thinking);
+    assert!(!state.is_run_timer_paused());
+}
+
+#[test]
+fn replayed_run_started_keeps_synced_elapsed_timer() {
+    let mut state = UiState::new();
+    let status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+
+    let timer = state.run_timer.as_ref().expect("timer should stay synced");
+    let elapsed = timer.elapsed_at(Instant::now());
+    assert!(elapsed >= Duration::from_millis(2_500));
+    assert!(elapsed < Duration::from_millis(2_600));
+}
+
+#[test]
+fn runtime_status_sync_calibrates_compact_activity() {
+    let mut state = UiState::new();
+    let status = compact_runtime_status(1_200);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert_eq!(state.agent_status, AgentStatus::Working);
+    assert!(!state.manual_compact_running);
+    assert!(!state.is_run_timer_paused());
+
+    let timer = state.run_timer.as_ref().expect("timer should be synced");
+    let elapsed = timer.elapsed_at(Instant::now());
+    assert!(elapsed >= Duration::from_millis(1_200));
+    assert!(elapsed < Duration::from_millis(1_300));
+}
+
+#[test]
+fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
+    let mut state = UiState::new();
+    let status = pending_plan_runtime_status("plan_1");
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert_eq!(
+        state.plan_approval.as_ref().map(|plan| plan.id.as_str()),
+        Some("plan_1")
+    );
+    assert!(state.run_timer.is_none());
+}
+
+#[test]
+fn plan_approval_resolved_closes_only_matching_plan() {
+    let mut state = UiState::new();
+
+    state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan("plan_1")));
+    state.plan_approval_selected = 1;
+    state.plan_approval_auto = true;
+    state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
+        plan_id: "other_plan".to_string(),
+        action: protocol::PlanApprovalAction::ContinueDiscussing,
+    });
+    assert!(state.plan_approval.is_some());
+
+    state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
+        plan_id: "plan_1".to_string(),
+        action: protocol::PlanApprovalAction::ContinueDiscussing,
+    });
+
+    assert!(state.plan_approval.is_none());
+    assert_eq!(state.plan_approval_selected, 0);
+    assert!(!state.plan_approval_auto);
 }
 
 #[test]

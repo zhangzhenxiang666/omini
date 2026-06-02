@@ -4,7 +4,7 @@ use axum::http::{HeaderMap, StatusCode};
 use omini_protocol as protocol;
 use std::sync::Arc;
 
-use crate::routes::{ApiResult, api_error, client_id_from_headers, daemon_session_or_not_found};
+use crate::routes::{ApiResult, api_error, client_id_from_headers, require_daemon_session};
 use crate::runtime::GlobalDaemonManager;
 
 /// 为客户端声明当前会话的控制权。
@@ -13,7 +13,7 @@ pub(crate) async fn claim_controller(
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::ControllerLease> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     let client_id = client_id_from_headers(&headers)?.to_string();
     let Some(controller_id) = session.claim_controller(client_id.clone()).await else {
         return Err(client_not_connected());
@@ -30,7 +30,7 @@ pub(crate) async fn release_controller(
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::AckResponse> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     let client_id = client_id_from_headers(&headers)?;
     session.release_controller(client_id).await;
     Ok(Json(protocol::AckResponse::ok()))
@@ -42,7 +42,7 @@ pub(crate) async fn takeover_controller(
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::ControllerLease> {
-    let session = daemon_session_or_not_found(&manager, &project_id, &session_id).await?;
+    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     let client_id = client_id_from_headers(&headers)?.to_string();
     let Some(controller_id) = session.takeover_controller(client_id.clone()).await else {
         return Err(client_not_connected());

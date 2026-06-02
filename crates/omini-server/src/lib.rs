@@ -1,3 +1,8 @@
+//! 本地 daemon 的 HTTP/WebSocket transport 层。
+//!
+//! 这个 crate 负责项目 attach、会话路由、控制权管理、事件 fanout 和 SQLite 持久化；
+//! agent 执行逻辑仍由 `omini-core` 负责。
+
 use omini_core::config::settings::OminiRoot;
 use omini_core::config::settings::UserConfig;
 use std::io;

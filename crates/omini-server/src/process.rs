@@ -1,8 +1,11 @@
+//! `omini-server` 独立进程的启动参数和 daemonize 流程。
+
 use crate::runtime_state;
 use omini_core::config::settings::OminiRoot;
 use std::fs::OpenOptions;
 use std::io;
 
+/// server 进程自己的启动选项。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessOptions {
     pub foreground: bool,

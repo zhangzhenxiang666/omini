@@ -1,3 +1,8 @@
+//! 从 server 持久化记录恢复 core/TUI 使用的历史视图。
+//!
+//! SQLite 中的消息按 kind 存储为不同 JSON 形状；这里把它们重新组装成
+//! `HistoryItem`，并兼容旧版本嵌在 assistant 文本中的 proposed plan。
+
 use crate::store::{self, Database};
 use chrono::{DateTime, Utc};
 use omini_core::config::project::ProjectDir;
@@ -8,6 +13,7 @@ use omini_core::types::proposed_plan::{extract_proposed_plan_text, strip_propose
 use std::collections::HashSet;
 use std::path::Path;
 
+/// 加载一个会话的消息历史，跳过无法解析的损坏记录以保证会话仍可打开。
 pub(crate) async fn load_messages(
     db: &Database,
     session_id: &str,
@@ -91,6 +97,7 @@ pub(crate) async fn load_messages(
     messages
 }
 
+/// 加载父会话下的子 agent 历史，并恢复成已完成的 snapshot。
 pub(crate) async fn load_subagents_for_session(
     db: &Database,
     session_id: &str,
@@ -138,6 +145,7 @@ pub(crate) async fn load_subagents_for_session(
     subagents
 }
 
+/// 把旧版 assistant 文本中的 `<proposed_plan>` 块拆成独立计划项。
 fn split_embedded_plan_blocks(
     blocks: Vec<ContentBlock>,
     role: Role,

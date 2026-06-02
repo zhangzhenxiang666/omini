@@ -1,3 +1,8 @@
+//! SQLite 持久化层。
+//!
+//! server 在这里保存会话元数据、消息历史和运行时发来的持久化事件。大型
+//! `ContentBlock` 会拆到 sidecar 文件，避免单行 JSON 过大影响数据库读写。
+
 use chrono::{DateTime, Utc};
 use omini_core::persistence::{RuntimePersistenceEvent, SessionRecord};
 use omini_core::types::display::{DisplayMessage, DisplayPlan, DisplaySummary};
@@ -9,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// server 持久化层统一错误。
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -19,8 +25,10 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
 }
 
+/// server 使用 core persistence 的会话记录作为数据库会话模型。
 pub(crate) type Session = SessionRecord;
 
+/// 从数据库读出的消息行。
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub id: i64,
@@ -31,6 +39,7 @@ pub struct StoredMessage {
     pub created_at: DateTime<Utc>,
 }
 
+/// 准备写入数据库的新消息。
 pub struct NewMessage {
     pub session_id: String,
     pub role: String,
@@ -40,6 +49,7 @@ pub struct NewMessage {
     pub blocks_dir: PathBuf,
 }
 
+/// `sessions` 表的原始行结构。
 #[derive(Debug, Clone, FromRow)]
 struct SessionRow {
     id: String,
@@ -59,6 +69,7 @@ struct SessionRow {
     updated_at: DateTime<Utc>,
 }
 
+/// `messages` 表的原始行结构。
 #[derive(Debug, Clone, FromRow)]
 struct StoredMessageRow {
     id: i64,
@@ -104,6 +115,7 @@ impl From<StoredMessageRow> for StoredMessage {
     }
 }
 
+/// SQLite 数据库句柄和所有持久化操作入口。
 pub struct Database {
     pool: SqlitePool,
 }
@@ -121,6 +133,7 @@ impl Database {
         Ok(db)
     }
 
+    /// 初始化表结构，并对旧数据库补齐缺失列。
     async fn initialize(&self) -> Result<(), StoreError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS sessions (
@@ -194,6 +207,7 @@ impl Database {
     // Session CRUD
     // -----------------------------------------------------------------------
 
+    /// 插入一条新的会话记录。
     pub async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         sqlx::query(
             "INSERT INTO sessions
@@ -222,6 +236,7 @@ impl Database {
         Ok(())
     }
 
+    /// 按 ID 读取会话元数据。
     pub async fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let row = sqlx::query_as::<_, SessionRow>("SELECT * FROM sessions WHERE id = ?")
             .bind(id)
@@ -230,6 +245,7 @@ impl Database {
         Ok(row.map(Into::into))
     }
 
+    /// 列出项目下的主会话，按最近更新时间倒序返回。
     pub async fn list_sessions(&self, project_path: &str) -> Result<Vec<Session>, StoreError> {
         let rows = sqlx::query_as::<_, SessionRow>(
             "SELECT * FROM sessions WHERE project_path = ? AND session_type = 'main' ORDER BY updated_at DESC, created_at DESC",
@@ -240,6 +256,7 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// 列出某个主会话派生出的子 agent 会话。
     pub async fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, StoreError> {
         let rows = sqlx::query_as::<_, SessionRow>(
             "SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC",
@@ -250,6 +267,7 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
+    /// 记录主会话 usage，并同步当前 context token 计数。
     pub async fn record_session_usage(&self, id: &str, usage: Usage) -> Result<(), StoreError> {
         let now = Utc::now();
         let total_tokens = usage_tokens_i64(usage);
@@ -280,6 +298,7 @@ impl Database {
         self.record_session_total_usage(id, usage).await
     }
 
+    /// 只累计 total usage，不覆盖当前 context token。
     pub async fn record_session_total_usage(
         &self,
         id: &str,
@@ -365,6 +384,7 @@ impl Database {
         Ok(())
     }
 
+    /// 仅当会话仍为空白且没有消息时设置初始标题。
     pub async fn set_initial_session_title(
         &self,
         id: &str,
@@ -394,6 +414,7 @@ impl Database {
     // Message CRUD
     // -----------------------------------------------------------------------
 
+    /// 写入普通 LLM 消息，必要时把大内容块拆到 sidecar。
     pub async fn insert_message(&self, msg: &NewMessage) -> Result<(), StoreError> {
         let blocks_json = {
             let stored = prepare_blocks(&msg.blocks, &msg.blocks_dir)?;
@@ -414,6 +435,7 @@ impl Database {
         Ok(())
     }
 
+    /// 写入只用于 UI/SQLite 展示的消息。
     pub async fn insert_display_message(
         &self,
         session_id: &str,
@@ -444,6 +466,7 @@ impl Database {
         Ok(())
     }
 
+    /// 写入独立 plan 记录，避免从 assistant 文本里二次解析。
     pub async fn insert_plan_message(
         &self,
         session_id: &str,
@@ -464,6 +487,7 @@ impl Database {
         Ok(())
     }
 
+    /// 写入压缩摘要展示记录。
     pub async fn insert_compact_summary_message(
         &self,
         session_id: &str,
@@ -484,6 +508,7 @@ impl Database {
         Ok(())
     }
 
+    /// 按写入顺序读取一个会话的全部消息行。
     pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StoreError> {
         let rows = sqlx::query_as::<_, StoredMessageRow>(
             "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
@@ -509,6 +534,7 @@ impl Database {
         }
     }
 
+    /// 消费 core 发出的持久化事件并映射到具体数据库操作。
     pub(crate) async fn apply_persistence_event(
         &self,
         event: RuntimePersistenceEvent,
@@ -588,6 +614,7 @@ impl Database {
         }
     }
 
+    /// 旧数据库轻量迁移：缺列时追加新列。
     async fn ensure_sessions_column(
         &self,
         column: &str,
@@ -618,9 +645,10 @@ fn usage_usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// Single `ContentBlock` values above this size are stored as sidecar files.
+/// 单个 `ContentBlock` 超过该大小后会存入 sidecar 文件。
 const BLOCK_SIZE_THRESHOLD: usize = 10 * 1024;
 
+/// 将内容块转换成可写入 messages.content 的 JSON，必要时生成 sidecar 引用。
 pub(crate) fn prepare_blocks(
     blocks: &[ContentBlock],
     blocks_dir: &Path,
@@ -655,6 +683,7 @@ pub(crate) fn prepare_blocks(
     Ok(out)
 }
 
+/// 从行内 JSON 或 sidecar 文件恢复完整内容块。
 pub(crate) fn load_blocks(
     stored: &[serde_json::Value],
     blocks_dir: &Path,
@@ -674,6 +703,7 @@ pub(crate) fn load_blocks(
     Ok(blocks)
 }
 
+/// 从不同消息 JSON 形状中提取可作为标题候选的纯文本。
 fn extract_message_text(content_json: &str) -> String {
     if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
         return display.text.replace('\n', " ").replace('\r', "");
