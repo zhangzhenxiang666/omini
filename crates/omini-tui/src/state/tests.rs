@@ -5,6 +5,8 @@ use crate::types::events::{
     PermissionPreview, RuntimeToUiEvent, SubagentStartedEvent, ToolPauseKind, ToolPauseRequest,
 };
 use crate::types::message::ToolResultBlock;
+use chrono::Utc;
+use omini_protocol as protocol;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -56,6 +58,39 @@ fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
             tool_name: "bash".to_string(),
             payload: serde_json::Map::new(),
         }),
+    }
+}
+
+fn query_runtime_status(
+    state: protocol::SessionRuntimeState,
+    elapsed_ms: u64,
+    pending_pause_ids: &[&str],
+) -> protocol::SessionRuntimeStatus {
+    protocol::SessionRuntimeStatus {
+        session_id: "session_1".to_string(),
+        state,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: Some(protocol::SessionRuntimeActivity {
+            kind: protocol::SessionRuntimeActivityKind::Query,
+            started_at: Utc::now(),
+            elapsed_ms,
+        }),
+        pending_pauses: pending_pause_ids
+            .iter()
+            .map(|tool_use_id| protocol::SessionRuntimePendingPause {
+                tool_use_id: (*tool_use_id).to_string(),
+                tool_name: "bash".to_string(),
+                kind: protocol::ToolPauseEventKind::Permission,
+                source_session_id: None,
+                source_agent_label: None,
+            })
+            .collect(),
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagents: Vec::new(),
     }
 }
 
@@ -148,6 +183,25 @@ fn run_timer_excludes_paused_duration() {
 }
 
 #[test]
+fn run_timer_starts_from_synced_elapsed_and_preserves_pause() {
+    let now = Instant::now();
+    let elapsed = Duration::from_secs(5);
+    let running = RunTimer::started_with_elapsed_at(now, elapsed, false);
+
+    assert_eq!(running.elapsed_at(now), elapsed);
+    assert_eq!(
+        running.elapsed_at(now + Duration::from_secs(2)),
+        Duration::from_secs(7)
+    );
+
+    let paused = RunTimer::started_with_elapsed_at(now, elapsed, true);
+
+    assert_eq!(paused.elapsed_at(now), elapsed);
+    assert_eq!(paused.elapsed_at(now + Duration::from_secs(2)), elapsed);
+    assert!(paused.is_paused());
+}
+
+#[test]
 fn run_finished_appends_elapsed_divider_and_clears_timer() {
     let mut state = UiState::new();
 
@@ -161,6 +215,41 @@ fn run_finished_appends_elapsed_divider_and_clears_timer() {
         state.messages.last(),
         Some(UiMessage::RunDivider { .. })
     ));
+}
+
+#[test]
+fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
+    let mut state = UiState::new();
+    let status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 2_500, &["tool_1"]);
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
+    assert!(state.is_run_timer_paused());
+
+    let timer = state.run_timer.as_ref().expect("timer should be synced");
+    let now = Instant::now();
+    let elapsed = timer.elapsed_at(now);
+    assert!(elapsed >= Duration::from_millis(2_500));
+    assert!(elapsed < Duration::from_millis(2_600));
+    assert_eq!(timer.elapsed_at(now + Duration::from_secs(5)), elapsed);
+}
+
+#[test]
+fn run_finished_divider_uses_synced_elapsed() {
+    let mut state = UiState::new();
+    let status = query_runtime_status(protocol::SessionRuntimeState::Working, 3_000, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    let Some(UiMessage::RunDivider { elapsed }) = state.messages.last() else {
+        panic!("expected run divider");
+    };
+    assert!(*elapsed >= Duration::from_secs(3));
+    assert!(*elapsed < Duration::from_secs(4));
 }
 
 #[test]

@@ -15,7 +15,7 @@ Project instructions for coding agents working in this repository.
 
 ## Rust Style
 
-- Prefer absolute `use` paths for imports, such as `crate::...`, `omini_runtime::...`, `omini_types::...`, `std::...`, or dependency crate paths.
+- Prefer absolute `use` paths for imports, such as `crate::...`, `omini_core::...`, `omini_protocol::...`, `omini_server::...`, `omini_tui::...`, `std::...`, or dependency crate paths.
 - Avoid adding new `super::...` imports when an absolute path is clear. Keep existing `super::...` imports if changing them is unrelated churn or if nearby code strongly favors that style.
 - When multiple nested `if let` or `let Some(...)` checks can be expressed clearly as a Rust 2024 `if let` chain, prefer the chain form.
 - Do not rewrite existing imports or nested conditionals solely to satisfy these Rust style rules. Apply them to new code and code already being edited for the task.

@@ -579,7 +579,6 @@ mod tests {
             ProviderProfile {
                 name: "OpenAI".to_string(),
                 endpoint: ProviderType::OpenAI,
-                api_key: "test".to_string(),
                 base_url: "https://example.invalid".to_string(),
                 models: vec![ModelConfig {
                     id: "gpt-test".to_string(),

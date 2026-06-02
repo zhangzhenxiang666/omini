@@ -1,12 +1,16 @@
 use super::clipboard::copy_to_clipboard;
+use super::command::INIT_PROMPT;
 use super::input;
+use super::protocol;
 use super::selection::{
     selected_text, selection_point_from_mouse, update_text_selection_from_mouse,
 };
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
+use crate::client::ClientRequest;
+use crate::types::display::UserDraft;
 use crate::types::events::{
-    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent, ToolPauseKind,
-    ToolPauseResponse, UiToRuntimeEvent,
+    ActiveProfile, PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent,
+    ToolPauseKind,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
@@ -39,8 +43,7 @@ mod tests {
     use crate::state::InputMention;
     use crate::types::display::MentionKind;
     use crate::types::events::{
-        ActiveProfile, EditPermissionPreview, PermissionPreview, PlanApprovalAction,
-        PlanExecutionProfile, SubmittedPlan, ToolPauseRequest,
+        ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -99,8 +102,10 @@ mod tests {
         }
     }
 
-    async fn recv_pause_response(rx: &mut mpsc::Receiver<UiToRuntimeEvent>) -> ToolPauseResponse {
-        let Some(UiToRuntimeEvent::ResolveToolPause { response, .. }) = rx.recv().await else {
+    async fn recv_pause_response(
+        rx: &mut mpsc::Receiver<ClientRequest>,
+    ) -> omini_protocol::ToolPauseResponse {
+        let Some(ClientRequest::ToolPauseResolve { response, .. }) = rx.recv().await else {
             panic!("expected tool pause response");
         };
         response
@@ -131,7 +136,7 @@ mod tests {
 
         assert_eq!(
             recv_pause_response(&mut rx).await,
-            ToolPauseResponse::Permission {
+            omini_protocol::ToolPauseResponse::Permission {
                 approved: false,
                 note: Some("Need context".to_string()),
             }
@@ -147,7 +152,7 @@ mod tests {
 
         assert_eq!(
             recv_pause_response(&mut rx).await,
-            ToolPauseResponse::Permission {
+            omini_protocol::ToolPauseResponse::Permission {
                 approved: false,
                 note: None,
             }
@@ -168,7 +173,7 @@ mod tests {
 
         assert_eq!(
             recv_pause_response(&mut rx).await,
-            ToolPauseResponse::Permission {
+            omini_protocol::ToolPauseResponse::Permission {
                 approved: true,
                 note: None,
             }
@@ -258,15 +263,14 @@ mod tests {
 
         handle_plan_approval_key(&mut state, KeyCode::Enter, &tx).await;
 
-        let Some(UiToRuntimeEvent::ResolvePlanApproval { plan_id, action }) = rx.recv().await
-        else {
+        let Some(ClientRequest::PlanResolve { plan_id, action }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
         assert_eq!(plan_id, "20260521T000000Z-plan");
         assert_eq!(
             action,
-            PlanApprovalAction::ApproveAndCompact {
-                profile: PlanExecutionProfile::Main,
+            omini_protocol::PlanApprovalAction::ApproveAndCompact {
+                profile: omini_protocol::PlanExecutionProfile::Main,
             }
         );
         assert!(state.plan_approval.is_none());
@@ -283,13 +287,13 @@ mod tests {
         assert!(state.plan_approval_auto);
         handle_plan_approval_key(&mut state, KeyCode::Char('1'), &tx).await;
 
-        let Some(UiToRuntimeEvent::ResolvePlanApproval { action, .. }) = rx.recv().await else {
+        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
         assert_eq!(
             action,
-            PlanApprovalAction::Approve {
-                profile: PlanExecutionProfile::Auto,
+            omini_protocol::PlanApprovalAction::Approve {
+                profile: omini_protocol::PlanExecutionProfile::Auto,
             }
         );
         assert!(state.plan_approval.is_none());
@@ -305,10 +309,13 @@ mod tests {
 
         handle_plan_approval_key(&mut state, KeyCode::Esc, &tx).await;
 
-        let Some(UiToRuntimeEvent::ResolvePlanApproval { action, .. }) = rx.recv().await else {
+        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
-        assert_eq!(action, PlanApprovalAction::ContinueDiscussing);
+        assert_eq!(
+            action,
+            omini_protocol::PlanApprovalAction::ContinueDiscussing
+        );
         assert!(state.plan_approval.is_none());
         assert!(!state.plan_approval_auto);
     }
@@ -322,7 +329,7 @@ mod tests {
             handle_key_event(&mut state, KeyCode::BackTab, KeyModifiers::SHIFT, &tx).await;
 
         assert!(handled);
-        let Some(UiToRuntimeEvent::ToggleActiveProfile) = rx.recv().await else {
+        let Some(ClientRequest::ProfileToggle) = rx.recv().await else {
             panic!("expected profile toggle event");
         };
     }
@@ -398,10 +405,10 @@ mod tests {
         assert_eq!(state.agent_status, AgentStatus::Working);
         assert!(state.manual_compact_running);
         assert!(state.run_timer.is_some());
-        let Some(UiToRuntimeEvent::SendCommand(command)) = rx.recv().await else {
+        let Some(ClientRequest::ContextCompact { instructions }) = rx.recv().await else {
             panic!("expected compact command");
         };
-        assert_eq!(command.text, "/compact");
+        assert_eq!(instructions, None);
     }
 
     #[tokio::test]
@@ -421,12 +428,17 @@ mod tests {
 
         handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
 
-        let Some(UiToRuntimeEvent::SendCommand(command)) = rx.recv().await else {
+        let Some(ClientRequest::ExpandSkillRun {
+            input: Some(command),
+            ..
+        }) = rx.recv().await
+        else {
             panic!("expected command draft");
         };
         assert_eq!(command.text, "/commit-message summarize @src/main.rs");
-        assert_eq!(command.mentions.len(), 1);
-        assert_eq!(command.mentions[0].target, "src/main.rs");
+        let context_refs = command.context_refs.expect("expected context refs");
+        assert_eq!(context_refs.len(), 1);
+        assert_eq!(context_refs[0].target(), "src/main.rs");
     }
 
     #[tokio::test]
@@ -440,7 +452,7 @@ mod tests {
         handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
 
         assert!(state.queued_user_inputs.is_empty());
-        let Some(UiToRuntimeEvent::SendMessage(_)) = rx.recv().await else {
+        let Some(ClientRequest::RunSubmitUserInput { .. }) = rx.recv().await else {
             panic!("expected user message");
         };
     }
@@ -449,7 +461,7 @@ mod tests {
 pub(super) async fn handle_input_event(
     state: &mut UiState,
     event: Event,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> UpdateOutcome {
     match event {
         Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
@@ -481,7 +493,7 @@ pub(super) async fn handle_input_event(
 pub(super) async fn handle_runtime_event(
     state: &mut UiState,
     event: RuntimeToUiEvent,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> UpdateOutcome {
     if let RuntimeToUiEvent::InteractionRequest(ref req) = event {
         state.open_interaction_request(req);
@@ -513,7 +525,7 @@ pub(super) async fn handle_runtime_event(
 pub(super) async fn drain_runtime_events(
     state: &mut UiState,
     agent_rx: &mut mpsc::Receiver<RuntimeToUiEvent>,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> UpdateOutcome {
     let mut outcome = UpdateOutcome::default();
     while let Ok(event) = agent_rx.try_recv() {
@@ -531,7 +543,7 @@ async fn handle_key_event(
     state: &mut UiState,
     code: KeyCode,
     modifiers: KeyModifiers,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> bool {
     if let Some(ref mut step) = state.interaction_step {
         let consumed = input::handle_interaction_key(step, code, request_tx).await;
@@ -558,7 +570,7 @@ async fn handle_key_event(
             AgentStatus::Working | AgentStatus::Thinking
         )
     {
-        let _ = request_tx.send(UiToRuntimeEvent::CancelRun).await;
+        let _ = request_tx.send(ClientRequest::RunCancel).await;
         return true;
     }
 
@@ -568,7 +580,7 @@ async fn handle_key_event(
     }
 
     if is_profile_toggle_key(code, modifiers) {
-        let _ = request_tx.send(UiToRuntimeEvent::ToggleActiveProfile).await;
+        let _ = request_tx.send(ClientRequest::ProfileToggle).await;
         return true;
     }
 
@@ -623,7 +635,7 @@ fn is_profile_toggle_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
 async fn handle_plan_approval_key(
     state: &mut UiState,
     code: KeyCode,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     let Some(plan) = state.plan_approval.as_ref() else {
         return;
@@ -656,9 +668,9 @@ async fn handle_plan_approval_key(
             state.plan_approval_selected = 0;
             state.plan_approval_auto = false;
             let _ = request_tx
-                .send(UiToRuntimeEvent::ResolvePlanApproval {
+                .send(ClientRequest::PlanResolve {
                     plan_id,
-                    action: PlanApprovalAction::ContinueDiscussing,
+                    action: omini_protocol::PlanApprovalAction::ContinueDiscussing,
                 })
                 .await;
         }
@@ -669,7 +681,7 @@ async fn handle_plan_approval_key(
     }
 }
 
-async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<UiToRuntimeEvent>) {
+async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<ClientRequest>) {
     let Some(plan) = state.plan_approval.take() else {
         return;
     };
@@ -686,9 +698,9 @@ async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<UiT
     state.plan_approval_selected = 0;
     state.plan_approval_auto = false;
     let _ = request_tx
-        .send(UiToRuntimeEvent::ResolvePlanApproval {
+        .send(ClientRequest::PlanResolve {
             plan_id: plan.id,
-            action,
+            action: protocol::plan_approval_action_from_internal(action),
         })
         .await;
 }
@@ -696,7 +708,7 @@ async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<UiT
 async fn handle_tool_pause_key(
     state: &mut UiState,
     code: KeyCode,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     let Some(active_pause) = state.active_tool_pause().cloned() else {
         return;
@@ -784,9 +796,9 @@ async fn handle_tool_pause_key(
         KeyCode::Esc => {
             state.permission_selected = 1;
             let _ = request_tx
-                .send(UiToRuntimeEvent::ResolveToolPause {
+                .send(ClientRequest::ToolPauseResolve {
                     tool_use_id: active_pause.tool_use_id.clone(),
-                    response: ToolPauseResponse::Cancelled,
+                    response: omini_protocol::ToolPauseResponse::Cancelled,
                 })
                 .await;
             let removed_active = state.remove_tool_pause(&active_pause.tool_use_id);
@@ -812,7 +824,7 @@ async fn handle_command_autocomplete_key(
     state: &mut UiState,
     code: KeyCode,
     modifiers: KeyModifiers,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     if input::is_newline_key(code, modifiers) {
         state.insert_text("\n");
@@ -840,11 +852,10 @@ async fn handle_command_autocomplete_key(
                     state.cursor_char = 0;
                     if !msg.is_empty() {
                         state.show_start_screen = false;
-                        let _ = request_tx
-                            .send(UiToRuntimeEvent::SendCommand(
-                                crate::types::display::UserDraft::plain(msg),
-                            ))
-                            .await;
+                        let draft = crate::types::display::UserDraft::plain(msg);
+                        if let Some(request) = request_from_command_draft(state, draft) {
+                            let _ = request_tx.send(request).await;
+                        }
                     }
                 }
             }
@@ -939,11 +950,87 @@ fn is_compact_command(text: &str) -> bool {
     rest.split_whitespace().next() == Some("compact")
 }
 
+fn parse_slash_command(text: &str) -> Option<(String, String)> {
+    let rest = text.trim().strip_prefix('/')?;
+    if rest.is_empty() {
+        return None;
+    }
+    let (name, args) = match rest.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args.trim()),
+        None => (rest, ""),
+    };
+    Some((name.to_ascii_lowercase(), args.to_string()))
+}
+
+fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<ClientRequest> {
+    let Some((name, args)) = parse_slash_command(&draft.text) else {
+        return Some(ClientRequest::RunSubmitUserInput {
+            input: protocol::user_input_from_draft(draft),
+        });
+    };
+
+    match name.as_str() {
+        "exit" | "quit" => Some(ClientRequest::AppShutdown),
+        "help" | "?" => {
+            state.open_help_drawer(state.autocomplete.all_commands.clone());
+            None
+        }
+        "model" => Some(ClientRequest::OpenModelPicker),
+        "sessions" | "resume" => Some(ClientRequest::OpenSessionPicker),
+        "agents" => Some(ClientRequest::OpenAgentManager),
+        "new" | "clear" => Some(ClientRequest::SessionNew),
+        "plan" => Some(ClientRequest::ProfileSet {
+            profile: protocol::active_profile_from_internal(ActiveProfile::Plan),
+        }),
+        "compact" => Some(ClientRequest::ContextCompact {
+            instructions: (!args.is_empty()).then_some(args),
+        }),
+        "rename" => Some(ClientRequest::SessionRename { title: args }),
+        "init" => {
+            let mut input = protocol::user_input_from_draft(draft);
+            let mut prompt = INIT_PROMPT.to_string();
+            if !args.is_empty() {
+                prompt.push_str("\n\nAdditional user notes for this initialization:\n");
+                prompt.push_str(&args);
+            }
+            input.text = prompt;
+            Some(ClientRequest::RunSubmitUserInput { input })
+        }
+        "thinking" => match args.as_str() {
+            "" => Some(ClientRequest::ThinkingDisplaySet { show: None }),
+            "on" => Some(ClientRequest::ThinkingDisplaySet { show: Some(true) }),
+            "off" => Some(ClientRequest::ThinkingDisplaySet { show: Some(false) }),
+            _ => {
+                state.apply_event(RuntimeToUiEvent::error(format!(
+                    "无效的 thinking 展示设置 '{}'，可用值: on | off",
+                    args
+                )));
+                None
+            }
+        },
+        "effort" => match args.parse() {
+            Ok(effort) => Some(ClientRequest::ModelThinkingEffortSet { effort }),
+            Err(()) => {
+                state.apply_event(RuntimeToUiEvent::error(format!(
+                    "无效的思考程度 '{}'，可用值: none | low | medium | high",
+                    args
+                )));
+                None
+            }
+        },
+        skill_name => Some(ClientRequest::ExpandSkillRun {
+            skill_name: skill_name.to_string(),
+            prompt: args,
+            input: Some(protocol::user_input_from_draft(draft)),
+        }),
+    }
+}
+
 async fn handle_composer_key(
     state: &mut UiState,
     code: KeyCode,
     modifiers: KeyModifiers,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> bool {
     let page_amt = 1.max(state.messages_area.height as usize / 2);
     match (code, modifiers) {
@@ -982,7 +1069,9 @@ async fn handle_composer_key(
                     if !state.is_run_active() && is_compact_command(&draft.text) {
                         state.begin_manual_compact();
                     }
-                    let _ = request_tx.send(UiToRuntimeEvent::SendCommand(draft)).await;
+                    if let Some(request) = request_from_command_draft(state, draft) {
+                        let _ = request_tx.send(request).await;
+                    }
                 } else if state.is_run_active() && !state.manual_compact_running {
                     state.mark_plan_mode_message_sent();
                     state.queued_user_inputs.push_back(draft);
@@ -1006,7 +1095,11 @@ async fn handle_composer_key(
                     };
                     state.messages.push(ui_message);
                     state.mark_plan_mode_message_sent();
-                    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;
+                    let _ = request_tx
+                        .send(ClientRequest::RunSubmitUserInput {
+                            input: protocol::user_input_from_draft(draft),
+                        })
+                        .await;
                     state.scroll_offset = 0;
                     state.auto_scroll = true;
                     state.agent_status = AgentStatus::Working;

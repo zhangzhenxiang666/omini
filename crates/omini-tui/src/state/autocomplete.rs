@@ -85,7 +85,7 @@ mod tests {
             sort_weight: 0,
             kind: CommandKind::Builtin,
             has_args: true,
-            args_description: Some("[prompt]"),
+            args_description: Some("[prompt]".to_string()),
         }
     }
 

@@ -256,7 +256,9 @@ impl UiState {
                         text: summary.markdown,
                     },
                 };
-                self.messages.push(ui_message);
+                if self.messages.last() != Some(&ui_message) {
+                    self.messages.push(ui_message);
+                }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -496,6 +498,9 @@ impl UiState {
                 self.status_bar.total_tokens = total_tokens;
                 self.status_bar.total_cached_tokens = total_cached_tokens;
             }
+            RuntimeToUiEvent::RuntimeStatusSynced { status } => {
+                self.apply_runtime_status_sync(status);
+            }
             RuntimeToUiEvent::CompactSummaryStarted(event) => {
                 if event.trigger == CompactTrigger::Manual {
                     self.begin_manual_compact();
@@ -577,7 +582,7 @@ impl UiState {
                 self.open_help_drawer(commands);
             }
             RuntimeToUiEvent::CommandList(cmds) => {
-                self.autocomplete.all_commands = cmds;
+                self.autocomplete.all_commands = crate::command::commands_with_runtime_skills(cmds);
             }
             RuntimeToUiEvent::AgentList(agents) => {
                 self.mention_autocomplete
@@ -820,6 +825,19 @@ mod tests {
         state.apply_event(RuntimeToUiEvent::ThinkingDisplayChanged { show: true });
 
         assert!(state.show_thinking_blocks);
+    }
+
+    #[test]
+    fn user_message_injected_does_not_duplicate_optimistic_echo() {
+        let mut state = UiState::new();
+        let message = Message::from_user_text("hello".to_string());
+        state.messages.push(UiMessage::Message(message.clone()));
+
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
+            message,
+        )));
+
+        assert_eq!(state.messages.len(), 1);
     }
 
     #[test]

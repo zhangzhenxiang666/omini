@@ -250,7 +250,7 @@ fn command_highlight_end(state: &UiState) -> Option<usize> {
     }
 }
 
-fn command_args_hint(state: &UiState) -> Option<&'static str> {
+fn command_args_hint(state: &UiState) -> Option<&str> {
     let input = &state.input;
     let cmd = matched_input_command(state, input)?;
     if !cmd.has_args {
@@ -259,7 +259,7 @@ fn command_args_hint(state: &UiState) -> Option<&'static str> {
 
     let space_pos = input.find(' ')?;
     if input[space_pos..].chars().all(char::is_whitespace) {
-        cmd.args_description
+        cmd.args_description.as_deref()
     } else {
         None
     }
@@ -270,11 +270,7 @@ mod tests {
     use super::*;
     use crate::types::events::{CommandKind, CommandSummary};
 
-    fn command(
-        name: &str,
-        has_args: bool,
-        args_description: Option<&'static str>,
-    ) -> CommandSummary {
+    fn command(name: &str, has_args: bool, args_description: Option<&str>) -> CommandSummary {
         CommandSummary {
             name: name.to_string(),
             aliases: Vec::new(),
@@ -282,7 +278,7 @@ mod tests {
             sort_weight: 0,
             kind: CommandKind::Builtin,
             has_args,
-            args_description,
+            args_description: args_description.map(str::to_string),
         }
     }
 

@@ -1,10 +1,8 @@
+use super::client;
 use super::render;
 use super::state::UiState;
 use super::update;
-use crate::config::project::ProjectDir;
-use crate::runtime::AgentRuntime;
-use crate::types::config::Settings;
-use crate::types::events::{ActiveProfile, RuntimeToUiEvent, UiToRuntimeEvent};
+use crate::types::events::{ActiveProfile, RuntimeToUiEvent};
 use crossterm::cursor::Hide;
 use crossterm::event::DisableMouseCapture;
 use crossterm::event::EnableMouseCapture;
@@ -59,7 +57,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io
     Ok(())
 }
 
-pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
+pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::Result<()> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
         safe_restore_terminal();
@@ -68,38 +66,47 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
 
     let mut terminal = init_terminal()?;
     let mut state = UiState::new();
+    let attach = &connection.attach;
+    let cwd = std::path::PathBuf::from(&attach.cwd);
 
-    state.status_bar.model = settings.model.clone();
-    state.status_bar.thinking_effort = settings.thinking_effort;
-    state.status_bar.active_provider = settings.active_provider.clone();
-    state.status_bar.cwd = settings.cwd.clone();
+    state.status_bar.model = attach.model.clone();
+    state.status_bar.thinking_effort = attach
+        .thinking_effort
+        .map(client::thinking_effort_from_protocol);
+    state.status_bar.active_provider = attach.active_provider.clone();
+    state.status_bar.cwd = cwd.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
-    state.startup_mcp_server_count = settings
-        .mcp_servers
-        .values()
-        .filter(|server| server.enabled)
-        .count();
-    state.startup_has_project_instructions = settings
-        .cwd
-        .join("AGENTS.md")
-        .metadata()
-        .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-    state.show_thinking_blocks = project
-        .load_state()
-        .map(|state| state.show_thinking_blocks)
-        .unwrap_or(true);
-    state.status_bar.context_window =
-        settings
-            .providers
-            .get(&settings.active_provider)
-            .and_then(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .find(|model| model.id == settings.model)
-                    .map(|model| model.limit)
-            });
-    state.set_mention_context(settings.cwd.clone(), Vec::new());
+    state.startup_mcp_server_count = attach.mcp_server_count;
+    state.startup_has_project_instructions = attach.has_project_instructions;
+    state.show_thinking_blocks = attach.show_thinking_blocks;
+    state.status_bar.context_window = attach.context_window;
+    state.startup_recent_sessions = attach
+        .sessions
+        .clone()
+        .into_iter()
+        .map(client::session_summary_from_protocol)
+        .filter(|session| !session.title.trim().is_empty())
+        .take(3)
+        .collect();
+    state.autocomplete.all_commands = crate::command::commands_with_runtime_skills(
+        attach
+            .skills
+            .clone()
+            .into_iter()
+            .map(client::skill_command_summary)
+            .collect(),
+    );
+    state.set_mention_context(
+        cwd,
+        crate::state::agent_summaries_to_mention_candidates(
+            attach
+                .agents
+                .clone()
+                .into_iter()
+                .map(client::agent_summary_from_protocol)
+                .collect(),
+        ),
+    );
 
     let running = Arc::new(AtomicBool::new(true));
     let thread_running = running.clone();
@@ -121,10 +128,13 @@ pub async fn run_ui(settings: Settings, project: ProjectDir) -> io::Result<()> {
     });
 
     let (agent_tx, mut agent_rx) = mpsc::channel::<RuntimeToUiEvent>(256);
-    let (request_tx, request_rx) = mpsc::channel::<UiToRuntimeEvent>(256);
+    let (request_tx, request_rx) = mpsc::channel::<client::ClientRequest>(256);
 
-    let runtime = AgentRuntime::new(agent_tx.clone(), request_rx, settings, project);
-    state.runtime_handle = Some(runtime.run());
+    state.runtime_handle = Some(client::spawn_project_client(
+        connection,
+        agent_tx.clone(),
+        request_rx,
+    ));
 
     terminal.draw(|frame| render::render(&mut state, frame))?;
 

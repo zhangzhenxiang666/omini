@@ -332,7 +332,7 @@ fn command_line(
 
 fn command_signature(command: &CommandSummary) -> String {
     if command.has_args
-        && let Some(args) = command.args_description
+        && let Some(args) = command.args_description.as_deref()
     {
         format!("/{} {}", command.name, args)
     } else {
@@ -390,7 +390,7 @@ mod tests {
             sort_weight: 0,
             kind,
             has_args: true,
-            args_description: Some("[prompt]"),
+            args_description: Some("[prompt]".to_string()),
         }
     }
 

@@ -2,8 +2,10 @@ use super::state::{
     AgentCreateStep, AgentGenerateReturn, AgentManagerView, AgentModelEntry, AgentStatus,
     InteractionStep, ModelSelectionEntry, UiMessage, UiState,
 };
+use crate::client::ClientRequest;
+use crate::protocol;
 use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
-use crate::types::events::{ToolPauseKind, ToolPauseResponse, UiToRuntimeEvent};
+use crate::types::events::{ToolPauseKind, ToolPauseResponse};
 use crossterm::event::{KeyCode, KeyModifiers};
 use tokio::sync::mpsc;
 
@@ -20,7 +22,7 @@ const AGENT_EDIT_ACTION_COUNT: usize = 4;
 pub(super) async fn handle_interaction_key(
     step: &mut InteractionStep,
     key: KeyCode,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) -> bool {
     match step {
         InteractionStep::ModelSelection {
@@ -81,10 +83,11 @@ pub(super) async fn handle_interaction_key(
                             _ => None,
                         };
                         let _ = request_tx
-                            .send(UiToRuntimeEvent::ModelSelected {
+                            .send(ClientRequest::ModelSelect {
                                 provider: provider_key.clone(),
                                 model: model.id.clone(),
-                                thinking_effort,
+                                thinking_effort: thinking_effort
+                                    .map(protocol::thinking_effort_from_internal),
                             })
                             .await;
                     }
@@ -112,7 +115,7 @@ pub(super) async fn handle_interaction_key(
                 if !sessions.is_empty() {
                     let session_id = sessions[*selected].id.clone();
                     let _ = request_tx
-                        .send(UiToRuntimeEvent::SessionSelected { session_id })
+                        .send(ClientRequest::SessionOpen { session_id })
                         .await;
                 }
                 true
@@ -359,7 +362,7 @@ pub(super) async fn handle_interaction_key(
 
 async fn handle_agents_enter(
     manager: &mut super::state::AgentManagerState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     match manager.view.clone() {
         AgentManagerView::List => {
@@ -387,10 +390,12 @@ async fn handle_agents_enter(
         AgentManagerView::GeneratedPreview => {
             let draft = manager.to_agent_draft();
             let _ = request_tx
-                .send(UiToRuntimeEvent::AgentSaveRequested {
-                    source_kind: manager.draft.source_kind,
+                .send(ClientRequest::AgentSave {
+                    source_kind: protocol::agent_source_kind_from_internal(
+                        manager.draft.source_kind,
+                    ),
                     original_path: manager.draft.original_path.clone(),
-                    draft,
+                    draft: protocol::agent_draft_from_internal(draft),
                 })
                 .await;
         }
@@ -407,9 +412,7 @@ async fn handle_agents_enter(
                 .get(idx)
                 .and_then(|record| record.path.clone())
             {
-                let _ = request_tx
-                    .send(UiToRuntimeEvent::AgentDeleteRequested { path })
-                    .await;
+                let _ = request_tx.send(ClientRequest::AgentDelete { path }).await;
             }
         }
     }
@@ -440,7 +443,7 @@ fn handle_agent_edit_menu_enter(manager: &mut super::state::AgentManagerState) {
 
 async fn autosave_agent_edit(
     manager: &super::state::AgentManagerState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     if !agent_edit_has_changes(manager) {
         return;
@@ -448,10 +451,10 @@ async fn autosave_agent_edit(
 
     let draft = manager.to_agent_draft();
     let _ = request_tx
-        .send(UiToRuntimeEvent::AgentSaveRequested {
-            source_kind: manager.draft.source_kind,
+        .send(ClientRequest::AgentSave {
+            source_kind: protocol::agent_source_kind_from_internal(manager.draft.source_kind),
             original_path: manager.draft.original_path.clone(),
-            draft,
+            draft: protocol::agent_draft_from_internal(draft),
         })
         .await;
 }
@@ -496,7 +499,7 @@ fn comparable_tools(tools: &[String]) -> Vec<String> {
 
 async fn handle_agent_create_enter(
     manager: &mut super::state::AgentManagerState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
     step: AgentCreateStep,
 ) {
     match step {
@@ -539,10 +542,12 @@ async fn handle_agent_create_enter(
         AgentCreateStep::ManualInstructions => {
             let draft = manager.to_agent_draft();
             let _ = request_tx
-                .send(UiToRuntimeEvent::AgentSaveRequested {
-                    source_kind: manager.draft.source_kind,
+                .send(ClientRequest::AgentSave {
+                    source_kind: protocol::agent_source_kind_from_internal(
+                        manager.draft.source_kind,
+                    ),
                     original_path: None,
-                    draft,
+                    draft: protocol::agent_draft_from_internal(draft),
                 })
                 .await;
         }
@@ -554,7 +559,7 @@ async fn handle_agent_create_enter(
 
 async fn submit_agent_generate(
     manager: &mut super::state::AgentManagerState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
     return_to: AgentGenerateReturn,
 ) {
     let description = manager.draft.generated_description.trim().to_string();
@@ -566,8 +571,8 @@ async fn submit_agent_generate(
     }
 
     let sent = request_tx
-        .send(UiToRuntimeEvent::AgentGenerateRequested {
-            source_kind: manager.draft.source_kind,
+        .send(ClientRequest::AgentGenerate {
+            source_kind: protocol::agent_source_kind_from_internal(manager.draft.source_kind),
             description,
             tools: manager.draft.tools.clone(),
             disallow_tools: manager.draft.disallow_tools.clone(),
@@ -791,7 +796,7 @@ fn add_tool(tools: &mut Vec<String>, tool: &str) {
 
 pub(super) async fn resolve_active_tool_pause(
     state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     let Some(req) = state.active_tool_pause().cloned() else {
         return;
@@ -846,9 +851,9 @@ pub(super) async fn resolve_active_tool_pause(
     };
 
     let _ = request_tx
-        .send(UiToRuntimeEvent::ResolveToolPause {
+        .send(ClientRequest::ToolPauseResolve {
             tool_use_id: req.tool_use_id.clone(),
-            response,
+            response: protocol::tool_pause_response_from_internal(response),
         })
         .await;
     let removed_active = state.remove_tool_pause(&req.tool_use_id);
@@ -857,7 +862,7 @@ pub(super) async fn resolve_active_tool_pause(
 
 pub(super) async fn flush_queued_user_inputs(
     state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     let ui_messages = state
         .queued_user_inputs
@@ -884,19 +889,25 @@ pub(super) async fn flush_queued_user_inputs(
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
     state.mark_plan_mode_message_sent();
-    let _ = request_tx.send(UiToRuntimeEvent::SendMessage(draft)).await;
+    let _ = request_tx
+        .send(ClientRequest::RunSubmitUserInput {
+            input: protocol::user_input_from_draft(draft),
+        })
+        .await;
 }
 
 pub(super) async fn submit_queued_intervention(
     state: &mut UiState,
-    request_tx: &mpsc::Sender<UiToRuntimeEvent>,
+    request_tx: &mpsc::Sender<ClientRequest>,
 ) {
     if state.is_run_active()
         && state.pending_intervention_inputs.is_empty()
         && let Some(draft) = state.take_queued_user_draft_for_intervention()
     {
         let _ = request_tx
-            .send(UiToRuntimeEvent::InterveneMessage(draft))
+            .send(ClientRequest::RunInterveneInput {
+                input: protocol::user_input_from_draft(draft),
+            })
             .await;
     }
 }

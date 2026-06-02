@@ -232,7 +232,7 @@ fn command_row_line(
 
 fn command_signature(cmd: &CommandSummary) -> String {
     if cmd.has_args
-        && let Some(args) = cmd.args_description
+        && let Some(args) = cmd.args_description.as_deref()
     {
         format!("/{} {}", cmd.name, args)
     } else {
@@ -326,7 +326,7 @@ mod tests {
             sort_weight: 0,
             kind: CommandKind::Skill,
             has_args: true,
-            args_description: Some("[prompt]"),
+            args_description: Some("[prompt]".to_string()),
         };
         let content_style = Style::default();
         let border_style = Style::default();
@@ -345,7 +345,7 @@ mod tests {
             sort_weight: 0,
             kind: CommandKind::Skill,
             has_args: true,
-            args_description: Some("[prompt]"),
+            args_description: Some("[prompt]".to_string()),
         };
 
         assert_eq!(command_signature(&cmd), "/skill-creator [prompt]");

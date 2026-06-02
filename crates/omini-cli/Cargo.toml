@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-omini-runtime.workspace = true
+clap.workspace = true
+dirs.workspace = true
+omini-core.workspace = true
+omini-protocol.workspace = true
+omini-server.workspace = true
 omini-tui.workspace = true
-tokio.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+serde.workspace = true
+serde_json.workspace = true

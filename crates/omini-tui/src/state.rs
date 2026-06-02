@@ -25,7 +25,9 @@ pub use interaction::{
     AgentCreateStep, AgentEditorField, AgentGenerateReturn, AgentManagerState, AgentManagerView,
     AgentModelEntry, InteractionStep, ModelSelectionEntry,
 };
-pub use mention::{InputMention, MentionAutocomplete, MentionCandidate};
+pub use mention::{
+    InputMention, MentionAutocomplete, MentionCandidate, agent_summaries_to_mention_candidates,
+};
 
 pub const PASTE_MARKER_THRESHOLD_CHARS: usize = 512;
 pub const PASTE_MARKER_THRESHOLD_NEWLINES: usize = 2;
@@ -139,6 +141,14 @@ impl RunTimer {
             started_at,
             paused_total: Duration::ZERO,
             pause_started_at: None,
+        }
+    }
+
+    fn started_with_elapsed_at(now: Instant, elapsed: Duration, paused: bool) -> Self {
+        Self {
+            started_at: now.checked_sub(elapsed).unwrap_or(now),
+            paused_total: Duration::ZERO,
+            pause_started_at: paused.then_some(now),
         }
     }
 
@@ -526,7 +536,10 @@ impl UiState {
             permission_drawer_body_area: Rect::default(),
             permission_drawer_content_len: 0,
             status_bar: StatusBar::default(),
-            autocomplete: CommandAutocomplete::default(),
+            autocomplete: CommandAutocomplete {
+                all_commands: crate::command::builtin_command_summaries(),
+                ..CommandAutocomplete::default()
+            },
             mention_autocomplete: MentionAutocomplete::default(),
             current_session_title: None,
             current_session_id: None,
@@ -606,6 +619,14 @@ impl UiState {
         self.run_timer = Some(RunTimer::started_at(Instant::now()));
     }
 
+    pub fn sync_run_timer(&mut self, elapsed: Duration, paused: bool) {
+        self.run_timer = Some(RunTimer::started_with_elapsed_at(
+            Instant::now(),
+            elapsed,
+            paused,
+        ));
+    }
+
     pub fn begin_manual_compact(&mut self) {
         self.manual_compact_running = true;
         self.agent_status = AgentStatus::Working;
@@ -650,6 +671,30 @@ impl UiState {
         self.run_timer
             .as_ref()
             .map(|timer| timer.elapsed_at(Instant::now()))
+    }
+
+    pub fn apply_runtime_status_sync(&mut self, status: omini_protocol::SessionRuntimeStatus) {
+        let Some(activity) = status.activity else {
+            return;
+        };
+        if activity.kind != omini_protocol::SessionRuntimeActivityKind::Query {
+            return;
+        }
+
+        let agent_status = match status.state {
+            omini_protocol::SessionRuntimeState::Idle => return,
+            omini_protocol::SessionRuntimeState::Thinking => AgentStatus::Thinking,
+            omini_protocol::SessionRuntimeState::Waiting => AgentStatus::AwaitingInput,
+            omini_protocol::SessionRuntimeState::Working
+            | omini_protocol::SessionRuntimeState::Compacting => AgentStatus::Working,
+        };
+        let paused = status.state == omini_protocol::SessionRuntimeState::Waiting
+            || !status.pending_pauses.is_empty();
+
+        self.show_start_screen = false;
+        self.manual_compact_running = false;
+        self.sync_run_timer(Duration::from_millis(activity.elapsed_ms), paused);
+        self.agent_status = agent_status;
     }
 
     pub fn is_run_timer_paused(&self) -> bool {
