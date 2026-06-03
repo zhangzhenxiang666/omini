@@ -232,6 +232,19 @@ pub struct SessionSummary {
     pub provider: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_state: Option<SessionRuntimeState>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRuntimeState {
+    #[default]
+    Idle,
+    Working,
+    Thinking,
+    Waiting,
+    Compacting,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -487,6 +500,40 @@ mod tests {
         assert_eq!(
             PlanExecutionProfile::Auto.active_profile(),
             ActiveProfile::Auto
+        );
+    }
+
+    #[test]
+    fn session_summary_defaults_to_unloaded_runtime_state() {
+        let summary: SessionSummary = serde_json::from_value(json!({
+            "id": "s1",
+            "title": "hello",
+            "model": "gpt-test",
+            "provider": "openai",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(summary.runtime_state, None);
+    }
+
+    #[test]
+    fn session_summary_serializes_runtime_state_when_loaded() {
+        let now = Utc::now();
+        let summary = SessionSummary {
+            id: "s1".to_string(),
+            title: "hello".to_string(),
+            model: "gpt-test".to_string(),
+            provider: "openai".to_string(),
+            created_at: now,
+            updated_at: now,
+            runtime_state: Some(SessionRuntimeState::Working),
+        };
+
+        assert_eq!(
+            serde_json::to_value(summary).unwrap()["runtime_state"],
+            json!("working")
         );
     }
 

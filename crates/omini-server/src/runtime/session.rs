@@ -195,6 +195,13 @@ impl RuntimeSession {
             )
     }
 
+    pub(crate) fn runtime_state(&self) -> protocol::SessionRuntimeState {
+        self.status_projection
+            .lock()
+            .expect("status projection lock poisoned")
+            .state()
+    }
+
     pub(crate) async fn rename_session(&self, title: String) -> Result<(), CoreError> {
         self.db
             .update_session_title(&self.session_id, &title)

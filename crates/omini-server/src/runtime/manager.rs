@@ -298,14 +298,19 @@ impl SessionManager {
 
     pub(crate) async fn list_sessions(&self) -> Result<protocol::SessionsResponse, CoreError> {
         let project_path = sanitize(&self.settings.cwd);
+        let runtime_states = {
+            let sessions = self.sessions.lock().expect("sessions lock poisoned");
+            sessions
+                .iter()
+                .map(|(session_id, session)| (session_id.clone(), session.runtime_state()))
+                .collect::<HashMap<_, _>>()
+        };
         let sessions = self
             .db
             .list_sessions(&project_path)
             .await
-            .map_err(|error| CoreError::new(format!("Failed to list sessions: {error}")))?
-            .into_iter()
-            .map(session_summary_from_store)
-            .collect();
+            .map_err(|error| CoreError::new(format!("Failed to list sessions: {error}")))?;
+        let sessions = session_summaries_with_runtime_states(sessions, &runtime_states);
         Ok(protocol::SessionsResponse { sessions })
     }
 
@@ -514,5 +519,69 @@ impl SessionManager {
         if should_close && let Err(error) = session.shutdown().await {
             eprintln!("runtime session shutdown failed: {error}");
         }
+    }
+}
+
+fn session_summaries_with_runtime_states(
+    sessions: Vec<Session>,
+    runtime_states: &HashMap<String, protocol::SessionRuntimeState>,
+) -> Vec<protocol::SessionSummary> {
+    sessions
+        .into_iter()
+        .map(|session| {
+            let mut summary = session_summary_from_store(session);
+            summary.runtime_state = runtime_states.get(&summary.id).copied();
+            summary
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_session(id: &str) -> Session {
+        let now = Utc::now();
+        Session {
+            id: id.to_string(),
+            project_path: "/tmp/project".to_string(),
+            parent_session_id: None,
+            spawn_tool_use_id: None,
+            session_type: "main".to_string(),
+            agent_label: None,
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            thinking_effort: None,
+            title: Some(id.to_string()),
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn session_summaries_merge_loaded_runtime_states() {
+        let sessions = vec![test_session("loaded"), test_session("stored")];
+        let runtime_states =
+            HashMap::from([("loaded".to_string(), protocol::SessionRuntimeState::Working)]);
+
+        let summaries = session_summaries_with_runtime_states(sessions, &runtime_states);
+
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|session| session.id == "loaded")
+                .and_then(|session| session.runtime_state),
+            Some(protocol::SessionRuntimeState::Working)
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|session| session.id == "stored")
+                .and_then(|session| session.runtime_state),
+            None
+        );
     }
 }

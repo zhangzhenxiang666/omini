@@ -71,6 +71,7 @@ pub(super) fn session_summary_from_store(session: Session) -> protocol::SessionS
         provider: session.provider,
         created_at: session.created_at,
         updated_at: session.updated_at,
+        runtime_state: None,
     }
 }
 

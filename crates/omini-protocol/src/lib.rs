@@ -8,8 +8,8 @@ pub use omini_domain::config::{
     InputModality, ModelInfo, ProviderEndpointKind, ProviderInfo, ThinkingEffort,
 };
 pub use omini_domain::events::{
-    ActiveProfile, CompactTrigger, PlanApprovalAction, PlanExecutionProfile, SessionSummary,
-    SessionUsage, SubagentStatus, ToolPauseResponse,
+    ActiveProfile, CompactTrigger, PlanApprovalAction, PlanExecutionProfile, SessionRuntimeState,
+    SessionSummary, SessionUsage, SubagentStatus, ToolPauseResponse,
 };
 pub use omini_domain::subagents::{AgentDraft, AgentSourceKind, AgentSummary};
 use serde::{Deserialize, Serialize};
@@ -242,17 +242,6 @@ pub struct SessionSnapshotEvent {
     pub message_count: usize,
     pub subagent_count: usize,
     pub usage: SessionUsage,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeState {
-    #[default]
-    Idle,
-    Working,
-    Thinking,
-    Waiting,
-    Compacting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -857,6 +846,27 @@ mod tests {
                 "ok": true,
                 "daemon": "omini"
             })
+        );
+    }
+
+    #[test]
+    fn sessions_response_carries_runtime_state() {
+        let now = Utc::now();
+        let response = SessionsResponse {
+            sessions: vec![SessionSummary {
+                id: "s1".to_string(),
+                title: "hello".to_string(),
+                model: "gpt-test".to_string(),
+                provider: "openai".to_string(),
+                created_at: now,
+                updated_at: now,
+                runtime_state: Some(SessionRuntimeState::Waiting),
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["sessions"][0]["runtime_state"],
+            json!("waiting")
         );
     }
 

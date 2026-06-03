@@ -464,7 +464,7 @@ impl RuntimeStatusProjection {
         self.mark_query_working();
     }
 
-    fn state(&self) -> protocol::SessionRuntimeState {
+    pub(super) fn state(&self) -> protocol::SessionRuntimeState {
         if self.compact_started_at.is_some() {
             protocol::SessionRuntimeState::Compacting
         } else if !self.pending_pauses.is_empty() {

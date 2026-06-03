@@ -92,6 +92,7 @@ mod tests {
             provider: "test-provider".to_string(),
             created_at: now,
             updated_at: now,
+            runtime_state: None,
         }];
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
@@ -118,6 +119,119 @@ mod tests {
                 .iter()
                 .any(|line| line.text.contains("Welcome back!"))
         );
+    }
+
+    #[test]
+    fn session_picker_renders_tail_runtime_state_markers() {
+        let backend = TestBackend::new(60, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let now = Utc::now();
+        let sessions = vec![
+            session_summary("stored", "Stored only", None, now),
+            session_summary(
+                "idle",
+                "Idle loaded",
+                Some(omini_protocol::SessionRuntimeState::Idle),
+                now,
+            ),
+            session_summary(
+                "thinking",
+                "Thinking loaded",
+                Some(omini_protocol::SessionRuntimeState::Thinking),
+                now,
+            ),
+            session_summary(
+                "working",
+                "Working loaded",
+                Some(omini_protocol::SessionRuntimeState::Working),
+                now,
+            ),
+            session_summary(
+                "waiting",
+                "Waiting loaded",
+                Some(omini_protocol::SessionRuntimeState::Waiting),
+                now,
+            ),
+            session_summary(
+                "compacting",
+                "Compacting loaded",
+                Some(omini_protocol::SessionRuntimeState::Compacting),
+                now,
+            ),
+        ];
+        state.interaction_step = Some(InteractionStep::Session {
+            sessions: sessions.clone(),
+            all_sessions: sessions,
+            search: String::new(),
+            selected: 0,
+        });
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert!(!buffer.content().iter().any(|cell| cell.symbol() == "○"));
+        let dot_colors = buffer
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "●")
+            .map(|cell| cell.fg)
+            .collect::<Vec<_>>();
+        for color in [
+            Color::Rgb(0x66, 0xbb, 0x6a),
+            Color::Rgb(0x64, 0x9f, 0xd5),
+            Color::Rgb(0xd6, 0x8c, 0x45),
+            Color::Rgb(0xb0, 0x83, 0xd8),
+        ] {
+            assert!(
+                dot_colors.contains(&color),
+                "missing status color {color:?}"
+            );
+        }
+        let width = buffer.area.width as usize;
+        for (idx, cell) in buffer.content().iter().enumerate() {
+            if cell.symbol() == "●" && dot_colors.contains(&cell.fg) {
+                assert_ne!(
+                    idx % width,
+                    width - 1,
+                    "status marker should not touch row edge"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_picker_truncates_titles_before_tail_status_column() {
+        let backend = TestBackend::new(34, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let now = Utc::now();
+        let long_title = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
+        let sessions = vec![session_summary(
+            "working",
+            long_title,
+            Some(omini_protocol::SessionRuntimeState::Working),
+            now,
+        )];
+        state.interaction_step = Some(InteractionStep::Session {
+            sessions: sessions.clone(),
+            all_sessions: sessions,
+            search: String::new(),
+            selected: 0,
+        });
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("●"));
+        assert!(rendered.contains("..."));
+        assert!(!rendered.contains(long_title));
     }
 
     #[test]
@@ -245,6 +359,23 @@ mod tests {
             kind,
             has_args: false,
             args_description: None,
+        }
+    }
+
+    fn session_summary(
+        id: &str,
+        title: &str,
+        runtime_state: Option<omini_protocol::SessionRuntimeState>,
+        now: chrono::DateTime<Utc>,
+    ) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            title: title.to_string(),
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            created_at: now,
+            updated_at: now,
+            runtime_state,
         }
     }
 

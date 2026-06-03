@@ -1,5 +1,6 @@
-use super::{pad_display_width, register_and_highlight_lines, truncate_str};
+use super::{line_width, pad_display_width, register_and_highlight_lines, truncate_str};
 use crate::state::{InteractionStep, UiState};
+use crate::types::events::SessionRuntimeState;
 use chrono::{DateTime, Local, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -106,7 +107,8 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     let time_col_w = 8; // "59分钟前" / "23h前" fit in this column.
     let prefix_w = UnicodeWidthStr::width("❯ ");
     let separator_w = UnicodeWidthStr::width("  ");
-    let max_msg_w = content_w.saturating_sub(prefix_w + time_col_w + separator_w);
+    let status_slot_w = 3;
+    let max_msg_w = content_w.saturating_sub(prefix_w + time_col_w + separator_w + status_slot_w);
 
     // ── Build lines ──
     // Top indicator
@@ -146,17 +148,33 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
 
         let prefix = if is_selected { "❯ " } else { "  " };
         let time_str = pad_display_width(&relative_time(session.updated_at), time_col_w);
+        let status_marker = session_status_marker(session.runtime_state);
         let msg = truncate_str(&session.title, max_msg_w);
-        let line_content = format!("{}{}  {}", prefix, time_str, msg);
-        let padded = pad_display_width(&line_content, content_w);
+        let used_w = prefix_w
+            + time_col_w
+            + separator_w
+            + status_slot_w
+            + UnicodeWidthStr::width(msg.as_str());
+        let pad_w = content_w.saturating_sub(used_w);
+        let base_style = row_style(fg, bg);
 
-        lines.push(Line::from(Span::styled(
-            padded,
-            match bg {
-                Some(bg) => Style::default().fg(fg).bg(bg),
-                None => Style::default().fg(fg),
-            },
-        )));
+        let mut row_spans = vec![
+            Span::styled(prefix.to_string(), base_style),
+            Span::styled(time_str, base_style),
+            Span::styled("  ", base_style),
+            Span::styled(msg, base_style),
+            Span::styled(" ".repeat(pad_w), base_style),
+        ];
+        if let Some((icon, color)) = status_marker {
+            row_spans.extend([
+                Span::styled(" ", base_style),
+                Span::styled(icon, row_style(color, bg)),
+                Span::styled(" ", base_style),
+            ]);
+        } else {
+            row_spans.push(Span::styled(" ".repeat(status_slot_w), base_style));
+        }
+        lines.push(Line::from(row_spans));
         row_backgrounds.push(bg);
     }
 
@@ -199,12 +217,88 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // ── Footer ──
-    let mut footer_line = Line::from(Span::styled(
-        "↑/↓ 选择 · Enter 确认 · Esc 返回 · 输入筛选",
-        Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
-    ));
+    let mut footer_line = session_footer_line(content_w);
     register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
     frame.render_widget(Paragraph::new(footer_line), footer_area);
+}
+
+fn row_style(fg: Color, bg: Option<Color>) -> Style {
+    let style = Style::default().fg(fg);
+    if let Some(bg) = bg {
+        style.bg(bg)
+    } else {
+        style
+    }
+}
+
+fn session_status_marker(
+    runtime_state: Option<SessionRuntimeState>,
+) -> Option<(&'static str, Color)> {
+    match runtime_state {
+        None => None,
+        Some(SessionRuntimeState::Idle) => Some(("●", Color::Rgb(0x66, 0xbb, 0x6a))),
+        Some(SessionRuntimeState::Thinking | SessionRuntimeState::Working) => {
+            Some(("●", Color::Rgb(0x64, 0x9f, 0xd5)))
+        }
+        Some(SessionRuntimeState::Waiting) => Some(("●", Color::Rgb(0xd6, 0x8c, 0x45))),
+        Some(SessionRuntimeState::Compacting) => Some(("●", Color::Rgb(0xb0, 0x83, 0xd8))),
+    }
+}
+
+fn session_footer_line(content_w: usize) -> Line<'static> {
+    let base_style = Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a));
+    let legend = Line::from(vec![
+        Span::styled("↑/↓ 选择 · Enter 确认 · Esc 返回 · 输入筛选 · ", base_style),
+        Span::styled(
+            "●",
+            row_style(
+                session_status_marker(Some(SessionRuntimeState::Idle))
+                    .expect("idle status has marker")
+                    .1,
+                None,
+            ),
+        ),
+        Span::styled(" 空闲 ", base_style),
+        Span::styled(
+            "●",
+            row_style(
+                session_status_marker(Some(SessionRuntimeState::Working))
+                    .expect("working status has marker")
+                    .1,
+                None,
+            ),
+        ),
+        Span::styled(" 运行 ", base_style),
+        Span::styled(
+            "●",
+            row_style(
+                session_status_marker(Some(SessionRuntimeState::Waiting))
+                    .expect("waiting status has marker")
+                    .1,
+                None,
+            ),
+        ),
+        Span::styled(" 等待 ", base_style),
+        Span::styled(
+            "●",
+            row_style(
+                session_status_marker(Some(SessionRuntimeState::Compacting))
+                    .expect("compacting status has marker")
+                    .1,
+                None,
+            ),
+        ),
+        Span::styled(" 压缩", base_style),
+    ]);
+
+    if line_width(&legend) <= content_w {
+        legend
+    } else {
+        Line::from(Span::styled(
+            "↑/↓ 选择 · Enter 确认 · Esc 返回 · 输入筛选",
+            base_style,
+        ))
+    }
 }
 
 fn render_session_row_backgrounds(

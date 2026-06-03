@@ -1160,6 +1160,7 @@ pub(crate) fn session_summary_from_protocol(
         provider: session.provider,
         created_at: session.created_at,
         updated_at: session.updated_at,
+        runtime_state: session.runtime_state,
     }
 }
 
@@ -1456,6 +1457,25 @@ mod tests {
             source_session_id: None,
             source_agent_label: None,
         }
+    }
+
+    #[test]
+    fn session_summary_mapping_preserves_runtime_state() {
+        let now = Utc::now();
+        let summary = session_summary_from_protocol(protocol::SessionSummary {
+            id: "session_1".to_string(),
+            title: "hello".to_string(),
+            model: "gpt-test".to_string(),
+            provider: "openai".to_string(),
+            created_at: now,
+            updated_at: now,
+            runtime_state: Some(protocol::SessionRuntimeState::Compacting),
+        });
+
+        assert_eq!(
+            summary.runtime_state,
+            Some(protocol::SessionRuntimeState::Compacting)
+        );
     }
 
     #[test]
