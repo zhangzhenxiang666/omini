@@ -167,11 +167,9 @@ impl SessionManager {
         &self,
         project_id: &str,
     ) -> Result<protocol::ProjectAttachResponse, CoreError> {
+        let settings = self.settings_with_project_state();
         let sessions = self.list_sessions().await?.sessions;
-        let context_window = self
-            .settings
-            .current_model_config()
-            .map(|model| model.limit);
+        let context_window = settings.current_model_config().map(|model| model.limit);
         let mcp_server_count = self
             .settings
             .mcp_servers
@@ -189,14 +187,14 @@ impl SessionManager {
             .load_state()
             .map(|state| state.show_thinking_blocks)
             .unwrap_or(true);
-        let agents = omini_core::subagents::list_agent_records(&self.settings.cwd)
+        let agents = omini_core::subagents::list_agent_records(&settings.cwd)
             .into_iter()
             .map(|agent| protocol::AgentSummary {
                 name: agent.name,
                 description: agent.description,
             })
             .collect();
-        let skills = omini_core::skills::load_skill_registry(&self.settings.cwd)
+        let skills = omini_core::skills::load_skill_registry(&settings.cwd)
             .skills()
             .filter(|skill| skill.user_invocable)
             .map(|skill| protocol::SkillSummary {
@@ -207,14 +205,11 @@ impl SessionManager {
 
         Ok(protocol::ProjectAttachResponse {
             project_id: project_id.to_string(),
-            cwd: self.settings.cwd.display().to_string(),
+            cwd: settings.cwd.display().to_string(),
             sessions,
-            active_provider: self.settings.active_provider.clone(),
-            model: self.settings.model.clone(),
-            thinking_effort: self
-                .settings
-                .thinking_effort
-                .map(thinking_effort_to_protocol),
+            active_provider: settings.active_provider.clone(),
+            model: settings.model.clone(),
+            thinking_effort: settings.thinking_effort.map(thinking_effort_to_protocol),
             context_window,
             mcp_server_count,
             has_project_instructions,
@@ -222,6 +217,110 @@ impl SessionManager {
             agents,
             skills,
         })
+    }
+
+    pub(crate) fn list_models(&self) -> protocol::ModelsResponse {
+        models_response_from_settings(&self.settings_with_project_state())
+    }
+
+    pub(crate) fn set_project_model(
+        &self,
+        request: protocol::SetModelRequest,
+    ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
+        let provider = self
+            .settings
+            .providers
+            .get(&request.provider)
+            .ok_or_else(|| {
+                CoreError::new(format!("Unknown provider profile: {}", request.provider))
+            })?;
+        if !provider
+            .models
+            .iter()
+            .any(|model| model.id == request.model)
+        {
+            return Err(CoreError::new(format!(
+                "Unknown model '{}' for provider '{}'",
+                request.model, request.provider
+            )));
+        }
+        let mut state = self
+            .project
+            .load_state()
+            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+        state.default_provider = Some(request.provider);
+        state.default_model = Some(request.model);
+        state.thinking_effort = request.thinking_effort.map(thinking_effort_from_protocol);
+        self.project
+            .save_state(&state)
+            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+        Ok(self.project_runtime_config_response())
+    }
+
+    pub(crate) fn set_project_thinking_effort(
+        &self,
+        request: protocol::SetThinkingEffortRequest,
+    ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
+        let mut state = self
+            .project
+            .load_state()
+            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+        state.thinking_effort = Some(thinking_effort_from_protocol(request.effort));
+        self.project
+            .save_state(&state)
+            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+        Ok(self.project_runtime_config_response())
+    }
+
+    pub(crate) fn set_project_thinking_display(
+        &self,
+        request: protocol::SetThinkingDisplayRequest,
+    ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
+        let mut state = self
+            .project
+            .load_state()
+            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+        state.show_thinking_blocks = request.show.unwrap_or(!state.show_thinking_blocks);
+        self.project
+            .save_state(&state)
+            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+        Ok(self.project_runtime_config_response())
+    }
+
+    fn project_runtime_config_response(&self) -> protocol::ProjectRuntimeConfigResponse {
+        let settings = self.settings_with_project_state();
+        let show_thinking_blocks = self
+            .project
+            .load_state()
+            .map(|state| state.show_thinking_blocks)
+            .unwrap_or(true);
+        protocol::ProjectRuntimeConfigResponse {
+            active_provider: settings.active_provider.clone(),
+            model: settings.model.clone(),
+            thinking_effort: settings.thinking_effort.map(thinking_effort_to_protocol),
+            context_window: settings.current_model_config().map(|model| model.limit),
+            show_thinking_blocks,
+        }
+    }
+
+    fn settings_with_project_state(&self) -> omini_core::types::config::Settings {
+        let mut settings = self.settings.clone();
+        let Ok(state) = self.project.load_state() else {
+            return settings;
+        };
+        if let Some(provider) = state.default_provider
+            && let Some(profile) = settings.providers.get(&provider)
+        {
+            settings.active_provider = provider;
+            settings.api_key = profile.api_key.clone();
+            settings.base_url = profile.base_url.clone();
+            settings.endpoint = profile.endpoint;
+        }
+        if let Some(model) = state.default_model {
+            settings.model = model;
+        }
+        settings.thinking_effort = state.thinking_effort;
+        settings
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<protocol::SessionsResponse, CoreError> {
@@ -279,7 +378,9 @@ impl SessionManager {
 
     pub(crate) async fn create_session(
         &self,
+        request: protocol::CreateSessionRequest,
     ) -> Result<protocol::CreateSessionResponse, CoreError> {
+        let settings = self.settings_for_new_session(&request)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         self.project.create_session(&session_id).map_err(|error| {
             CoreError::new(format!("Failed to create session directory: {error}"))
@@ -292,12 +393,9 @@ impl SessionManager {
             spawn_tool_use_id: None,
             session_type: "main".to_string(),
             agent_label: None,
-            provider: self.settings.active_provider.clone(),
-            model: self.settings.model.clone(),
-            thinking_effort: self
-                .settings
-                .thinking_effort
-                .map(|effort| effort.to_string()),
+            provider: settings.active_provider.clone(),
+            model: settings.model.clone(),
+            thinking_effort: settings.thinking_effort.map(|effort| effort.to_string()),
             title: None,
             current_context_tokens: 0,
             total_tokens: 0,
@@ -309,11 +407,16 @@ impl SessionManager {
             .create_session(&session)
             .await
             .map_err(|error| CoreError::new(format!("Failed to persist session: {error}")))?;
+        let active_profile = request
+            .profile
+            .map(active_profile_from_protocol)
+            .unwrap_or(ActiveProfile::Main);
         let runtime = Arc::new(RuntimeSession::spawn(
-            self.settings.clone(),
+            settings,
             self.project.clone(),
             session_id.clone(),
             Arc::clone(&self.db),
+            active_profile,
         ));
         self.sessions
             .lock()
@@ -322,6 +425,49 @@ impl SessionManager {
         Ok(protocol::CreateSessionResponse {
             session_id: Some(session_id),
         })
+    }
+
+    fn settings_for_new_session(
+        &self,
+        request: &protocol::CreateSessionRequest,
+    ) -> Result<omini_core::types::config::Settings, CoreError> {
+        let mut settings = self.settings_with_project_state();
+        if let Some(provider) = &request.provider {
+            let profile = settings
+                .providers
+                .get(provider)
+                .ok_or_else(|| CoreError::new(format!("Unknown provider profile: {provider}")))?;
+            settings.active_provider = provider.clone();
+            settings.api_key = profile.api_key.clone();
+            settings.base_url = profile.base_url.clone();
+            settings.endpoint = profile.endpoint;
+        }
+        if let Some(model) = &request.model {
+            let provider = settings
+                .providers
+                .get(&settings.active_provider)
+                .ok_or_else(|| {
+                    CoreError::new(format!(
+                        "Unknown provider profile: {}",
+                        settings.active_provider
+                    ))
+                })?;
+            if !provider
+                .models
+                .iter()
+                .any(|candidate| candidate.id == *model)
+            {
+                return Err(CoreError::new(format!(
+                    "Unknown model '{}' for provider '{}'",
+                    model, settings.active_provider
+                )));
+            }
+            settings.model = model.clone();
+        }
+        if let Some(effort) = request.thinking_effort {
+            settings.thinking_effort = Some(thinking_effort_from_protocol(effort));
+        }
+        Ok(settings)
     }
 
     pub(crate) async fn session(
@@ -363,6 +509,7 @@ impl SessionManager {
             self.project.clone(),
             session_id.to_string(),
             Arc::clone(&self.db),
+            ActiveProfile::Main,
         ));
         sessions.insert(session_id.to_string(), Arc::clone(&session));
         Ok(session)
@@ -989,6 +1136,7 @@ impl RuntimeStatusProjection {
         protocol::SessionRuntimeStatus {
             session_id: session_id.to_string(),
             state: self.state(),
+            active_profile: self.active_profile,
             loaded: context.loaded,
             controller_id: context.controller_id,
             connected_client_count: context.connected_client_count,
@@ -1539,16 +1687,24 @@ impl RuntimeSession {
         project: ProjectDir,
         session_id: String,
         db: Arc<Database>,
+        active_profile: ActiveProfile,
     ) -> Self {
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
         let (server_event_tx, _) = broadcast::channel(128);
-        let core = AgentCoreSession::spawn(settings.clone(), project.clone());
+        let core = AgentCoreSession::spawn_with_active_profile(
+            settings.clone(),
+            project.clone(),
+            active_profile,
+        );
         let mut persistence_rx = core.subscribe_persistence();
         let mut tool_pause_rx = core.subscribe();
         let mut runtime_event_rx = core.subscribe();
         let replay_buffer = Arc::new(Mutex::new(RuntimeReplayBuffer::default()));
-        let status_projection = Arc::new(Mutex::new(RuntimeStatusProjection::default()));
+        let status_projection = Arc::new(Mutex::new(RuntimeStatusProjection {
+            active_profile,
+            ..RuntimeStatusProjection::default()
+        }));
         let persistence_db = Arc::clone(&db);
         let persisted_replay_buffer = Arc::clone(&replay_buffer);
         let replay_session_id = session_id.clone();
@@ -1772,6 +1928,11 @@ impl RuntimeSession {
         let messages = history::load_messages(&self.db, &self.session_id, &blocks_dir).await;
         let subagents =
             history::load_subagents_for_session(&self.db, &self.session_id, &self.project).await;
+        let active_profile = self
+            .status_projection
+            .lock()
+            .expect("status projection lock poisoned")
+            .active_profile();
         Ok(omini_core::types::events::LoadedSession {
             session_id: session.id,
             provider: session.provider,
@@ -1780,6 +1941,7 @@ impl RuntimeSession {
                 .thinking_effort
                 .as_deref()
                 .and_then(|effort| effort.parse().ok()),
+            active_profile,
             title: session.title,
             messages,
             subagents,
@@ -2013,6 +2175,57 @@ fn thinking_effort_to_protocol(
     }
 }
 
+fn thinking_effort_from_protocol(
+    effort: protocol::ThinkingEffort,
+) -> omini_core::types::config::ThinkingEffort {
+    match effort {
+        protocol::ThinkingEffort::None => omini_core::types::config::ThinkingEffort::None,
+        protocol::ThinkingEffort::Low => omini_core::types::config::ThinkingEffort::Low,
+        protocol::ThinkingEffort::Medium => omini_core::types::config::ThinkingEffort::Medium,
+        protocol::ThinkingEffort::High => omini_core::types::config::ThinkingEffort::High,
+    }
+}
+
+fn active_profile_from_protocol(profile: protocol::ActiveProfile) -> ActiveProfile {
+    match profile {
+        protocol::ActiveProfile::Main => ActiveProfile::Main,
+        protocol::ActiveProfile::Auto => ActiveProfile::Auto,
+        protocol::ActiveProfile::Plan => ActiveProfile::Plan,
+    }
+}
+
+fn models_response_from_settings(
+    settings: &omini_core::types::config::Settings,
+) -> protocol::ModelsResponse {
+    let mut providers = settings
+        .providers
+        .iter()
+        .map(|(id, provider)| protocol::ProviderInfo {
+            id: id.clone(),
+            name: provider.name.clone(),
+            endpoint: provider.endpoint,
+            base_url: provider.base_url.clone(),
+            models: provider
+                .models
+                .iter()
+                .map(|model| protocol::ModelInfo {
+                    id: model.id.clone(),
+                    name: model.name.clone(),
+                    limit: model.limit,
+                    thinking: model.thinking,
+                    input_modalities: model.input_modalities.clone(),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    providers.sort_by(|a, b| a.id.cmp(&b.id));
+    protocol::ModelsResponse {
+        providers,
+        current_provider: settings.active_provider.clone(),
+        current_model: settings.model.clone(),
+    }
+}
+
 /// 将数据库会话记录压缩成协议层会话摘要。
 fn session_summary_from_store(session: Session) -> protocol::SessionSummary {
     protocol::SessionSummary {
@@ -2133,6 +2346,7 @@ mod tests {
             provider: "main".to_string(),
             model: "test-model".to_string(),
             thinking_effort: None,
+            active_profile: ActiveProfile::Main,
             title: None,
             messages,
             subagents: Vec::new(),
@@ -2212,6 +2426,10 @@ mod tests {
         );
 
         assert_eq!(projection.active_profile(), ActiveProfile::Plan);
+        assert_eq!(
+            status_snapshot(&projection, Utc::now()).active_profile,
+            protocol::ActiveProfile::Plan
+        );
     }
 
     #[test]
@@ -3030,6 +3248,7 @@ mod tests {
                 provider: "main".to_string(),
                 model: "test-model".to_string(),
                 thinking_effort: None,
+                active_profile: ActiveProfile::Main,
                 title: Some("hello".to_string()),
                 messages: vec![HistoryItem::Message(Message::from_user_text(
                     "hello".to_string(),

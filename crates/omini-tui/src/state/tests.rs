@@ -69,6 +69,7 @@ fn query_runtime_status(
     protocol::SessionRuntimeStatus {
         session_id: "session_1".to_string(),
         state,
+        active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
         connected_client_count: 1,
@@ -99,6 +100,7 @@ fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
     protocol::SessionRuntimeStatus {
         session_id: "session_1".to_string(),
         state: protocol::SessionRuntimeState::Compacting,
+        active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
         connected_client_count: 1,
@@ -120,6 +122,7 @@ fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus 
     protocol::SessionRuntimeStatus {
         session_id: "session_1".to_string(),
         state: protocol::SessionRuntimeState::Idle,
+        active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
         connected_client_count: 1,

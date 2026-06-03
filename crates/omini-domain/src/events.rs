@@ -268,6 +268,8 @@ pub struct LoadedSession {
     pub provider: String,
     pub model: String,
     pub thinking_effort: Option<ThinkingEffort>,
+    #[serde(default)]
+    pub active_profile: ActiveProfile,
     pub title: Option<String>,
     pub messages: Vec<HistoryItem>,
     pub subagents: Vec<SubagentSnapshot>,

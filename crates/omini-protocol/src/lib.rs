@@ -72,6 +72,18 @@ pub struct ProjectAttachResponse {
     pub skills: Vec<SkillSummary>,
 }
 
+/// 项目级运行配置更新后的快照；用于无活跃 session 的 TUI 状态同步。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectRuntimeConfigResponse {
+    pub active_provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<ThinkingEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    pub show_thinking_blocks: bool,
+}
+
 /// WebSocket runtime 事件保留 legacy payload，同时允许逐步增加稳定 typed overlay。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeEvent {
@@ -364,6 +376,9 @@ pub struct SessionRuntimeStatus {
     pub session_id: String,
     /// 当前会话顶层运行状态。
     pub state: SessionRuntimeState,
+    /// 当前会话使用的运行 profile。
+    #[serde(default)]
+    pub active_profile: ActiveProfile,
     /// core 是否已完成该会话的加载和 hydrate。
     pub loaded: bool,
     /// 当前拥有会话控制权的客户端 ID；无人控制时为空。
@@ -563,6 +578,19 @@ pub struct SetThinkingDisplayRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionsResponse {
     pub sessions: Vec<SessionSummary>,
+}
+
+/// 创建会话时可覆盖项目默认运行配置。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<ThinkingEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<ActiveProfile>,
 }
 
 /// 创建会话后的响应；部分旧流程只清空当前会话，因此可能没有新 ID。
@@ -950,6 +978,7 @@ mod tests {
         let status = SessionRuntimeStatus {
             session_id: "s1".to_string(),
             state: SessionRuntimeState::Idle,
+            active_profile: ActiveProfile::Main,
             loaded: false,
             controller_id: None,
             connected_client_count: 0,
@@ -967,6 +996,7 @@ mod tests {
             json!({
                 "session_id": "s1",
                 "state": "idle",
+                "active_profile": "main",
                 "loaded": false,
                 "connected_client_count": 0
             })
@@ -978,6 +1008,7 @@ mod tests {
         let status = SessionRuntimeStatus {
             session_id: "s1".to_string(),
             state: SessionRuntimeState::Idle,
+            active_profile: ActiveProfile::Main,
             loaded: true,
             controller_id: None,
             connected_client_count: 1,
@@ -999,6 +1030,7 @@ mod tests {
             json!({
                 "session_id": "s1",
                 "state": "idle",
+                "active_profile": "main",
                 "loaded": true,
                 "connected_client_count": 1,
                 "pending_plan_approval": {
@@ -1057,6 +1089,7 @@ mod tests {
             status: SessionRuntimeStatus {
                 session_id: "s1".to_string(),
                 state: SessionRuntimeState::Compacting,
+                active_profile: ActiveProfile::Auto,
                 loaded: true,
                 controller_id: Some("client_1".to_string()),
                 connected_client_count: 2,

@@ -142,6 +142,24 @@ impl AgentRuntime {
         settings: Settings,
         project: ProjectDir,
     ) -> Self {
+        Self::new_with_active_profile(
+            event_tx,
+            persistence_tx,
+            request_rx,
+            settings,
+            project,
+            ActiveProfile::Main,
+        )
+    }
+
+    pub fn new_with_active_profile(
+        event_tx: mpsc::Sender<RuntimeToUiEvent>,
+        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+        request_rx: mpsc::Receiver<UiToRuntimeEvent>,
+        settings: Settings,
+        project: ProjectDir,
+        active_profile: ActiveProfile,
+    ) -> Self {
         let mcp_manager = Arc::new(McpManager::from_settings(&settings));
         Self::with_mcp_manager(
             event_tx,
@@ -150,6 +168,7 @@ impl AgentRuntime {
             settings,
             project,
             mcp_manager,
+            active_profile,
         )
     }
 
@@ -160,6 +179,7 @@ impl AgentRuntime {
         mut settings: Settings,
         project: ProjectDir,
         mcp_manager: Arc<McpManager>,
+        active_profile: ActiveProfile,
     ) -> Self {
         let llm_client = LlmClient::new(
             settings.endpoint,
@@ -175,7 +195,7 @@ impl AgentRuntime {
             &settings,
             &subagent_registry.summaries(),
             &skill_registry.injected_summaries(),
-            ActiveProfile::Main,
+            active_profile,
         ));
         let permission_engine = Arc::new(PermissionEngine::load(
             settings.cwd.clone(),
@@ -220,7 +240,7 @@ impl AgentRuntime {
             subagent_runner,
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
-            active_profile: Arc::new(RwLock::new(ActiveProfile::Main)),
+            active_profile: Arc::new(RwLock::new(active_profile)),
             session_usage: Arc::new(Mutex::new(SessionUsageSnapshot::default())),
         }
     }
@@ -235,9 +255,6 @@ impl AgentRuntime {
                         match req {
                             UiToRuntimeEvent::SendMessage(draft) => {
                                 self.submit_user_message(draft).await;
-                            }
-                            UiToRuntimeEvent::ClearSession => {
-                                self.clear_session().await;
                             }
                             UiToRuntimeEvent::CompactContext { instructions } => {
                                 self.compact_context(instructions.as_deref()).await;
@@ -310,26 +327,6 @@ impl AgentRuntime {
         })
     }
 
-    async fn clear_session(&mut self) {
-        self.session_id = None;
-        self.session_dir = None;
-        self.messages.clear();
-        *self.session_usage.lock().await = SessionUsageSnapshot {
-            context_window: self.current_context_window(),
-            ..SessionUsageSnapshot::default()
-        };
-
-        self.send_event(RuntimeToUiEvent::SessionChanged {
-            session_id: None,
-            messages: vec![],
-            subagents: vec![],
-            usage: *self.session_usage.lock().await,
-        })
-        .await;
-        self.send_event(RuntimeToUiEvent::SessionTitleChanged { title: None })
-            .await;
-    }
-
     async fn compact_context(&mut self, custom_instructions: Option<&str>) {
         if let Err(error) = self
             .force_compact_current_session(custom_instructions)
@@ -393,7 +390,7 @@ impl AgentRuntime {
         // 同步思考强度。
         let thinking_effort = snapshot.thinking_effort;
         self.settings.thinking_effort = thinking_effort;
-        self.set_active_profile(ActiveProfile::Main);
+        self.set_active_profile(snapshot.active_profile);
 
         // UI 展示由 server 从 SQLite 提供；LLM 上下文使用 JSONL 历史。
         let runtime_messages = match session_dir.load_history() {
@@ -986,7 +983,6 @@ impl AgentRuntime {
                                 .await;
                             }
                             UiToRuntimeEvent::SendMessage(_)
-                            | UiToRuntimeEvent::ClearSession
                             | UiToRuntimeEvent::CompactContext { .. }
                             | UiToRuntimeEvent::ShutdownRequested
                             | UiToRuntimeEvent::SessionSelected { .. }
@@ -2397,6 +2393,7 @@ mod tests {
                 provider: runtime.settings.active_provider.clone(),
                 model: runtime.settings.model.clone(),
                 thinking_effort: runtime.settings.thinking_effort,
+                active_profile: ActiveProfile::Main,
                 title: Some("session body".to_string()),
                 messages: vec![HistoryItem::Message(runtime.messages[0].clone())],
                 subagents: Vec::new(),

@@ -74,6 +74,16 @@ fn project_routes() -> Router<AppState> {
     Router::new()
         // attach 是 daemon 认识项目的入口；其余项目接口都依赖这个注册关系。
         .route("/attach", put(routes::projects::attach_project))
+        .route("/models", get(routes::projects::list_models))
+        .route("/model", post(routes::projects::set_model))
+        .route(
+            "/thinking-effort",
+            post(routes::projects::set_thinking_effort),
+        )
+        .route(
+            "/thinking-display",
+            post(routes::projects::set_thinking_display),
+        )
         // 会话列表和创建作用在项目层级，具体会话操作继续挂在 session_id 下。
         .route(
             "/sessions",
@@ -138,7 +148,6 @@ fn session_lifecycle_routes() -> Router<AppState> {
     // 这些操作改变当前会话的打开、创建或展示状态，不直接提交 run。
     Router::new()
         .route("/open", post(routes::sessions::open_session))
-        .route("/new", post(routes::sessions::new_session))
         .route("/rename", post(routes::sessions::rename_session))
         .route("/compact", post(routes::sessions::compact_context))
 }

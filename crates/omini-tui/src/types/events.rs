@@ -22,8 +22,6 @@ pub enum UiToRuntimeEvent {
     SendMessage(UserDraft),
     /// 用户执行一条命令
     SendCommand(UserDraft),
-    /// 清空当前 runtime 会话状态，等待后续输入创建新会话。
-    ClearSession,
     /// 用户请求压缩当前会话上下文。
     CompactContext { instructions: Option<String> },
     /// 用户请求调整 thinking effort。

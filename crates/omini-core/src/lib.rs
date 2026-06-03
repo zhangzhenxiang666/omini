@@ -16,7 +16,7 @@ pub mod util;
 use crate::runtime::AgentRuntime;
 use crate::types::display as display_types;
 use crate::types::events as event_types;
-use crate::types::events::{RuntimeToUiEvent, UiToRuntimeEvent};
+use crate::types::events::{ActiveProfile, RuntimeToUiEvent, UiToRuntimeEvent};
 use crate::types::subagents as subagent_types;
 use omini_protocol as protocol;
 use omini_protocol::RuntimeEvent;
@@ -94,6 +94,14 @@ impl AgentCoreSession {
         settings: crate::types::config::Settings,
         project: config::project::ProjectDir,
     ) -> Self {
+        Self::spawn_with_active_profile(settings, project, ActiveProfile::Main)
+    }
+
+    pub fn spawn_with_active_profile(
+        settings: crate::types::config::Settings,
+        project: config::project::ProjectDir,
+        active_profile: ActiveProfile,
+    ) -> Self {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToUiEvent>(512);
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
@@ -111,6 +119,7 @@ impl AgentCoreSession {
             settings,
             project,
             Arc::clone(&mcp_manager),
+            active_profile,
         );
         let runtime_handle = runtime.run();
         let fanout_tx = event_tx.clone();
@@ -279,12 +288,6 @@ impl AgentCoreSession {
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {
         self.send_runtime_event(UiToRuntimeEvent::CancelRun).await
-    }
-
-    pub async fn new_session(&self) -> Result<protocol::CreateSessionResponse, CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::ClearSession)
-            .await?;
-        Ok(protocol::CreateSessionResponse { session_id: None })
     }
 
     pub async fn compact_context(&self, instructions: Option<String>) -> Result<(), CoreError> {

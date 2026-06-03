@@ -707,6 +707,11 @@ impl UiState {
     }
 
     pub fn apply_runtime_status_sync(&mut self, status: omini_protocol::SessionRuntimeStatus) {
+        self.status_bar.active_profile = match status.active_profile {
+            omini_protocol::ActiveProfile::Main => ActiveProfile::Main,
+            omini_protocol::ActiveProfile::Auto => ActiveProfile::Auto,
+            omini_protocol::ActiveProfile::Plan => ActiveProfile::Plan,
+        };
         self.sync_pending_plan_approval(status.pending_plan_approval);
 
         let Some(activity) = status.activity else {

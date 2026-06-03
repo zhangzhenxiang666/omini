@@ -978,7 +978,9 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
         "model" => Some(ClientRequest::OpenModelPicker),
         "sessions" | "resume" => Some(ClientRequest::OpenSessionPicker),
         "agents" => Some(ClientRequest::OpenAgentManager),
-        "new" | "clear" => Some(ClientRequest::SessionNew),
+        "new" | "clear" => Some(ClientRequest::SessionNew {
+            profile: protocol::active_profile_from_internal(state.status_bar.active_profile),
+        }),
         "plan" => Some(ClientRequest::ProfileSet {
             profile: protocol::active_profile_from_internal(ActiveProfile::Plan),
         }),

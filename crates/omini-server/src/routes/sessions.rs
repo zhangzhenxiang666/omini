@@ -60,9 +60,14 @@ pub(crate) async fn session_status(
 pub(crate) async fn create_session(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
+    Json(request): Json<protocol::CreateSessionRequest>,
 ) -> ApiResult<protocol::CreateSessionResponse> {
     let project = require_project(&manager, &project_id).await?;
-    project.create_session().await.map(Json).map_err(core_error)
+    project
+        .create_session(request)
+        .await
+        .map(Json)
+        .map_err(core_error)
 }
 
 /// 列出当前会话可切换的模型。
@@ -170,18 +175,6 @@ pub(crate) async fn open_session(
     let target = require_daemon_session(&manager, &project_id, &request.session_id).await?;
     target.ensure_loaded().await.map_err(core_error)?;
     Ok(Json(protocol::AckResponse::ok()))
-}
-
-/// 从当前会话发起创建一个新会话。
-pub(crate) async fn new_session(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> ApiResult<protocol::CreateSessionResponse> {
-    let project = require_project(&manager, &project_id).await?;
-    let session = require_session(&project, &session_id).await?;
-    ensure_controller(&session, &headers).await?;
-    project.create_session().await.map(Json).map_err(core_error)
 }
 
 /// 重命名当前会话。

@@ -1,9 +1,10 @@
-use crate::types::events::RuntimeToUiEvent;
+use crate::types::events::{RuntimeToUiEvent, SessionUsageSnapshot};
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol as protocol;
 use omini_protocol::ProtocolError;
 use reqwest::Method;
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -46,7 +47,9 @@ pub(crate) enum ClientRequest {
     SessionOpen {
         session_id: String,
     },
-    SessionNew,
+    SessionNew {
+        profile: protocol::ActiveProfile,
+    },
     SessionRename {
         title: String,
     },
@@ -124,7 +127,8 @@ async fn run_project_client(
         .build()
         .map_err(|err| format!("build HTTP client: {err}"))?;
     let mut active_session_id: Option<String> = None;
-    let mut pending_request: Option<ClientRequest> = None;
+    let mut pending_requests: VecDeque<ClientRequest> = VecDeque::new();
+    let mut blank_profile = protocol::ActiveProfile::Main;
     // 每个活跃 session 只允许一次最新 daemon 地址重连；否则健康检查成功但 session
     // 仍不可用时会在同一个断线点空转。
     let mut refreshed_active_session = false;
@@ -132,19 +136,25 @@ async fn run_project_client(
     loop {
         if let Some(session_id) = active_session_id.take() {
             // 一次只维护一个活跃 session WebSocket；切换会话时结束旧 loop 再连接新 loop。
-            let mut session_initial_request = pending_request.take();
+            let mut session_initial_requests = std::mem::take(&mut pending_requests);
             let disconnect = match run_connected_session(
                 &http,
                 &connection,
                 &session_id,
                 &event_tx,
                 &mut request_rx,
-                &mut session_initial_request,
+                &mut session_initial_requests,
             )
             .await
             {
                 Ok(SessionLoop::Switch(next_session_id)) => {
                     active_session_id = Some(next_session_id);
+                    refreshed_active_session = false;
+                    continue;
+                }
+                Ok(SessionLoop::Blank(profile)) => {
+                    active_session_id = None;
+                    blank_profile = profile;
                     refreshed_active_session = false;
                     continue;
                 }
@@ -164,7 +174,7 @@ async fn run_project_client(
                     Ok(()) => {
                         // 新 daemon 不认识旧 client_id；rediscovery 会重新注册并 attach 项目。
                         active_session_id = Some(session_id);
-                        pending_request = session_initial_request;
+                        pending_requests = session_initial_requests;
                         refreshed_active_session = true;
                     }
                     Err(reconnect_err) => {
@@ -184,14 +194,22 @@ async fn run_project_client(
             break;
         };
         // 没有活跃 session 时，项目级请求可以直接处理；会话级请求会先创建 session 再补发。
-        match handle_project_request(&http, &connection, request, &event_tx).await? {
+        match handle_project_request(
+            &http,
+            &mut connection,
+            request,
+            &event_tx,
+            &mut blank_profile,
+        )
+        .await?
+        {
             ProjectAction::None => {}
             ProjectAction::Connect {
                 session_id,
                 pending,
             } => {
                 active_session_id = Some(session_id);
-                pending_request = pending;
+                pending_requests = pending;
                 refreshed_active_session = false;
             }
             ProjectAction::Shutdown => break,
@@ -206,23 +224,40 @@ enum ProjectAction {
     // Connect 可能带一个待补发请求，用于“用户第一次输入时自动创建会话并立刻提交”。
     Connect {
         session_id: String,
-        pending: Option<ClientRequest>,
+        pending: VecDeque<ClientRequest>,
     },
     Shutdown,
 }
 
 enum SessionLoop {
     Switch(String),
+    Blank(protocol::ActiveProfile),
     Closed(String),
+}
+
+enum LocalAction {
+    None,
+    Switch(String),
+    Blank(protocol::ActiveProfile),
 }
 
 async fn handle_project_request(
     http: &reqwest::Client,
-    connection: &ProjectConnection,
+    connection: &mut ProjectConnection,
     request: ClientRequest,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    blank_profile: &mut protocol::ActiveProfile,
 ) -> Result<ProjectAction, String> {
     match request {
+        ClientRequest::RunSubmitUserInput { .. } | ClientRequest::ExpandSkillRun { .. } => {
+            let session_id = create_session(http, connection, *blank_profile, event_tx).await?;
+            let mut pending = VecDeque::new();
+            pending.push_back(request);
+            Ok(ProjectAction::Connect {
+                session_id,
+                pending,
+            })
+        }
         ClientRequest::OpenSessionPicker => {
             let sessions: protocol::SessionsResponse =
                 get_json(http, &project_sessions_url(connection)).await?;
@@ -236,14 +271,81 @@ async fn handle_project_request(
         }
         ClientRequest::SessionOpen { session_id } => Ok(ProjectAction::Connect {
             session_id,
-            pending: None,
+            pending: VecDeque::new(),
         }),
-        ClientRequest::SessionNew => {
-            let session_id = create_session(http, connection).await?;
-            Ok(ProjectAction::Connect {
-                session_id,
-                pending: None,
-            })
+        ClientRequest::SessionNew { profile } => {
+            *blank_profile = profile;
+            emit_blank_session(event_tx, connection).await?;
+            event_tx
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::OpenModelPicker => {
+            let models: protocol::ModelsResponse =
+                get_json(http, &project_models_url(connection)).await?;
+            event_tx
+                .send(RuntimeToUiEvent::InteractionRequest(
+                    event_types_model_selection(models),
+                ))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::ModelSelect {
+            provider,
+            model,
+            thinking_effort,
+        } => {
+            let config: protocol::ProjectRuntimeConfigResponse = post_json_without_client(
+                http,
+                &project_model_url(connection),
+                &protocol::SetModelRequest {
+                    provider,
+                    model,
+                    thinking_effort,
+                },
+            )
+            .await?;
+            apply_project_runtime_config(connection, event_tx, config).await?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::ModelThinkingEffortSet { effort } => {
+            let config: protocol::ProjectRuntimeConfigResponse = post_json_without_client(
+                http,
+                &project_thinking_effort_url(connection),
+                &protocol::SetThinkingEffortRequest { effort },
+            )
+            .await?;
+            apply_project_runtime_config(connection, event_tx, config).await?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::ProfileToggle => {
+            *blank_profile = toggle_profile(*blank_profile);
+            event_tx
+                .send(RuntimeToUiEvent::ActiveProfileChanged(*blank_profile))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::ProfileSet { profile } => {
+            *blank_profile = profile;
+            event_tx
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::ThinkingDisplaySet { show } => {
+            let config: protocol::ProjectRuntimeConfigResponse = post_json_without_client(
+                http,
+                &project_thinking_display_url(connection),
+                &protocol::SetThinkingDisplayRequest { show },
+            )
+            .await?;
+            apply_project_runtime_config(connection, event_tx, config).await?;
+            Ok(ProjectAction::None)
         }
         ClientRequest::AppShutdown => {
             event_tx
@@ -253,12 +355,14 @@ async fn handle_project_request(
             Ok(ProjectAction::Shutdown)
         }
         other => {
-            let session_id = create_session(http, connection).await?;
-            // 用户在无活跃会话时触发会话内动作，先创建会话，再交给 session loop 处理原动作。
-            Ok(ProjectAction::Connect {
-                session_id,
-                pending: Some(other),
-            })
+            event_tx
+                .send(RuntimeToUiEvent::error(format!(
+                    "当前没有活跃会话，不能执行 {}；请先发送消息创建会话或用 /sessions 打开已有会话",
+                    request_name(&other)
+                )))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            Ok(ProjectAction::None)
         }
     }
 }
@@ -266,12 +370,113 @@ async fn handle_project_request(
 async fn create_session(
     http: &reqwest::Client,
     connection: &ProjectConnection,
+    profile: protocol::ActiveProfile,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
 ) -> Result<String, String> {
-    let response: protocol::CreateSessionResponse =
-        post_json_without_client(http, &project_sessions_url(connection), &()).await?;
-    response
+    let response: protocol::CreateSessionResponse = post_json_without_client(
+        http,
+        &project_sessions_url(connection),
+        &protocol::CreateSessionRequest {
+            provider: Some(connection.attach.active_provider.clone()),
+            model: Some(connection.attach.model.clone()),
+            thinking_effort: connection.attach.thinking_effort,
+            profile: Some(profile),
+        },
+    )
+    .await?;
+    let session_id = response
         .session_id
-        .ok_or_else(|| "Server did not return a session id".to_string())
+        .ok_or_else(|| "Server did not return a session id".to_string())?;
+    event_tx
+        .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())?;
+    Ok(session_id)
+}
+
+async fn emit_blank_session(
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    connection: &ProjectConnection,
+) -> Result<(), String> {
+    event_tx
+        .send(RuntimeToUiEvent::SessionChanged {
+            session_id: None,
+            messages: Vec::new(),
+            subagents: Vec::new(),
+            usage: SessionUsageSnapshot {
+                context_window: connection.attach.context_window,
+                ..SessionUsageSnapshot::default()
+            },
+        })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())?;
+    event_tx
+        .send(RuntimeToUiEvent::SessionTitleChanged { title: None })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())
+}
+
+async fn apply_project_runtime_config(
+    connection: &mut ProjectConnection,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    config: protocol::ProjectRuntimeConfigResponse,
+) -> Result<(), String> {
+    connection.attach.active_provider = config.active_provider.clone();
+    connection.attach.model = config.model.clone();
+    connection.attach.thinking_effort = config.thinking_effort;
+    connection.attach.context_window = config.context_window;
+    connection.attach.show_thinking_blocks = config.show_thinking_blocks;
+
+    event_tx
+        .send(RuntimeToUiEvent::ModelChanged {
+            provider: config.active_provider,
+            model: config.model,
+            thinking_effort: config.thinking_effort.map(thinking_effort_from_protocol),
+            context_window: config.context_window,
+        })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())?;
+    event_tx
+        .send(RuntimeToUiEvent::ThinkingDisplayChanged {
+            show: config.show_thinking_blocks,
+        })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())
+}
+
+fn toggle_profile(profile: protocol::ActiveProfile) -> protocol::ActiveProfile {
+    match profile {
+        protocol::ActiveProfile::Main => protocol::ActiveProfile::Auto,
+        protocol::ActiveProfile::Auto => protocol::ActiveProfile::Plan,
+        protocol::ActiveProfile::Plan => protocol::ActiveProfile::Main,
+    }
+}
+
+fn request_name(request: &ClientRequest) -> &'static str {
+    match request {
+        ClientRequest::RunSubmitUserInput { .. } => "submit",
+        ClientRequest::RunInterveneInput { .. } => "intervene",
+        ClientRequest::RunCancel => "cancel",
+        ClientRequest::ProfileToggle => "profile toggle",
+        ClientRequest::ProfileSet { .. } => "profile",
+        ClientRequest::OpenModelPicker => "model picker",
+        ClientRequest::ModelSelect { .. } => "model select",
+        ClientRequest::ModelThinkingEffortSet { .. } => "thinking effort",
+        ClientRequest::OpenSessionPicker => "sessions",
+        ClientRequest::SessionOpen { .. } => "session open",
+        ClientRequest::SessionNew { .. } => "new session",
+        ClientRequest::SessionRename { .. } => "rename",
+        ClientRequest::ContextCompact { .. } => "compact",
+        ClientRequest::ToolPauseResolve { .. } => "tool pause",
+        ClientRequest::PlanResolve { .. } => "plan approval",
+        ClientRequest::OpenAgentManager => "agents",
+        ClientRequest::AgentSave { .. } => "agent save",
+        ClientRequest::AgentDelete { .. } => "agent delete",
+        ClientRequest::AgentGenerate { .. } => "agent generate",
+        ClientRequest::ExpandSkillRun { .. } => "skill",
+        ClientRequest::ThinkingDisplaySet { .. } => "thinking display",
+        ClientRequest::AppShutdown => "shutdown",
+    }
 }
 
 async fn run_connected_session(
@@ -280,7 +485,7 @@ async fn run_connected_session(
     session_id: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     request_rx: &mut mpsc::Receiver<ClientRequest>,
-    initial_request: &mut Option<ClientRequest>,
+    initial_requests: &mut VecDeque<ClientRequest>,
 ) -> Result<SessionLoop, String> {
     let base = session_base_url(connection, session_id);
     let url = format!(
@@ -305,12 +510,15 @@ async fn run_connected_session(
     let client_id = connection.client_id.clone();
     let mut did_calibrate_initial_status = false;
 
-    if let Some(request) = initial_request.take()
-        && let Some(next_session_id) =
-            handle_local_request(http, connection, &base, &client_id, request, event_tx).await?
-    {
-        // pending request 也可能是打开/新建会话，出现时直接切到目标 session。
-        return Ok(SessionLoop::Switch(next_session_id));
+    while let Some(request) = initial_requests.pop_front() {
+        match handle_local_request(http, connection, &base, &client_id, request, event_tx).await? {
+            LocalAction::None => {}
+            LocalAction::Switch(next_session_id) => {
+                // pending request 也可能是打开会话，出现时直接切到目标 session。
+                return Ok(SessionLoop::Switch(next_session_id));
+            }
+            LocalAction::Blank(profile) => return Ok(SessionLoop::Blank(profile)),
+        }
     }
 
     loop {
@@ -327,10 +535,11 @@ async fn run_connected_session(
                 )
                 .await
                 {
-                    Ok(Some(next_session_id)) => {
+                    Ok(LocalAction::None) => {}
+                    Ok(LocalAction::Switch(next_session_id)) => {
                         return Ok(SessionLoop::Switch(next_session_id));
                     }
-                    Ok(None) => {}
+                    Ok(LocalAction::Blank(profile)) => return Ok(SessionLoop::Blank(profile)),
                     Err(err) => {
                         let _ = event_tx.send(RuntimeToUiEvent::error(err)).await;
                     }
@@ -539,8 +748,8 @@ async fn handle_local_request(
     client_id: &str,
     request: ClientRequest,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
-) -> Result<Option<String>, String> {
-    // 返回 Some(session_id) 表示该请求不是普通 mutation，而是要求外层切换 session loop。
+) -> Result<LocalAction, String> {
+    // 返回 Switch/Blank 表示该请求要求外层退出当前 session loop。
     match request {
         ClientRequest::RunSubmitUserInput { input } => {
             post_json::<_, protocol::RunSubmittedResponse>(
@@ -640,10 +849,15 @@ async fn handle_local_request(
                 .map_err(|_| "TUI event receiver closed".to_string())?;
         }
         ClientRequest::SessionOpen { session_id } => {
-            return Ok(Some(session_id));
+            return Ok(LocalAction::Switch(session_id));
         }
-        ClientRequest::SessionNew => {
-            return Ok(Some(create_session(http, connection).await?));
+        ClientRequest::SessionNew { profile } => {
+            emit_blank_session(event_tx, connection).await?;
+            event_tx
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .await
+                .map_err(|_| "TUI event receiver closed".to_string())?;
+            return Ok(LocalAction::Blank(profile));
         }
         ClientRequest::SessionRename { title } => {
             post_json::<_, protocol::AckResponse>(
@@ -779,12 +993,40 @@ async fn handle_local_request(
                 .map_err(|_| "TUI event receiver closed".to_string())?;
         }
     }
-    Ok(None)
+    Ok(LocalAction::None)
 }
 
 fn project_sessions_url(connection: &ProjectConnection) -> String {
     format!(
         "http://{}/v1/projects/{}/sessions",
+        connection.addr, connection.project_id
+    )
+}
+
+fn project_models_url(connection: &ProjectConnection) -> String {
+    format!(
+        "http://{}/v1/projects/{}/models",
+        connection.addr, connection.project_id
+    )
+}
+
+fn project_model_url(connection: &ProjectConnection) -> String {
+    format!(
+        "http://{}/v1/projects/{}/model",
+        connection.addr, connection.project_id
+    )
+}
+
+fn project_thinking_effort_url(connection: &ProjectConnection) -> String {
+    format!(
+        "http://{}/v1/projects/{}/thinking-effort",
+        connection.addr, connection.project_id
+    )
+}
+
+fn project_thinking_display_url(connection: &ProjectConnection) -> String {
+    format!(
+        "http://{}/v1/projects/{}/thinking-display",
         connection.addr, connection.project_id
     )
 }
@@ -1170,6 +1412,7 @@ mod tests {
         protocol::SessionRuntimeStatus {
             session_id: "session_1".to_string(),
             state: protocol::SessionRuntimeState::Working,
+            active_profile: protocol::ActiveProfile::Main,
             loaded: true,
             controller_id: Some("client_1".to_string()),
             connected_client_count: 1,
