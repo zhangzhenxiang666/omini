@@ -12,6 +12,7 @@ daemonize.workspace = true
 dirs.workspace = true
 futures-util.workspace = true
 omini-core.workspace = true
+omini-domain.workspace = true
 omini-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true

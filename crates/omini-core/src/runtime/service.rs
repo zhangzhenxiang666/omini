@@ -1,7 +1,6 @@
 use crate::api::LlmClient;
 use crate::config::project::ProjectDir;
 use crate::config::project::SessionDir;
-use crate::config::project::sanitize;
 use crate::engine::{QueryContext, QueryEngine, ToolPauseResolver};
 use crate::mcp::McpManager;
 use crate::permissions::PermissionEngine;
@@ -20,6 +19,7 @@ use crate::types::events::{
 use crate::types::message::Message;
 use crate::types::usage::Usage;
 use chrono::Utc;
+use omini_domain::project::sanitize_project_path as sanitize;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};

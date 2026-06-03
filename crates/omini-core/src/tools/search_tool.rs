@@ -230,7 +230,8 @@ async fn execute_search(prepared: PreparedSearch) -> ToolResult {
 }
 
 async fn run_rg(prepared: &PreparedSearch) -> Result<std::process::Output, String> {
-    let mut command = Command::new("rg");
+    let rg_path = bundled_rg_path()?;
+    let mut command = Command::new(&rg_path);
     command.current_dir(&prepared.cwd);
     command.kill_on_drop(true);
 
@@ -270,15 +271,33 @@ async fn run_rg(prepared: &PreparedSearch) -> Result<std::process::Output, Strin
 
     match tokio::time::timeout(SEARCH_TIMEOUT, command.output()).await {
         Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err("ripgrep (`rg`) was not found in PATH".to_string())
-        }
-        Ok(Err(e)) => Err(format!("Failed to spawn rg: {e}")),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "bundled ripgrep not found at {}; reinstall omini or restore bundled tools",
+            bundled_rg_display_path()
+        )),
+        Ok(Err(e)) => Err(format!(
+            "Failed to spawn bundled ripgrep at {}: {e}",
+            rg_path.display()
+        )),
         Err(_) => Err(format!(
             "search timed out after {}ms",
             SEARCH_TIMEOUT.as_millis()
         )),
     }
+}
+
+fn bundled_rg_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".omini").join("bin").join(rg_binary_name()))
+        .ok_or_else(|| "cannot find home dir for bundled ripgrep".to_string())
+}
+
+fn bundled_rg_display_path() -> String {
+    format!("~/.omini/bin/{}", rg_binary_name())
+}
+
+fn rg_binary_name() -> &'static str {
+    if cfg!(windows) { "rg.exe" } else { "rg" }
 }
 
 fn filter_file_lines(stdout: &str, prepared: &PreparedSearch) -> Vec<String> {
@@ -377,6 +396,17 @@ mod tests {
             context: None,
             max_results: None,
         }
+    }
+
+    #[test]
+    fn bundled_rg_display_path_uses_install_layout() {
+        let expected = if cfg!(windows) {
+            "~/.omini/bin/rg.exe"
+        } else {
+            "~/.omini/bin/rg"
+        };
+
+        assert_eq!(bundled_rg_display_path(), expected);
     }
 
     #[tokio::test]

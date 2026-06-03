@@ -14,7 +14,7 @@ crates/
 
 ## Crate Responsibilities
 
-- `omini-cli` is the binary entrypoint. It initializes the omini root, loads config, opens the database, initializes the project, builds `Settings`, and starts the TUI/client flow.
+- `omini-cli` is the user-facing binary entrypoint. It starts or connects to the installed `omini-server` daemon binary, registers the current project, and starts the TUI/client flow.
 - `omini-domain` owns stable data types and small domain helpers shared by core, protocol, TUI, and server-adjacent code: messages, tool definitions, usage, display/history records, proposed plan parsing, shared provider/model view enums, plan approval payloads, tool pause payloads, session summaries, compact event payloads, and subagent event payloads.
 - `omini-core` owns the agent implementation: provider clients, engine loop, tools, MCP, permissions, prompts, skills, subagents, compaction, plan handling, session runtime service, config, project state, and SQLite helpers during migration.
 - `omini-protocol` owns public HTTP and WebSocket request/response envelopes. It reuses or re-exports `omini-domain` types when the wire shape matches, and it must stay independent from core, server, and TUI implementation types.
@@ -40,7 +40,7 @@ omini-protocol
 
 omini-core --> omini-domain + omini-protocol
 omini-tui  --> omini-domain + omini-protocol
-omini-cli --> omini-core + omini-server/omini-tui bootstrap
+omini-cli --> omini-protocol + omini-tui
 ```
 
 Current boundary notes:
@@ -51,7 +51,7 @@ Current boundary notes:
 
 ## Runtime Flow
 
-1. `omini-cli` initializes root/config/project/database state and starts the local client flow.
+1. `omini-cli` starts or connects to the local `omini-server` daemon binary, attaches the current project, and starts the local client flow.
 2. `omini-tui` starts or connects to the local server, creates/selects a session, claims controller status, and subscribes to `/sessions/{session_id}/ws`.
 3. TUI input is translated locally: slash commands stay client UX, `@` mentions become semantic context refs, and image markers become attachment refs.
 4. `omini-server` validates HTTP requests, applies controller conflict rules, and routes accepted requests to `omini-core`.
@@ -76,7 +76,8 @@ Non-critical UI events may continue to use legacy payloads temporarily.
 
 ## Where Changes Usually Go
 
-- CLI startup, config loading, project initialization, or database initialization: `omini-cli` and eventually daemon bootstrap.
+- CLI startup, installed daemon binary lookup, and client registration/attach: `omini-cli`.
+- Config loading, project initialization, and database initialization: `omini-server`.
 - Stable shared messages, usage records, display/history records, plan parsing helpers, no-secret provider/model view types, plan approval payloads, tool pause payloads, compact payloads, and subagent payloads: `omini-domain`.
 - Agent behavior, tools, providers, permissions, prompts, skills, subagents, compaction, plans, config, and project state: `omini-core`.
 - Public endpoint bodies, user input DTOs, attachments, controller DTOs, and typed WebSocket event DTO envelopes: `omini-protocol`.

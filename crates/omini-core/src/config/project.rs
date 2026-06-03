@@ -2,15 +2,11 @@ use crate::config::settings::UserConfig;
 use crate::types::config::ConfigError;
 use crate::types::config::ThinkingEffort;
 use crate::types::message::Message;
+use omini_domain::project::sanitize_project_path as sanitize;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-
-/// 将项目路径转义为安全的目录名：`/`、`_`、空格 → `-`
-pub fn sanitize(path: &Path) -> String {
-    path.to_string_lossy().replace(['/', '_', ' '], "-")
-}
 
 /// `~/.omini/projects/` 目录操作句柄。
 pub struct ProjectsDir {

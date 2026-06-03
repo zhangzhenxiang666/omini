@@ -1,7 +1,8 @@
-use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
-use omini_core::config::project::sanitize;
+use clap::builder::Styles;
+use clap::builder::styling::{AnsiColor, Effects};
+use omini_domain::project::sanitize_project_path as sanitize;
 use omini_protocol as protocol;
 use serde::Deserialize;
 use std::env;
@@ -18,10 +19,19 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-const DAEMON_RUNNER_COMMAND: &str = "__daemon";
+fn styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::Green.on_default() | Effects::BOLD)
+        .usage(AnsiColor::Green.on_default() | Effects::BOLD)
+        .literal(AnsiColor::BrightCyan.on_default() | Effects::BOLD)
+        .placeholder(AnsiColor::BrightCyan.on_default())
+        .error(AnsiColor::BrightRed.on_default() | Effects::BOLD)
+        .valid(AnsiColor::BrightCyan.on_default() | Effects::BOLD)
+        .invalid(AnsiColor::BrightYellow.on_default() | Effects::BOLD)
+}
 
 #[derive(Debug, Parser)]
-#[command(version)]
+#[command(version, styles = styles())]
 struct Cli {
     #[command(subcommand)]
     command: Option<CliCommand>,
@@ -29,25 +39,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    #[command(about = "管理本地 omini-server daemon")]
     Server {
         #[command(subcommand)]
         command: ServerCommand,
     },
-    #[command(name = DAEMON_RUNNER_COMMAND, hide = true)]
-    Daemon(DaemonArgs),
-}
-
-#[derive(Debug, Args)]
-struct DaemonArgs {
-    #[arg(long)]
-    foreground: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Subcommand)]
 enum ServerCommand {
+    #[command(about = "启动本地 omini-server daemon")]
     Start,
+    #[command(about = "停止正在运行的 omini-server daemon")]
     Stop,
+    #[command(about = "重启本地 omini-server daemon")]
     Restart,
+    #[command(about = "查看 omini-server 运行状态")]
     Status,
 }
 
@@ -107,12 +114,6 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             Ok(ExitCode::SUCCESS)
         }
         Some(CliCommand::Server { command }) => run_server_command(command),
-        Some(CliCommand::Daemon(args)) => {
-            omini_server::process::run_daemon_process(omini_server::process::ProcessOptions {
-                foreground: args.foreground,
-            })?;
-            Ok(ExitCode::SUCCESS)
-        }
     }
 }
 
@@ -196,7 +197,7 @@ fn status_server() -> Result<ExitCode, Box<dyn Error>> {
         Ok(ExitCode::SUCCESS)
     } else {
         println!("omini-server is not running");
-        Ok(ExitCode::from(1))
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -295,13 +296,47 @@ fn spawn_server_process() -> Result<(), String> {
 
 fn server_process_command() -> Result<ProcessCommand, String> {
     if let Some(path) = env::var_os("OMINI_SERVER_BIN").filter(|value| !value.is_empty()) {
-        return Ok(ProcessCommand::new(PathBuf::from(path)));
+        let path = PathBuf::from(path);
+        if !path.is_absolute() {
+            return Err(format!(
+                "OMINI_SERVER_BIN must be an absolute path: {}",
+                path.display()
+            ));
+        }
+        if !path.is_file() {
+            return Err(format!(
+                "OMINI_SERVER_BIN points to a missing omini-server binary: {}",
+                path.display()
+            ));
+        }
+        return Ok(ProcessCommand::new(path));
     }
 
-    let exe = env::current_exe().map_err(|err| format!("find current executable: {err}"))?;
-    let mut command = ProcessCommand::new(exe);
-    command.arg(DAEMON_RUNNER_COMMAND);
-    Ok(command)
+    let path = installed_server_bin_path()?;
+    if !path.is_file() {
+        return Err(format!(
+            "omini-server binary was not found at {}. Run the omini install flow or set OMINI_SERVER_BIN to an absolute omini-server path.",
+            path.display()
+        ));
+    }
+    Ok(ProcessCommand::new(path))
+}
+
+fn installed_server_bin_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".omini").join("bin").join(server_binary_name()))
+        .ok_or_else(|| {
+            "cannot find home dir; set OMINI_SERVER_BIN to an absolute omini-server path"
+                .to_string()
+        })
+}
+
+fn server_binary_name() -> &'static str {
+    if cfg!(windows) {
+        "omini-server.exe"
+    } else {
+        "omini-server"
+    }
 }
 
 fn read_daemon_hint() -> Option<DaemonHint> {
@@ -426,5 +461,10 @@ mod tests {
                 Some(CliCommand::Server { command }) if command == expected
             ));
         }
+    }
+
+    #[test]
+    fn cli_rejects_old_daemon_runner_command() {
+        assert!(Cli::try_parse_from(["omini", "__daemon"]).is_err());
     }
 }

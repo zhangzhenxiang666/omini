@@ -23,8 +23,23 @@
 ## 构建
 
 ```bash
-cargo build
+cargo build -p omini -p omini-server
 ```
+
+## 安装布局
+
+发布包固定包含：
+
+```text
+bin/omini
+bin/omini-server
+bin/rg
+```
+
+未来安装流程会把用户命令 `omini` 安装到 `~/.local/bin/omini`，把内部依赖
+`omini-server` 和 `rg` 安装到 `~/.omini/bin/`。运行时 `omini` 从 `OMINI_SERVER_BIN`
+或 `~/.omini/bin/omini-server` 启动 daemon，search 工具固定调用 `~/.omini/bin/rg`，
+不依赖用户 `PATH` 中的 `rg`。
 
 ## 许可
 
