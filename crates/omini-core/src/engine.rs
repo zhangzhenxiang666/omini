@@ -1,4 +1,4 @@
-use crate::api::{ApiRequest, FinishReason, LlmClient};
+use crate::api::{ApiRequest, ApiStream, FinishReason, LlmClient, RequestError};
 use crate::permissions::PermissionEngine;
 use crate::runtime::compact::{self, AutoCompactState};
 use crate::tools::{
@@ -11,6 +11,7 @@ use crate::types::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
 use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -285,12 +286,21 @@ impl QueryEngine {
             };
 
             // TODO: 需要优化api的错误处理, 对于因上下文过长的输入而失败的请求要尝试收缩上下文然后再调研llm摘要
-            let mut stream = match ctx.llm_client.invoke(request).await {
-                Ok(s) => s,
-                Err(e) => {
+            let mut stream = match self
+                .invoke_or_cancel(ctx.llm_client.invoke(request), &cancelled)
+                .await
+            {
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
                     let error = format!("LLM request failed: {e}");
                     finish_reason = FinishReason::Error(error.clone());
                     let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
+                    let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                    turns += 1;
+                    break;
+                }
+                None => {
+                    finish_reason = FinishReason::Error("Cancelled".to_string());
                     let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
                     turns += 1;
                     break;
@@ -544,6 +554,29 @@ impl QueryEngine {
             turns,
             finish_reason,
             had_tool_use,
+        }
+    }
+
+    async fn invoke_or_cancel(
+        &self,
+        invoke: impl Future<Output = Result<ApiStream, RequestError>>,
+        cancelled: &Arc<AtomicBool>,
+    ) -> Option<Result<ApiStream, RequestError>> {
+        tokio::pin!(invoke);
+
+        loop {
+            if cancelled.load(Ordering::Relaxed) {
+                return None;
+            }
+
+            tokio::select! {
+                result = &mut invoke => return Some(result),
+                _ = self.cancel_notify.notified() => {
+                    if cancelled.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                }
+            }
         }
     }
 
@@ -942,7 +975,15 @@ impl Default for QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolRegistry;
+    use crate::types::config::{CompactConfig, ProviderType};
     use crate::types::message::ToolUseBlock;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::OnceLock;
+    use std::sync::mpsc as std_mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     fn permission_denied_tool_result(user_note_present: bool) -> ToolResultBlock {
         let mut metadata = serde_json::Map::new();
@@ -973,6 +1014,168 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("")
+    }
+
+    fn test_settings() -> Settings {
+        Settings {
+            api_key: "test-key".to_string(),
+            base_url: String::new(),
+            model: "test-model".to_string(),
+            endpoint: ProviderType::OpenAI,
+            providers: HashMap::new(),
+            active_provider: "test".to_string(),
+            system_prompt: None,
+            language: None,
+            max_turns: Some(1),
+            cwd: std::env::current_dir().unwrap_or_else(|_| ".".into()),
+            thinking_effort: None,
+            permissions: None,
+            compact: CompactConfig {
+                enabled: false,
+                ..CompactConfig::default()
+            },
+            mcp_servers: HashMap::new(),
+        }
+    }
+
+    fn test_http_client() -> &'static reqwest::Client {
+        static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+        CLIENT.get_or_init(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("test HTTP client should build")
+        })
+    }
+
+    fn test_llm_client(base_url: String) -> LlmClient {
+        LlmClient {
+            http_client: test_http_client(),
+            api_key: "test-key".to_string(),
+            base_url,
+            protocol: ProviderType::OpenAI,
+        }
+    }
+
+    fn spawn_hanging_openai_server() -> (String, std_mpsc::Receiver<()>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("test server addr")
+        );
+        let (accepted_tx, accepted_rx) = std_mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = accepted_tx.send(());
+
+            let mut buf = [0_u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(err)
+                        if err.kind() == std::io::ErrorKind::WouldBlock
+                            || err.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        (base_url, accepted_rx, handle)
+    }
+
+    fn spawn_retryable_openai_server() -> (String, std_mpsc::Receiver<()>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let base_url = format!(
+            "http://{}",
+            listener.local_addr().expect("test server addr")
+        );
+        let (responded_tx, responded_rx) = std_mpsc::channel();
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror",
+                )
+                .expect("write retryable response");
+            let _ = stream.flush();
+            let _ = responded_tx.send(());
+        });
+
+        (base_url, responded_rx, handle)
+    }
+
+    async fn wait_for_server_signal(
+        signal_rx: std_mpsc::Receiver<()>,
+    ) -> Result<(), std_mpsc::RecvTimeoutError> {
+        tokio::task::spawn_blocking(move || signal_rx.recv_timeout(Duration::from_secs(2)))
+            .await
+            .expect("server signal task should not panic")
+    }
+
+    async fn cancel_query_after_server_signal(
+        base_url: String,
+        signal_rx: std_mpsc::Receiver<()>,
+        delay_before_cancel: Option<Duration>,
+    ) -> (QueryResult, Vec<EngineToRuntimeEvent>) {
+        let engine = QueryEngine::default();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (tx, mut rx) = mpsc::channel(16);
+        let mut messages = vec![Message::from_user_text("hello".to_string())];
+        let settings = Arc::new(test_settings());
+        let tool_registry = Arc::new(ToolRegistry::new());
+        let llm_client = test_llm_client(base_url);
+        let ctx = QueryContext {
+            messages: &mut messages,
+            settings,
+            llm_client,
+            tool_registry,
+            active_profile: ActiveProfile::Main,
+            runtime_context: None,
+        };
+
+        let query = engine.run_query(ctx, tx, Arc::clone(&cancelled));
+        tokio::pin!(query);
+        let server_signal = wait_for_server_signal(signal_rx);
+        tokio::pin!(server_signal);
+
+        loop {
+            tokio::select! {
+                signal = &mut server_signal => {
+                    signal.expect("test server should receive the request");
+                    break;
+                }
+                result = &mut query => {
+                    panic!("query finished before cancellation: {:?}", result.finish_reason);
+                }
+            }
+        }
+
+        if let Some(delay) = delay_before_cancel {
+            tokio::time::sleep(delay).await;
+        }
+        cancelled.store(true, Ordering::Relaxed);
+        engine.cancel_current_run();
+
+        let result = tokio::time::timeout(Duration::from_millis(500), &mut query)
+            .await
+            .expect("query should return promptly after cancellation");
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        (result, events)
     }
 
     #[test]
@@ -1083,6 +1286,54 @@ mod tests {
 
         assert!(messages.is_empty());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn request_phase_cancel_drops_in_flight_http_connect() {
+        let (base_url, accepted_rx, server) = spawn_hanging_openai_server();
+
+        let (result, events) = cancel_query_after_server_signal(base_url, accepted_rx, None).await;
+
+        server.join().expect("test server should exit");
+        assert_eq!(result.turns, 1);
+        assert!(matches!(
+            result.finish_reason,
+            FinishReason::Error(ref error) if error == "Cancelled"
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, EngineToRuntimeEvent::TurnStarted))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, EngineToRuntimeEvent::TurnEnded))
+        );
+    }
+
+    #[tokio::test]
+    async fn request_phase_cancel_interrupts_retry_backoff() {
+        let (base_url, responded_rx, server) = spawn_retryable_openai_server();
+
+        let (result, events) = cancel_query_after_server_signal(
+            base_url,
+            responded_rx,
+            Some(Duration::from_millis(50)),
+        )
+        .await;
+
+        server.join().expect("test server should exit");
+        assert_eq!(result.turns, 1);
+        assert!(matches!(
+            result.finish_reason,
+            FinishReason::Error(ref error) if error == "Cancelled"
+        ));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, EngineToRuntimeEvent::TurnEnded))
+        );
     }
 
     #[test]
