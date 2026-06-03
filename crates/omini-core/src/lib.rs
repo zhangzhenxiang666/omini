@@ -311,16 +311,23 @@ impl AgentCoreSession {
     }
 
     pub async fn set_model(&self, request: protocol::SetModelRequest) -> Result<(), CoreError> {
+        let requested_effort = request.thinking_effort.map(thinking_effort_from_protocol);
+        let thinking_effort;
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
+            thinking_effort = settings.effective_thinking_effort_for(
+                &request.provider,
+                &request.model,
+                requested_effort,
+            );
             settings.active_provider = request.provider.clone();
             settings.model = request.model.clone();
-            settings.thinking_effort = request.thinking_effort.map(thinking_effort_from_protocol);
+            settings.thinking_effort = thinking_effort;
         }
         self.send_runtime_event(UiToRuntimeEvent::ModelSelected {
             provider: request.provider,
             model: request.model,
-            thinking_effort: request.thinking_effort.map(thinking_effort_from_protocol),
+            thinking_effort,
         })
         .await
     }
@@ -329,14 +336,14 @@ impl AgentCoreSession {
         &self,
         request: protocol::SetThinkingEffortRequest,
     ) -> Result<(), CoreError> {
+        let requested_effort = thinking_effort_from_protocol(request.effort);
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
-            settings.thinking_effort = Some(thinking_effort_from_protocol(request.effort));
+            settings.thinking_effort =
+                settings.effective_current_thinking_effort(Some(requested_effort));
         }
-        self.send_runtime_event(UiToRuntimeEvent::SetThinkingEffort(
-            thinking_effort_from_protocol(request.effort),
-        ))
-        .await
+        self.send_runtime_event(UiToRuntimeEvent::SetThinkingEffort(requested_effort))
+            .await
     }
 
     pub async fn set_thinking_display(

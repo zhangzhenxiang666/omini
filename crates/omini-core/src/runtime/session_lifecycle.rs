@@ -27,7 +27,11 @@ impl AgentRuntime {
         }
 
         // 同步思考强度。
-        let thinking_effort = snapshot.thinking_effort;
+        let thinking_effort = self.settings.effective_thinking_effort_for(
+            &snapshot.provider,
+            &snapshot.model,
+            snapshot.thinking_effort,
+        );
         self.settings.thinking_effort = thinking_effort;
         self.set_active_profile(snapshot.active_profile);
 
@@ -95,6 +99,8 @@ impl AgentRuntime {
             .expect("failed to create session directory");
         self.session_dir = Some(session_dir);
 
+        self.settings.normalize_current_thinking_effort();
+
         let now = Utc::now();
         let project_path = sanitize(&self.settings.cwd);
         // 从第一条用户消息中提取标题。
@@ -158,5 +164,170 @@ impl AgentRuntime {
 
     pub(super) fn current_context_window(&self) -> Option<u32> {
         active_run::current_context_window(&self.settings)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::project::{ProjectDir, ProjectsDir};
+    use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use crate::types::config::{ProviderType, Settings, ThinkingEffort};
+    use crate::types::events::{LoadedSession, RuntimeToUiEvent, SessionUsageSnapshot};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::path::Path;
+    use std::path::PathBuf;
+    use tokio::sync::mpsc;
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn unique_temp_root(test_name: &str) -> TestRoot {
+        TestRoot {
+            path: std::env::temp_dir().join(format!(
+                "omini-core-{test_name}-{}-{}",
+                std::process::id(),
+                Uuid::new_v4()
+            )),
+        }
+    }
+
+    fn test_config() -> UserConfig {
+        let models = HashMap::from([
+            (
+                "fast".to_string(),
+                ModelEntry {
+                    name: Some("Fast".to_string()),
+                    limit: Some(1000),
+                    thinking: Some(false),
+                    input_modalities: None,
+                },
+            ),
+            (
+                "reasoner".to_string(),
+                ModelEntry {
+                    name: Some("Reasoner".to_string()),
+                    limit: Some(2000),
+                    thinking: Some(true),
+                    input_modalities: None,
+                },
+            ),
+        ]);
+
+        UserConfig {
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderConfig {
+                    name: Some("OpenAI".to_string()),
+                    endpoint: ProviderType::OpenAI,
+                    base_url: "https://openai.example".to_string(),
+                    api_key: "test-key".to_string(),
+                    models: Some(models),
+                },
+            )]),
+            language: None,
+            permissions: None,
+            compact: None,
+            mcp_servers: HashMap::new(),
+        }
+    }
+
+    fn settings_for_cwd(cwd: &Path) -> Settings {
+        let mut settings = test_config()
+            .to_settings(Some("openai"), Some("fast"), None)
+            .expect("settings should build");
+        settings.cwd = cwd.to_path_buf();
+        settings.thinking_effort = Some(ThinkingEffort::Medium);
+        settings
+    }
+
+    fn project_for(root: &Path, cwd: &Path) -> ProjectDir {
+        ProjectsDir::new(root)
+            .for_cwd(cwd, &test_config())
+            .expect("project should initialize")
+    }
+
+    fn runtime_for(
+        settings: Settings,
+        project: ProjectDir,
+    ) -> (
+        AgentRuntime,
+        mpsc::Receiver<RuntimeToUiEvent>,
+        mpsc::Receiver<RuntimePersistenceEvent>,
+    ) {
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (persistence_tx, persistence_rx) = mpsc::channel(32);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        (
+            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project),
+            event_rx,
+            persistence_rx,
+        )
+    }
+
+    #[tokio::test]
+    async fn create_session_does_not_persist_effort_for_non_thinking_model() {
+        let temp = unique_temp_root("create-session");
+        let cwd = temp.path.join("cwd");
+        let project = project_for(&temp.path, &cwd);
+        let settings = settings_for_cwd(&cwd);
+        let (mut runtime, _event_rx, mut persistence_rx) = runtime_for(settings, project);
+
+        runtime.create_session(None).await;
+
+        let event = persistence_rx
+            .recv()
+            .await
+            .expect("create session should persist");
+        let RuntimePersistenceEvent::CreateSession(session) = event else {
+            panic!("expected CreateSession event");
+        };
+        assert_eq!(session.model, "fast");
+        assert_eq!(session.thinking_effort, None);
+        assert_eq!(runtime.settings.thinking_effort, None);
+    }
+
+    #[tokio::test]
+    async fn switch_session_does_not_emit_effort_for_non_thinking_model() {
+        let temp = unique_temp_root("switch-session");
+        let cwd = temp.path.join("cwd");
+        let project = project_for(&temp.path, &cwd);
+        let settings = settings_for_cwd(&cwd);
+        let (mut runtime, mut event_rx, _persistence_rx) = runtime_for(settings, project);
+        while event_rx.try_recv().is_ok() {}
+
+        runtime
+            .switch_session(LoadedSession {
+                session_id: "s1".to_string(),
+                provider: "openai".to_string(),
+                model: "fast".to_string(),
+                thinking_effort: Some(ThinkingEffort::Medium),
+                active_profile: ActiveProfile::Main,
+                title: None,
+                messages: Vec::new(),
+                subagents: Vec::new(),
+                usage: SessionUsageSnapshot::default(),
+            })
+            .await;
+
+        assert_eq!(runtime.settings.thinking_effort, None);
+        let mut model_changed = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let RuntimeToUiEvent::ModelChanged {
+                thinking_effort, ..
+            } = event
+            {
+                model_changed = Some(thinking_effort);
+            }
+        }
+        assert_eq!(model_changed, Some(None));
     }
 }

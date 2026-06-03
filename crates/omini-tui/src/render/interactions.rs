@@ -132,10 +132,8 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
     }
 }
 
-fn model_panel_height(entries: &[ModelSelectionEntry], selected: usize, area_height: u16) -> u16 {
-    let has_thinking = entries
-        .get(selected)
-        .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
+fn model_panel_height(entries: &[ModelSelectionEntry], _selected: usize, area_height: u16) -> u16 {
+    let has_thinking = model_entries_have_thinking(entries);
     // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
     let extra: u16 = if has_thinking { 6 } else { 4 };
     ((entries.len() as u16) + extra)
@@ -157,15 +155,16 @@ fn render_model_panel(
     area: Rect,
     params: ModelPanelParams<'_>,
 ) {
-    let has_thinking = params
+    let has_any_thinking = model_entries_have_thinking(params.entries);
+    let selected_has_thinking = params
         .entries
         .get(params.selected)
         .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
 
     // Layout: entries list + [thinking row] + hint
     let hint_h: u16 = 1;
-    let thinking_h: u16 = if has_thinking { 1 } else { 0 };
-    let gap_h: u16 = if has_thinking { 1 } else { 0 };
+    let thinking_h: u16 = if has_any_thinking { 1 } else { 0 };
+    let gap_h: u16 = if has_any_thinking { 1 } else { 0 };
     let list_h = area.height.saturating_sub(hint_h + thinking_h + gap_h);
 
     let list_area = Rect {
@@ -257,7 +256,7 @@ fn render_model_panel(
     }
 
     // Thinking effort row
-    if has_thinking && thinking_y < area.bottom() {
+    if has_any_thinking && thinking_y < area.bottom() {
         const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉"];
         const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High"];
         const EFFORT_COLORS: &[Color] = &[
@@ -271,21 +270,33 @@ fn render_model_panel(
         let label = EFFORT_LABELS[ti];
         let color = EFFORT_COLORS[ti];
 
-        let thinking_style = Style::default().fg(color).add_modifier(if ti > 0 {
-            Modifier::BOLD
+        let thinking_style = Style::default()
+            .fg(if selected_has_thinking {
+                color
+            } else {
+                Color::Rgb(100, 105, 115)
+            })
+            .add_modifier(if selected_has_thinking && ti > 0 {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            });
+        let helper_style = Style::default().fg(Color::Rgb(140, 145, 155));
+        let mut thinking_line = if selected_has_thinking {
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(format!("{} {} effort", icon, label), thinking_style),
+                Span::raw("   "),
+                Span::styled("← → to adjust", helper_style),
+            ])
         } else {
-            Modifier::empty()
-        });
-
-        let mut thinking_line = Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{} {} effort", icon, label), thinking_style),
-            Span::raw("   "),
-            Span::styled(
-                "← → to adjust",
-                Style::default().fg(Color::Rgb(140, 145, 155)),
-            ),
-        ]);
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled("○ effort unavailable", thinking_style),
+                Span::raw("   "),
+                Span::styled("model does not support thinking", helper_style),
+            ])
+        };
         let thinking_area = Rect {
             x: area.x,
             y: thinking_y,
@@ -302,7 +313,7 @@ fn render_model_panel(
     }
 
     // Hint
-    let hint_text = if has_thinking {
+    let hint_text = if selected_has_thinking {
         "  ↑↓ 选择  ·  ←→ effort  ·  Enter 确认  ·  Esc 取消"
     } else {
         "  ↑↓ 选择  ·  Enter 确认  ·  Esc 取消"
@@ -321,6 +332,12 @@ fn render_model_panel(
         register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
         frame.render_widget(Paragraph::new(hint), hint_area);
     }
+}
+
+fn model_entries_have_thinking(entries: &[ModelSelectionEntry]) -> bool {
+    entries
+        .iter()
+        .any(|entry| matches!(entry, ModelSelectionEntry::Model { model, .. } if model.thinking))
 }
 
 fn model_meta_text(model: &crate::types::config::ModelConfig, display: &str) -> String {
@@ -359,13 +376,56 @@ fn trim_decimal_unit(value: f64, unit: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::ModelSelectionEntry;
     use crate::types::config::ModelConfig;
+
+    fn model_entry(id: &str, thinking: bool) -> ModelSelectionEntry {
+        ModelSelectionEntry::Model {
+            provider_key: "openai".to_string(),
+            model: ModelConfig {
+                id: id.to_string(),
+                name: None,
+                limit: 1000,
+                thinking,
+                input_modalities: None,
+            },
+        }
+    }
 
     #[test]
     fn context_limit_formats_million_tokens_as_m() {
         assert_eq!(format_context_limit(1_000_000).as_deref(), Some("1m"));
         assert_eq!(format_context_limit(1_500_000).as_deref(), Some("1.5m"));
         assert_eq!(format_context_limit(256_000).as_deref(), Some("256k"));
+    }
+
+    #[test]
+    fn model_panel_height_stays_stable_across_thinking_selection() {
+        let entries = vec![
+            ModelSelectionEntry::ProviderHeader {
+                name: "OpenAI".to_string(),
+            },
+            model_entry("fast", false),
+            model_entry("reasoner", true),
+        ];
+
+        assert_eq!(
+            model_panel_height(&entries, 1, 50),
+            model_panel_height(&entries, 2, 50)
+        );
+    }
+
+    #[test]
+    fn model_panel_height_omits_effort_area_without_thinking_models() {
+        let entries = vec![
+            ModelSelectionEntry::ProviderHeader {
+                name: "OpenAI".to_string(),
+            },
+            model_entry("fast", false),
+            model_entry("lite", false),
+        ];
+
+        assert_eq!(model_panel_height(&entries, 1, 50), 7);
     }
 
     #[test]

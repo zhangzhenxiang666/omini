@@ -86,8 +86,9 @@ pub(super) async fn apply_model_selection(
 ) {
     let provider = selection.provider;
     let model = selection.model;
-    let thinking_effort = selection.thinking_effort;
     if let Some(profile) = settings.providers.get(provider) {
+        let thinking_effort =
+            settings.effective_thinking_effort_for(provider, model, selection.thinking_effort);
         settings.active_provider = provider.to_string();
         settings.model = model.to_string();
         settings.thinking_effort = thinking_effort;
@@ -169,12 +170,12 @@ pub(super) async fn apply_thinking_effort(
         }
     }
 
-    let stored_effort = effort.to_string();
+    let effective_effort = settings.effective_current_thinking_effort(Some(effort));
     if let Some(sid) = session_id {
         if persistence_tx
             .send(RuntimePersistenceEvent::UpdateSessionThinkingEffort {
                 session_id: sid.to_string(),
-                thinking_effort: Some(stored_effort),
+                thinking_effort: effective_effort.map(|effort| effort.to_string()),
             })
             .await
             .is_err()
@@ -194,7 +195,7 @@ pub(super) async fn apply_thinking_effort(
                 return;
             }
         };
-        state.thinking_effort = Some(effort);
+        state.thinking_effort = effective_effort;
         if let Err(e) = project.save_state(&state) {
             let _ = event_tx
                 .send(RuntimeToUiEvent::error(format!("保存项目状态失败: {e}")))
@@ -203,7 +204,7 @@ pub(super) async fn apply_thinking_effort(
         }
     }
 
-    settings.thinking_effort = Some(effort);
+    settings.thinking_effort = effective_effort;
     let _ = event_tx
         .send(RuntimeToUiEvent::ModelChanged {
             provider: settings.active_provider.clone(),

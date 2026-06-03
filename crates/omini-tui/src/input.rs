@@ -76,11 +76,16 @@ pub(super) async fn handle_interaction_key(
                         model,
                     } = &entries[*selected]
                     {
-                        let thinking_effort = match *thinking_idx {
-                            1 => Some(crate::types::config::ThinkingEffort::Low),
-                            2 => Some(crate::types::config::ThinkingEffort::Medium),
-                            3 => Some(crate::types::config::ThinkingEffort::High),
-                            _ => None,
+                        let thinking_effort = if model.thinking {
+                            match *thinking_idx {
+                                0 => Some(crate::types::config::ThinkingEffort::None),
+                                1 => Some(crate::types::config::ThinkingEffort::Low),
+                                2 => Some(crate::types::config::ThinkingEffort::Medium),
+                                3 => Some(crate::types::config::ThinkingEffort::High),
+                                _ => None,
+                            }
+                        } else {
+                            None
                         };
                         let _ = request_tx
                             .send(ClientRequest::ModelSelect {
@@ -926,6 +931,7 @@ pub(super) fn is_newline_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
 mod tests {
     use super::*;
     use crate::state::AgentManagerState;
+    use crate::types::config::ModelConfig;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -950,6 +956,19 @@ mod tests {
         }
     }
 
+    fn model_selection_entry(id: &str, thinking: bool) -> ModelSelectionEntry {
+        ModelSelectionEntry::Model {
+            provider_key: "openai".to_string(),
+            model: ModelConfig {
+                id: id.to_string(),
+                name: None,
+                limit: 1000,
+                thinking,
+                input_modalities: None,
+            },
+        }
+    }
+
     #[test]
     fn newline_key_accepts_shift_enter_and_ctrl_j_forms() {
         assert!(is_newline_key(KeyCode::Enter, KeyModifiers::SHIFT));
@@ -961,6 +980,94 @@ mod tests {
     fn newline_key_rejects_plain_enter_and_intervention_key() {
         assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::empty()));
         assert!(!is_newline_key(KeyCode::Enter, KeyModifiers::ALT));
+    }
+
+    #[tokio::test]
+    async fn model_selection_enter_drops_effort_for_non_thinking_model() {
+        let mut step = InteractionStep::ModelSelection {
+            entries: vec![
+                ModelSelectionEntry::ProviderHeader {
+                    name: "OpenAI".to_string(),
+                },
+                model_selection_entry("fast", false),
+            ],
+            selected: 1,
+            thinking_idx: 3,
+            active_provider: "openai".to_string(),
+            active_model: "reasoner".to_string(),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(handle_interaction_key(&mut step, KeyCode::Enter, &tx).await);
+
+        let request = rx.recv().await.expect("model select should be sent");
+        let ClientRequest::ModelSelect {
+            provider,
+            model,
+            thinking_effort,
+        } = request
+        else {
+            panic!("expected model select request");
+        };
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "fast");
+        assert_eq!(thinking_effort, None);
+    }
+
+    #[tokio::test]
+    async fn model_selection_enter_keeps_effort_for_thinking_model() {
+        let mut step = InteractionStep::ModelSelection {
+            entries: vec![
+                ModelSelectionEntry::ProviderHeader {
+                    name: "OpenAI".to_string(),
+                },
+                model_selection_entry("reasoner", true),
+            ],
+            selected: 1,
+            thinking_idx: 3,
+            active_provider: "openai".to_string(),
+            active_model: "reasoner".to_string(),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(handle_interaction_key(&mut step, KeyCode::Enter, &tx).await);
+
+        let request = rx.recv().await.expect("model select should be sent");
+        let ClientRequest::ModelSelect {
+            thinking_effort, ..
+        } = request
+        else {
+            panic!("expected model select request");
+        };
+        assert_eq!(thinking_effort, Some(omini_protocol::ThinkingEffort::High));
+    }
+
+    #[tokio::test]
+    async fn model_selection_enter_sends_none_effort_for_thinking_no_selection() {
+        let mut step = InteractionStep::ModelSelection {
+            entries: vec![
+                ModelSelectionEntry::ProviderHeader {
+                    name: "OpenAI".to_string(),
+                },
+                model_selection_entry("reasoner", true),
+            ],
+            selected: 1,
+            thinking_idx: 0,
+            active_provider: "openai".to_string(),
+            active_model: "reasoner".to_string(),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(handle_interaction_key(&mut step, KeyCode::Enter, &tx).await);
+
+        let request = rx.recv().await.expect("model select should be sent");
+        let ClientRequest::ModelSelect {
+            thinking_effort, ..
+        } = request
+        else {
+            panic!("expected model select request");
+        };
+        assert_eq!(thinking_effort, Some(omini_protocol::ThinkingEffort::None));
     }
 
     #[test]

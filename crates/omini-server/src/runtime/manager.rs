@@ -221,9 +221,15 @@ impl SessionManager {
             .project
             .load_state()
             .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
-        state.default_provider = Some(request.provider);
-        state.default_model = Some(request.model);
-        state.thinking_effort = request.thinking_effort.map(thinking_effort_from_protocol);
+        let provider = request.provider;
+        let model = request.model;
+        state.default_provider = Some(provider.clone());
+        state.default_model = Some(model.clone());
+        state.thinking_effort = self.settings.effective_thinking_effort_for(
+            &provider,
+            &model,
+            request.thinking_effort.map(thinking_effort_from_protocol),
+        );
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
@@ -234,11 +240,22 @@ impl SessionManager {
         &self,
         request: protocol::SetThinkingEffortRequest,
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
+        let settings = self.settings_with_project_state();
+        let effort = thinking_effort_from_protocol(request.effort);
+        if effort != omini_core::types::config::ThinkingEffort::None
+            && !settings.current_model_supports_thinking()
+        {
+            return Err(CoreError::new(format!(
+                "Current model '{}' does not support thinking",
+                settings.model
+            )));
+        }
+
         let mut state = self
             .project
             .load_state()
             .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
-        state.thinking_effort = Some(thinking_effort_from_protocol(request.effort));
+        state.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
@@ -292,7 +309,8 @@ impl SessionManager {
         if let Some(model) = state.default_model {
             settings.model = model;
         }
-        settings.thinking_effort = state.thinking_effort;
+        settings.thinking_effort =
+            settings.effective_current_thinking_effort(state.thinking_effort);
         settings
     }
 
@@ -443,8 +461,18 @@ impl SessionManager {
             settings.model = model.clone();
         }
         if let Some(effort) = request.thinking_effort {
-            settings.thinking_effort = Some(thinking_effort_from_protocol(effort));
+            let effort = thinking_effort_from_protocol(effort);
+            if effort != omini_core::types::config::ThinkingEffort::None
+                && !settings.current_model_supports_thinking()
+            {
+                return Err(CoreError::new(format!(
+                    "Model '{}' does not support thinking",
+                    settings.model
+                )));
+            }
+            settings.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
         }
+        settings.normalize_current_thinking_effort();
         Ok(settings)
     }
 
@@ -539,6 +567,91 @@ fn session_summaries_with_runtime_states(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::config::project::{ProjectDir, ProjectsDir};
+    use omini_core::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use omini_core::types::config::{ProviderType, ThinkingEffort};
+    use std::fs;
+    use std::path::Path;
+    use std::path::PathBuf;
+
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn unique_temp_root(test_name: &str) -> TestRoot {
+        TestRoot {
+            path: std::env::temp_dir().join(format!(
+                "omini-server-{test_name}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            )),
+        }
+    }
+
+    fn test_config() -> UserConfig {
+        let models = HashMap::from([
+            (
+                "fast".to_string(),
+                ModelEntry {
+                    name: Some("Fast".to_string()),
+                    limit: Some(1000),
+                    thinking: Some(false),
+                    input_modalities: None,
+                },
+            ),
+            (
+                "reasoner".to_string(),
+                ModelEntry {
+                    name: Some("Reasoner".to_string()),
+                    limit: Some(2000),
+                    thinking: Some(true),
+                    input_modalities: None,
+                },
+            ),
+        ]);
+
+        UserConfig {
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderConfig {
+                    name: Some("OpenAI".to_string()),
+                    endpoint: ProviderType::OpenAI,
+                    base_url: "https://openai.example".to_string(),
+                    api_key: "test-key".to_string(),
+                    models: Some(models),
+                },
+            )]),
+            language: None,
+            permissions: None,
+            compact: None,
+            mcp_servers: HashMap::new(),
+        }
+    }
+
+    async fn session_manager_for(root: &Path, cwd: &Path) -> (SessionManager, ProjectDir) {
+        let config = test_config();
+        let project = ProjectsDir::new(root)
+            .for_cwd(cwd, &config)
+            .expect("project should initialize");
+        let mut settings = config
+            .to_settings(Some("openai"), Some("reasoner"), Some(ThinkingEffort::High))
+            .expect("settings should build");
+        settings.cwd = cwd.to_path_buf();
+        let db_path = root.join("omini.sqlite");
+        let db = Database::open(&db_path)
+            .await
+            .expect("database should open");
+        (
+            SessionManager::new(settings, project.clone(), Arc::new(db)),
+            project,
+        )
+    }
 
     fn test_session(id: &str) -> Session {
         let now = Utc::now();
@@ -582,6 +695,64 @@ mod tests {
                 .find(|session| session.id == "stored")
                 .and_then(|session| session.runtime_state),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn set_project_model_clears_effort_for_non_thinking_model() {
+        let temp = unique_temp_root("project-model");
+        let cwd = temp.path.join("cwd");
+        let (manager, project) = session_manager_for(&temp.path, &cwd).await;
+        let mut state = project.load_state().expect("state should load");
+        state.thinking_effort = Some(ThinkingEffort::High);
+        project.save_state(&state).expect("state should save");
+
+        let response = manager
+            .set_project_model(protocol::SetModelRequest {
+                provider: "openai".to_string(),
+                model: "fast".to_string(),
+                thinking_effort: Some(protocol::ThinkingEffort::Medium),
+            })
+            .expect("model switch should succeed");
+
+        assert_eq!(response.model, "fast");
+        assert_eq!(response.thinking_effort, None);
+        assert_eq!(
+            project
+                .load_state()
+                .expect("state should load")
+                .thinking_effort,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn set_project_thinking_effort_none_disables_thinking_model_effort() {
+        let temp = unique_temp_root("project-effort-none");
+        let cwd = temp.path.join("cwd");
+        let (manager, project) = session_manager_for(&temp.path, &cwd).await;
+        let mut state = project.load_state().expect("state should load");
+        state.default_provider = Some("openai".to_string());
+        state.default_model = Some("reasoner".to_string());
+        state.thinking_effort = Some(ThinkingEffort::High);
+        project.save_state(&state).expect("state should save");
+
+        let response = manager
+            .set_project_thinking_effort(protocol::SetThinkingEffortRequest {
+                effort: protocol::ThinkingEffort::None,
+            })
+            .expect("none effort should clear");
+
+        assert_eq!(
+            response.thinking_effort,
+            Some(protocol::ThinkingEffort::None)
+        );
+        assert_eq!(
+            project
+                .load_state()
+                .expect("state should load")
+                .thinking_effort,
+            Some(ThinkingEffort::None)
         );
     }
 }

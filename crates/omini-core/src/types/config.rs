@@ -42,6 +42,46 @@ impl Settings {
             .and_then(|provider| provider.models.iter().find(|model| model.id == self.model))
     }
 
+    pub fn model_supports_thinking(&self, provider: &str, model: &str) -> bool {
+        self.providers
+            .get(provider)
+            .and_then(|profile| {
+                profile
+                    .models
+                    .iter()
+                    .find(|candidate| candidate.id == model)
+            })
+            .is_some_and(|model| model.thinking)
+    }
+
+    pub fn current_model_supports_thinking(&self) -> bool {
+        self.model_supports_thinking(&self.active_provider, &self.model)
+    }
+
+    pub fn effective_thinking_effort_for(
+        &self,
+        provider: &str,
+        model: &str,
+        effort: Option<ThinkingEffort>,
+    ) -> Option<ThinkingEffort> {
+        if !self.model_supports_thinking(provider, model) {
+            return None;
+        }
+
+        Some(effort.unwrap_or_default())
+    }
+
+    pub fn effective_current_thinking_effort(
+        &self,
+        effort: Option<ThinkingEffort>,
+    ) -> Option<ThinkingEffort> {
+        self.effective_thinking_effort_for(&self.active_provider, &self.model, effort)
+    }
+
+    pub fn normalize_current_thinking_effort(&mut self) {
+        self.thinking_effort = self.effective_current_thinking_effort(self.thinking_effort);
+    }
+
     pub fn supports_input_modality(&self, modality: InputModality) -> bool {
         self.current_model_config()
             .and_then(|model| model.input_modalities.as_ref())

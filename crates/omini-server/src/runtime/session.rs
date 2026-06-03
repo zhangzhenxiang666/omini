@@ -297,12 +297,14 @@ impl RuntimeSession {
             .active_profile();
         Ok(omini_core::types::events::LoadedSession {
             session_id: session.id,
-            provider: session.provider,
-            model: session.model,
-            thinking_effort: session
-                .thinking_effort
-                .as_deref()
-                .and_then(|effort| effort.parse().ok()),
+            provider: session.provider.clone(),
+            model: session.model.clone(),
+            thinking_effort: effective_session_thinking_effort(
+                &self.settings,
+                &session.provider,
+                &session.model,
+                session.thinking_effort.as_deref(),
+            ),
             active_profile,
             title: session.title,
             messages,
@@ -451,5 +453,92 @@ impl RuntimeSession {
 
     pub(crate) async fn shutdown(&self) -> Result<(), CoreError> {
         self.core.shutdown().await
+    }
+}
+
+fn effective_session_thinking_effort(
+    settings: &omini_core::types::config::Settings,
+    provider: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Option<omini_core::types::config::ThinkingEffort> {
+    let effort = effort.and_then(|effort| effort.parse().ok());
+    settings.effective_thinking_effort_for(provider, model, effort)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omini_core::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use omini_core::types::config::{ProviderType, ThinkingEffort};
+
+    fn test_settings(model: &str) -> omini_core::types::config::Settings {
+        let models = HashMap::from([
+            (
+                "fast".to_string(),
+                ModelEntry {
+                    name: Some("Fast".to_string()),
+                    limit: Some(1000),
+                    thinking: Some(false),
+                    input_modalities: None,
+                },
+            ),
+            (
+                "reasoner".to_string(),
+                ModelEntry {
+                    name: Some("Reasoner".to_string()),
+                    limit: Some(2000),
+                    thinking: Some(true),
+                    input_modalities: None,
+                },
+            ),
+        ]);
+        let config = UserConfig {
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderConfig {
+                    name: Some("OpenAI".to_string()),
+                    endpoint: ProviderType::OpenAI,
+                    base_url: "https://openai.example".to_string(),
+                    api_key: "test-key".to_string(),
+                    models: Some(models),
+                },
+            )]),
+            language: None,
+            permissions: None,
+            compact: None,
+            mcp_servers: HashMap::new(),
+        };
+        config
+            .to_settings(Some("openai"), Some(model), None)
+            .expect("settings should build")
+    }
+
+    #[test]
+    fn snapshot_effort_is_cleared_for_non_thinking_model() {
+        let settings = test_settings("fast");
+
+        assert_eq!(
+            effective_session_thinking_effort(&settings, "openai", "fast", Some("medium")),
+            None
+        );
+    }
+
+    #[test]
+    fn snapshot_effort_is_kept_for_thinking_model() {
+        let settings = test_settings("reasoner");
+
+        assert_eq!(
+            effective_session_thinking_effort(&settings, "openai", "reasoner", Some("high")),
+            Some(ThinkingEffort::High)
+        );
+        assert_eq!(
+            effective_session_thinking_effort(&settings, "openai", "reasoner", Some("none")),
+            Some(ThinkingEffort::None)
+        );
+        assert_eq!(
+            effective_session_thinking_effort(&settings, "openai", "reasoner", None),
+            Some(ThinkingEffort::Medium)
+        );
     }
 }

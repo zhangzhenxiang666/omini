@@ -95,7 +95,8 @@ impl UiState {
                     Some(ThinkingEffort::Low) => 1,
                     Some(ThinkingEffort::Medium) => 2,
                     Some(ThinkingEffort::High) => 3,
-                    Some(ThinkingEffort::None) | None => 0,
+                    Some(ThinkingEffort::None) => 0,
+                    None => 2,
                 };
                 let mut sorted: Vec<_> = providers.clone().into_iter().collect();
                 sorted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -769,10 +770,34 @@ fn compact_summary_failed_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
     use crate::types::events::{
         ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
         CompactSummaryFinishedEvent, CompactTrigger,
     };
+    use std::collections::HashMap;
+
+    fn model_selection_request() -> InteractionRequest {
+        InteractionRequest::ModelSelection {
+            providers: HashMap::from([(
+                "openai".to_string(),
+                ProviderProfile {
+                    name: "OpenAI".to_string(),
+                    endpoint: ProviderType::OpenAI,
+                    base_url: "https://openai.example".to_string(),
+                    models: vec![ModelConfig {
+                        id: "reasoner".to_string(),
+                        name: None,
+                        limit: 1000,
+                        thinking: true,
+                        input_modalities: None,
+                    }],
+                },
+            )]),
+            current_provider: "openai".to_string(),
+            current_model: "reasoner".to_string(),
+        }
+    }
 
     #[test]
     fn entering_plan_mode_resets_plan_message_hint_state() {
@@ -784,6 +809,34 @@ mod tests {
 
         assert_eq!(state.status_bar.active_profile, ActiveProfile::Plan);
         assert!(!state.status_bar.plan_mode_message_sent);
+    }
+
+    #[test]
+    fn model_selection_defaults_missing_thinking_effort_to_medium() {
+        let mut state = UiState::new();
+        state.status_bar.thinking_effort = None;
+
+        state.open_interaction_request(&model_selection_request());
+
+        let Some(InteractionStep::ModelSelection { thinking_idx, .. }) = state.interaction_step
+        else {
+            panic!("expected model selection interaction");
+        };
+        assert_eq!(thinking_idx, 2);
+    }
+
+    #[test]
+    fn model_selection_preserves_explicit_no_thinking_effort() {
+        let mut state = UiState::new();
+        state.status_bar.thinking_effort = Some(ThinkingEffort::None);
+
+        state.open_interaction_request(&model_selection_request());
+
+        let Some(InteractionStep::ModelSelection { thinking_idx, .. }) = state.interaction_step
+        else {
+            panic!("expected model selection interaction");
+        };
+        assert_eq!(thinking_idx, 0);
     }
 
     #[test]

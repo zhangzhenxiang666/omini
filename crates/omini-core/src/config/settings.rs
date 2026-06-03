@@ -115,7 +115,7 @@ impl UserConfig {
             .unwrap_or(&first_model)
             .to_string();
 
-        Ok(Settings {
+        let mut settings = Settings {
             api_key: active.api_key.clone(),
             base_url: active.base_url.clone(),
             model,
@@ -130,7 +130,9 @@ impl UserConfig {
             permissions: self.permissions.clone(),
             compact: self.compact.clone().unwrap_or_default(),
             mcp_servers: self.mcp_servers.clone(),
-        })
+        };
+        settings.normalize_current_thinking_effort();
+        Ok(settings)
     }
 
     /// 验证配置是否合法：
@@ -281,6 +283,75 @@ gpt-test = { input_modalities = ["text", "image"] }
             Some(&[InputModality::Text, InputModality::Image][..])
         );
         assert!(settings.supports_input_modality(InputModality::Image));
+    }
+
+    #[test]
+    fn to_settings_clears_thinking_effort_for_non_thinking_model() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+fast = {}
+reasoner = { thinking = true }
+"#,
+        );
+
+        let settings = config
+            .to_settings(Some("openai"), Some("fast"), Some(ThinkingEffort::Medium))
+            .unwrap();
+
+        assert!(!settings.current_model_supports_thinking());
+        assert_eq!(settings.thinking_effort, None);
+    }
+
+    #[test]
+    fn to_settings_keeps_thinking_effort_for_thinking_model() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+fast = {}
+reasoner = { thinking = true }
+"#,
+        );
+
+        let settings = config
+            .to_settings(Some("openai"), Some("reasoner"), Some(ThinkingEffort::High))
+            .unwrap();
+
+        assert!(settings.current_model_supports_thinking());
+        assert_eq!(settings.thinking_effort, Some(ThinkingEffort::High));
+    }
+
+    #[test]
+    fn to_settings_defaults_thinking_model_effort_to_medium() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models]
+fast = {}
+reasoner = { thinking = true }
+"#,
+        );
+
+        let settings = config
+            .to_settings(Some("openai"), Some("reasoner"), None)
+            .unwrap();
+
+        assert!(settings.current_model_supports_thinking());
+        assert_eq!(settings.thinking_effort, Some(ThinkingEffort::Medium));
     }
 
     #[test]
