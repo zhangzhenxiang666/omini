@@ -20,7 +20,7 @@ Project instructions for coding agents working in this repository.
 - Assign the issue to the person doing the work before starting the fix when repository permissions allow it.
 - Use a focused branch name that includes the issue number, such as `fix/issue-1-cancel-llm-connect`.
 - Reference the issue in commits with `Refs #<issue-number>` while the fix is still being verified. Do not use `Closes #<issue-number>` or `Fixes #<issue-number>` until the fix is confirmed.
-- Close the issue only after the implementation is complete and the relevant verification commands have passed.
+- After the implementation is complete and the relevant verification commands have passed, use `Closes #<issue-number>` or `Fixes #<issue-number>` in the final commit or PR description so GitHub closes the issue automatically when the change lands. Do not close issues manually with `gh issue close` or the GitHub UI unless explicitly requested.
 - In the final summary for issue-driven work, include the issue number, fix branch name, and verification commands/results.
 
 ## Rust Style
