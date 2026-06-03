@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
-use super::service::CapabilityStore;
+use super::capabilities::CapabilityStore;
 
 pub(super) async fn toggle_active_profile(
     active_profile: &mut ActiveProfile,
