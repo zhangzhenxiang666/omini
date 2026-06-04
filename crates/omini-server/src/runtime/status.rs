@@ -44,28 +44,10 @@ impl RuntimePendingPause {
     }
 }
 
-/// 当前会话下子 agent 的运行态投影。
+/// 当前运行中子 agent 的来源信息，用于标注其工具活动。
 #[derive(Debug, Clone)]
-struct RuntimeSubagentActivity {
-    session_id: String,
+struct RuntimeSubagentContext {
     agent_label: String,
-    status: protocol::SubagentStatus,
-    started_at: DateTime<Utc>,
-    finished_at: Option<DateTime<Utc>>,
-    active_tool: Option<RuntimeToolActivity>,
-}
-
-impl RuntimeSubagentActivity {
-    fn to_protocol(&self, now: DateTime<Utc>) -> protocol::SessionRuntimeSubagent {
-        protocol::SessionRuntimeSubagent {
-            session_id: self.session_id.clone(),
-            agent_label: self.agent_label.clone(),
-            status: self.status,
-            started_at: self.started_at,
-            finished_at: self.finished_at,
-            active_tool: self.active_tool.as_ref().map(|tool| tool.to_protocol(now)),
-        }
-    }
 }
 
 /// 从 runtime 事件流增量推导出的会话运行态。
@@ -81,7 +63,7 @@ pub(super) struct RuntimeStatusProjection {
     pending_pauses: HashMap<String, RuntimePendingPause>,
     pending_plan_approval: Option<protocol::PlanSubmittedEvent>,
     active_tools: HashMap<String, RuntimeToolActivity>,
-    subagents: HashMap<String, RuntimeSubagentActivity>,
+    subagents: HashMap<String, RuntimeSubagentContext>,
 }
 
 /// 生成协议状态快照时由 session 层补充的外部上下文。
@@ -91,6 +73,7 @@ pub(super) struct RuntimeStatusSnapshotContext {
     pub connected_client_count: usize,
     pub skills: Vec<protocol::SessionRuntimeSkill>,
     pub mcp_servers: Vec<protocol::SessionRuntimeMcpServer>,
+    pub subagent_sessions: Vec<protocol::AgentSummary>,
     pub now: DateTime<Utc>,
 }
 
@@ -170,13 +153,6 @@ impl RuntimeStatusProjection {
             .collect::<Vec<_>>();
         active_tools.sort_by(|left, right| left.tool_use_id.cmp(&right.tool_use_id));
 
-        let mut subagents = self
-            .subagents
-            .values()
-            .map(|subagent| subagent.to_protocol(context.now))
-            .collect::<Vec<_>>();
-        subagents.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-
         protocol::SessionRuntimeStatus {
             session_id: session_id.to_string(),
             state: self.state(),
@@ -190,7 +166,7 @@ impl RuntimeStatusProjection {
             active_tools,
             skills: context.skills,
             mcp_servers: context.mcp_servers,
-            subagents,
+            subagent_sessions: context.subagent_sessions,
         }
     }
 
@@ -343,7 +319,7 @@ impl RuntimeStatusProjection {
             .saturating_add(elapsed_ms(paused_at, now));
     }
 
-    fn record_subagent_started(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
+    fn record_subagent_started(&mut self, event: &RuntimeEvent, _now: DateTime<Utc>) {
         let Some(session_id) = event
             .payload
             .get("session_id")
@@ -360,13 +336,8 @@ impl RuntimeStatusProjection {
         };
         self.subagents.insert(
             session_id.to_string(),
-            RuntimeSubagentActivity {
-                session_id: session_id.to_string(),
+            RuntimeSubagentContext {
                 agent_label: agent_label.to_string(),
-                status: protocol::SubagentStatus::Running,
-                started_at: now,
-                finished_at: None,
-                active_tool: None,
             },
         );
         self.mark_query_working();
@@ -384,12 +355,7 @@ impl RuntimeStatusProjection {
             .subagents
             .get(session_id)
             .map(|subagent| subagent.agent_label.clone());
-        let tool = self.record_tool_use_for_subagent(event, now, session_id, agent_label);
-        if let Some(tool) = tool
-            && let Some(subagent) = self.subagents.get_mut(session_id)
-        {
-            subagent.active_tool = Some(tool);
-        }
+        self.record_tool_use_for_subagent(event, now, session_id, agent_label);
         self.mark_query_working();
     }
 
@@ -432,18 +398,10 @@ impl RuntimeStatusProjection {
         self.finish_tool(tool_use_id);
         self.finish_pause(tool_use_id, now);
         self.finish_pause(&format!("{session_id}:{tool_use_id}"), now);
-        if let Some(subagent) = self.subagents.get_mut(session_id)
-            && subagent
-                .active_tool
-                .as_ref()
-                .is_some_and(|tool| tool.tool_use_id == tool_use_id)
-        {
-            subagent.active_tool = None;
-        }
         self.mark_query_working();
     }
 
-    fn record_subagent_finished(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
+    fn record_subagent_finished(&mut self, event: &RuntimeEvent, _now: DateTime<Utc>) {
         let Some(session_id) = event
             .payload
             .get("session_id")
@@ -451,16 +409,7 @@ impl RuntimeStatusProjection {
         else {
             return;
         };
-        if let Some(subagent) = self.subagents.get_mut(session_id) {
-            subagent.status = event
-                .payload
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .and_then(subagent_status)
-                .unwrap_or(protocol::SubagentStatus::Completed);
-            subagent.finished_at = Some(now);
-            subagent.active_tool = None;
-        }
+        self.subagents.remove(session_id);
         self.mark_query_working();
     }
 
@@ -594,16 +543,6 @@ pub(super) fn plan_approval_resolved_plan_id(event: &RuntimeEvent) -> Option<Str
         .map(str::to_string)
 }
 
-fn subagent_status(status: &str) -> Option<protocol::SubagentStatus> {
-    match status {
-        "running" => Some(protocol::SubagentStatus::Running),
-        "completed" => Some(protocol::SubagentStatus::Completed),
-        "failed" => Some(protocol::SubagentStatus::Failed),
-        "cancelled" => Some(protocol::SubagentStatus::Cancelled),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,6 +603,7 @@ mod tests {
                 connected_client_count: 1,
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
+                subagent_sessions: Vec::new(),
                 now,
             },
         )
@@ -928,6 +868,10 @@ mod tests {
                         description: "Search docs".to_string(),
                     }],
                 }],
+                subagent_sessions: vec![protocol::AgentSummary {
+                    name: "explorer".to_string(),
+                    description: "Read-only exploration agent.".to_string(),
+                }],
                 now,
             },
         );
@@ -947,10 +891,12 @@ mod tests {
             status.mcp_servers[0].tools[0].registered_name,
             "mcp__docs__search"
         );
+        assert_eq!(status.subagent_sessions.len(), 1);
+        assert_eq!(status.subagent_sessions[0].name, "explorer");
     }
 
     #[test]
-    fn runtime_status_tracks_active_tools_and_subagents() {
+    fn runtime_status_tracks_subagent_tools_through_active_tools() {
         let mut projection = RuntimeStatusProjection::default();
         let started_at = Utc::now();
 
@@ -1000,14 +946,16 @@ mod tests {
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
-        assert_eq!(status.subagents.len(), 1);
-        assert_eq!(status.subagents[0].agent_label, "explorer");
+        assert!(status.subagent_sessions.is_empty());
+        let subagent_tool = status
+            .active_tools
+            .iter()
+            .find(|tool| tool.tool_use_id == "sub_tool_1")
+            .expect("subagent tool should be tracked as an active tool");
+        assert_eq!(subagent_tool.source_session_id.as_deref(), Some("sub_1"));
         assert_eq!(
-            status.subagents[0]
-                .active_tool
-                .as_ref()
-                .map(|tool| tool.tool_name.as_str()),
-            Some("read")
+            subagent_tool.source_agent_label.as_deref(),
+            Some("explorer")
         );
     }
 }

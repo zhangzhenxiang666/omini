@@ -1,13 +1,13 @@
 use super::*;
 
 #[derive(Debug)]
-pub(super) struct CapabilityStore {
+pub(crate) struct CapabilityStore {
     subagents: RwLock<Arc<AgentRegistry>>,
     skills: RwLock<Arc<SkillRegistry>>,
 }
 
 impl CapabilityStore {
-    pub(super) fn load(settings: &Settings) -> Self {
+    pub(crate) fn load(settings: &Settings) -> Self {
         Self {
             subagents: RwLock::new(Arc::new(crate::subagents::load_agent_registry(
                 &settings.cwd,
@@ -16,7 +16,7 @@ impl CapabilityStore {
         }
     }
 
-    pub(super) fn subagent_registry(&self) -> Arc<AgentRegistry> {
+    pub(crate) fn subagent_registry(&self) -> Arc<AgentRegistry> {
         self.subagents
             .read()
             .expect("subagent registry lock poisoned")
@@ -32,7 +32,7 @@ impl CapabilityStore {
         registry
     }
 
-    pub(super) fn skill_registry(&self) -> Arc<SkillRegistry> {
+    pub(crate) fn skill_registry(&self) -> Arc<SkillRegistry> {
         self.skills
             .read()
             .expect("skill registry lock poisoned")

@@ -76,6 +76,8 @@ pub struct AgentCoreSession {
     settings: Arc<RwLock<crate::types::config::Settings>>,
     // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前会话实际运行状态。
     mcp_manager: Arc<crate::mcp::McpManager>,
+    // 与 runtime 共享同一个能力 store，保证只读状态反映当前 session 实际能力。
+    capabilities: Arc<crate::runtime::CapabilityStore>,
     // agent runtime 主循环：消费 request_tx 输入并驱动模型、工具、权限和内部事件。
     _runtime_handle: JoinHandle<()>,
     // runtime 事件 fanout：把 RuntimeToUiEvent 编码成 RuntimeEvent 并广播给 server。
@@ -110,15 +112,17 @@ impl AgentCoreSession {
         let (event_tx, _) = broadcast::channel::<RuntimeEvent>(512);
         let (persistence_tx, _) =
             broadcast::channel::<crate::persistence::RuntimePersistenceEvent>(512);
-        let mcp_manager = Arc::new(crate::mcp::McpManager::from_settings(&settings));
+        let handles = crate::runtime::RuntimeCapabilityHandles::load(&settings);
+        let mcp_manager = Arc::clone(&handles.mcp_manager);
+        let capabilities = Arc::clone(&handles.capabilities);
 
-        let runtime = AgentRuntime::with_mcp_manager(
+        let runtime = AgentRuntime::with_capability_handles(
             runtime_event_tx,
             runtime_persistence_tx,
             request_rx,
             settings,
             project,
-            Arc::clone(&mcp_manager),
+            handles,
             active_profile,
         );
         let runtime_handle = runtime.run();
@@ -161,6 +165,7 @@ impl AgentCoreSession {
             persistence_tx,
             settings: settings_snapshot,
             mcp_manager,
+            capabilities,
             _runtime_handle: runtime_handle,
             _fanout_handle: fanout_handle,
             _persistence_handle: persistence_handle,
@@ -243,8 +248,8 @@ impl AgentCoreSession {
     }
 
     pub fn runtime_skills(&self) -> Vec<protocol::SessionRuntimeSkill> {
-        let settings = self.settings.read().expect("core settings lock poisoned");
-        let mut skills = crate::skills::load_skill_registry(&settings.cwd)
+        let skill_registry = self.capabilities.skill_registry();
+        let mut skills = skill_registry
             .skills()
             .map(|skill| protocol::SessionRuntimeSkill {
                 name: skill.name.clone(),
@@ -266,6 +271,10 @@ impl AgentCoreSession {
 
     pub fn runtime_mcp_servers(&self) -> Vec<protocol::SessionRuntimeMcpServer> {
         self.mcp_manager.protocol_status()
+    }
+
+    pub fn runtime_subagents(&self) -> Vec<protocol::AgentSummary> {
+        self.capabilities.subagent_registry().summaries()
     }
 
     pub async fn submit_run(

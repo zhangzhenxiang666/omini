@@ -35,6 +35,20 @@ use super::capabilities::CapabilityStore;
 #[cfg(test)]
 use super::manual_compact::persist_compact_summary_event;
 
+pub(crate) struct RuntimeCapabilityHandles {
+    pub(crate) mcp_manager: Arc<McpManager>,
+    pub(crate) capabilities: Arc<CapabilityStore>,
+}
+
+impl RuntimeCapabilityHandles {
+    pub(crate) fn load(settings: &Settings) -> Self {
+        Self {
+            mcp_manager: Arc::new(McpManager::from_settings(settings)),
+            capabilities: Arc::new(CapabilityStore::load(settings)),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
@@ -89,7 +103,7 @@ pub struct AgentRuntime {
     /// runtime 侧的子代理生命周期服务。
     pub(super) subagent_runner: Arc<RuntimeSubagentRunner>,
     /// runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
-    pub(super) capabilities: CapabilityStore,
+    pub(super) capabilities: Arc<CapabilityStore>,
     /// 取消标志，用于 CancelRun。
     pub(super) cancelled: Arc<AtomicBool>,
     /// 当前活跃 profile，供 runtime 主循环和运行中事件处理器共享读取。
@@ -124,25 +138,25 @@ impl AgentRuntime {
         project: ProjectDir,
         active_profile: ActiveProfile,
     ) -> Self {
-        let mcp_manager = Arc::new(McpManager::from_settings(&settings));
-        Self::with_mcp_manager(
+        let handles = RuntimeCapabilityHandles::load(&settings);
+        Self::with_capability_handles(
             event_tx,
             persistence_tx,
             request_rx,
             settings,
             project,
-            mcp_manager,
+            handles,
             active_profile,
         )
     }
 
-    pub(crate) fn with_mcp_manager(
+    pub(crate) fn with_capability_handles(
         event_tx: mpsc::Sender<RuntimeToUiEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
         request_rx: mpsc::Receiver<UiToRuntimeEvent>,
         mut settings: Settings,
         project: ProjectDir,
-        mcp_manager: Arc<McpManager>,
+        handles: RuntimeCapabilityHandles,
         active_profile: ActiveProfile,
     ) -> Self {
         let llm_client = LlmClient::new(
@@ -152,7 +166,8 @@ impl AgentRuntime {
         );
         let tool_registry = Arc::new(crate::tools::create_main_registry());
         let subagent_runner = Arc::new(RuntimeSubagentRunner);
-        let capabilities = CapabilityStore::load(&settings);
+        let mcp_manager = handles.mcp_manager;
+        let capabilities = handles.capabilities;
         let subagent_registry = capabilities.subagent_registry();
         let skill_registry = capabilities.skill_registry();
         settings.system_prompt = Some(crate::prompts::build_system_prompt_with_capabilities(
@@ -167,8 +182,6 @@ impl AgentRuntime {
             settings.permissions.clone(),
         ));
 
-        // 向 UI 推送 runtime 侧能力快照，供自动补全使用。
-        let _ = event_tx.try_send(RuntimeToUiEvent::AgentList(subagent_registry.summaries()));
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
                 "Subagent: {}",

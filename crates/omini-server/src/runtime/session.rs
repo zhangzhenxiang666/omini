@@ -179,6 +179,7 @@ impl RuntimeSession {
         let loaded = self.loaded.is_loaded();
         let skills = self.core.runtime_skills();
         let mcp_servers = self.core.runtime_mcp_servers();
+        let subagent_sessions = self.core.runtime_subagents();
         self.status_projection
             .lock()
             .expect("status projection lock poisoned")
@@ -190,6 +191,7 @@ impl RuntimeSession {
                     connected_client_count,
                     skills,
                     mcp_servers,
+                    subagent_sessions,
                     now: Utc::now(),
                 },
             )

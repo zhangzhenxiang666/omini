@@ -2,7 +2,7 @@ use crate::persistence::SessionRecord;
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
-use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
+use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use crate::types::usage::Usage;
 pub use omini_domain::events::*;
 use serde::{Deserialize, Serialize};
@@ -204,10 +204,6 @@ pub enum RuntimeToUiEvent {
     SessionTitleChanged { title: Option<String> },
     /// 当前 profile 已变更
     ActiveProfileChanged(#[serde(with = "serde_runtime_event_payload::profile")] ActiveProfile),
-    /// Runtime 启动时推送 subagent 列表（供 @ mention 自动补全使用）
-    AgentList(#[serde(with = "serde_runtime_event_payload::agents")] Vec<AgentSummary>),
-    /// Runtime 启动时推送当前项目最近会话（供首屏展示使用）
-    StartupSessionsLoaded { sessions: Vec<SessionSummary> },
     /// Runtime 刷新 `/agents` 面板数据
     AgentManagementUpdated { records: Vec<AgentRecord> },
     /// LLM 已生成 agent 草稿，供 `/agents` 面板预览和保存
@@ -282,7 +278,6 @@ impl RuntimeToUiEvent {
 mod serde_runtime_event_payload {
     use crate::types::display::HistoryItem;
     use crate::types::events::ActiveProfile;
-    use crate::types::subagents::AgentSummary;
     use serde::Deserialize;
     use serde::Serializer;
     use serde::ser::SerializeStruct;
@@ -361,31 +356,6 @@ mod serde_runtime_event_payload {
             Ok(ProfilePayload::deserialize(deserializer)?.profile)
         }
     }
-
-    pub mod agents {
-        use super::*;
-
-        pub fn serialize<S>(agents: &[AgentSummary], serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut state = serializer.serialize_struct("AgentsPayload", 1)?;
-            state.serialize_field("agents", agents)?;
-            state.end()
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<AgentSummary>, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            #[derive(Deserialize)]
-            struct AgentsPayload {
-                agents: Vec<AgentSummary>,
-            }
-
-            Ok(AgentsPayload::deserialize(deserializer)?.agents)
-        }
-    }
 }
 
 #[cfg(test)]
@@ -393,7 +363,6 @@ mod tests {
     use crate::types::display::{DisplayMessage, HistoryItem};
     use crate::types::events::{ActiveProfile, RuntimeToUiEvent};
     use crate::types::message::{ContentBlock, Message, Role};
-    use crate::types::subagents::AgentSummary;
     use serde_json::json;
 
     #[test]
@@ -459,19 +428,6 @@ mod tests {
         assert_eq!(
             value,
             json!({"type": "active_profile_changed", "profile": "plan"})
-        );
-
-        let value = serde_json::to_value(RuntimeToUiEvent::AgentList(vec![AgentSummary {
-            name: "default".to_string(),
-            description: "General purpose agent.".to_string(),
-        }]))
-        .expect("serialize agent list");
-        assert_eq!(
-            value,
-            json!({
-                "type": "agent_list",
-                "agents": [{"name": "default", "description": "General purpose agent."}]
-            })
         );
     }
 }

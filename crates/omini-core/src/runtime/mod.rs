@@ -36,4 +36,6 @@ use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, mpsc};
 use uuid::Uuid;
 
+pub(crate) use capabilities::CapabilityStore;
 pub use service::AgentRuntime;
+pub(crate) use service::RuntimeCapabilityHandles;

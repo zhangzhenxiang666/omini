@@ -1427,7 +1427,7 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagents: Vec::new(),
+            subagent_sessions: Vec::new(),
         }
     }
 

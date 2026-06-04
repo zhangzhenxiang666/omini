@@ -707,18 +707,31 @@ impl UiState {
     }
 
     pub fn apply_runtime_status_sync(&mut self, status: omini_protocol::SessionRuntimeStatus) {
-        self.status_bar.active_profile = match status.active_profile {
+        let omini_protocol::SessionRuntimeStatus {
+            active_profile,
+            pending_plan_approval,
+            subagent_sessions,
+            activity,
+            state,
+            pending_pauses,
+            ..
+        } = status;
+
+        self.status_bar.active_profile = match active_profile {
             omini_protocol::ActiveProfile::Main => ActiveProfile::Main,
             omini_protocol::ActiveProfile::Auto => ActiveProfile::Auto,
             omini_protocol::ActiveProfile::Plan => ActiveProfile::Plan,
         };
-        self.sync_pending_plan_approval(status.pending_plan_approval);
+        self.mention_autocomplete
+            .set_candidates(agent_summaries_to_mention_candidates(subagent_sessions));
+        self.update_input_autocomplete();
+        self.sync_pending_plan_approval(pending_plan_approval);
 
-        let Some(activity) = status.activity else {
+        let Some(activity) = activity else {
             return;
         };
 
-        let agent_status = match status.state {
+        let agent_status = match state {
             omini_protocol::SessionRuntimeState::Idle => return,
             omini_protocol::SessionRuntimeState::Thinking => AgentStatus::Thinking,
             omini_protocol::SessionRuntimeState::Waiting => AgentStatus::AwaitingInput,
@@ -727,8 +740,8 @@ impl UiState {
         };
         // RuntimeStatus 是连接同步事实；compact 可能由其它客户端发起，不能标记为本地 manual compact。
         let paused = activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
-            && (status.state == omini_protocol::SessionRuntimeState::Waiting
-                || !status.pending_pauses.is_empty());
+            && (state == omini_protocol::SessionRuntimeState::Waiting
+                || !pending_pauses.is_empty());
 
         self.show_start_screen = false;
         self.manual_compact_running = false;

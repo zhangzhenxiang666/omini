@@ -346,19 +346,6 @@ pub struct SessionRuntimeMcpServer {
     pub tools: Vec<SessionRuntimeMcpTool>,
 }
 
-/// 当前会话下一个子 agent 的运行态快照。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeSubagent {
-    pub session_id: String,
-    pub agent_label: String,
-    pub status: SubagentStatus,
-    pub started_at: DateTime<Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub finished_at: Option<DateTime<Utc>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active_tool: Option<SessionRuntimeTool>,
-}
-
 /// 会话运行态的完整协议快照，供新连接或状态轮询同步 UI。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRuntimeStatus {
@@ -393,9 +380,9 @@ pub struct SessionRuntimeStatus {
     /// 当前会话可见的 MCP server 能力和状态。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<SessionRuntimeMcpServer>,
-    /// 当前会话下正在或最近运行的子 agent。
+    /// 当前会话可用的子 agent 能力列表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subagents: Vec<SessionRuntimeSubagent>,
+    pub subagent_sessions: Vec<AgentSummary>,
 }
 
 /// 项目下多个活跃会话的运行态列表响应。
@@ -998,7 +985,7 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagents: Vec::new(),
+            subagent_sessions: Vec::new(),
         };
 
         assert_eq!(
@@ -1032,7 +1019,7 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagents: Vec::new(),
+            subagent_sessions: Vec::new(),
         };
 
         assert_eq!(
@@ -1049,6 +1036,39 @@ mod tests {
                     "markdown": "# Plan"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn session_runtime_status_serializes_subagent_sessions() {
+        let status = SessionRuntimeStatus {
+            session_id: "s1".to_string(),
+            state: SessionRuntimeState::Idle,
+            active_profile: ActiveProfile::Main,
+            loaded: true,
+            controller_id: None,
+            connected_client_count: 1,
+            activity: None,
+            pending_pauses: Vec::new(),
+            pending_plan_approval: None,
+            active_tools: Vec::new(),
+            skills: Vec::new(),
+            mcp_servers: Vec::new(),
+            subagent_sessions: vec![AgentSummary {
+                name: "explorer".to_string(),
+                description: "Read-only exploration agent.".to_string(),
+            }],
+        };
+
+        let value = serde_json::to_value(status).unwrap();
+
+        assert!(value.get("subagents").is_none());
+        assert_eq!(
+            value["subagent_sessions"],
+            json!([{
+                "name": "explorer",
+                "description": "Read-only exploration agent."
+            }])
         );
     }
 
@@ -1113,7 +1133,7 @@ mod tests {
                 active_tools: Vec::new(),
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
-                subagents: Vec::new(),
+                subagent_sessions: Vec::new(),
             },
         };
         let value = serde_json::to_value(envelope).unwrap();

@@ -92,7 +92,7 @@ fn query_runtime_status(
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagents: Vec::new(),
+        subagent_sessions: Vec::new(),
     }
 }
 
@@ -114,7 +114,7 @@ fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagents: Vec::new(),
+        subagent_sessions: Vec::new(),
     }
 }
 
@@ -136,7 +136,7 @@ fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus 
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagents: Vec::new(),
+        subagent_sessions: Vec::new(),
     }
 }
 
@@ -349,6 +349,50 @@ fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
 }
 
 #[test]
+fn runtime_status_sync_updates_subagent_mention_candidates() {
+    let mut state = UiState::new();
+    state.input = "@wo".to_string();
+    state.cursor_char = 3;
+    let mut status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
+    status.subagent_sessions = vec![
+        AgentSummary {
+            name: "explorer".to_string(),
+            description: "Read-only codebase exploration agent.".to_string(),
+        },
+        AgentSummary {
+            name: "worker".to_string(),
+            description: "Implementation agent for focused coding tasks.".to_string(),
+        },
+    ];
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert!(state.mention_autocomplete.visible);
+    let candidates: Vec<_> = state
+        .mention_autocomplete
+        .filtered
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.kind,
+                candidate.label.as_str(),
+                candidate.target.as_str(),
+                candidate.description.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        candidates,
+        vec![(
+            MentionKind::Subagent,
+            "worker",
+            "worker",
+            "Implementation agent for focused coding tasks."
+        )]
+    );
+}
+
+#[test]
 fn plan_approval_resolved_closes_only_matching_plan() {
     let mut state = UiState::new();
 
@@ -476,48 +520,6 @@ fn runtime_error_fails_running_subagent_state() {
 
     let node = state.subagents.get("sub_1").unwrap();
     assert_eq!(node.status, SubagentStatus::Failed);
-}
-
-#[test]
-fn agent_list_event_updates_subagent_mention_candidates() {
-    let mut state = UiState::new();
-    state.input = "@wo".to_string();
-    state.cursor_char = 3;
-
-    state.apply_event(RuntimeToUiEvent::AgentList(vec![
-        AgentSummary {
-            name: "explorer".to_string(),
-            description: "Read-only codebase exploration agent.".to_string(),
-        },
-        AgentSummary {
-            name: "worker".to_string(),
-            description: "Implementation agent for focused coding tasks.".to_string(),
-        },
-    ]));
-
-    assert!(state.mention_autocomplete.visible);
-    let candidates: Vec<_> = state
-        .mention_autocomplete
-        .filtered
-        .iter()
-        .map(|candidate| {
-            (
-                candidate.kind,
-                candidate.label.as_str(),
-                candidate.target.as_str(),
-                candidate.description.as_str(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        candidates,
-        vec![(
-            MentionKind::Subagent,
-            "worker",
-            "worker",
-            "Implementation agent for focused coding tasks."
-        )]
-    );
 }
 
 #[test]

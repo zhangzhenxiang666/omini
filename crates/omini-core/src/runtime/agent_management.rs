@@ -54,8 +54,6 @@ impl AgentRuntime {
             &skill_registry.injected_summaries(),
             self.active_profile(),
         ));
-        self.send_event(RuntimeToUiEvent::AgentList(registry.summaries()))
-            .await;
         self.send_event(RuntimeToUiEvent::AgentManagementUpdated {
             records: crate::subagents::list_agent_records(&self.settings.cwd),
         })

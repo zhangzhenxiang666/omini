@@ -1,7 +1,7 @@
 use super::input::combined_user_draft;
 use super::{
     AgentManagerState, AgentManagerView, AgentStatus, InteractionStep, ModelSelectionEntry,
-    SubagentNode, UiMessage, UiState, mention,
+    SubagentNode, UiMessage, UiState,
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
@@ -586,18 +586,6 @@ impl UiState {
             }
             RuntimeToUiEvent::CommandList(cmds) => {
                 self.autocomplete.all_commands = crate::command::commands_with_runtime_skills(cmds);
-            }
-            RuntimeToUiEvent::AgentList(agents) => {
-                self.mention_autocomplete
-                    .set_candidates(mention::agent_summaries_to_mention_candidates(agents));
-                self.update_input_autocomplete();
-            }
-            RuntimeToUiEvent::StartupSessionsLoaded { sessions } => {
-                self.startup_recent_sessions = sessions
-                    .into_iter()
-                    .filter(|session| !session.title.trim().is_empty())
-                    .take(3)
-                    .collect();
             }
             RuntimeToUiEvent::AgentManagementUpdated { records } => {
                 if let Some(InteractionStep::Agents(manager)) = &mut self.interaction_step {
