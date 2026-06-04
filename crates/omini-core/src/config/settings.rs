@@ -158,6 +158,11 @@ pub struct OminiRoot {
 }
 
 impl OminiRoot {
+    /// 使用指定目录作为 omini root，主要用于测试或自定义数据目录。
+    pub fn from_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     /// 通过 `dirs` 查找用户家目录，拼接 `.omini` 并创建（如果不存在）。
     pub fn init() -> std::io::Result<Self> {
         let path = dirs::home_dir()

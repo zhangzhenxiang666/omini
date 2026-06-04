@@ -4,7 +4,6 @@
 //! agent 执行逻辑仍由 `omini-core` 负责。
 
 use omini_core::config::settings::OminiRoot;
-use omini_core::config::settings::UserConfig;
 use std::io;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -19,15 +18,11 @@ pub mod store;
 mod ws;
 
 /// 启动本地 daemon，并把实际监听端口写入运行状态文件供客户端发现。
-pub async fn serve_daemon(root: OminiRoot, config: UserConfig) -> io::Result<()> {
+pub async fn serve_daemon(root: OminiRoot) -> io::Result<()> {
     let db = store::Database::open(&root.db_path())
         .await
         .map_err(io::Error::other)?;
-    let manager = Arc::new(runtime::GlobalDaemonManager::new(
-        root,
-        config,
-        Arc::new(db),
-    ));
+    let manager = Arc::new(runtime::GlobalDaemonManager::new(root, Arc::new(db)));
     let (shutdown, shutdown_rx) = app::shutdown_channel();
     let app = app::router(manager, shutdown);
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;

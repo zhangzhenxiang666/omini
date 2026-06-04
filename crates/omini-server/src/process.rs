@@ -53,7 +53,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = OminiRoot::init()?;
     let config = root.load_config()?;
     config.validate()?;
-    crate::serve_daemon(root, config).await?;
+    crate::serve_daemon(root).await?;
     Ok(())
 }
 

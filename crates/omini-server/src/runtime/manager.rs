@@ -19,6 +19,7 @@ pub(crate) enum ProjectLookupError {
 }
 
 /// 会话查找或恢复过程中可能出现的错误。
+#[derive(Debug)]
 pub(crate) enum SessionError {
     NotFound,
     Core(CoreError),
@@ -32,18 +33,16 @@ impl From<CoreError> for SessionError {
 
 /// daemon 级项目注册表，负责把 project_id 路由到对应的 `SessionManager`。
 pub(crate) struct GlobalDaemonManager {
-    root: OminiRoot,
-    config: UserConfig,
+    root: Arc<OminiRoot>,
     db: Arc<Database>,
     // daemon 按项目隔离 SessionManager；HTTP 路由里的 project_id 必须先 attach 才能命中这里。
     projects: Mutex<HashMap<String, Arc<SessionManager>>>,
 }
 
 impl GlobalDaemonManager {
-    pub(crate) fn new(root: OminiRoot, config: UserConfig, db: Arc<Database>) -> Self {
+    pub(crate) fn new(root: OminiRoot, db: Arc<Database>) -> Self {
         Self {
-            root,
-            config,
+            root: Arc::new(root),
             db,
             projects: Mutex::new(HashMap::new()),
         }
@@ -62,22 +61,11 @@ impl GlobalDaemonManager {
             )));
         }
 
+        let config = load_validated_config(&self.root).map_err(ProjectAttachError::Config)?;
         let project = self
             .root
-            .init_project(&cwd, &self.config)
+            .init_project(&cwd, &config)
             .map_err(|err| ProjectAttachError::Config(err.to_string()))?;
-        let project_state = project
-            .load_state()
-            .map_err(|err| ProjectAttachError::Config(err.to_string()))?;
-        let mut settings = self
-            .config
-            .to_settings(
-                project_state.default_provider.as_deref(),
-                project_state.default_model.as_deref(),
-                project_state.thinking_effort,
-            )
-            .map_err(|err| ProjectAttachError::Config(err.to_string()))?;
-        settings.cwd = cwd.clone();
 
         let manager = {
             let mut projects = self.projects.lock().expect("projects lock poisoned");
@@ -85,8 +73,12 @@ impl GlobalDaemonManager {
                 // 同一项目重复 attach 复用已有 manager，避免拆出多套 session/cache 状态。
                 Arc::clone(manager)
             } else {
-                let manager =
-                    Arc::new(SessionManager::new(settings, project, Arc::clone(&self.db)));
+                let manager = Arc::new(SessionManager::new(
+                    Arc::clone(&self.root),
+                    cwd.clone(),
+                    project,
+                    Arc::clone(&self.db),
+                ));
                 projects.insert(project_id.to_string(), Arc::clone(&manager));
                 manager
             }
@@ -115,7 +107,8 @@ impl GlobalDaemonManager {
 ///
 /// 它只缓存当前有客户端使用的 runtime session；持久化会话列表和历史仍来自数据库。
 pub(crate) struct SessionManager {
-    settings: omini_core::types::config::Settings,
+    root: Arc<OminiRoot>,
+    cwd: PathBuf,
     project: ProjectDir,
     db: Arc<Database>,
     // 这里只缓存正在被客户端使用的 runtime；空闲后会关闭并从数据库按需恢复。
@@ -124,12 +117,14 @@ pub(crate) struct SessionManager {
 
 impl SessionManager {
     pub(crate) fn new(
-        settings: omini_core::types::config::Settings,
+        root: Arc<OminiRoot>,
+        cwd: PathBuf,
         project: ProjectDir,
         db: Arc<Database>,
     ) -> Self {
         Self {
-            settings,
+            root,
+            cwd,
             project,
             db,
             sessions: Mutex::new(HashMap::new()),
@@ -140,17 +135,15 @@ impl SessionManager {
         &self,
         project_id: &str,
     ) -> Result<protocol::ProjectAttachResponse, CoreError> {
-        let settings = self.settings_with_project_state();
+        let settings = self.fresh_settings_with_project_state()?;
         let sessions = self.list_sessions().await?.sessions;
         let context_window = settings.current_model_config().map(|model| model.limit);
-        let mcp_server_count = self
-            .settings
+        let mcp_server_count = settings
             .mcp_servers
             .values()
             .filter(|server| server.enabled)
             .count();
         let has_project_instructions = self
-            .settings
             .cwd
             .join("AGENTS.md")
             .metadata()
@@ -160,14 +153,14 @@ impl SessionManager {
             .load_state()
             .map(|state| state.show_thinking_blocks)
             .unwrap_or(true);
-        let agents = omini_core::subagents::list_agent_records(&settings.cwd)
+        let agents = omini_core::subagents::list_agent_records(&self.cwd)
             .into_iter()
             .map(|agent| protocol::AgentSummary {
                 name: agent.name,
                 description: agent.description,
             })
             .collect();
-        let skills = omini_core::skills::load_skill_registry(&settings.cwd)
+        let skills = omini_core::skills::load_skill_registry(&self.cwd)
             .skills()
             .filter(|skill| skill.user_invocable)
             .map(|skill| protocol::SkillSummary {
@@ -192,21 +185,20 @@ impl SessionManager {
         })
     }
 
-    pub(crate) fn list_models(&self) -> protocol::ModelsResponse {
-        models_response_from_settings(&self.settings_with_project_state())
+    pub(crate) fn list_models(&self) -> Result<protocol::ModelsResponse, CoreError> {
+        Ok(models_response_from_settings(
+            &self.fresh_settings_with_project_state()?,
+        ))
     }
 
     pub(crate) fn set_project_model(
         &self,
         request: protocol::SetModelRequest,
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
-        let provider = self
-            .settings
-            .providers
-            .get(&request.provider)
-            .ok_or_else(|| {
-                CoreError::new(format!("Unknown provider profile: {}", request.provider))
-            })?;
+        let settings = self.fresh_settings_with_project_state()?;
+        let provider = settings.providers.get(&request.provider).ok_or_else(|| {
+            CoreError::new(format!("Unknown provider profile: {}", request.provider))
+        })?;
         if !provider
             .models
             .iter()
@@ -225,7 +217,7 @@ impl SessionManager {
         let model = request.model;
         state.default_provider = Some(provider.clone());
         state.default_model = Some(model.clone());
-        state.thinking_effort = self.settings.effective_thinking_effort_for(
+        state.thinking_effort = settings.effective_thinking_effort_for(
             &provider,
             &model,
             request.thinking_effort.map(thinking_effort_from_protocol),
@@ -233,14 +225,14 @@ impl SessionManager {
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
-        Ok(self.project_runtime_config_response())
+        self.project_runtime_config_response()
     }
 
     pub(crate) fn set_project_thinking_effort(
         &self,
         request: protocol::SetThinkingEffortRequest,
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
-        let settings = self.settings_with_project_state();
+        let settings = self.fresh_settings_with_project_state()?;
         let effort = thinking_effort_from_protocol(request.effort);
         if effort != omini_core::types::config::ThinkingEffort::None
             && !settings.current_model_supports_thinking()
@@ -259,7 +251,7 @@ impl SessionManager {
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
-        Ok(self.project_runtime_config_response())
+        self.project_runtime_config_response()
     }
 
     pub(crate) fn set_project_thinking_display(
@@ -274,48 +266,48 @@ impl SessionManager {
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
-        Ok(self.project_runtime_config_response())
+        self.project_runtime_config_response()
     }
 
-    fn project_runtime_config_response(&self) -> protocol::ProjectRuntimeConfigResponse {
-        let settings = self.settings_with_project_state();
+    fn project_runtime_config_response(
+        &self,
+    ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
+        let settings = self.fresh_settings_with_project_state()?;
         let show_thinking_blocks = self
             .project
             .load_state()
             .map(|state| state.show_thinking_blocks)
             .unwrap_or(true);
-        protocol::ProjectRuntimeConfigResponse {
+        Ok(protocol::ProjectRuntimeConfigResponse {
             active_provider: settings.active_provider.clone(),
             model: settings.model.clone(),
             thinking_effort: settings.thinking_effort.map(thinking_effort_to_protocol),
             context_window: settings.current_model_config().map(|model| model.limit),
             show_thinking_blocks,
-        }
+        })
     }
 
-    fn settings_with_project_state(&self) -> omini_core::types::config::Settings {
-        let mut settings = self.settings.clone();
-        let Ok(state) = self.project.load_state() else {
-            return settings;
-        };
-        if let Some(provider) = state.default_provider
-            && let Some(profile) = settings.providers.get(&provider)
-        {
-            settings.active_provider = provider;
-            settings.api_key = profile.api_key.clone();
-            settings.base_url = profile.base_url.clone();
-            settings.endpoint = profile.endpoint;
-        }
-        if let Some(model) = state.default_model {
-            settings.model = model;
-        }
-        settings.thinking_effort =
-            settings.effective_current_thinking_effort(state.thinking_effort);
-        settings
+    fn fresh_settings_with_project_state(
+        &self,
+    ) -> Result<omini_core::types::config::Settings, CoreError> {
+        let config = load_validated_config(&self.root).map_err(config_core_error)?;
+        let state = self
+            .project
+            .load_state()
+            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+        let mut settings = config
+            .to_settings(
+                state.default_provider.as_deref(),
+                state.default_model.as_deref(),
+                state.thinking_effort,
+            )
+            .map_err(|error| CoreError::new(format!("Failed to build settings: {error}")))?;
+        settings.cwd = self.cwd.clone();
+        Ok(settings)
     }
 
     pub(crate) async fn list_sessions(&self) -> Result<protocol::SessionsResponse, CoreError> {
-        let project_path = sanitize(&self.settings.cwd);
+        let project_path = sanitize(&self.cwd);
         let runtime_states = {
             let sessions = self.sessions.lock().expect("sessions lock poisoned");
             sessions
@@ -384,7 +376,7 @@ impl SessionManager {
         let now = chrono::Utc::now();
         let session = Session {
             id: session_id.clone(),
-            project_path: sanitize(&self.settings.cwd),
+            project_path: sanitize(&self.cwd),
             parent_session_id: None,
             spawn_tool_use_id: None,
             session_type: "main".to_string(),
@@ -427,7 +419,7 @@ impl SessionManager {
         &self,
         request: &protocol::CreateSessionRequest,
     ) -> Result<omini_core::types::config::Settings, CoreError> {
-        let mut settings = self.settings_with_project_state();
+        let mut settings = self.fresh_settings_with_project_state()?;
         if let Some(provider) = &request.provider {
             let profile = settings
                 .providers
@@ -476,6 +468,51 @@ impl SessionManager {
         Ok(settings)
     }
 
+    fn settings_for_existing_session(
+        &self,
+        session: &Session,
+    ) -> Result<omini_core::types::config::Settings, CoreError> {
+        let mut settings = self.fresh_settings_with_project_state()?;
+        if session.provider.is_empty() || session.model.is_empty() {
+            settings.normalize_current_thinking_effort();
+            return Ok(settings);
+        }
+
+        let (api_key, base_url, endpoint) = {
+            let profile = settings.providers.get(&session.provider).ok_or_else(|| {
+                CoreError::new(format!("Unknown provider profile: {}", session.provider))
+            })?;
+            if !profile
+                .models
+                .iter()
+                .any(|candidate| candidate.id == session.model)
+            {
+                return Err(CoreError::new(format!(
+                    "Unknown model '{}' for provider '{}'",
+                    session.model, session.provider
+                )));
+            }
+            (
+                profile.api_key.clone(),
+                profile.base_url.clone(),
+                profile.endpoint,
+            )
+        };
+
+        settings.active_provider = session.provider.clone();
+        settings.api_key = api_key;
+        settings.base_url = base_url;
+        settings.endpoint = endpoint;
+        settings.model = session.model.clone();
+        let effort: Option<omini_core::types::config::ThinkingEffort> = session
+            .thinking_effort
+            .as_deref()
+            .and_then(|effort| effort.parse().ok());
+        settings.thinking_effort = settings.effective_current_thinking_effort(effort);
+        settings.normalize_current_thinking_effort();
+        Ok(settings)
+    }
+
     pub(crate) async fn session(
         &self,
         session_id: &str,
@@ -491,7 +528,7 @@ impl SessionManager {
             return Ok(session);
         }
 
-        let project_path = sanitize(&self.settings.cwd);
+        let project_path = sanitize(&self.cwd);
         let Some(session_record) = self
             .db
             .get_session(session_id)
@@ -505,13 +542,15 @@ impl SessionManager {
             return Err(SessionError::NotFound);
         }
 
+        let settings = self.settings_for_existing_session(&session_record)?;
+
         // 数据库查询和 runtime 创建之间可能有并发请求，拿到锁后再检查一次缓存。
         let mut sessions = self.sessions.lock().expect("sessions lock poisoned");
         if let Some(session) = sessions.get(session_id) {
             return Ok(Arc::clone(session));
         }
         let session = Arc::new(RuntimeSession::spawn(
-            self.settings.clone(),
+            settings,
             self.project.clone(),
             session_id.to_string(),
             Arc::clone(&self.db),
@@ -550,6 +589,16 @@ impl SessionManager {
     }
 }
 
+fn load_validated_config(root: &OminiRoot) -> Result<UserConfig, String> {
+    let config = root.load_config().map_err(|error| error.to_string())?;
+    config.validate().map_err(|error| error.to_string())?;
+    Ok(config)
+}
+
+fn config_core_error(message: String) -> CoreError {
+    CoreError::new(format!("Failed to load user config: {message}"))
+}
+
 fn session_summaries_with_runtime_states(
     sessions: Vec<Session>,
     runtime_states: &HashMap<String, protocol::SessionRuntimeState>,
@@ -567,9 +616,8 @@ fn session_summaries_with_runtime_states(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::config::project::{ProjectDir, ProjectsDir};
-    use omini_core::config::settings::{ModelEntry, ProviderConfig, UserConfig};
-    use omini_core::types::config::{ProviderType, ThinkingEffort};
+    use omini_core::config::project::ProjectDir;
+    use omini_core::types::config::ThinkingEffort;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -594,63 +642,69 @@ mod tests {
         }
     }
 
-    fn test_config() -> UserConfig {
-        let models = HashMap::from([
-            (
-                "fast".to_string(),
-                ModelEntry {
-                    name: Some("Fast".to_string()),
-                    limit: Some(1000),
-                    thinking: Some(false),
-                    input_modalities: None,
-                },
-            ),
-            (
-                "reasoner".to_string(),
-                ModelEntry {
-                    name: Some("Reasoner".to_string()),
-                    limit: Some(2000),
-                    thinking: Some(true),
-                    input_modalities: None,
-                },
-            ),
-        ]);
+    fn write_config(root: &Path, include_extra_provider: bool) {
+        fs::create_dir_all(root).expect("root should be created");
+        let mut content = r#"
+[providers.openai]
+name = "OpenAI"
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
 
-        UserConfig {
-            providers: HashMap::from([(
-                "openai".to_string(),
-                ProviderConfig {
-                    name: Some("OpenAI".to_string()),
-                    endpoint: ProviderType::OpenAI,
-                    base_url: "https://openai.example".to_string(),
-                    api_key: "test-key".to_string(),
-                    models: Some(models),
-                },
-            )]),
-            language: None,
-            permissions: None,
-            compact: None,
-            mcp_servers: HashMap::new(),
+[providers.openai.models.fast]
+name = "Fast"
+limit = 1000
+thinking = false
+
+[providers.openai.models.reasoner]
+name = "Reasoner"
+limit = 2000
+thinking = true
+"#
+        .to_string();
+
+        if include_extra_provider {
+            content.push_str(
+                r#"
+[providers.anthropic]
+name = "Anthropic"
+endpoint = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+
+[providers.anthropic.models.claude-test]
+name = "Claude Test"
+limit = 3000
+thinking = true
+"#,
+            );
         }
+
+        fs::write(root.join("config.toml"), content).expect("config should be written");
     }
 
     async fn session_manager_for(root: &Path, cwd: &Path) -> (SessionManager, ProjectDir) {
-        let config = test_config();
-        let project = ProjectsDir::new(root)
-            .for_cwd(cwd, &config)
+        write_config(root, false);
+        let root = Arc::new(OminiRoot::from_path(root.to_path_buf()));
+        let config = load_validated_config(&root).expect("config should load");
+        let project = root
+            .init_project(cwd, &config)
             .expect("project should initialize");
-        let mut settings = config
-            .to_settings(Some("openai"), Some("reasoner"), Some(ThinkingEffort::High))
-            .expect("settings should build");
-        settings.cwd = cwd.to_path_buf();
-        let db_path = root.join("omini.sqlite");
+        let db_path = root.path().join("omini.sqlite");
         let db = Database::open(&db_path)
             .await
             .expect("database should open");
         (
-            SessionManager::new(settings, project.clone(), Arc::new(db)),
+            SessionManager::new(root, cwd.to_path_buf(), project.clone(), Arc::new(db)),
             project,
         )
+    }
+
+    fn has_provider(response: &protocol::ModelsResponse, provider: &str) -> bool {
+        response
+            .providers
+            .iter()
+            .any(|candidate| candidate.id == provider)
     }
 
     fn test_session(id: &str) -> Session {
@@ -696,6 +750,102 @@ mod tests {
                 .and_then(|session| session.runtime_state),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn project_models_reflect_config_added_after_manager_creation() {
+        let temp = unique_temp_root("project-models-refresh");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+
+        let initial = manager.list_models().expect("models should load");
+        assert!(!has_provider(&initial, "anthropic"));
+
+        write_config(&temp.path, true);
+
+        let refreshed = manager.list_models().expect("models should reload");
+        assert!(has_provider(&refreshed, "anthropic"));
+    }
+
+    #[tokio::test]
+    async fn new_and_restored_sessions_use_latest_config_without_hot_updating_cached_runtime() {
+        let temp = unique_temp_root("session-config-refresh");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+
+        let old_session_id = manager
+            .create_session(protocol::CreateSessionRequest {
+                provider: Some("openai".to_string()),
+                model: Some("fast".to_string()),
+                thinking_effort: None,
+                profile: None,
+            })
+            .await
+            .expect("old session should be created")
+            .session_id
+            .expect("session id should be returned");
+        let old_runtime = manager
+            .session(&old_session_id)
+            .await
+            .expect("old runtime should be cached");
+        assert!(!has_provider(&old_runtime.core.list_models(), "anthropic"));
+
+        write_config(&temp.path, true);
+
+        assert!(!has_provider(&old_runtime.core.list_models(), "anthropic"));
+
+        let new_session_id = manager
+            .create_session(protocol::CreateSessionRequest {
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-test".to_string()),
+                thinking_effort: Some(protocol::ThinkingEffort::High),
+                profile: None,
+            })
+            .await
+            .expect("new session should use reloaded config")
+            .session_id
+            .expect("session id should be returned");
+        let new_record = manager
+            .db
+            .get_session(&new_session_id)
+            .await
+            .expect("new session should load")
+            .expect("new session should exist");
+        assert_eq!(new_record.provider, "anthropic");
+        assert_eq!(new_record.model, "claude-test");
+
+        let removed = manager
+            .sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .remove(&old_session_id)
+            .expect("old runtime should be cached");
+        removed
+            .shutdown()
+            .await
+            .expect("old runtime should shut down");
+
+        let restored = manager
+            .session(&old_session_id)
+            .await
+            .expect("old session should restore");
+        let restored_models = restored.core.list_models();
+        assert!(has_provider(&restored_models, "anthropic"));
+        assert_eq!(restored_models.current_provider, "openai");
+        assert_eq!(restored_models.current_model, "fast");
+
+        restored
+            .shutdown()
+            .await
+            .expect("restored runtime should shut down");
+        let new_runtime = manager
+            .session(&new_session_id)
+            .await
+            .expect("new runtime should be cached");
+        new_runtime
+            .shutdown()
+            .await
+            .expect("new runtime should shut down");
     }
 
     #[tokio::test]

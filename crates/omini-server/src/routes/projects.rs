@@ -26,7 +26,7 @@ pub(crate) async fn list_models(
     Path(project_id): Path<String>,
 ) -> ApiResult<protocol::ModelsResponse> {
     let project = require_project(&manager, &project_id).await?;
-    Ok(Json(project.list_models()))
+    project.list_models().map(Json).map_err(core_error)
 }
 
 /// 设置项目默认模型；后续新建 session 会继承该配置。
