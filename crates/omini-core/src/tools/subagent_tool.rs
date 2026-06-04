@@ -10,8 +10,8 @@ pub struct SubagentInput {
     pub name: String,
     /// Task prompt for the subagent. The parent agent must describe the concrete task.
     pub prompt: String,
-    /// Optional short title shown in the UI for this subagent task.
-    pub title: Option<String>,
+    /// Short title shown in the UI for this subagent task.
+    pub title: String,
 }
 
 pub struct SubagentTool;
@@ -31,8 +31,8 @@ impl Tool for SubagentTool {
             "\n",
             "Input fields:\n",
             "  name    The subagent name to run.\n",
-            "  prompt  The concrete task for that subagent. This field is required.\n",
-            "  title   Optional short UI title for this subagent task.\n",
+            "  prompt  The concrete task for that subagent.\n",
+            "  title   Short UI title for this subagent task.\n",
             "\n",
             "The subagent has its own session, context, system instructions, ",
             "and tool allowlist. Its intermediate messages are hidden from the main context. ",
@@ -51,14 +51,11 @@ impl Tool for SubagentTool {
         if input.prompt.trim().is_empty() {
             return Err(ToolResult::error("prompt must not be empty"));
         }
-        let title = input.title.and_then(|title| {
-            let title = title.trim();
-            if title.is_empty() {
-                None
-            } else {
-                Some(title.chars().take(80).collect())
-            }
-        });
+        let title = input.title.trim();
+        if title.is_empty() {
+            return Err(ToolResult::error("title must not be empty"));
+        }
+        let title = title.chars().take(80).collect();
         Ok(SubagentRunRequest {
             name: name.to_string(),
             prompt: input.prompt,
@@ -82,5 +79,67 @@ impl Tool for SubagentTool {
         };
 
         runner.run_subagent(request, ctx, runtime).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::Tool;
+    use serde_json::json;
+
+    #[test]
+    fn schema_requires_title() {
+        let schema = SubagentTool.input_schema();
+        let required = schema
+            .get("required")
+            .and_then(|value| value.as_array())
+            .expect("subagent schema should list required fields");
+
+        for field in ["name", "prompt", "title"] {
+            assert!(
+                required.iter().any(|value| value.as_str() == Some(field)),
+                "{field} should be required in {required:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_rejects_missing_title() {
+        let err = serde_json::from_value::<SubagentInput>(json!({
+            "name": "explorer",
+            "prompt": "Find relevant files"
+        }))
+        .unwrap_err();
+
+        assert!(err.to_string().contains("missing field `title`"));
+    }
+
+    #[tokio::test]
+    async fn prepare_rejects_empty_title() {
+        let err = SubagentTool
+            .prepare(SubagentInput {
+                name: "explorer".to_string(),
+                prompt: "Find relevant files".to_string(),
+                title: "  ".to_string(),
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.output, "title must not be empty");
+    }
+
+    #[tokio::test]
+    async fn prepare_trims_and_truncates_title() {
+        let prepared = SubagentTool
+            .prepare(SubagentInput {
+                name: "explorer".to_string(),
+                prompt: "Find relevant files".to_string(),
+                title: format!(" {} ", "x".repeat(90)),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(prepared.title, "x".repeat(80));
     }
 }

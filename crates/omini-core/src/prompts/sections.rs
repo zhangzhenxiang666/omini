@@ -144,9 +144,8 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
         }
     }
     section.push_str("## Subagent Prompting\n\n");
-    section.push_str("- The tool input must include `name` and a concrete `prompt` task.\n");
     section.push_str(
-        "- Optionally include a short `title` when a compact UI label would help the user distinguish concurrent subagent tasks. Keep it brief and use the user's language.\n",
+        "- Use a short `title` as a compact UI label; keep it brief and in the user's language.\n",
     );
     section.push_str(
         "- Write prompts as self-contained briefs: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own.\n",

@@ -23,7 +23,7 @@ use uuid::Uuid;
 pub struct SubagentRunRequest {
     pub name: String,
     pub prompt: String,
-    pub title: Option<String>,
+    pub title: String,
 }
 
 #[derive(Debug, Default)]
@@ -99,7 +99,7 @@ async fn run_subagent(
         provider: settings.active_provider.clone(),
         model: settings.model.clone(),
         thinking_effort: settings.thinking_effort.map(|e| e.to_string()),
-        title: request.title.clone(),
+        title: Some(request.title.clone()),
         current_context_tokens: 0,
         total_tokens: 0,
         total_cached_tokens: 0,
