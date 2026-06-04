@@ -442,6 +442,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn effort_command_accepts_max() {
+        let mut state = UiState::new();
+        state.input = "/effort max".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::ModelThinkingEffortSet { effort }) = rx.recv().await else {
+            panic!("expected effort request");
+        };
+        assert_eq!(effort, omini_protocol::ThinkingEffort::Max);
+    }
+
+    #[tokio::test]
     async fn manual_compact_does_not_queue_normal_user_input() {
         let mut state = UiState::new();
         state.begin_manual_compact();
@@ -1014,7 +1029,7 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
             Ok(effort) => Some(ClientRequest::ModelThinkingEffortSet { effort }),
             Err(()) => {
                 state.apply_event(RuntimeToUiEvent::error(format!(
-                    "无效的思考程度 '{}'，可用值: none | low | medium | high",
+                    "无效的思考程度 '{}'，可用值: none | low | medium | high | xhigh | max",
                     args
                 )));
                 None

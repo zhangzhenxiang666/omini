@@ -60,6 +60,8 @@ pub(crate) fn thinking_effort_from_internal(
         config_types::ThinkingEffort::Low => omini_protocol::ThinkingEffort::Low,
         config_types::ThinkingEffort::Medium => omini_protocol::ThinkingEffort::Medium,
         config_types::ThinkingEffort::High => omini_protocol::ThinkingEffort::High,
+        config_types::ThinkingEffort::XHigh => omini_protocol::ThinkingEffort::XHigh,
+        config_types::ThinkingEffort::Max => omini_protocol::ThinkingEffort::Max,
     }
 }
 

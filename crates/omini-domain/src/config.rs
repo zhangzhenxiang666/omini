@@ -11,6 +11,8 @@ pub enum ThinkingEffort {
     #[default]
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl fmt::Display for ThinkingEffort {
@@ -20,6 +22,8 @@ impl fmt::Display for ThinkingEffort {
             ThinkingEffort::Low => "low",
             ThinkingEffort::Medium => "medium",
             ThinkingEffort::High => "high",
+            ThinkingEffort::XHigh => "xhigh",
+            ThinkingEffort::Max => "max",
         };
         f.write_str(value)
     }
@@ -34,6 +38,8 @@ impl FromStr for ThinkingEffort {
             "low" => Ok(ThinkingEffort::Low),
             "medium" => Ok(ThinkingEffort::Medium),
             "high" => Ok(ThinkingEffort::High),
+            "xhigh" => Ok(ThinkingEffort::XHigh),
+            "max" => Ok(ThinkingEffort::Max),
             _ => Err(()),
         }
     }
@@ -115,6 +121,24 @@ mod tests {
         assert_eq!(
             model.input_modalities.as_deref(),
             Some(&[InputModality::Text, InputModality::Image][..])
+        );
+    }
+
+    #[test]
+    fn thinking_effort_parses_new_levels() {
+        assert_eq!("xhigh".parse(), Ok(ThinkingEffort::XHigh));
+        assert_eq!("max".parse(), Ok(ThinkingEffort::Max));
+    }
+
+    #[test]
+    fn thinking_effort_serializes_new_levels() {
+        assert_eq!(
+            serde_json::to_value(ThinkingEffort::XHigh).unwrap(),
+            json!("xhigh")
+        );
+        assert_eq!(
+            serde_json::to_value(ThinkingEffort::Max).unwrap(),
+            json!("max")
         );
     }
 }

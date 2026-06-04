@@ -32,9 +32,7 @@ pub(super) async fn invoke_openai(
     let max_tokens = request.max_tokens.unwrap_or(32768);
     map.insert("max_tokens".to_string(), Value::Number(max_tokens.into()));
 
-    if let Some(effort) = request.thinking_effort
-        && effort != ThinkingEffort::None
-    {
+    if let Some(effort) = request.thinking_effort.and_then(openai_reasoning_effort) {
         map.insert(
             "reasoning_effort".to_string(),
             serde_json::to_value(effort)?,
@@ -327,6 +325,17 @@ pub(super) async fn invoke_openai(
         tracing::debug!("SSE stream task finished, channel closed");
     });
     Ok(result_stream)
+}
+
+fn openai_reasoning_effort(effort: ThinkingEffort) -> Option<&'static str> {
+    match effort {
+        ThinkingEffort::None => None,
+        ThinkingEffort::Low => Some("low"),
+        ThinkingEffort::Medium => Some("medium"),
+        ThinkingEffort::High => Some("high"),
+        ThinkingEffort::XHigh => Some("xhigh"),
+        ThinkingEffort::Max => Some("high"),
+    }
 }
 
 fn update_usage_from_value(current: &mut Usage, usage: &Value) {
@@ -633,6 +642,16 @@ mod tests {
         assert_eq!(usage.prompt_tokens, 100);
         assert_eq!(usage.completion_tokens, 20);
         assert_eq!(usage.cached_tokens, 64);
+    }
+
+    #[test]
+    fn reasoning_effort_maps_provider_specific_values() {
+        assert_eq!(openai_reasoning_effort(ThinkingEffort::None), None);
+        assert_eq!(
+            openai_reasoning_effort(ThinkingEffort::XHigh),
+            Some("xhigh")
+        );
+        assert_eq!(openai_reasoning_effort(ThinkingEffort::Max), Some("high"));
     }
 
     #[test]

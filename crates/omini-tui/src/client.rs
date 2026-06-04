@@ -1147,6 +1147,8 @@ pub(crate) fn thinking_effort_from_protocol(
         protocol::ThinkingEffort::Low => crate::types::config::ThinkingEffort::Low,
         protocol::ThinkingEffort::Medium => crate::types::config::ThinkingEffort::Medium,
         protocol::ThinkingEffort::High => crate::types::config::ThinkingEffort::High,
+        protocol::ThinkingEffort::XHigh => crate::types::config::ThinkingEffort::XHigh,
+        protocol::ThinkingEffort::Max => crate::types::config::ThinkingEffort::Max,
     }
 }
 

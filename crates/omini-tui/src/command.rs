@@ -75,7 +75,7 @@ pub fn builtin_command_summaries() -> Vec<CommandSummary> {
             "调整当前模型的思考程度",
             40,
             true,
-            Some("<none | low | medium | high>"),
+            Some("<none | low | medium | high | xhigh | max>"),
         ),
         builtin("init", &[], "分析项目并生成 AGENTS.md", 50, true, None),
         builtin("rename", &[], "重命名当前会话", 60, true, Some("<name>")),

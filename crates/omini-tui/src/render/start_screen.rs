@@ -409,6 +409,8 @@ fn thinking_effort_label(state: &UiState) -> Option<&'static str> {
         Some(ThinkingEffort::Low) => Some("low"),
         Some(ThinkingEffort::Medium) => Some("medium"),
         Some(ThinkingEffort::High) => Some("high"),
+        Some(ThinkingEffort::XHigh) => Some("xhigh"),
+        Some(ThinkingEffort::Max) => Some("max"),
         Some(ThinkingEffort::None) | None => None,
     }
 }

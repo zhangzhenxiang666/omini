@@ -8,6 +8,8 @@ pub(super) fn thinking_effort_to_protocol(
         omini_core::types::config::ThinkingEffort::Low => protocol::ThinkingEffort::Low,
         omini_core::types::config::ThinkingEffort::Medium => protocol::ThinkingEffort::Medium,
         omini_core::types::config::ThinkingEffort::High => protocol::ThinkingEffort::High,
+        omini_core::types::config::ThinkingEffort::XHigh => protocol::ThinkingEffort::XHigh,
+        omini_core::types::config::ThinkingEffort::Max => protocol::ThinkingEffort::Max,
     }
 }
 
@@ -19,6 +21,8 @@ pub(super) fn thinking_effort_from_protocol(
         protocol::ThinkingEffort::Low => omini_core::types::config::ThinkingEffort::Low,
         protocol::ThinkingEffort::Medium => omini_core::types::config::ThinkingEffort::Medium,
         protocol::ThinkingEffort::High => omini_core::types::config::ThinkingEffort::High,
+        protocol::ThinkingEffort::XHigh => omini_core::types::config::ThinkingEffort::XHigh,
+        protocol::ThinkingEffort::Max => omini_core::types::config::ThinkingEffort::Max,
     }
 }
 

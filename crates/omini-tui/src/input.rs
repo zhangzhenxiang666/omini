@@ -66,7 +66,7 @@ pub(super) async fn handle_interaction_key(
                     if let E::Model { model, .. } = &entries[*selected]
                         && model.thinking
                     {
-                        *thinking_idx = (*thinking_idx + 1).min(3);
+                        *thinking_idx = (*thinking_idx + 1).min(5);
                     }
                     true
                 }
@@ -82,6 +82,8 @@ pub(super) async fn handle_interaction_key(
                                 1 => Some(crate::types::config::ThinkingEffort::Low),
                                 2 => Some(crate::types::config::ThinkingEffort::Medium),
                                 3 => Some(crate::types::config::ThinkingEffort::High),
+                                4 => Some(crate::types::config::ThinkingEffort::XHigh),
+                                5 => Some(crate::types::config::ThinkingEffort::Max),
                                 _ => None,
                             }
                         } else {
@@ -1040,6 +1042,60 @@ mod tests {
             panic!("expected model select request");
         };
         assert_eq!(thinking_effort, Some(omini_protocol::ThinkingEffort::High));
+    }
+
+    #[tokio::test]
+    async fn model_selection_right_reaches_and_clamps_max_effort() {
+        let mut step = InteractionStep::ModelSelection {
+            entries: vec![
+                ModelSelectionEntry::ProviderHeader {
+                    name: "OpenAI".to_string(),
+                },
+                model_selection_entry("reasoner", true),
+            ],
+            selected: 1,
+            thinking_idx: 3,
+            active_provider: "openai".to_string(),
+            active_model: "reasoner".to_string(),
+        };
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert!(handle_interaction_key(&mut step, KeyCode::Right, &tx).await);
+        assert!(handle_interaction_key(&mut step, KeyCode::Right, &tx).await);
+        assert!(handle_interaction_key(&mut step, KeyCode::Right, &tx).await);
+
+        let InteractionStep::ModelSelection { thinking_idx, .. } = step else {
+            panic!("expected model selection");
+        };
+        assert_eq!(thinking_idx, 5);
+    }
+
+    #[tokio::test]
+    async fn model_selection_enter_sends_max_effort_for_thinking_model() {
+        let mut step = InteractionStep::ModelSelection {
+            entries: vec![
+                ModelSelectionEntry::ProviderHeader {
+                    name: "OpenAI".to_string(),
+                },
+                model_selection_entry("reasoner", true),
+            ],
+            selected: 1,
+            thinking_idx: 5,
+            active_provider: "openai".to_string(),
+            active_model: "reasoner".to_string(),
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+
+        assert!(handle_interaction_key(&mut step, KeyCode::Enter, &tx).await);
+
+        let request = rx.recv().await.expect("model select should be sent");
+        let ClientRequest::ModelSelect {
+            thinking_effort, ..
+        } = request
+        else {
+            panic!("expected model select request");
+        };
+        assert_eq!(thinking_effort, Some(omini_protocol::ThinkingEffort::Max));
     }
 
     #[tokio::test]

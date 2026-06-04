@@ -86,6 +86,8 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
         Some(ThinkingEffort::Low) => format!("{}  low", model_part),
         Some(ThinkingEffort::Medium) => format!("{}  medium", model_part),
         Some(ThinkingEffort::High) => format!("{}  high", model_part),
+        Some(ThinkingEffort::XHigh) => format!("{}  xhigh", model_part),
+        Some(ThinkingEffort::Max) => format!("{}  max", model_part),
         _ => model_part,
     };
 

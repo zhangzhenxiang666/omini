@@ -95,6 +95,8 @@ impl UiState {
                     Some(ThinkingEffort::Low) => 1,
                     Some(ThinkingEffort::Medium) => 2,
                     Some(ThinkingEffort::High) => 3,
+                    Some(ThinkingEffort::XHigh) => 4,
+                    Some(ThinkingEffort::Max) => 5,
                     Some(ThinkingEffort::None) => 0,
                     None => 2,
                 };
@@ -825,6 +827,20 @@ mod tests {
             panic!("expected model selection interaction");
         };
         assert_eq!(thinking_idx, 0);
+    }
+
+    #[test]
+    fn model_selection_preserves_max_thinking_effort() {
+        let mut state = UiState::new();
+        state.status_bar.thinking_effort = Some(ThinkingEffort::Max);
+
+        state.open_interaction_request(&model_selection_request());
+
+        let Some(InteractionStep::ModelSelection { thinking_idx, .. }) = state.interaction_step
+        else {
+            panic!("expected model selection interaction");
+        };
+        assert_eq!(thinking_idx, 5);
     }
 
     #[test]

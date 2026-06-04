@@ -257,13 +257,15 @@ fn render_model_panel(
 
     // Thinking effort row
     if has_any_thinking && thinking_y < area.bottom() {
-        const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉"];
-        const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High"];
+        const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉", "◆", "★"];
+        const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High", "XHigh", "Max"];
         const EFFORT_COLORS: &[Color] = &[
             Color::Rgb(140, 145, 155),
             Color::Rgb(190, 170, 140),
             Color::Rgb(220, 185, 145),
             Color::Rgb(255, 200, 120),
+            Color::Rgb(255, 170, 120),
+            Color::Rgb(255, 135, 135),
         ];
         let ti = params.thinking_idx.min(EFFORT_ICONS.len() - 1);
         let icon = EFFORT_ICONS[ti];
