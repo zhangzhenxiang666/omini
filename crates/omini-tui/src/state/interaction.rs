@@ -58,6 +58,8 @@ pub struct AgentManagerState {
     pub edit_action_selected: usize,
     pub model_entries: Vec<AgentModelEntry>,
     pub model_selected: usize,
+    pub current_provider: String,
+    pub current_model: String,
     pub message: Option<String>,
     pub draft_wrap_width: usize,
 }
@@ -169,6 +171,8 @@ impl AgentManagerState {
             edit_action_selected: 0,
             model_entries,
             model_selected,
+            current_provider,
+            current_model,
             message: None,
             draft_wrap_width: 80,
         }

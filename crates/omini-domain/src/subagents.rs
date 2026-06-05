@@ -48,6 +48,13 @@ pub struct AgentDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GeneratedAgentDraft {
+    pub name: String,
+    pub description: String,
+    pub instructions: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AgentSummary {
     pub name: String,
     pub description: String,

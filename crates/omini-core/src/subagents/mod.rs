@@ -7,8 +7,13 @@ mod generator;
 mod parser;
 mod runner;
 
-pub use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
-pub use generator::{generate_agent_draft, parse_generated_agent};
+pub use crate::types::subagents::{
+    AgentDraft, AgentRecord, AgentSourceKind, AgentSummary, GeneratedAgentDraft,
+};
+pub use generator::{
+    GenerateAgentDraftError, generate_agent_draft, generate_agent_draft_checked,
+    parse_generated_agent,
+};
 pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 
 #[derive(Debug, Clone)]

@@ -21,7 +21,6 @@ use crate::types::subagents as subagent_types;
 use omini_protocol as protocol;
 use omini_protocol::RuntimeEvent;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -387,34 +386,9 @@ impl AgentCoreSession {
         .await
     }
 
-    pub async fn save_agent(&self, request: protocol::SaveAgentRequest) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::AgentSaveRequested {
-            source_kind: agent_source_kind_from_protocol(request.source_kind),
-            original_path: request.original_agent_id.map(PathBuf::from),
-            draft: agent_draft_from_protocol(request.draft),
-        })
-        .await
-    }
-
-    pub async fn delete_agent(&self, agent_id: String) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::AgentDeleteRequested {
-            path: PathBuf::from(agent_id),
-        })
-        .await
-    }
-
-    pub async fn generate_agent(
-        &self,
-        request: protocol::GenerateAgentRequest,
-    ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::AgentGenerateRequested {
-            source_kind: agent_source_kind_from_protocol(request.source_kind),
-            description: request.description,
-            tools: request.tools,
-            disallow_tools: request.disallow_tools,
-            model: request.model,
-        })
-        .await
+    pub async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
+        self.send_runtime_event(UiToRuntimeEvent::SubagentRegistryChanged)
+            .await
     }
 
     pub async fn shutdown(&self) -> Result<(), CoreError> {
@@ -714,16 +688,6 @@ fn plan_execution_profile_from_protocol(
     }
 }
 
-fn agent_source_kind_from_protocol(
-    source_kind: protocol::AgentSourceKind,
-) -> subagent_types::AgentSourceKind {
-    match source_kind {
-        protocol::AgentSourceKind::BuiltIn => subagent_types::AgentSourceKind::BuiltIn,
-        protocol::AgentSourceKind::Project => subagent_types::AgentSourceKind::Project,
-        protocol::AgentSourceKind::User => subagent_types::AgentSourceKind::User,
-    }
-}
-
 fn agent_source_kind_to_protocol(
     source_kind: subagent_types::AgentSourceKind,
 ) -> protocol::AgentSourceKind {
@@ -731,17 +695,6 @@ fn agent_source_kind_to_protocol(
         subagent_types::AgentSourceKind::BuiltIn => protocol::AgentSourceKind::BuiltIn,
         subagent_types::AgentSourceKind::Project => protocol::AgentSourceKind::Project,
         subagent_types::AgentSourceKind::User => protocol::AgentSourceKind::User,
-    }
-}
-
-fn agent_draft_from_protocol(draft: protocol::AgentDraft) -> subagent_types::AgentDraft {
-    subagent_types::AgentDraft {
-        name: draft.name,
-        description: draft.description,
-        instructions: draft.instructions,
-        tools: draft.tools,
-        disallow_tools: draft.disallow_tools,
-        model: draft.model,
     }
 }
 

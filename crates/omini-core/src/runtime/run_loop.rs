@@ -61,14 +61,8 @@ impl AgentRuntime {
                             UiToRuntimeEvent::SessionSelected { snapshot } => {
                                 self.switch_session(snapshot).await;
                             }
-                            UiToRuntimeEvent::AgentSaveRequested { source_kind, original_path, draft } => {
-                                self.save_agent(source_kind, original_path.as_deref(), &draft).await;
-                            }
-                            UiToRuntimeEvent::AgentDeleteRequested { path } => {
-                                self.delete_agent(&path).await;
-                            }
-                            UiToRuntimeEvent::AgentGenerateRequested { source_kind, description, tools, disallow_tools, model } => {
-                                self.generate_agent(source_kind, &description, tools, disallow_tools, model).await;
+                            UiToRuntimeEvent::SubagentRegistryChanged => {
+                                self.reload_subagent_registry();
                             }
                             UiToRuntimeEvent::ResolveToolPause { .. } => {
                                 // 过期的权限响应可能在其他客户端已处理暂停、运行继续后抵达。
@@ -315,6 +309,9 @@ impl AgentRuntime {
                                         .await;
                                 }
                             }
+                            UiToRuntimeEvent::SubagentRegistryChanged => {
+                                active_run::reject_request(&event_tx).await;
+                            }
                             UiToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 active_run::apply_model_selection(
                                     &mut self.settings,
@@ -338,9 +335,7 @@ impl AgentRuntime {
                             | UiToRuntimeEvent::CompactContext { .. }
                             | UiToRuntimeEvent::ShutdownRequested
                             | UiToRuntimeEvent::SessionSelected { .. }
-                            | UiToRuntimeEvent::AgentSaveRequested { .. }
-                            | UiToRuntimeEvent::AgentDeleteRequested { .. }
-                            | UiToRuntimeEvent::AgentGenerateRequested { .. } => {
+                            => {
                                 active_run::reject_request(&event_tx).await;
                             }
                         }

@@ -1,14 +1,44 @@
-use super::AgentDraft;
+use super::GeneratedAgentDraft;
+use crate::types::config::ThinkingEffort;
+use std::fmt;
 use tokio_stream::StreamExt;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenerateAgentDraftError {
+    Request(String),
+    Stream(String),
+    Parse(String),
+}
+
+impl fmt::Display for GenerateAgentDraftError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GenerateAgentDraftError::Request(message)
+            | GenerateAgentDraftError::Stream(message)
+            | GenerateAgentDraftError::Parse(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for GenerateAgentDraftError {}
 
 pub async fn generate_agent_draft(
     llm_client: &crate::api::LlmClient,
-    settings: &crate::types::config::Settings,
+    model: &str,
+    thinking_effort: Option<ThinkingEffort>,
     description: &str,
-    tools: Vec<String>,
-    disallow_tools: Vec<String>,
-    model: Option<String>,
-) -> Result<AgentDraft, String> {
+) -> Result<GeneratedAgentDraft, String> {
+    generate_agent_draft_checked(llm_client, model, thinking_effort, description)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn generate_agent_draft_checked(
+    llm_client: &crate::api::LlmClient,
+    model: &str,
+    thinking_effort: Option<ThinkingEffort>,
+    description: &str,
+) -> Result<GeneratedAgentDraft, GenerateAgentDraftError> {
     let prompt = build_generate_agent_prompt(description);
     let messages = vec![crate::types::message::Message {
         role: crate::types::message::Role::User,
@@ -16,29 +46,33 @@ pub async fn generate_agent_draft(
     }];
     let request = crate::api::ApiRequest {
         messages: &messages,
-        model: &settings.model,
+        model,
         system_prompt: Some(
             "You generate Omini subagent specs. Output only valid JSON matching the requested schema.",
         ),
         tools: None,
         max_tokens: Some(8192),
         temperature: Some(0.2),
-        thinking_effort: settings.thinking_effort,
+        thinking_effort,
     };
     let mut stream = llm_client
         .invoke(request)
         .await
-        .map_err(|e| format!("生成 agent 失败: {e}"))?;
+        .map_err(|e| GenerateAgentDraftError::Request(format!("生成 agent 失败: {e}")))?;
     let mut text = String::new();
     while let Some(event) = stream.next().await {
         match event {
             Ok(crate::api::ApiEvent::Text(delta)) => text.push_str(&delta),
             Ok(crate::api::ApiEvent::Done(_)) => break,
             Ok(_) => {}
-            Err(e) => return Err(format!("生成 agent 流式响应失败: {e}")),
+            Err(e) => {
+                return Err(GenerateAgentDraftError::Stream(format!(
+                    "生成 agent 流式响应失败: {e}"
+                )));
+            }
         }
     }
-    parse_generated_agent(&text, tools, disallow_tools, model)
+    parse_generated_agent(&text).map_err(GenerateAgentDraftError::Parse)
 }
 
 fn build_generate_agent_prompt(description: &str) -> String {
@@ -64,12 +98,7 @@ fn build_generate_agent_prompt(description: &str) -> String {
     )
 }
 
-pub fn parse_generated_agent(
-    raw: &str,
-    tools: Vec<String>,
-    disallow_tools: Vec<String>,
-    model: Option<String>,
-) -> Result<AgentDraft, String> {
+pub fn parse_generated_agent(raw: &str) -> Result<GeneratedAgentDraft, String> {
     let mut json_text = raw.trim();
     if let Some(stripped) = json_text.strip_prefix("```json") {
         json_text = stripped.trim();
@@ -90,19 +119,10 @@ pub fn parse_generated_agent(
             .map(ToOwned::to_owned)
             .ok_or_else(|| format!("生成结果缺少字段: {key}"))
     };
-    Ok(AgentDraft {
+    Ok(GeneratedAgentDraft {
         name: field("name")?,
         description: field("description")?,
         instructions: field("instructions")?,
-        tools: tools
-            .into_iter()
-            .filter(|tool| tool != "subagent")
-            .collect(),
-        disallow_tools: disallow_tools
-            .into_iter()
-            .filter(|tool| tool != "subagent")
-            .collect(),
-        model,
     })
 }
 
@@ -118,18 +138,12 @@ mod tests {
                 "description": "Use when reviewing focused code diffs.",
                 "instructions": "Review the diff and return findings."
             }"#,
-            vec!["read".to_string(), "subagent".to_string()],
-            vec!["write".to_string(), "subagent".to_string()],
-            Some("openai/gpt-test".to_string()),
         )
         .unwrap();
 
         assert_eq!(draft.name, "diff-reviewer");
         assert_eq!(draft.description, "Use when reviewing focused code diffs.");
         assert_eq!(draft.instructions, "Review the diff and return findings.");
-        assert_eq!(draft.tools, vec!["read"]);
-        assert_eq!(draft.disallow_tools, vec!["write"]);
-        assert_eq!(draft.model.as_deref(), Some("openai/gpt-test"));
     }
 
     #[test]
@@ -142,9 +156,6 @@ mod tests {
                 "instructions": "Add tests and report verification."
             }
             ```"#,
-            Vec::new(),
-            Vec::new(),
-            None,
         )
         .unwrap();
 
@@ -158,9 +169,6 @@ mod tests {
                 "name": "bad",
                 "description": "Missing instructions."
             }"#,
-            Vec::new(),
-            Vec::new(),
-            None,
         )
         .unwrap_err();
 

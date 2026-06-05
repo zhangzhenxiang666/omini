@@ -2,38 +2,23 @@ use crate::api::LlmClient;
 use crate::config::project::ProjectDir;
 use crate::config::project::SessionDir;
 use crate::engine::QueryEngine;
-#[cfg(test)]
-use crate::engine::ToolPauseResolver;
 use crate::mcp::McpManager;
 use crate::permissions::PermissionEngine;
 use crate::persistence::RuntimePersistenceEvent;
 use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
 use crate::types::config::Settings;
-#[cfg(test)]
-use crate::types::display::UserDraft;
 use crate::types::display::{DisplayMessage, HistoryItem};
 use crate::types::events::{
     ActiveProfile, RuntimeToUiEvent, SessionUsageSnapshot, UiToRuntimeEvent,
-};
-#[cfg(test)]
-use crate::types::events::{
-    EngineToRuntimeEvent, LoadedSession, PlanApprovalAction, ToolPauseKind, ToolPauseRequest,
-    ToolPauseResponse,
 };
 use crate::types::message::Message;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, mpsc};
-#[cfg(test)]
-use uuid::Uuid;
 
-#[cfg(test)]
-use super::active_run;
 use super::capabilities::CapabilityStore;
-#[cfg(test)]
-use super::manual_compact::persist_compact_summary_event;
 
 pub(crate) struct RuntimeCapabilityHandles {
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -243,13 +228,21 @@ mod tests {
     use super::*;
     use crate::config::project::ProjectsDir;
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use crate::engine::ToolPauseResolver;
+    use crate::runtime::active_run;
+    use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::config::{ProviderType, Settings};
-    use crate::types::events::{NotificationKind, PlanExecutionProfile};
+    use crate::types::display::UserDraft;
+    use crate::types::events::{
+        EngineToRuntimeEvent, LoadedSession, NotificationKind, PlanApprovalAction,
+        PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+    };
     use crate::types::message::{ContentBlock, Role};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use uuid::Uuid;
 
     async fn ensure_test_persistence() {}
 
@@ -1207,6 +1200,70 @@ mod tests {
             }
         }
         assert!(saw_main_mode_event);
+    }
+
+    #[tokio::test]
+    async fn reload_subagent_registry_rebuilds_runtime_capabilities_and_prompt() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("reload-subagent-registry");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime = AgentRuntime::new(
+            event_tx,
+            test_persistence_tx(),
+            request_rx,
+            settings,
+            project,
+        );
+
+        assert!(
+            !runtime
+                .settings
+                .system_prompt
+                .as_deref()
+                .expect("system prompt should exist")
+                .contains("cache-helper")
+        );
+        crate::subagents::write_agent_file(
+            &cwd,
+            crate::subagents::AgentSourceKind::Project,
+            &crate::subagents::AgentDraft {
+                name: "cache-helper".to_string(),
+                description: "Use when checking cache-sensitive changes.".to_string(),
+                instructions: "Inspect cache-sensitive changes and report findings.".to_string(),
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+            },
+        )
+        .expect("failed to write test agent");
+
+        runtime.reload_subagent_registry();
+
+        assert!(
+            runtime
+                .capabilities
+                .subagent_registry()
+                .summaries()
+                .iter()
+                .any(|agent| agent.name == "cache-helper")
+        );
+        assert!(
+            runtime
+                .settings
+                .system_prompt
+                .as_deref()
+                .expect("system prompt should be rebuilt")
+                .contains("cache-helper")
+        );
     }
 
     #[tokio::test]

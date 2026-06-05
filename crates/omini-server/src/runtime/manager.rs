@@ -269,6 +269,176 @@ impl SessionManager {
         self.project_runtime_config_response()
     }
 
+    pub(crate) fn list_agents(&self) -> Result<protocol::AgentsResponse, CoreError> {
+        let settings = self.fresh_settings_with_project_state()?;
+        Ok(agents_response_from_settings(&self.cwd, &settings))
+    }
+
+    pub(crate) async fn save_agent(
+        &self,
+        request: protocol::SaveAgentRequest,
+        target_session_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        if request.source_kind == protocol::AgentSourceKind::BuiltIn {
+            return Err(CoreError::new("内置 agent 不能写入"));
+        }
+        let original_path = request
+            .original_agent_id
+            .as_deref()
+            .map(|agent_id| self.resolve_editable_agent_path(agent_id))
+            .transpose()?;
+        if omini_core::subagents::agent_name_exists(
+            &self.cwd,
+            &request.draft.name,
+            original_path.as_deref(),
+        ) {
+            return Err(CoreError::new(format!(
+                "agent '{}' 已存在",
+                request.draft.name
+            )));
+        }
+        let written_path =
+            omini_core::subagents::write_agent_file(&self.cwd, request.source_kind, &request.draft)
+                .map_err(CoreError::new)?;
+        if let Some(path) = original_path
+            && path != written_path
+        {
+            omini_core::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+        }
+        self.refresh_target_session_agents(target_session_id).await
+    }
+
+    pub(crate) async fn delete_agent(
+        &self,
+        agent_id: &str,
+        target_session_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let path = self.resolve_editable_agent_path(agent_id)?;
+        omini_core::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+        self.refresh_target_session_agents(target_session_id).await
+    }
+
+    pub(crate) async fn generate_agent(
+        &self,
+        request: protocol::GenerateAgentRequest,
+    ) -> Result<protocol::GenerateAgentResponse, CoreError> {
+        let settings = self.settings_for_agent_generation(&request)?;
+        let llm_client = omini_core::api::LlmClient::new(
+            settings.endpoint,
+            settings.api_key.clone(),
+            settings.base_url.clone(),
+        );
+        let mut parse_error = None;
+        for attempt in 0..2 {
+            match omini_core::subagents::generate_agent_draft_checked(
+                &llm_client,
+                &settings.model,
+                settings.thinking_effort,
+                &request.description,
+            )
+            .await
+            {
+                Ok(draft) => {
+                    return Ok(protocol::GenerateAgentResponse {
+                        draft: protocol::GeneratedAgentDraft {
+                            name: draft.name,
+                            description: draft.description,
+                            instructions: draft.instructions,
+                        },
+                    });
+                }
+                Err(omini_core::subagents::GenerateAgentDraftError::Parse(message))
+                    if attempt == 0 =>
+                {
+                    parse_error = Some(message);
+                }
+                Err(error) => return Err(CoreError::new(error.to_string())),
+            }
+        }
+        Err(CoreError::new(
+            parse_error.unwrap_or_else(|| "生成 agent 失败".to_string()),
+        ))
+    }
+
+    async fn refresh_target_session_agents(
+        &self,
+        target_session_id: Option<&str>,
+    ) -> Result<(), CoreError> {
+        let Some(session_id) = target_session_id else {
+            return Ok(());
+        };
+        let Some(session) = self.cached_session(session_id) else {
+            return Ok(());
+        };
+        session.reload_subagent_registry().await?;
+        session.broadcast_agent_management_updated(omini_core::subagents::list_agent_records(
+            &self.cwd,
+        ))
+    }
+
+    fn cached_session(&self, session_id: &str) -> Option<Arc<RuntimeSession>> {
+        self.sessions
+            .lock()
+            .expect("sessions lock poisoned")
+            .get(session_id)
+            .cloned()
+    }
+
+    fn resolve_editable_agent_path(&self, agent_id: &str) -> Result<PathBuf, CoreError> {
+        omini_core::subagents::list_agent_records(&self.cwd)
+            .into_iter()
+            .find(|record| record.editable && agent_record_id(record) == agent_id)
+            .and_then(|record| record.path)
+            .ok_or_else(|| CoreError::new(format!("agent '{agent_id}' 不存在或不可编辑")))
+    }
+
+    fn settings_for_agent_generation(
+        &self,
+        request: &protocol::GenerateAgentRequest,
+    ) -> Result<omini_core::types::config::Settings, CoreError> {
+        let mut settings = self.fresh_settings_with_project_state()?;
+        let (api_key, base_url, endpoint) = {
+            let provider = settings.providers.get(&request.provider).ok_or_else(|| {
+                CoreError::new(format!("Unknown provider profile: {}", request.provider))
+            })?;
+            if !provider
+                .models
+                .iter()
+                .any(|candidate| candidate.id == request.model)
+            {
+                return Err(CoreError::new(format!(
+                    "Unknown model '{}' for provider '{}'",
+                    request.model, request.provider
+                )));
+            }
+            (
+                provider.api_key.clone(),
+                provider.base_url.clone(),
+                provider.endpoint,
+            )
+        };
+        settings.active_provider = request.provider.clone();
+        settings.api_key = api_key;
+        settings.base_url = base_url;
+        settings.endpoint = endpoint;
+        settings.model = request.model.clone();
+        if let Some(effort) = request.thinking_effort {
+            let effort = thinking_effort_from_protocol(effort);
+            if effort != omini_core::types::config::ThinkingEffort::None
+                && !settings.current_model_supports_thinking()
+            {
+                return Err(CoreError::new(format!(
+                    "Model '{}' does not support thinking",
+                    settings.model
+                )));
+            }
+            settings.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
+        } else {
+            settings.normalize_current_thinking_effort();
+        }
+        Ok(settings)
+    }
+
     fn project_runtime_config_response(
         &self,
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
@@ -599,6 +769,46 @@ fn config_core_error(message: String) -> CoreError {
     CoreError::new(format!("Failed to load user config: {message}"))
 }
 
+fn agents_response_from_settings(
+    cwd: &std::path::Path,
+    settings: &omini_core::types::config::Settings,
+) -> protocol::AgentsResponse {
+    let records = omini_core::subagents::list_agent_records(cwd)
+        .into_iter()
+        .map(agent_record_to_protocol)
+        .collect();
+    let models = models_response_from_settings(settings);
+    protocol::AgentsResponse {
+        records,
+        providers: models.providers,
+        current_provider: models.current_provider,
+        current_model: models.current_model,
+    }
+}
+
+fn agent_record_to_protocol(record: omini_core::subagents::AgentRecord) -> protocol::AgentRecord {
+    let id = agent_record_id(&record);
+    protocol::AgentRecord {
+        id,
+        name: record.name,
+        description: record.description,
+        instructions: record.instructions,
+        tools: record.tools,
+        disallow_tools: record.disallow_tools,
+        model: record.model,
+        source_kind: record.source_kind,
+        editable: record.editable,
+    }
+}
+
+fn agent_record_id(record: &omini_core::subagents::AgentRecord) -> String {
+    record
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| record.name.clone())
+}
+
 fn session_summaries_with_runtime_states(
     sessions: Vec<Session>,
     runtime_states: &HashMap<String, protocol::SessionRuntimeState>,
@@ -765,6 +975,123 @@ thinking = true
 
         let refreshed = manager.list_models().expect("models should reload");
         assert!(has_provider(&refreshed, "anthropic"));
+    }
+
+    #[tokio::test]
+    async fn save_agent_without_target_writes_file_without_spawning_runtime() {
+        let temp = unique_temp_root("agent-save-no-target");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+
+        manager
+            .save_agent(
+                protocol::SaveAgentRequest {
+                    source_kind: protocol::AgentSourceKind::Project,
+                    original_agent_id: None,
+                    draft: protocol::AgentDraft {
+                        name: "cache-helper".to_string(),
+                        description: "Use when checking cache-sensitive changes.".to_string(),
+                        instructions: "Inspect cache-sensitive changes.".to_string(),
+                        tools: Vec::new(),
+                        disallow_tools: Vec::new(),
+                        model: None,
+                    },
+                },
+                None,
+            )
+            .await
+            .expect("agent should save");
+
+        let agents = manager.list_agents().expect("agents should list");
+        assert!(
+            agents
+                .records
+                .iter()
+                .any(|agent| agent.name == "cache-helper")
+        );
+        assert!(
+            manager
+                .sessions
+                .lock()
+                .expect("sessions lock poisoned")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn save_agent_rejects_built_in_source_kind() {
+        let temp = unique_temp_root("agent-save-built-in");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+
+        let error = manager
+            .save_agent(
+                protocol::SaveAgentRequest {
+                    source_kind: protocol::AgentSourceKind::BuiltIn,
+                    original_agent_id: None,
+                    draft: protocol::AgentDraft {
+                        name: "bad".to_string(),
+                        description: "Bad built-in write.".to_string(),
+                        instructions: "Do not write.".to_string(),
+                        tools: Vec::new(),
+                        disallow_tools: Vec::new(),
+                        model: None,
+                    },
+                },
+                None,
+            )
+            .await
+            .expect_err("built-in writes should fail");
+
+        assert!(error.message().contains("内置 agent 不能写入"));
+    }
+
+    #[tokio::test]
+    async fn delete_agent_requires_known_editable_record_id() {
+        let temp = unique_temp_root("agent-delete-path-ownership");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+
+        let arbitrary = cwd.join(".omini").join("agents").join("missing.md");
+        let error = manager
+            .delete_agent(&arbitrary.display().to_string(), None)
+            .await
+            .expect_err("unlisted path should not be deletable");
+        assert!(error.message().contains("不存在或不可编辑"));
+
+        manager
+            .save_agent(
+                protocol::SaveAgentRequest {
+                    source_kind: protocol::AgentSourceKind::Project,
+                    original_agent_id: None,
+                    draft: protocol::AgentDraft {
+                        name: "deletable".to_string(),
+                        description: "Use when testing deletion.".to_string(),
+                        instructions: "Delete me.".to_string(),
+                        tools: Vec::new(),
+                        disallow_tools: Vec::new(),
+                        model: None,
+                    },
+                },
+                None,
+            )
+            .await
+            .expect("agent should save");
+        let agents = manager.list_agents().expect("agents should list");
+        let agent_id = agents
+            .records
+            .iter()
+            .find(|agent| agent.name == "deletable")
+            .expect("saved agent should be listed")
+            .id
+            .clone();
+
+        manager
+            .delete_agent(&agent_id, None)
+            .await
+            .expect("listed editable agent should delete");
+        let agents = manager.list_agents().expect("agents should list");
+        assert!(!agents.records.iter().any(|agent| agent.name == "deletable"));
     }
 
     #[tokio::test]

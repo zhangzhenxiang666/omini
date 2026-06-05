@@ -84,6 +84,18 @@ fn project_routes() -> Router<AppState> {
             "/thinking-display",
             post(routes::projects::set_thinking_display),
         )
+        .route(
+            "/agents",
+            get(routes::agents::list_project_agents).post(routes::agents::save_project_agent),
+        )
+        .route(
+            "/agents/generate",
+            post(routes::agents::generate_project_agent),
+        )
+        .route(
+            "/agents/{agent_id}",
+            delete(routes::agents::delete_project_agent),
+        )
         // 会话列表和创建作用在项目层级，具体会话操作继续挂在 session_id 下。
         .route(
             "/sessions",
@@ -157,10 +169,16 @@ fn capability_routes() -> Router<AppState> {
     Router::new()
         .route(
             "/agents",
-            get(routes::agents::list_agents).post(routes::agents::save_agent),
+            get(routes::agents::list_session_agents).post(routes::agents::save_session_agent),
         )
-        .route("/agents/generate", post(routes::agents::generate_agent))
-        .route("/agents/{agent_id}", delete(routes::agents::delete_agent))
+        .route(
+            "/agents/generate",
+            post(routes::agents::generate_session_agent),
+        )
+        .route(
+            "/agents/{agent_id}",
+            delete(routes::agents::delete_session_agent),
+        )
         .route("/skills", get(routes::skills::list_skills))
         .route("/skills/{skill_name}", get(routes::skills::get_skill))
 }

@@ -583,7 +583,10 @@ async fn submit_agent_generate(
             description,
             tools: manager.draft.tools.clone(),
             disallow_tools: manager.draft.disallow_tools.clone(),
-            model: manager.draft.model.clone(),
+            agent_model: manager.draft.model.clone(),
+            provider: manager.current_provider.clone(),
+            model: manager.current_model.clone(),
+            thinking_effort: None,
         })
         .await;
     if sent.is_ok() {

@@ -41,22 +41,8 @@ pub enum UiToRuntimeEvent {
     },
     /// 外部 server 已加载会话快照，要求 runtime 切换到该会话。
     SessionSelected { snapshot: LoadedSession },
-    /// 用户请求保存 agent
-    AgentSaveRequested {
-        source_kind: AgentSourceKind,
-        original_path: Option<std::path::PathBuf>,
-        draft: AgentDraft,
-    },
-    /// 用户请求删除 agent
-    AgentDeleteRequested { path: std::path::PathBuf },
-    /// 用户请求由 LLM 生成 agent
-    AgentGenerateRequested {
-        source_kind: AgentSourceKind,
-        description: String,
-        tools: Vec<String>,
-        disallow_tools: Vec<String>,
-        model: Option<String>,
-    },
+    /// server 已完成 agent 文件变更，要求 runtime 刷新当前会话可用的 subagent 能力。
+    SubagentRegistryChanged,
     /// 用户响应工具暂停请求
     ResolveToolPause {
         tool_use_id: String,

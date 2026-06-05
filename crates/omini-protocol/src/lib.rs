@@ -11,7 +11,7 @@ pub use omini_domain::events::{
     ActiveProfile, CompactTrigger, PlanApprovalAction, PlanExecutionProfile, SessionRuntimeState,
     SessionSummary, SessionUsage, SubagentStatus, ToolPauseResponse,
 };
-pub use omini_domain::subagents::{AgentDraft, AgentSourceKind, AgentSummary};
+pub use omini_domain::subagents::{AgentDraft, AgentSourceKind, AgentSummary, GeneratedAgentDraft};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -637,14 +637,17 @@ pub struct SaveAgentRequest {
 /// 请求模型根据描述生成 agent 草稿。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GenerateAgentRequest {
-    pub source_kind: AgentSourceKind,
     pub description: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub disallow_tools: Vec<String>,
+    pub provider: String,
+    pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub thinking_effort: Option<ThinkingEffort>,
+}
+
+/// 模型生成的 agent 草稿字段；工具策略、scope 和保存位置由客户端确认后另行保存。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GenerateAgentResponse {
+    pub draft: GeneratedAgentDraft,
 }
 
 /// skill 列表中展示的轻量摘要。
@@ -886,6 +889,48 @@ mod tests {
                 "attachment_id": "att_1",
                 "mime_type": "image/png",
                 "name": "diagram.png"
+            })
+        );
+    }
+
+    #[test]
+    fn generate_agent_request_requires_generation_model_fields() {
+        let request = GenerateAgentRequest {
+            description: "review diffs".to_string(),
+            provider: "openai".to_string(),
+            model: "reasoner".to_string(),
+            thinking_effort: Some(ThinkingEffort::High),
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "description": "review diffs",
+                "provider": "openai",
+                "model": "reasoner",
+                "thinking_effort": "high"
+            })
+        );
+    }
+
+    #[test]
+    fn generate_agent_response_contains_only_generated_fields() {
+        let response = GenerateAgentResponse {
+            draft: GeneratedAgentDraft {
+                name: "diff-reviewer".to_string(),
+                description: "Use when reviewing code diffs.".to_string(),
+                instructions: "Review the diff and return findings.".to_string(),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            json!({
+                "draft": {
+                    "name": "diff-reviewer",
+                    "description": "Use when reviewing code diffs.",
+                    "instructions": "Review the diff and return findings."
+                }
             })
         );
     }

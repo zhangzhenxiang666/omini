@@ -78,7 +78,10 @@ pub(crate) enum ClientRequest {
         description: String,
         tools: Vec<String>,
         disallow_tools: Vec<String>,
-        model: Option<String>,
+        agent_model: Option<String>,
+        provider: String,
+        model: String,
+        thinking_effort: Option<protocol::ThinkingEffort>,
     },
     ExpandSkillRun {
         skill_name: String,
@@ -321,6 +324,52 @@ async fn handle_project_request(
             apply_project_runtime_config(connection, event_tx, config).await?;
             Ok(ProjectAction::None)
         }
+        ClientRequest::OpenAgentManager => {
+            open_agent_manager(http, connection, event_tx).await?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::AgentSave {
+            source_kind,
+            original_path,
+            draft,
+        } => {
+            save_agent(http, connection, None, source_kind, original_path, draft).await?;
+            refresh_agent_management_panel(http, connection, event_tx).await?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::AgentDelete { path } => {
+            delete_agent(http, connection, None, path).await?;
+            refresh_agent_management_panel(http, connection, event_tx).await?;
+            Ok(ProjectAction::None)
+        }
+        ClientRequest::AgentGenerate {
+            source_kind,
+            description,
+            tools,
+            disallow_tools,
+            agent_model,
+            provider,
+            model,
+            thinking_effort,
+        } => {
+            generate_agent(
+                http,
+                connection,
+                event_tx,
+                AgentGenerateRequest {
+                    source_kind,
+                    description,
+                    tools,
+                    disallow_tools,
+                    agent_model,
+                    provider,
+                    model,
+                    thinking_effort,
+                },
+            )
+            .await?;
+            Ok(ProjectAction::None)
+        }
         ClientRequest::ProfileToggle => {
             *blank_profile = toggle_profile(*blank_profile);
             event_tx
@@ -444,6 +493,111 @@ async fn apply_project_runtime_config(
         .map_err(|_| "TUI event receiver closed".to_string())
 }
 
+struct AgentGenerateRequest {
+    source_kind: protocol::AgentSourceKind,
+    description: String,
+    tools: Vec<String>,
+    disallow_tools: Vec<String>,
+    agent_model: Option<String>,
+    provider: String,
+    model: String,
+    thinking_effort: Option<protocol::ThinkingEffort>,
+}
+
+async fn open_agent_manager(
+    http: &reqwest::Client,
+    connection: &ProjectConnection,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+) -> Result<(), String> {
+    let agents: protocol::AgentsResponse = get_json(http, &project_agents_url(connection)).await?;
+    event_tx
+        .send(RuntimeToUiEvent::InteractionRequest(
+            event_types_agent_management(agents),
+        ))
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())
+}
+
+async fn refresh_agent_management_panel(
+    http: &reqwest::Client,
+    connection: &ProjectConnection,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+) -> Result<(), String> {
+    let agents: protocol::AgentsResponse = get_json(http, &project_agents_url(connection)).await?;
+    event_tx
+        .send(RuntimeToUiEvent::AgentManagementUpdated {
+            records: agent_records_from_protocol(agents.records),
+        })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())
+}
+
+async fn save_agent(
+    http: &reqwest::Client,
+    connection: &ProjectConnection,
+    target_session_id: Option<&str>,
+    source_kind: protocol::AgentSourceKind,
+    original_path: Option<PathBuf>,
+    draft: protocol::AgentDraft,
+) -> Result<(), String> {
+    let _: protocol::AckResponse = post_json_without_client(
+        http,
+        &project_agents_url_with_target(connection, target_session_id),
+        &protocol::SaveAgentRequest {
+            source_kind,
+            original_agent_id: original_path.map(|path| path.display().to_string()),
+            draft,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn delete_agent(
+    http: &reqwest::Client,
+    connection: &ProjectConnection,
+    target_session_id: Option<&str>,
+    path: PathBuf,
+) -> Result<(), String> {
+    send_empty_without_client(
+        http,
+        Method::DELETE,
+        &project_agent_url(connection, &path.display().to_string(), target_session_id),
+    )
+    .await
+}
+
+async fn generate_agent(
+    http: &reqwest::Client,
+    connection: &ProjectConnection,
+    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    request: AgentGenerateRequest,
+) -> Result<(), String> {
+    let response: protocol::GenerateAgentResponse = post_json_without_client(
+        http,
+        &project_agent_generate_url(connection),
+        &protocol::GenerateAgentRequest {
+            description: request.description,
+            provider: request.provider,
+            model: request.model,
+            thinking_effort: request.thinking_effort,
+        },
+    )
+    .await?;
+    event_tx
+        .send(RuntimeToUiEvent::AgentGenerated {
+            source_kind: agent_source_kind_from_protocol(request.source_kind),
+            draft: generated_agent_draft_from_protocol(
+                response.draft,
+                request.tools,
+                request.disallow_tools,
+                request.agent_model,
+            ),
+        })
+        .await
+        .map_err(|_| "TUI event receiver closed".to_string())
+}
+
 fn toggle_profile(profile: protocol::ActiveProfile) -> protocol::ActiveProfile {
     match profile {
         protocol::ActiveProfile::Main => protocol::ActiveProfile::Auto,
@@ -511,7 +665,11 @@ async fn run_connected_session(
     let mut did_calibrate_initial_status = false;
 
     while let Some(request) = initial_requests.pop_front() {
-        match handle_local_request(http, connection, &base, &client_id, request, event_tx).await? {
+        match handle_local_request(
+            http, connection, session_id, &base, &client_id, request, event_tx,
+        )
+        .await?
+        {
             LocalAction::None => {}
             LocalAction::Switch(next_session_id) => {
                 // pending request 也可能是打开会话，出现时直接切到目标 session。
@@ -528,6 +686,7 @@ async fn run_connected_session(
                 match handle_local_request(
                     http,
                     connection,
+                    session_id,
                     &base,
                     &client_id,
                     request,
@@ -744,6 +903,7 @@ fn default_daemon_host() -> String {
 async fn handle_local_request(
     http: &reqwest::Client,
     connection: &ProjectConnection,
+    session_id: &str,
     base: &str,
     client_id: &str,
     request: ClientRequest,
@@ -899,61 +1059,51 @@ async fn handle_local_request(
             .await?;
         }
         ClientRequest::OpenAgentManager => {
-            let agents: protocol::AgentsResponse =
-                get_json(http, &format!("{base}/agents")).await?;
-            event_tx
-                .send(RuntimeToUiEvent::InteractionRequest(
-                    event_types_agent_management(agents),
-                ))
-                .await
-                .map_err(|_| "TUI event receiver closed".to_string())?;
+            open_agent_manager(http, connection, event_tx).await?;
         }
         ClientRequest::AgentSave {
             source_kind,
             original_path,
             draft,
         } => {
-            post_json::<_, protocol::AckResponse>(
+            save_agent(
                 http,
-                &format!("{base}/agents"),
-                client_id,
-                &protocol::SaveAgentRequest {
-                    source_kind,
-                    original_agent_id: original_path.map(|path| path.display().to_string()),
-                    draft,
-                },
+                connection,
+                Some(session_id),
+                source_kind,
+                original_path,
+                draft,
             )
             .await?;
+            refresh_agent_management_panel(http, connection, event_tx).await?;
         }
         ClientRequest::AgentDelete { path } => {
-            send_empty(
-                http,
-                Method::DELETE,
-                &format!(
-                    "{base}/agents/{}",
-                    percent_encode(&path.display().to_string())
-                ),
-                client_id,
-            )
-            .await?;
+            delete_agent(http, connection, Some(session_id), path).await?;
+            refresh_agent_management_panel(http, connection, event_tx).await?;
         }
         ClientRequest::AgentGenerate {
             source_kind,
             description,
             tools,
             disallow_tools,
+            agent_model,
+            provider,
             model,
+            thinking_effort,
         } => {
-            post_json::<_, protocol::AckResponse>(
+            generate_agent(
                 http,
-                &format!("{base}/agents/generate"),
-                client_id,
-                &protocol::GenerateAgentRequest {
+                connection,
+                event_tx,
+                AgentGenerateRequest {
                     source_kind,
                     description,
                     tools,
                     disallow_tools,
+                    agent_model,
+                    provider,
                     model,
+                    thinking_effort,
                 },
             )
             .await?;
@@ -1029,6 +1179,48 @@ fn project_thinking_display_url(connection: &ProjectConnection) -> String {
         "http://{}/v1/projects/{}/thinking-display",
         connection.addr, connection.project_id
     )
+}
+
+fn project_agents_url(connection: &ProjectConnection) -> String {
+    format!(
+        "http://{}/v1/projects/{}/agents",
+        connection.addr, connection.project_id
+    )
+}
+
+fn project_agents_url_with_target(
+    connection: &ProjectConnection,
+    target_session_id: Option<&str>,
+) -> String {
+    let url = project_agents_url(connection);
+    match target_session_id {
+        Some(session_id) => {
+            format!("{url}?target_session_id={}", percent_encode(session_id))
+        }
+        None => url,
+    }
+}
+
+fn project_agent_generate_url(connection: &ProjectConnection) -> String {
+    format!("{}/generate", project_agents_url(connection))
+}
+
+fn project_agent_url(
+    connection: &ProjectConnection,
+    agent_id: &str,
+    target_session_id: Option<&str>,
+) -> String {
+    let url = format!(
+        "{}/{}",
+        project_agents_url(connection),
+        percent_encode(agent_id)
+    );
+    match target_session_id {
+        Some(session_id) => {
+            format!("{url}?target_session_id={}", percent_encode(session_id))
+        }
+        None => url,
+    }
 }
 
 fn session_base_url(connection: &ProjectConnection, session_id: &str) -> String {
@@ -1112,6 +1304,20 @@ async fn send_empty(
     let response = http
         .request(method, url)
         .header(CLIENT_ID_HEADER, client_id)
+        .send()
+        .await
+        .map_err(|err| format!("request {url}: {err}"))?;
+    let _: protocol::AckResponse = decode_response(response, url).await?;
+    Ok(())
+}
+
+async fn send_empty_without_client(
+    http: &reqwest::Client,
+    method: Method,
+    url: &str,
+) -> Result<(), String> {
+    let response = http
+        .request(method, url)
         .send()
         .await
         .map_err(|err| format!("request {url}: {err}"))?;
@@ -1215,15 +1421,20 @@ fn event_types_agent_management(
     agents: protocol::AgentsResponse,
 ) -> crate::types::events::InteractionRequest {
     crate::types::events::InteractionRequest::AgentManagement {
-        records: agents
-            .records
-            .into_iter()
-            .map(agent_record_from_protocol)
-            .collect(),
+        records: agent_records_from_protocol(agents.records),
         providers: providers_from_protocol(agents.providers),
         current_provider: agents.current_provider,
         current_model: agents.current_model,
     }
+}
+
+fn agent_records_from_protocol(
+    records: Vec<protocol::AgentRecord>,
+) -> Vec<crate::subagents::AgentRecord> {
+    records
+        .into_iter()
+        .map(agent_record_from_protocol)
+        .collect()
 }
 
 fn providers_from_protocol(
@@ -1303,6 +1514,22 @@ fn agent_source_kind_from_protocol(
         protocol::AgentSourceKind::BuiltIn => crate::subagents::AgentSourceKind::BuiltIn,
         protocol::AgentSourceKind::Project => crate::subagents::AgentSourceKind::Project,
         protocol::AgentSourceKind::User => crate::subagents::AgentSourceKind::User,
+    }
+}
+
+fn generated_agent_draft_from_protocol(
+    draft: protocol::GeneratedAgentDraft,
+    tools: Vec<String>,
+    disallow_tools: Vec<String>,
+    model: Option<String>,
+) -> crate::subagents::AgentDraft {
+    crate::subagents::AgentDraft {
+        name: draft.name,
+        description: draft.description,
+        instructions: draft.instructions,
+        tools,
+        disallow_tools,
+        model,
     }
 }
 
@@ -1478,6 +1705,27 @@ mod tests {
             summary.runtime_state,
             Some(protocol::SessionRuntimeState::Compacting)
         );
+    }
+
+    #[test]
+    fn generated_agent_draft_preserves_local_policy_fields() {
+        let draft = generated_agent_draft_from_protocol(
+            protocol::GeneratedAgentDraft {
+                name: "diff-reviewer".to_string(),
+                description: "Use when reviewing diffs.".to_string(),
+                instructions: "Review the diff and report findings.".to_string(),
+            },
+            vec!["read".to_string()],
+            vec!["bash".to_string()],
+            Some("openai/reasoner".to_string()),
+        );
+
+        assert_eq!(draft.name, "diff-reviewer");
+        assert_eq!(draft.description, "Use when reviewing diffs.");
+        assert_eq!(draft.instructions, "Review the diff and report findings.");
+        assert_eq!(draft.tools, vec!["read"]);
+        assert_eq!(draft.disallow_tools, vec!["bash"]);
+        assert_eq!(draft.model.as_deref(), Some("openai/reasoner"));
     }
 
     #[test]

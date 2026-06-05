@@ -197,6 +197,21 @@ impl RuntimeSession {
             )
     }
 
+    pub(crate) async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
+        self.core.reload_subagent_registry().await
+    }
+
+    pub(crate) fn broadcast_agent_management_updated(
+        &self,
+        records: Vec<omini_core::subagents::AgentRecord>,
+    ) -> Result<(), CoreError> {
+        let event = runtime_event_from_internal(
+            omini_core::types::events::RuntimeToUiEvent::AgentManagementUpdated { records },
+        )?;
+        let _ = self.server_event_tx.send(event);
+        Ok(())
+    }
+
     pub(crate) fn runtime_state(&self) -> protocol::SessionRuntimeState {
         self.status_projection
             .lock()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::subagents::AgentSummary;
+use crate::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use crate::types::display::MentionKind;
 use crate::types::events::{
     PermissionPreview, RuntimeToUiEvent, SubagentStartedEvent, ToolPauseKind, ToolPauseRequest,
@@ -390,6 +390,49 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
             "Implementation agent for focused coding tasks."
         )]
     );
+}
+
+#[test]
+fn agent_management_update_refreshes_subagent_mention_candidates() {
+    let mut state = UiState::new();
+    state.input = "@wo".to_string();
+    state.cursor_char = 3;
+
+    state.apply_event(RuntimeToUiEvent::AgentManagementUpdated {
+        records: vec![
+            AgentRecord {
+                name: "explorer".to_string(),
+                description: "Read-only codebase exploration agent.".to_string(),
+                instructions: "Explore.".to_string(),
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+                source_kind: AgentSourceKind::BuiltIn,
+                path: None,
+                editable: false,
+            },
+            AgentRecord {
+                name: "worker".to_string(),
+                description: "Implementation agent for focused coding tasks.".to_string(),
+                instructions: "Work.".to_string(),
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+                source_kind: AgentSourceKind::Project,
+                path: None,
+                editable: true,
+            },
+        ],
+    });
+
+    assert!(state.mention_autocomplete.visible);
+    let candidates: Vec<_> = state
+        .mention_autocomplete
+        .filtered
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect();
+    assert_eq!(candidates, vec!["worker"]);
 }
 
 #[test]
