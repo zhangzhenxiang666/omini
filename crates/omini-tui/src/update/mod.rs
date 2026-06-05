@@ -518,14 +518,14 @@ pub(super) async fn handle_runtime_event(
         return UpdateOutcome::exit();
     }
 
-    if let RuntimeToUiEvent::SessionChanged {
+    if let RuntimeToUiEvent::SessionSnapshot {
         session_id,
         messages,
         subagents,
         usage,
     } = event
     {
-        state.apply_session_changed(session_id, messages, subagents, usage);
+        state.apply_session_snapshot(session_id, messages, subagents, usage);
     } else {
         let should_flush_queue = matches!(event, RuntimeToUiEvent::RunFinished);
         state.apply_event(event);

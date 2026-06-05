@@ -23,8 +23,8 @@ use crate::types::config::ThinkingEffort;
 use crate::types::display::{DisplaySummary, HistoryItem, UserDraft};
 use crate::types::events::{
     ActiveProfile, EngineToRuntimeEvent, LoadedSession, Notification, PlanApprovalAction,
-    RuntimeToUiEvent, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind, ToolPauseRequest,
-    ToolPauseResponse, UiToRuntimeEvent,
+    RuntimeToServerEvent, ServerToRuntimeEvent, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
+    ToolPauseRequest, ToolPauseResponse,
 };
 use crate::types::message::Message;
 use crate::types::usage::Usage;

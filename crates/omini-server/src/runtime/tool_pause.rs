@@ -65,7 +65,8 @@ fn tool_pause_update(event: &RuntimeEvent) -> Option<ToolPauseUpdate> {
                 format!("{session_id}:{tool_use_id}"),
             ]))
         }
-        "run_started" | "run_finished" | "session_changed" => Some(ToolPauseUpdate::Clear),
+        "run_started" | "run_finished" => Some(ToolPauseUpdate::Clear),
+        kind if is_session_snapshot_kind(kind) => Some(ToolPauseUpdate::Clear),
         _ => None,
     }
 }

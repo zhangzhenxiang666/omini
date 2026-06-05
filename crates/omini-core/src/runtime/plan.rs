@@ -1,5 +1,5 @@
 use crate::config::project::ProjectDir;
-use crate::types::events::{ActiveProfile, RuntimeToUiEvent, SubmittedPlan};
+use crate::types::events::{ActiveProfile, RuntimeToServerEvent, SubmittedPlan};
 use crate::types::message::{ContentBlock, Message, Role};
 use crate::types::proposed_plan::{
     ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text,
@@ -23,18 +23,18 @@ impl ProposedPlanForwarder {
 
     pub(super) async fn forward_text_delta(
         &mut self,
-        event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+        event_tx: &mpsc::Sender<RuntimeToServerEvent>,
         delta: String,
     ) {
         let Some(parser) = self.parser.as_mut() else {
-            let _ = event_tx.send(RuntimeToUiEvent::TextDelta(delta)).await;
+            let _ = event_tx.send(RuntimeToServerEvent::TextDelta(delta)).await;
             return;
         };
 
         forward_segments(event_tx, parser.push_str(&delta)).await;
     }
 
-    pub(super) async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToUiEvent>) {
+    pub(super) async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
         let Some(parser) = self.parser.as_mut() else {
             return;
         };
@@ -43,17 +43,17 @@ impl ProposedPlanForwarder {
 }
 
 async fn forward_segments(
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     segments: Vec<ProposedPlanSegment>,
 ) {
     for segment in segments {
         match segment {
             ProposedPlanSegment::Normal(text) if !text.is_empty() => {
-                let _ = event_tx.send(RuntimeToUiEvent::TextDelta(text)).await;
+                let _ = event_tx.send(RuntimeToServerEvent::TextDelta(text)).await;
             }
             ProposedPlanSegment::ProposedPlanDelta(delta) if !delta.is_empty() => {
                 let _ = event_tx
-                    .send(RuntimeToUiEvent::ProposedPlanDelta(delta))
+                    .send(RuntimeToServerEvent::ProposedPlanDelta(delta))
                     .await;
             }
             ProposedPlanSegment::Normal(_)

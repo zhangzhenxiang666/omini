@@ -44,9 +44,9 @@ impl AgentRuntime {
                         )
                         .await;
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
-                                msg,
-                            )))
+                            .send(RuntimeToServerEvent::UserMessageInjected(
+                                HistoryItem::Message(msg),
+                            ))
                             .await;
                     }
                     EngineToRuntimeEvent::LlmHistoryProduced(msg) => {
@@ -74,14 +74,14 @@ impl AgentRuntime {
                     }
                     // ===== 透传事件 =====
                     EngineToRuntimeEvent::TurnStarted => {
-                        let _ = event_tx.send(RuntimeToUiEvent::TurnStarted).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::TurnStarted).await;
                     }
                     EngineToRuntimeEvent::TurnEnded => {
                         proposed_plan_forwarder.flush(&event_tx).await;
-                        let _ = event_tx.send(RuntimeToUiEvent::TurnEnded).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::TurnEnded).await;
                     }
                     EngineToRuntimeEvent::ThinkingDelta(t) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::ThinkingDelta(t)).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::ThinkingDelta(t)).await;
                     }
                     EngineToRuntimeEvent::TextDelta(t) => {
                         proposed_plan_forwarder
@@ -89,10 +89,10 @@ impl AgentRuntime {
                             .await;
                     }
                     EngineToRuntimeEvent::ToolUse(tu) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::ToolUse(tu)).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::ToolUse(tu)).await;
                     }
                     EngineToRuntimeEvent::ToolResult(tr) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::ToolResult(tr)).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::ToolResult(tr)).await;
                     }
                     EngineToRuntimeEvent::ToolPauseRequested(req) => {
                         if Self::should_auto_approve_permission_pause(&active_profile_handle, &req)
@@ -104,16 +104,18 @@ impl AgentRuntime {
                                     note: None,
                                 },
                             ) {
-                                let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
+                                let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
                             }
                             continue;
                         }
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::ToolPauseRequested(req))
+                            .send(RuntimeToServerEvent::ToolPauseRequested(req))
                             .await;
                     }
                     EngineToRuntimeEvent::PlanSubmitted(plan) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::PlanSubmitted(plan)).await;
+                        let _ = event_tx
+                            .send(RuntimeToServerEvent::PlanSubmitted(plan))
+                            .await;
                     }
                     EngineToRuntimeEvent::UsageRecorded(usage) => {
                         let _ = persistence_tx
@@ -125,7 +127,7 @@ impl AgentRuntime {
                         let snapshot =
                             record_usage_snapshot(&usage_state, usage, context_window).await;
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::UsageChanged(snapshot))
+                            .send(RuntimeToServerEvent::UsageChanged(snapshot))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactShrinkStarted(_)
@@ -135,23 +137,23 @@ impl AgentRuntime {
                     }
                     EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryStarted(event))
+                            .send(RuntimeToServerEvent::CompactSummaryStarted(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryDelta(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryDelta(event))
+                            .send(RuntimeToServerEvent::CompactSummaryDelta(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                         persist_compact_summary_event(&session_id, &event, &persistence_tx).await;
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryFinished(event))
+                            .send(RuntimeToServerEvent::CompactSummaryFinished(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryFailed(event))
+                            .send(RuntimeToServerEvent::CompactSummaryFailed(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
@@ -166,7 +168,7 @@ impl AgentRuntime {
                     }
                     EngineToRuntimeEvent::SubagentStarted(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::SubagentStarted(event))
+                            .send(RuntimeToServerEvent::SubagentStarted(event))
                             .await;
                     }
                     EngineToRuntimeEvent::SubagentSessionCreated(session) => {
@@ -193,7 +195,7 @@ impl AgentRuntime {
                         let snapshot =
                             record_total_usage_snapshot(&usage_state, usage, context_window).await;
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::UsageChanged(snapshot))
+                            .send(RuntimeToServerEvent::UsageChanged(snapshot))
                             .await;
                     }
                     EngineToRuntimeEvent::SubagentMessageProduced(event) => {
@@ -219,29 +221,29 @@ impl AgentRuntime {
                             .await;
                         }
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::SubagentMessageProduced(event))
+                            .send(RuntimeToServerEvent::SubagentMessageProduced(event))
                             .await;
                     }
                     EngineToRuntimeEvent::SubagentToolUse(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::SubagentToolUse(event))
+                            .send(RuntimeToServerEvent::SubagentToolUse(event))
                             .await;
                     }
                     EngineToRuntimeEvent::SubagentToolResult(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::SubagentToolResult(event))
+                            .send(RuntimeToServerEvent::SubagentToolResult(event))
                             .await;
                     }
                     EngineToRuntimeEvent::SubagentFinished(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::SubagentFinished(event))
+                            .send(RuntimeToServerEvent::SubagentFinished(event))
                             .await;
                     }
                     EngineToRuntimeEvent::Error(e) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
                     }
                     EngineToRuntimeEvent::Warning(warning) => {
-                        let _ = event_tx.send(RuntimeToUiEvent::warning(warning)).await;
+                        let _ = event_tx.send(RuntimeToServerEvent::warning(warning)).await;
                     }
                 }
             }

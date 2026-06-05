@@ -239,7 +239,7 @@ mod tests {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.apply_session_changed(None, vec![], vec![], SessionUsageSnapshot::default());
+        state.apply_session_snapshot(None, vec![], vec![], SessionUsageSnapshot::default());
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
 

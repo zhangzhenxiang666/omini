@@ -629,8 +629,8 @@ impl UiState {
                         .push(UiMessage::Notification(Notification::info(message)));
                 }
             }
-            // SessionChanged 由 TUI 主循环直接处理，此处无需匹配
-            RuntimeToUiEvent::SessionChanged { .. } => {}
+            // SessionSnapshot 由 TUI 主循环直接处理，此处无需匹配
+            RuntimeToUiEvent::SessionSnapshot { .. } => {}
         }
     }
 
@@ -664,7 +664,7 @@ impl UiState {
         }
     }
 
-    pub fn apply_session_changed(
+    pub fn apply_session_snapshot(
         &mut self,
         session_id: Option<String>,
         messages: Vec<HistoryItem>,

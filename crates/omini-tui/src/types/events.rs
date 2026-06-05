@@ -30,8 +30,6 @@ pub enum UiToRuntimeEvent {
     SetThinkingDisplay { show: Option<bool> },
     /// 用户请求打开帮助抽屉。
     ShowHelp,
-    /// 用户请求关闭程序。
-    ShutdownRequested,
     /// 用户切换当前 active profile
     ToggleActiveProfile,
     /// 用户显式设置当前 active profile
@@ -44,8 +42,6 @@ pub enum UiToRuntimeEvent {
         model: String,
         thinking_effort: Option<ThinkingEffort>,
     },
-    /// 用户在会话选择页中确认选择
-    SessionSelected { session_id: String },
     /// server 已完成 agent 文件变更，要求 runtime 刷新当前会话可用的 subagent 能力。
     SubagentRegistryChanged,
     /// 用户响应工具暂停请求
@@ -185,8 +181,8 @@ pub enum RuntimeToUiEvent {
     RuntimeStatusSynced {
         status: omini_protocol::SessionRuntimeStatus,
     },
-    /// 会话已切换
-    SessionChanged {
+    /// 当前会话快照已同步。
+    SessionSnapshot {
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,

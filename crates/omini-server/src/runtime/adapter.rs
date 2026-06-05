@@ -85,7 +85,7 @@ pub(super) fn initial_session_title_from_input(input: &protocol::UserInput) -> O
     (!title.is_empty()).then(|| title.chars().take(300).collect())
 }
 
-/// 将持久化 snapshot 转成一组 legacy runtime 事件供 TUI 恢复 UI。
+/// 将持久化 snapshot 转成一组 runtime 事件供 TUI 恢复 UI。
 pub(super) fn session_snapshot_events(
     snapshot: omini_core::types::events::LoadedSession,
     context_window: Option<u32>,
@@ -94,17 +94,17 @@ pub(super) fn session_snapshot_events(
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
     let events = [
-        omini_core::types::events::RuntimeToUiEvent::SessionTitleChanged {
+        omini_core::types::events::RuntimeToServerEvent::SessionTitleChanged {
             title: snapshot.title,
         },
-        omini_core::types::events::RuntimeToUiEvent::ModelChanged {
+        omini_core::types::events::RuntimeToServerEvent::ModelChanged {
             provider: snapshot.provider,
             model: snapshot.model,
             thinking_effort: snapshot.thinking_effort,
             context_window,
         },
-        omini_core::types::events::RuntimeToUiEvent::ActiveProfileChanged(active_profile),
-        omini_core::types::events::RuntimeToUiEvent::SessionChanged {
+        omini_core::types::events::RuntimeToServerEvent::ActiveProfileChanged(active_profile),
+        omini_core::types::events::RuntimeToServerEvent::SessionSnapshot {
             session_id: Some(snapshot.session_id),
             messages: snapshot.messages,
             subagents: snapshot.subagents,
@@ -120,7 +120,7 @@ pub(super) fn session_snapshot_events(
 
 /// 把 core/TUI 内部事件编码成协议 `RuntimeEvent`。
 pub(super) fn runtime_event_from_internal(
-    event: omini_core::types::events::RuntimeToUiEvent,
+    event: omini_core::types::events::RuntimeToServerEvent,
 ) -> Result<RuntimeEvent, CoreError> {
     let payload = serde_json::to_value(event)
         .map_err(|error| CoreError::new(format!("Failed to encode runtime event: {error}")))?;
@@ -193,7 +193,7 @@ mod tests {
                 "session_title_changed",
                 "model_changed",
                 "active_profile_changed",
-                "session_changed"
+                "session_snapshot"
             ]
         );
         assert_eq!(events[0].payload["title"], "hello");

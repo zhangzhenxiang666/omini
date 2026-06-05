@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn record_total_usage_and_notify(
     session_id: &str,
     usage: Usage,
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
     usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
 ) {
@@ -15,7 +15,7 @@ pub(super) async fn record_total_usage_and_notify(
         .await;
     let snapshot = record_total_usage_snapshot(usage_state, usage, None).await;
     let _ = event_tx
-        .send(RuntimeToUiEvent::UsageTotalsChanged {
+        .send(RuntimeToServerEvent::UsageTotalsChanged {
             total_tokens: snapshot.total_tokens,
             total_cached_tokens: snapshot.total_cached_tokens,
         })

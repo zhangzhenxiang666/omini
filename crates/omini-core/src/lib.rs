@@ -16,7 +16,7 @@ pub mod util;
 use crate::runtime::AgentRuntime;
 use crate::types::display as display_types;
 use crate::types::events as event_types;
-use crate::types::events::{ActiveProfile, RuntimeToUiEvent, UiToRuntimeEvent};
+use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
 use crate::types::subagents as subagent_types;
 use omini_protocol as protocol;
 use omini_protocol::RuntimeEvent;
@@ -54,10 +54,10 @@ impl std::error::Error for CoreError {}
 ///
 /// `omini-server::runtime::RuntimeSession` 为每个 daemon 会话持有一个
 /// `AgentCoreSession`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
-/// 转成 core 内部的 `UiToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
+/// 转成 core 内部的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
 /// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
 ///
-/// 这个类型目前还承担 core 到 protocol 的适配：内部 `RuntimeToUiEvent` 会被编码成
+/// 这个类型目前还承担 core 到 protocol 的适配：内部 `RuntimeToServerEvent` 会被编码成
 /// `omini_protocol::RuntimeEvent`，并尽量附带 typed overlay 供新客户端消费。新增事件时
 /// 要同步考虑 `key_runtime_event_from_internal`，否则 server/TUI 只能看到 legacy payload。
 ///
@@ -66,8 +66,8 @@ impl std::error::Error for CoreError {}
 /// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
 pub struct AgentCoreSession {
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
-    request_tx: mpsc::Sender<UiToRuntimeEvent>,
-    // runtime UI 事件在 fanout 任务中转成协议事件后广播给 server。
+    request_tx: mpsc::Sender<ServerToRuntimeEvent>,
+    // runtime 输出事件在 fanout 任务中转成协议事件后广播给 server。
     event_tx: broadcast::Sender<RuntimeEvent>,
     // 持久化事件保持 core 内部形态，由 server 负责事务、replay 裁剪和错误处理。
     persistence_tx: broadcast::Sender<crate::persistence::RuntimePersistenceEvent>,
@@ -79,7 +79,7 @@ pub struct AgentCoreSession {
     capabilities: Arc<crate::runtime::CapabilityStore>,
     // agent runtime 主循环：消费 request_tx 输入并驱动模型、工具、权限和内部事件。
     _runtime_handle: JoinHandle<()>,
-    // runtime 事件 fanout：把 RuntimeToUiEvent 编码成 RuntimeEvent 并广播给 server。
+    // runtime 事件 fanout：把 RuntimeToServerEvent 编码成 RuntimeEvent 并广播给 server。
     _fanout_handle: JoinHandle<()>,
     // 持久化事件 fanout：把 core 产生的 RuntimePersistenceEvent 广播给 server 落盘。
     _persistence_handle: JoinHandle<()>,
@@ -89,7 +89,7 @@ impl AgentCoreSession {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
     /// 返回值是 server 唯一需要持有的 core 会话句柄。runtime 本身只消费
-    /// `UiToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转换成 server
+    /// `ServerToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转换成 server
     /// 能广播的协议事件，并把持久化事件转成 broadcast stream。
     pub fn spawn(
         settings: crate::types::config::Settings,
@@ -104,10 +104,10 @@ impl AgentCoreSession {
         active_profile: ActiveProfile,
     ) -> Self {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
-        let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToUiEvent>(512);
+        let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
             mpsc::channel::<crate::persistence::RuntimePersistenceEvent>(512);
-        let (request_tx, request_rx) = mpsc::channel::<UiToRuntimeEvent>(512);
+        let (request_tx, request_rx) = mpsc::channel::<ServerToRuntimeEvent>(512);
         let (event_tx, _) = broadcast::channel::<RuntimeEvent>(512);
         let (persistence_tx, _) =
             broadcast::channel::<crate::persistence::RuntimePersistenceEvent>(512);
@@ -197,7 +197,7 @@ impl AgentCoreSession {
         &self,
         snapshot: event_types::LoadedSession,
     ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::SessionSelected { snapshot })
+        self.send_to_runtime(ServerToRuntimeEvent::HydrateSessionSnapshot { snapshot })
             .await
     }
 
@@ -282,29 +282,29 @@ impl AgentCoreSession {
     ) -> Result<protocol::RunSubmittedResponse, CoreError> {
         let event = match request.mode {
             protocol::RunInputMode::Submit => {
-                UiToRuntimeEvent::SendMessage(user_input_from_protocol(request.input))
+                ServerToRuntimeEvent::SendMessage(user_input_from_protocol(request.input))
             }
             protocol::RunInputMode::Intervene => {
-                UiToRuntimeEvent::InterveneMessage(user_input_from_protocol(request.input))
+                ServerToRuntimeEvent::InterveneMessage(user_input_from_protocol(request.input))
             }
         };
-        self.send_runtime_event(event).await?;
+        self.send_to_runtime(event).await?;
         Ok(protocol::RunSubmittedResponse {
             run_id: "current".to_string(),
         })
     }
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::CancelRun).await
+        self.send_to_runtime(ServerToRuntimeEvent::CancelRun).await
     }
 
     pub async fn compact_context(&self, instructions: Option<String>) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::CompactContext { instructions })
+        self.send_to_runtime(ServerToRuntimeEvent::CompactContext { instructions })
             .await
     }
 
     pub async fn toggle_active_profile(&self) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::ToggleActiveProfile)
+        self.send_to_runtime(ServerToRuntimeEvent::ToggleActiveProfile)
             .await
     }
 
@@ -312,7 +312,7 @@ impl AgentCoreSession {
         &self,
         request: protocol::SetActiveProfileRequest,
     ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::SetActiveProfile(
+        self.send_to_runtime(ServerToRuntimeEvent::SetActiveProfile(
             active_profile_from_protocol(request.profile),
         ))
         .await
@@ -332,7 +332,7 @@ impl AgentCoreSession {
             settings.model = request.model.clone();
             settings.thinking_effort = thinking_effort;
         }
-        self.send_runtime_event(UiToRuntimeEvent::ModelSelected {
+        self.send_to_runtime(ServerToRuntimeEvent::ModelSelected {
             provider: request.provider,
             model: request.model,
             thinking_effort,
@@ -350,7 +350,7 @@ impl AgentCoreSession {
             settings.thinking_effort =
                 settings.effective_current_thinking_effort(Some(requested_effort));
         }
-        self.send_runtime_event(UiToRuntimeEvent::SetThinkingEffort(requested_effort))
+        self.send_to_runtime(ServerToRuntimeEvent::SetThinkingEffort(requested_effort))
             .await
     }
 
@@ -358,7 +358,7 @@ impl AgentCoreSession {
         &self,
         request: protocol::SetThinkingDisplayRequest,
     ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::SetThinkingDisplay { show: request.show })
+        self.send_to_runtime(ServerToRuntimeEvent::SetThinkingDisplay { show: request.show })
             .await
     }
 
@@ -367,7 +367,7 @@ impl AgentCoreSession {
         tool_use_id: String,
         request: protocol::ResolveToolPauseRequest,
     ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::ResolveToolPause {
+        self.send_to_runtime(ServerToRuntimeEvent::ResolveToolPause {
             tool_use_id,
             response: tool_pause_response_from_protocol(request.response),
         })
@@ -379,7 +379,7 @@ impl AgentCoreSession {
         plan_id: String,
         request: protocol::ResolvePlanRequest,
     ) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::ResolvePlanApproval {
+        self.send_to_runtime(ServerToRuntimeEvent::ResolvePlanApproval {
             plan_id,
             action: plan_approval_action_from_protocol(request.action),
         })
@@ -387,19 +387,19 @@ impl AgentCoreSession {
     }
 
     pub async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::SubagentRegistryChanged)
+        self.send_to_runtime(ServerToRuntimeEvent::SubagentRegistryChanged)
             .await
     }
 
     pub async fn shutdown(&self) -> Result<(), CoreError> {
-        self.send_runtime_event(UiToRuntimeEvent::ShutdownRequested)
+        self.send_to_runtime(ServerToRuntimeEvent::CloseRuntime)
             .await
     }
 
     /// 向 runtime 投递一个已通过 server 校验的内部事件。
     ///
     /// channel 关闭意味着对应会话的 runtime 已退出，调用方应把它视为 core 会话不可用。
-    async fn send_runtime_event(&self, event: UiToRuntimeEvent) -> Result<(), CoreError> {
+    async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
         self.request_tx
             .send(event)
             .await
@@ -416,24 +416,28 @@ fn runtime_event_kind(payload: &serde_json::Value) -> String {
 }
 
 fn key_runtime_event_from_internal(
-    event: &event_types::RuntimeToUiEvent,
+    event: &event_types::RuntimeToServerEvent,
 ) -> Option<protocol::KeyRuntimeEvent> {
     match event {
-        event_types::RuntimeToUiEvent::RunStarted => Some(protocol::KeyRuntimeEvent::RunStarted),
-        event_types::RuntimeToUiEvent::RunFinished => Some(protocol::KeyRuntimeEvent::RunFinished),
-        event_types::RuntimeToUiEvent::Notification(notification) => Some(
+        event_types::RuntimeToServerEvent::RunStarted => {
+            Some(protocol::KeyRuntimeEvent::RunStarted)
+        }
+        event_types::RuntimeToServerEvent::RunFinished => {
+            Some(protocol::KeyRuntimeEvent::RunFinished)
+        }
+        event_types::RuntimeToServerEvent::Notification(notification) => Some(
             protocol::KeyRuntimeEvent::Notification(protocol::NotificationEvent {
                 level: notification_level_to_protocol(notification.kind),
                 message: notification.message.clone(),
                 details: notification.details.clone(),
             }),
         ),
-        event_types::RuntimeToUiEvent::ActiveProfileChanged(profile) => {
+        event_types::RuntimeToServerEvent::ActiveProfileChanged(profile) => {
             Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
                 protocol::ActiveProfileChangedEvent { profile: *profile },
             ))
         }
-        event_types::RuntimeToUiEvent::ToolPauseRequested(request) => Some(
+        event_types::RuntimeToServerEvent::ToolPauseRequested(request) => Some(
             protocol::KeyRuntimeEvent::ToolPauseRequested(protocol::ToolPauseRequestedEvent {
                 tool_use_id: request.tool_use_id.clone(),
                 tool_name: request.tool_name.clone(),
@@ -449,20 +453,20 @@ fn key_runtime_event_from_internal(
                 source_agent_label: request.source_agent_label.clone(),
             }),
         ),
-        event_types::RuntimeToUiEvent::PlanSubmitted(plan) => Some(
+        event_types::RuntimeToServerEvent::PlanSubmitted(plan) => Some(
             protocol::KeyRuntimeEvent::PlanSubmitted(protocol::PlanSubmittedEvent {
                 plan_id: plan.id.clone(),
                 title: plan.title.clone(),
                 markdown: plan.markdown.clone(),
             }),
         ),
-        event_types::RuntimeToUiEvent::PlanApprovalResolved { plan_id, action } => Some(
+        event_types::RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => Some(
             protocol::KeyRuntimeEvent::PlanApprovalResolved(protocol::PlanApprovalResolvedEvent {
                 plan_id: plan_id.clone(),
                 action: *action,
             }),
         ),
-        event_types::RuntimeToUiEvent::CompactSummaryStarted(event) => {
+        event_types::RuntimeToServerEvent::CompactSummaryStarted(event) => {
             Some(protocol::KeyRuntimeEvent::CompactSummaryStarted(
                 protocol::CompactSummaryStartedEvent {
                     trigger: event.trigger,
@@ -471,7 +475,7 @@ fn key_runtime_event_from_internal(
                 },
             ))
         }
-        event_types::RuntimeToUiEvent::CompactSummaryDelta(event) => Some(
+        event_types::RuntimeToServerEvent::CompactSummaryDelta(event) => Some(
             protocol::KeyRuntimeEvent::CompactSummaryDelta(protocol::CompactSummaryDeltaEvent {
                 trigger: event.trigger,
                 delta: event.delta.clone(),
@@ -479,7 +483,7 @@ fn key_runtime_event_from_internal(
                 agent_label: event.agent_label.clone(),
             }),
         ),
-        event_types::RuntimeToUiEvent::CompactSummaryFinished(event) => {
+        event_types::RuntimeToServerEvent::CompactSummaryFinished(event) => {
             Some(protocol::KeyRuntimeEvent::CompactSummaryFinished(
                 protocol::CompactSummaryFinishedEvent {
                     trigger: event.trigger,
@@ -490,7 +494,7 @@ fn key_runtime_event_from_internal(
                 },
             ))
         }
-        event_types::RuntimeToUiEvent::CompactSummaryFailed(event) => Some(
+        event_types::RuntimeToServerEvent::CompactSummaryFailed(event) => Some(
             protocol::KeyRuntimeEvent::CompactSummaryFailed(protocol::CompactSummaryFailedEvent {
                 trigger: event.trigger,
                 message: event.message.clone(),
@@ -498,7 +502,7 @@ fn key_runtime_event_from_internal(
                 agent_label: event.agent_label.clone(),
             }),
         ),
-        event_types::RuntimeToUiEvent::SessionChanged {
+        event_types::RuntimeToServerEvent::SessionSnapshot {
             session_id,
             messages,
             subagents,
@@ -780,8 +784,9 @@ mod tests {
 
     #[test]
     fn active_profile_changed_has_typed_overlay() {
-        let event =
-            event_types::RuntimeToUiEvent::ActiveProfileChanged(event_types::ActiveProfile::Plan);
+        let event = event_types::RuntimeToServerEvent::ActiveProfileChanged(
+            event_types::ActiveProfile::Plan,
+        );
 
         assert_eq!(
             super::key_runtime_event_from_internal(&event),
@@ -795,7 +800,7 @@ mod tests {
 
     #[test]
     fn compact_summary_finished_has_typed_overlay() {
-        let event = event_types::RuntimeToUiEvent::CompactSummaryFinished(
+        let event = event_types::RuntimeToServerEvent::CompactSummaryFinished(
             event_types::CompactSummaryFinishedEvent {
                 trigger: event_types::CompactTrigger::Manual,
                 summary: "summary".to_string(),
@@ -821,7 +826,7 @@ mod tests {
 
     #[test]
     fn plan_approval_resolved_has_typed_overlay() {
-        let event = event_types::RuntimeToUiEvent::PlanApprovalResolved {
+        let event = event_types::RuntimeToServerEvent::PlanApprovalResolved {
             plan_id: "plan_1".to_string(),
             action: event_types::PlanApprovalAction::ContinueDiscussing,
         };

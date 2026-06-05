@@ -10,7 +10,7 @@ use crate::tools::ToolRegistry;
 use crate::types::config::Settings;
 use crate::types::display::{DisplayMessage, HistoryItem};
 use crate::types::events::{
-    ActiveProfile, RuntimeToUiEvent, SessionUsageSnapshot, UiToRuntimeEvent,
+    ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent, SessionUsageSnapshot,
 };
 use crate::types::message::Message;
 use std::sync::Arc;
@@ -55,20 +55,20 @@ pub(super) fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
 
 /// Agent 运行时。
 ///
-/// 维护自己的对话历史，通过 channel 与 UI 双向通信。
-/// 一次 `UiToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用和工具执行，
+/// 维护自己的对话历史，通过 channel 与 server/facade 双向通信。
+/// 一次 `ServerToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用和工具执行，
 /// 直到 LLM 自然结束或达到最大轮次。
 pub struct AgentRuntime {
     /// 当前会话 ID，第一次提交时生成。
     pub(crate) session_id: Option<String>,
     /// 创建后缓存的会话目录句柄。
     pub(crate) session_dir: Option<SessionDir>,
-    /// 向 UI 发送事件。
-    pub(super) event_tx: mpsc::Sender<RuntimeToUiEvent>,
-    /// 向外部 server 转发 UI/SQLite 级持久化事件。
+    /// 向 server/facade 发送 runtime 事件。
+    pub(super) event_tx: mpsc::Sender<RuntimeToServerEvent>,
+    /// 向外部 server 转发展示/SQLite 级持久化事件。
     pub(super) persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-    /// 接收 UI 发来的请求。
-    pub(super) request_rx: mpsc::Receiver<UiToRuntimeEvent>,
+    /// 接收 server/facade 投递的 runtime 命令。
+    pub(super) request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
     /// 运行时配置。
     pub(crate) settings: Settings,
     /// 当前项目目录。
@@ -99,9 +99,9 @@ pub struct AgentRuntime {
 
 impl AgentRuntime {
     pub fn new(
-        event_tx: mpsc::Sender<RuntimeToUiEvent>,
+        event_tx: mpsc::Sender<RuntimeToServerEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<UiToRuntimeEvent>,
+        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
         settings: Settings,
         project: ProjectDir,
     ) -> Self {
@@ -116,9 +116,9 @@ impl AgentRuntime {
     }
 
     pub fn new_with_active_profile(
-        event_tx: mpsc::Sender<RuntimeToUiEvent>,
+        event_tx: mpsc::Sender<RuntimeToServerEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<UiToRuntimeEvent>,
+        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
         settings: Settings,
         project: ProjectDir,
         active_profile: ActiveProfile,
@@ -136,9 +136,9 @@ impl AgentRuntime {
     }
 
     pub(crate) fn with_capability_handles(
-        event_tx: mpsc::Sender<RuntimeToUiEvent>,
+        event_tx: mpsc::Sender<RuntimeToServerEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<UiToRuntimeEvent>,
+        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
         mut settings: Settings,
         project: ProjectDir,
         handles: RuntimeCapabilityHandles,
@@ -168,19 +168,19 @@ impl AgentRuntime {
         ));
 
         for diagnostic in &subagent_registry.diagnostics {
-            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
+            let _ = event_tx.try_send(RuntimeToServerEvent::warning(format!(
                 "Subagent: {}",
                 diagnostic.message()
             )));
         }
         for diagnostic in &skill_registry.diagnostics {
-            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
+            let _ = event_tx.try_send(RuntimeToServerEvent::warning(format!(
                 "Skill: {}",
                 diagnostic.message()
             )));
         }
         for diagnostic in permission_engine.diagnostics() {
-            let _ = event_tx.try_send(RuntimeToUiEvent::warning(format!(
+            let _ = event_tx.try_send(RuntimeToServerEvent::warning(format!(
                 "Permission: {diagnostic}"
             )));
         }
@@ -318,7 +318,9 @@ mod tests {
         &text.text
     }
 
-    fn drain_events(event_rx: &mut mpsc::Receiver<RuntimeToUiEvent>) -> Vec<RuntimeToUiEvent> {
+    fn drain_events(
+        event_rx: &mut mpsc::Receiver<RuntimeToServerEvent>,
+    ) -> Vec<RuntimeToServerEvent> {
         let mut events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
             events.push(event);
@@ -397,14 +399,14 @@ mod tests {
             .position(|event| {
                 matches!(
                     event,
-                    RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(message))
+                    RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(message))
                         if text_content(message) == "hello"
                 )
             })
             .expect("user message should be echoed to UI");
         let started = events
             .iter()
-            .position(|event| matches!(event, RuntimeToUiEvent::RunStarted))
+            .position(|event| matches!(event, RuntimeToServerEvent::RunStarted))
             .expect("run should start");
         assert!(injected < started);
     }
@@ -442,7 +444,7 @@ mod tests {
 
         let mut profiles = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::ActiveProfileChanged(profile) = event {
+            if let RuntimeToServerEvent::ActiveProfileChanged(profile) = event {
                 profiles.push(profile);
             }
         }
@@ -499,7 +501,7 @@ mod tests {
         let profiles: Vec<_> = drain_events(&mut event_rx)
             .into_iter()
             .filter_map(|event| match event {
-                RuntimeToUiEvent::ActiveProfileChanged(profile) => Some(profile),
+                RuntimeToServerEvent::ActiveProfileChanged(profile) => Some(profile),
                 _ => None,
             })
             .collect();
@@ -519,7 +521,7 @@ mod tests {
         let profiles: Vec<_> = drain_events(&mut event_rx)
             .into_iter()
             .filter_map(|event| match event {
-                RuntimeToUiEvent::ActiveProfileChanged(profile) => Some(profile),
+                RuntimeToServerEvent::ActiveProfileChanged(profile) => Some(profile),
                 _ => None,
             })
             .collect();
@@ -835,7 +837,7 @@ mod tests {
         assert!(events.iter().any(|event| {
             matches!(
                 event,
-                RuntimeToUiEvent::Notification(notification)
+                RuntimeToServerEvent::Notification(notification)
                     if notification.kind == NotificationKind::Warn
                         && notification.message.contains("还不需要压缩")
             )
@@ -898,7 +900,7 @@ mod tests {
 
         let mut saw_short_approval_event = false;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(message)) = event
+            if let RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(message)) = event
                 && text_content(&message) == "Approved. Implement the proposed plan now."
             {
                 saw_short_approval_event = true;
@@ -980,7 +982,7 @@ mod tests {
 
         let mut saw_resolved = false;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::PlanApprovalResolved { plan_id, action } = event {
+            if let RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } = event {
                 assert_eq!(plan_id, "plan_1");
                 assert_eq!(action, PlanApprovalAction::ContinueDiscussing);
                 saw_resolved = true;
@@ -1061,7 +1063,7 @@ mod tests {
 
         let mut saw_new_session_event = false;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::SessionChanged {
+            if let RuntimeToServerEvent::SessionSnapshot {
                 session_id: Some(session_id),
                 messages,
                 ..
@@ -1129,7 +1131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_session_resets_active_profile_to_main_and_notifies_ui() {
+    async fn hydrate_session_snapshot_resets_active_profile_to_main_and_notifies_ui() {
         ensure_test_persistence().await;
 
         let root = unique_temp_root("switch-session-mode");
@@ -1159,7 +1161,7 @@ mod tests {
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime
-            .switch_session(LoadedSession {
+            .hydrate_session_snapshot(LoadedSession {
                 session_id: session_id.clone(),
                 provider: runtime.settings.active_provider.clone(),
                 model: runtime.settings.model.clone(),
@@ -1194,7 +1196,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             if matches!(
                 event,
-                RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Main)
+                RuntimeToServerEvent::ActiveProfileChanged(ActiveProfile::Main)
             ) {
                 saw_main_mode_event = true;
             }
@@ -1324,7 +1326,7 @@ mod tests {
         assert!(
             !drain_events(&mut event_rx)
                 .into_iter()
-                .any(|event| matches!(event, RuntimeToUiEvent::ToolPauseRequested(_)))
+                .any(|event| matches!(event, RuntimeToServerEvent::ToolPauseRequested(_)))
         );
 
         drop(engine_tx);
@@ -1377,7 +1379,7 @@ mod tests {
             .await
             .expect("ui pause event should arrive")
             .expect("ui event channel should stay open");
-        let RuntimeToUiEvent::ToolPauseRequested(req) = event else {
+        let RuntimeToServerEvent::ToolPauseRequested(req) = event else {
             panic!("expected tool pause event");
         };
         assert_eq!(req.tool_use_id, "tool_1");
@@ -1428,7 +1430,7 @@ mod tests {
             .await
             .expect("ui user message event should arrive")
             .expect("ui event channel should stay open");
-        let RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(event_message)) = event
+        let RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(event_message)) = event
         else {
             panic!("expected user message injection");
         };
@@ -1644,7 +1646,7 @@ mod tests {
 
         let mut last_usage = None;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::UsageChanged(snapshot) = event {
+            if let RuntimeToServerEvent::UsageChanged(snapshot) = event {
                 last_usage = Some(snapshot);
             }
         }

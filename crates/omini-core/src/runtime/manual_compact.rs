@@ -8,8 +8,10 @@ impl AgentRuntime {
             .force_compact_current_session(custom_instructions)
             .await
         {
-            self.send_event(RuntimeToUiEvent::Notification(Notification::warning(error)))
-                .await;
+            self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
+                error,
+            )))
+            .await;
         }
     }
 
@@ -60,23 +62,23 @@ impl AgentRuntime {
                     }
                     EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryStarted(event))
+                            .send(RuntimeToServerEvent::CompactSummaryStarted(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryDelta(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryDelta(event))
+                            .send(RuntimeToServerEvent::CompactSummaryDelta(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                         persist_compact_summary_event(&session_id, &event, &persistence_tx).await;
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryFinished(event))
+                            .send(RuntimeToServerEvent::CompactSummaryFinished(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                         let _ = event_tx
-                            .send(RuntimeToUiEvent::CompactSummaryFailed(event))
+                            .send(RuntimeToServerEvent::CompactSummaryFailed(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
@@ -111,7 +113,7 @@ impl AgentRuntime {
             Ok(outcome) => {
                 if compact_outcome_is_noop(&outcome) {
                     // 手动 compact 已经让 TUI 进入 working；无可压缩内容也要给一个终止事件。
-                    self.send_event(RuntimeToUiEvent::warning(
+                    self.send_event(RuntimeToServerEvent::warning(
                         "当前会话历史还不需要压缩".to_string(),
                     ))
                     .await;

@@ -731,29 +731,78 @@ impl SessionManager {
     }
 
     pub(crate) async fn close_session_if_idle(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
         session: &Arc<RuntimeSession>,
     ) {
-        let should_close = {
-            let presence = session.presence.lock().expect("presence lock poisoned");
-            if !presence.clients.is_empty() {
-                return;
-            }
-            let mut sessions = self.sessions.lock().expect("sessions lock poisoned");
-            let Some(current) = sessions.get(session_id) else {
-                return;
-            };
-            // 只关闭当前缓存里的同一个 Arc，避免旧连接清理时误关掉新建 runtime。
-            if Arc::ptr_eq(current, session) {
-                sessions.remove(session_id);
-                true
-            } else {
-                false
-            }
-        };
+        let mut events = session.subscribe();
 
-        if should_close && let Err(error) = session.shutdown().await {
+        if self.remove_session_if_reclaimable(session_id, session) {
+            Self::shutdown_session(session).await;
+            return;
+        }
+
+        if !self.should_wait_for_reclaim(session_id, session) {
+            return;
+        }
+
+        let manager = Arc::clone(self);
+        let session_id = session_id.to_string();
+        let session = Arc::clone(session);
+        tokio::spawn(async move {
+            while matches!(
+                events.recv().await,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_))
+            ) {
+                // RunFinished 后可能紧跟 PlanSubmitted。
+                // 先等投影状态稳定，再判断 runtime 是否可回收。
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if manager.remove_session_if_reclaimable(&session_id, &session) {
+                    Self::shutdown_session(&session).await;
+                    break;
+                }
+                if !manager.should_wait_for_reclaim(&session_id, &session) {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn remove_session_if_reclaimable(
+        &self,
+        session_id: &str,
+        session: &Arc<RuntimeSession>,
+    ) -> bool {
+        let presence = session.presence.lock().expect("presence lock poisoned");
+        if !presence.clients.is_empty() || !session.is_reclaimable() {
+            return false;
+        }
+        let mut sessions = self.sessions.lock().expect("sessions lock poisoned");
+        let Some(current) = sessions.get(session_id) else {
+            return false;
+        };
+        // 只关闭当前缓存里的同一个 Arc，避免旧连接清理时误关掉新建 runtime。
+        if Arc::ptr_eq(current, session) {
+            sessions.remove(session_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn should_wait_for_reclaim(&self, session_id: &str, session: &Arc<RuntimeSession>) -> bool {
+        let presence = session.presence.lock().expect("presence lock poisoned");
+        if !presence.clients.is_empty() || session.is_reclaimable() {
+            return false;
+        }
+        let sessions = self.sessions.lock().expect("sessions lock poisoned");
+        sessions
+            .get(session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+    }
+
+    async fn shutdown_session(session: &RuntimeSession) {
+        if let Err(error) = session.shutdown().await {
             eprintln!("runtime session shutdown failed: {error}");
         }
     }
@@ -1019,6 +1068,59 @@ thinking = true
     }
 
     #[tokio::test]
+    async fn save_agent_with_target_notifies_cached_session_agents() {
+        let temp = unique_temp_root("agent-save-target");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+        let session_id = manager
+            .create_session(protocol::CreateSessionRequest::default())
+            .await
+            .expect("session should create")
+            .session_id
+            .expect("session id should be returned");
+        let session = manager
+            .session(&session_id)
+            .await
+            .expect("session should load");
+        let mut events = session.subscribe_server_events();
+
+        manager
+            .save_agent(
+                protocol::SaveAgentRequest {
+                    source_kind: protocol::AgentSourceKind::Project,
+                    original_agent_id: None,
+                    draft: protocol::AgentDraft {
+                        name: "target-helper".to_string(),
+                        description: "Use when testing target refresh.".to_string(),
+                        instructions: "Refresh me.".to_string(),
+                        tools: Vec::new(),
+                        disallow_tools: Vec::new(),
+                        model: None,
+                    },
+                },
+                Some(&session_id),
+            )
+            .await
+            .expect("agent should save");
+
+        let event = events
+            .recv()
+            .await
+            .expect("agent update should be broadcast");
+        assert_eq!(event.kind, "agent_management_updated");
+        assert!(
+            event
+                .payload
+                .get("records")
+                .and_then(serde_json::Value::as_array)
+                .expect("records should be an array")
+                .iter()
+                .any(|record| record["name"] == "target-helper")
+        );
+        session.shutdown().await.expect("session should shut down");
+    }
+
+    #[tokio::test]
     async fn save_agent_rejects_built_in_source_kind() {
         let temp = unique_temp_root("agent-save-built-in");
         let cwd = temp.path.join("cwd");
@@ -1173,6 +1275,67 @@ thinking = true
             .shutdown()
             .await
             .expect("new runtime should shut down");
+    }
+
+    #[tokio::test]
+    async fn close_session_if_idle_keeps_active_runtime_without_clients() {
+        let temp = unique_temp_root("idle-active-runtime");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+        let manager = Arc::new(manager);
+        let session_id = manager
+            .create_session(protocol::CreateSessionRequest::default())
+            .await
+            .expect("session should create")
+            .session_id
+            .expect("session id should be returned");
+        let session = manager
+            .session(&session_id)
+            .await
+            .expect("session should load");
+        session.record_runtime_event_for_test("run_started");
+
+        manager.close_session_if_idle(&session_id, &session).await;
+
+        assert!(
+            manager
+                .sessions
+                .lock()
+                .expect("sessions lock poisoned")
+                .contains_key(&session_id)
+        );
+        session.shutdown().await.expect("session should shut down");
+    }
+
+    #[tokio::test]
+    async fn active_runtime_without_clients_reclaims_after_run_finishes() {
+        let temp = unique_temp_root("idle-active-runtime-reclaim");
+        let cwd = temp.path.join("cwd");
+        let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
+        let manager = Arc::new(manager);
+        let session_id = manager
+            .create_session(protocol::CreateSessionRequest::default())
+            .await
+            .expect("session should create")
+            .session_id
+            .expect("session id should be returned");
+        let session = manager
+            .session(&session_id)
+            .await
+            .expect("session should load");
+        session.record_runtime_event_for_test("run_started");
+
+        manager.close_session_if_idle(&session_id, &session).await;
+        session.record_runtime_event_for_test("run_finished");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(
+            !manager
+                .sessions
+                .lock()
+                .expect("sessions lock poisoned")
+                .contains_key(&session_id)
+        );
     }
 
     #[tokio::test]

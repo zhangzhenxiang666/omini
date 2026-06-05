@@ -8,13 +8,13 @@ pub use omini_domain::events::*;
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
-// 第一层：UI → Runtime 的事件
+// 第一层：Server → Runtime 的事件
 // ===========================================================================
 
-/// UI → Runtime 的事件。
+/// Server/facade → Runtime 的事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum UiToRuntimeEvent {
+pub enum ServerToRuntimeEvent {
     /// 用户取消当前正在运行的对话
     CancelRun,
     /// 用户发送一条消息给 runtime
@@ -25,8 +25,6 @@ pub enum UiToRuntimeEvent {
     SetThinkingEffort(ThinkingEffort),
     /// 用户请求调整 thinking 块显示偏好。
     SetThinkingDisplay { show: Option<bool> },
-    /// 用户请求关闭程序。
-    ShutdownRequested,
     /// 用户切换当前 active profile
     ToggleActiveProfile,
     /// 用户显式设置当前 active profile
@@ -39,8 +37,10 @@ pub enum UiToRuntimeEvent {
         model: String,
         thinking_effort: Option<ThinkingEffort>,
     },
-    /// 外部 server 已加载会话快照，要求 runtime 切换到该会话。
-    SessionSelected { snapshot: LoadedSession },
+    /// 外部 server 已加载会话快照，要求 runtime hydrate 当前会话状态。
+    HydrateSessionSnapshot { snapshot: LoadedSession },
+    /// server 正在回收该 session runtime。
+    CloseRuntime,
     /// server 已完成 agent 文件变更，要求 runtime 刷新当前会话可用的 subagent 能力。
     SubagentRegistryChanged,
     /// 用户响应工具暂停请求
@@ -64,7 +64,7 @@ pub enum UiToRuntimeEvent {
 /// Runtime 消费此事件后负责：
 /// 1. 更新内部 `messages` 状态
 /// 2. 增量持久化
-/// 3. 翻译为 `RuntimeToUiEvent` 转发给 UI
+/// 3. 翻译为 `RuntimeToServerEvent` 转发给 server
 #[derive(Debug, Clone)]
 pub enum EngineToRuntimeEvent {
     /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。
@@ -83,7 +83,7 @@ pub enum EngineToRuntimeEvent {
     ToolResultsDisplayProduced(Message),
 
     /// 当前轮完整结束（助理消息 + 工具结果均已产出）。
-    /// Runtime 收到后转发 `RuntimeToUiEvent::TurnEnded` 给 UI。
+    /// Runtime 收到后转发 `RuntimeToServerEvent::TurnEnded` 给 server。
     TurnEnded,
 
     /// 新一轮 LLM 调用开始
@@ -142,27 +142,24 @@ pub enum EngineToRuntimeEvent {
 }
 
 // ===========================================================================
-// 第三层：Runtime → UI 的事件
+// 第三层：Runtime → Server 的事件
 // ===========================================================================
 
-/// Runtime → UI 的事件。
+/// Runtime → Server/facade 的事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum RuntimeToUiEvent {
+pub enum RuntimeToServerEvent {
     /// 用户输入已提交，运行时开始处理
     RunStarted,
-    /// Runtime 注入了一条用户消息，UI 需要显示到消息区
+    /// Runtime 注入了一条用户消息，客户端需要显示到消息区。
     UserMessageInjected(#[serde(with = "serde_runtime_event_payload::history_item")] HistoryItem),
     /// 所有轮次完成，运行结束
     RunFinished,
 
-    /// 请求关闭整个程序
-    Shutdown,
-
     /// 运行时产生的通知信息（显示在消息区，但不作为对话消息）
     Notification(Notification),
 
-    /// 模型已切换（TUI 更新状态栏用）
+    /// 模型已切换（客户端更新状态栏用）。
     ModelChanged {
         provider: String,
         model: String,
@@ -178,15 +175,15 @@ pub enum RuntimeToUiEvent {
         total_tokens: i64,
         total_cached_tokens: i64,
     },
-    /// 会话已切换
-    SessionChanged {
+    /// 当前会话快照已同步。
+    SessionSnapshot {
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
         subagents: Vec<SubagentSnapshot>,
         usage: SessionUsageSnapshot,
     },
 
-    /// 会话标题变更（TUI 头部栏显示用）
+    /// 会话标题变更（客户端头部栏显示用）。
     SessionTitleChanged { title: Option<String> },
     /// 当前 profile 已变更
     ActiveProfileChanged(#[serde(with = "serde_runtime_event_payload::profile")] ActiveProfile),
@@ -227,7 +224,7 @@ pub enum RuntimeToUiEvent {
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(ToolPauseRequest),
-    /// 计划已提交，TUI 应打开计划审批抽屉
+    /// 计划已提交，客户端应打开计划审批抽屉。
     PlanSubmitted(SubmittedPlan),
     /// 计划审批已被任一客户端处理，所有客户端都应关闭对应抽屉。
     PlanApprovalResolved {
@@ -247,7 +244,7 @@ pub enum RuntimeToUiEvent {
     SubagentFinished(SubagentFinishedEvent),
 }
 
-impl RuntimeToUiEvent {
+impl RuntimeToServerEvent {
     pub fn notice(message: impl Into<String>) -> Self {
         Self::Notification(Notification::info(message))
     }
@@ -347,20 +344,20 @@ mod serde_runtime_event_payload {
 #[cfg(test)]
 mod tests {
     use crate::types::display::{DisplayMessage, HistoryItem};
-    use crate::types::events::{ActiveProfile, RuntimeToUiEvent};
+    use crate::types::events::{ActiveProfile, RuntimeToServerEvent};
     use crate::types::message::{ContentBlock, Message, Role};
     use serde_json::json;
 
     #[test]
     fn runtime_event_newtype_payloads_serialize_as_tagged_maps() {
-        let value = serde_json::to_value(RuntimeToUiEvent::ThinkingDelta("思考".to_string()))
+        let value = serde_json::to_value(RuntimeToServerEvent::ThinkingDelta("思考".to_string()))
             .expect("serialize thinking delta");
         assert_eq!(value, json!({"type": "thinking_delta", "delta": "思考"}));
-        let decoded: RuntimeToUiEvent =
+        let decoded: RuntimeToServerEvent =
             serde_json::from_value(value).expect("deserialize thinking delta");
-        assert!(matches!(decoded, RuntimeToUiEvent::ThinkingDelta(delta) if delta == "思考"));
+        assert!(matches!(decoded, RuntimeToServerEvent::ThinkingDelta(delta) if delta == "思考"));
 
-        let value = serde_json::to_value(RuntimeToUiEvent::UserMessageInjected(
+        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected(
             HistoryItem::Display(DisplayMessage {
                 role: Role::User,
                 text: "@worker hello".to_string(),
@@ -379,7 +376,7 @@ mod tests {
                 }
             })
         );
-        let value = serde_json::to_value(RuntimeToUiEvent::UserMessageInjected(
+        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected(
             HistoryItem::Message(Message::new(
                 Role::User,
                 vec![ContentBlock::from_base64_image(
@@ -408,9 +405,10 @@ mod tests {
             })
         );
 
-        let value =
-            serde_json::to_value(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan))
-                .expect("serialize profile");
+        let value = serde_json::to_value(RuntimeToServerEvent::ActiveProfileChanged(
+            ActiveProfile::Plan,
+        ))
+        .expect("serialize profile");
         assert_eq!(
             value,
             json!({"type": "active_profile_changed", "profile": "plan"})

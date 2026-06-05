@@ -94,7 +94,8 @@ impl RuntimeStatusProjection {
             }
             // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
             "run_started" => self.start_query(now),
-            "run_finished" | "session_changed" => self.clear_active_run(),
+            "run_finished" => self.clear_active_run(),
+            kind if is_session_snapshot_kind(kind) => self.clear_active_run(),
             "turn_started" => self.mark_query_thinking(),
             "text_delta" => self.mark_query_working(),
             "thinking_delta" => self.mark_query_thinking(),
@@ -416,7 +417,7 @@ impl RuntimeStatusProjection {
     pub(super) fn state(&self) -> protocol::SessionRuntimeState {
         if self.compact_started_at.is_some() {
             protocol::SessionRuntimeState::Compacting
-        } else if !self.pending_pauses.is_empty() {
+        } else if !self.pending_pauses.is_empty() || self.pending_plan_approval.is_some() {
             protocol::SessionRuntimeState::Waiting
         } else if self.query_started_at.is_some() {
             self.query_state
@@ -649,6 +650,7 @@ mod tests {
             now,
         );
         let status = status_snapshot(&projection, now);
+        assert_eq!(status.state, protocol::SessionRuntimeState::Waiting);
         assert_eq!(
             status
                 .pending_plan_approval

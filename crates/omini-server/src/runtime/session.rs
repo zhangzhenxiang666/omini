@@ -206,7 +206,7 @@ impl RuntimeSession {
         records: Vec<omini_core::subagents::AgentRecord>,
     ) -> Result<(), CoreError> {
         let event = runtime_event_from_internal(
-            omini_core::types::events::RuntimeToUiEvent::AgentManagementUpdated { records },
+            omini_core::types::events::RuntimeToServerEvent::AgentManagementUpdated { records },
         )?;
         let _ = self.server_event_tx.send(event);
         Ok(())
@@ -217,6 +217,10 @@ impl RuntimeSession {
             .lock()
             .expect("status projection lock poisoned")
             .state()
+    }
+
+    pub(crate) fn is_reclaimable(&self) -> bool {
+        self.runtime_state() == protocol::SessionRuntimeState::Idle
     }
 
     pub(crate) async fn rename_session(&self, title: String) -> Result<(), CoreError> {
@@ -470,6 +474,23 @@ impl RuntimeSession {
 
     pub(crate) async fn shutdown(&self) -> Result<(), CoreError> {
         self.core.shutdown().await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_runtime_event_for_test(&self, kind: &str) {
+        let event = RuntimeEvent::new(
+            kind,
+            serde_json::json!({
+                "type": kind,
+            }),
+        );
+        self.status_projection
+            .lock()
+            .expect("status projection lock poisoned")
+            .record_event(&event, Utc::now());
+        let _ = self
+            .runtime_event_tx
+            .send(SequencedRuntimeEvent { seq: 0, event });
     }
 }
 

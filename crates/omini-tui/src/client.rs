@@ -448,7 +448,7 @@ async fn emit_blank_session(
     connection: &ProjectConnection,
 ) -> Result<(), String> {
     event_tx
-        .send(RuntimeToUiEvent::SessionChanged {
+        .send(RuntimeToUiEvent::SessionSnapshot {
             session_id: None,
             messages: Vec::new(),
             subagents: Vec::new(),
@@ -1660,13 +1660,7 @@ mod tests {
         }
     }
 
-    fn envelope_text(event: RuntimeToUiEvent) -> String {
-        let payload = serde_json::to_value(event).expect("event should serialize");
-        let kind = payload
-            .get("type")
-            .and_then(serde_json::Value::as_str)
-            .expect("event should have type")
-            .to_string();
+    fn runtime_event_envelope_text(kind: &str, payload: serde_json::Value) -> String {
         serde_json::to_string(&protocol::ServerEnvelope::Event {
             event: protocol::RuntimeEvent::new(kind, payload),
         })
@@ -1817,16 +1811,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_server_text_still_decodes_legacy_runtime_event() {
+    async fn handle_server_text_decodes_session_snapshot_event() {
         let (tx, mut rx) = mpsc::channel(4);
 
         let saw_runtime_status = handle_server_text(
-            &envelope_text(RuntimeToUiEvent::SessionChanged {
-                session_id: Some("session_1".to_string()),
-                messages: Vec::new(),
-                subagents: Vec::new(),
-                usage: Default::default(),
-            }),
+            &runtime_event_envelope_text(
+                "session_snapshot",
+                serde_json::json!({
+                    "type": "session_snapshot",
+                    "session_id": "session_1",
+                    "messages": [],
+                    "subagents": [],
+                    "usage": {
+                        "current_context_tokens": 0,
+                        "total_tokens": 0,
+                        "total_cached_tokens": 0,
+                        "context_window": null
+                    }
+                }),
+            ),
             &tx,
         )
         .await
@@ -1835,7 +1838,7 @@ mod tests {
         assert!(!saw_runtime_status);
         assert!(matches!(
             rx.recv().await,
-            Some(RuntimeToUiEvent::SessionChanged { .. })
+            Some(RuntimeToUiEvent::SessionSnapshot { .. })
         ));
     }
 }

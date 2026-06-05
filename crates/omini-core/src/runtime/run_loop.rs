@@ -10,13 +10,13 @@ impl AgentRuntime {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            UiToRuntimeEvent::SendMessage(draft) => {
+                            ServerToRuntimeEvent::SendMessage(draft) => {
                                 self.submit_user_message(draft).await;
                             }
-                            UiToRuntimeEvent::CompactContext { instructions } => {
+                            ServerToRuntimeEvent::CompactContext { instructions } => {
                                 self.compact_context(instructions.as_deref()).await;
                             }
-                            UiToRuntimeEvent::SetThinkingEffort(effort) => {
+                            ServerToRuntimeEvent::SetThinkingEffort(effort) => {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
@@ -27,47 +27,47 @@ impl AgentRuntime {
                                 )
                                 .await;
                             }
-                            UiToRuntimeEvent::SetThinkingDisplay { show } => {
+                            ServerToRuntimeEvent::SetThinkingDisplay { show } => {
                                 active_run::set_thinking_display(&self.project, show, &self.event_tx)
                                     .await;
                             }
-                            UiToRuntimeEvent::ShutdownRequested => {
-                                self.send_event(RuntimeToUiEvent::Shutdown).await;
-                            }
-                            UiToRuntimeEvent::ToggleActiveProfile => {
+                            ServerToRuntimeEvent::ToggleActiveProfile => {
                                 self.toggle_active_profile().await;
                             }
-                            UiToRuntimeEvent::SetActiveProfile(profile) => {
+                            ServerToRuntimeEvent::SetActiveProfile(profile) => {
                                 self.set_active_profile(profile);
-                                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                                self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
                                     self.active_profile(),
                                 ))
                                 .await;
                             }
-                            UiToRuntimeEvent::InterveneMessage(draft) => {
+                            ServerToRuntimeEvent::InterveneMessage(draft) => {
                                 let _ = draft;
-                                self.send_event(RuntimeToUiEvent::error(
+                                self.send_event(RuntimeToServerEvent::error(
                                     "Cannot intervene because no run is active".to_string(),
                                 ))
                                 .await;
                             }
-                            UiToRuntimeEvent::CancelRun => {
+                            ServerToRuntimeEvent::CancelRun => {
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.cancel_current_run();
                             }
-                            UiToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
+                            ServerToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 self.switch_model(&provider, &model, thinking_effort).await;
                             }
-                            UiToRuntimeEvent::SessionSelected { snapshot } => {
-                                self.switch_session(snapshot).await;
+                            ServerToRuntimeEvent::HydrateSessionSnapshot { snapshot } => {
+                                self.hydrate_session_snapshot(snapshot).await;
                             }
-                            UiToRuntimeEvent::SubagentRegistryChanged => {
+                            ServerToRuntimeEvent::CloseRuntime => {
+                                break;
+                            }
+                            ServerToRuntimeEvent::SubagentRegistryChanged => {
                                 self.reload_subagent_registry();
                             }
-                            UiToRuntimeEvent::ResolveToolPause { .. } => {
+                            ServerToRuntimeEvent::ResolveToolPause { .. } => {
                                 // 过期的权限响应可能在其他客户端已处理暂停、运行继续后抵达。
                             }
-                            UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
+                            ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 self.resolve_plan_approval(&plan_id, action).await;
                             }
                         }
@@ -111,7 +111,7 @@ impl AgentRuntime {
             ActiveProfile::Plan => ActiveProfile::Main,
         };
         self.set_active_profile(next);
-        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+        self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
             self.active_profile(),
         ))
         .await;
@@ -127,13 +127,13 @@ impl AgentRuntime {
         let submission = match draft.into_submission() {
             Ok(submission) => submission,
             Err(error) => {
-                self.send_event(RuntimeToUiEvent::error(error)).await;
+                self.send_event(RuntimeToServerEvent::error(error)).await;
                 return;
             }
         };
         let history_item = submission.clone().history_item();
         self.messages.push(submission.llm_message);
-        self.send_event(RuntimeToUiEvent::UserMessageInjected(history_item))
+        self.send_event(RuntimeToServerEvent::UserMessageInjected(history_item))
             .await;
         if let Some(display_message) = submission.display_message {
             self.process_run(RunStart::SplitDisplayMessage { display_message })
@@ -167,7 +167,7 @@ impl AgentRuntime {
         )
         .await;
 
-        self.send_event(RuntimeToUiEvent::RunStarted).await;
+        self.send_event(RuntimeToServerEvent::RunStarted).await;
         self.ensure_mcp_initialized().await;
         let tool_registry = self.tool_registry_snapshot();
 
@@ -177,7 +177,7 @@ impl AgentRuntime {
         let active_profile_handle = Arc::clone(&self.active_profile);
         let tool_pause_resolver = self.query_engine.tool_pause_resolver();
 
-        // 启动事件处理器独立 task，负责增量持久化和转发到 UI。
+        // 启动事件处理器独立 task，负责增量持久化和转发到 server。
         let processor = self
             .spawn_event_processor(
                 engine_rx,
@@ -231,38 +231,38 @@ impl AgentRuntime {
                     }
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            UiToRuntimeEvent::CancelRun => {
+                            ServerToRuntimeEvent::CancelRun => {
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.cancel_current_run();
                             }
-                            UiToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
+                            ServerToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
                                 if let Err(e) = self
                                     .query_engine
                                     .resolve_tool_pause(&tool_use_id, response)
                                 {
-                                    let _ = event_tx.send(RuntimeToUiEvent::error(e)).await;
+                                    let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
                                 }
                             }
-                            UiToRuntimeEvent::InterveneMessage(draft) => {
+                            ServerToRuntimeEvent::InterveneMessage(draft) => {
                                 let submission = match draft.into_submission() {
                                     Ok(submission) => submission,
                                     Err(error) => {
-                                        let _ = event_tx.send(RuntimeToUiEvent::error(error)).await;
+                                        let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
                                         continue;
                                     }
                                 };
                                 self.query_engine
                                     .enqueue_user_message(submission.llm_message);
                             }
-                            UiToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
+                            ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 let _ = (plan_id, action);
                                 let _ = event_tx
-                                    .send(RuntimeToUiEvent::error(
+                                    .send(RuntimeToServerEvent::error(
                                         "Cannot resolve plan approval while a run is active".to_string(),
                                     ))
                                     .await;
                             }
-                            UiToRuntimeEvent::SetThinkingEffort(effort) => {
+                            ServerToRuntimeEvent::SetThinkingEffort(effort) => {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
@@ -273,11 +273,11 @@ impl AgentRuntime {
                                 )
                                 .await;
                             }
-                            UiToRuntimeEvent::SetThinkingDisplay { show } => {
+                            ServerToRuntimeEvent::SetThinkingDisplay { show } => {
                                 active_run::set_thinking_display(&self.project, show, &event_tx)
                                     .await;
                             }
-                            UiToRuntimeEvent::ToggleActiveProfile => {
+                            ServerToRuntimeEvent::ToggleActiveProfile => {
                                 let mut active_profile = *active_profile_handle
                                     .read()
                                     .expect("active profile lock poisoned");
@@ -292,7 +292,7 @@ impl AgentRuntime {
                                     .write()
                                     .expect("active profile lock poisoned") = active_profile;
                             }
-                            UiToRuntimeEvent::SetActiveProfile(profile) => {
+                            ServerToRuntimeEvent::SetActiveProfile(profile) => {
                                 if profile == ActiveProfile::Plan {
                                     active_run::reject_request(&event_tx).await;
                                 } else {
@@ -305,14 +305,14 @@ impl AgentRuntime {
                                         profile,
                                     );
                                     let _ = event_tx
-                                        .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                                        .send(RuntimeToServerEvent::ActiveProfileChanged(profile))
                                         .await;
                                 }
                             }
-                            UiToRuntimeEvent::SubagentRegistryChanged => {
+                            ServerToRuntimeEvent::SubagentRegistryChanged => {
                                 active_run::reject_request(&event_tx).await;
                             }
-                            UiToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
+                            ServerToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 active_run::apply_model_selection(
                                     &mut self.settings,
                                     &mut self.llm_client,
@@ -331,10 +331,10 @@ impl AgentRuntime {
                                 )
                                 .await;
                             }
-                            UiToRuntimeEvent::SendMessage(_)
-                            | UiToRuntimeEvent::CompactContext { .. }
-                            | UiToRuntimeEvent::ShutdownRequested
-                            | UiToRuntimeEvent::SessionSelected { .. }
+                            ServerToRuntimeEvent::SendMessage(_)
+                            | ServerToRuntimeEvent::CompactContext { .. }
+                            | ServerToRuntimeEvent::HydrateSessionSnapshot { .. }
+                            | ServerToRuntimeEvent::CloseRuntime
                             => {
                                 active_run::reject_request(&event_tx).await;
                             }
@@ -349,15 +349,16 @@ impl AgentRuntime {
         let _ = processor.await;
 
         self.cancelled.store(false, Ordering::Relaxed);
-        self.send_event(RuntimeToUiEvent::RunFinished).await;
+        self.send_event(RuntimeToServerEvent::RunFinished).await;
 
         match self.persist_latest_proposed_plan().await {
             Ok(Some(plan)) => {
-                self.send_event(RuntimeToUiEvent::PlanSubmitted(plan)).await;
+                self.send_event(RuntimeToServerEvent::PlanSubmitted(plan))
+                    .await;
             }
             Ok(None) => {}
             Err(error) => {
-                self.send_event(RuntimeToUiEvent::error(error)).await;
+                self.send_event(RuntimeToServerEvent::error(error)).await;
             }
         }
     }
@@ -388,13 +389,13 @@ impl AgentRuntime {
         let event_tx = self.event_tx.clone();
         tokio::spawn(async move {
             for warning in manager.initialize().await {
-                let _ = event_tx.send(RuntimeToUiEvent::warning(warning)).await;
+                let _ = event_tx.send(RuntimeToServerEvent::warning(warning)).await;
             }
         });
     }
 
-    /// 发送事件到 UI，忽略 send 失败。
-    pub(crate) async fn send_event(&self, event: RuntimeToUiEvent) {
+    /// 发送事件到 server/facade，忽略 send 失败。
+    pub(crate) async fn send_event(&self, event: RuntimeToServerEvent) {
         let _ = self.event_tx.send(event).await;
     }
 }

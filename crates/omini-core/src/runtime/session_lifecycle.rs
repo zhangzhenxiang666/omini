@@ -2,8 +2,8 @@ use super::service::AgentRuntime;
 use super::*;
 
 impl AgentRuntime {
-    /// 切换会话，在 /sessions 交互完成后回调。
-    pub(super) async fn switch_session(&mut self, snapshot: LoadedSession) {
+    /// 从 server 提供的持久化快照 hydrate 当前 runtime 状态。
+    pub(super) async fn hydrate_session_snapshot(&mut self, snapshot: LoadedSession) {
         self.session_id = Some(snapshot.session_id.clone());
 
         let session_dir = self.project.session(&snapshot.session_id);
@@ -39,7 +39,7 @@ impl AgentRuntime {
         let runtime_messages = match session_dir.load_history() {
             Ok(messages) => messages,
             Err(e) => {
-                self.send_event(RuntimeToUiEvent::warning(format!(
+                self.send_event(RuntimeToServerEvent::warning(format!(
                     "加载 JSONL 历史失败，已降级使用 UI 消息快照: {e}"
                 )))
                 .await;
@@ -61,12 +61,12 @@ impl AgentRuntime {
         usage.context_window = self.current_context_window();
         *self.session_usage.lock().await = usage;
 
-        self.send_event(RuntimeToUiEvent::SessionTitleChanged {
+        self.send_event(RuntimeToServerEvent::SessionTitleChanged {
             title: snapshot.title.clone(),
         })
         .await;
 
-        self.send_event(RuntimeToUiEvent::ModelChanged {
+        self.send_event(RuntimeToServerEvent::ModelChanged {
             provider: snapshot.provider.clone(),
             model: snapshot.model.clone(),
             thinking_effort,
@@ -74,12 +74,12 @@ impl AgentRuntime {
         })
         .await;
 
-        self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+        self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
             self.active_profile(),
         ))
         .await;
 
-        self.send_event(RuntimeToUiEvent::SessionChanged {
+        self.send_event(RuntimeToServerEvent::SessionSnapshot {
             session_id: Some(snapshot.session_id),
             messages: snapshot.messages,
             subagents: snapshot.subagents,
@@ -130,7 +130,7 @@ impl AgentRuntime {
             .await
             .is_err()
         {
-            self.send_event(RuntimeToUiEvent::error(
+            self.send_event(RuntimeToServerEvent::error(
                 "Failed to forward session persistence event".to_string(),
             ))
             .await;
@@ -143,9 +143,9 @@ impl AgentRuntime {
             ..SessionUsageSnapshot::default()
         };
         *self.session_usage.lock().await = usage;
-        self.send_event(RuntimeToUiEvent::SessionTitleChanged { title: title_out })
+        self.send_event(RuntimeToServerEvent::SessionTitleChanged { title: title_out })
             .await;
-        self.send_event(RuntimeToUiEvent::SessionChanged {
+        self.send_event(RuntimeToServerEvent::SessionSnapshot {
             session_id: Some(session_id_out),
             messages: initial_display_message
                 .map(|item| vec![item])
@@ -173,7 +173,7 @@ mod tests {
     use crate::config::project::{ProjectDir, ProjectsDir};
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
     use crate::types::config::{ProviderType, Settings, ThinkingEffort};
-    use crate::types::events::{LoadedSession, RuntimeToUiEvent, SessionUsageSnapshot};
+    use crate::types::events::{LoadedSession, RuntimeToServerEvent, SessionUsageSnapshot};
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -260,7 +260,7 @@ mod tests {
         project: ProjectDir,
     ) -> (
         AgentRuntime,
-        mpsc::Receiver<RuntimeToUiEvent>,
+        mpsc::Receiver<RuntimeToServerEvent>,
         mpsc::Receiver<RuntimePersistenceEvent>,
     ) {
         let (event_tx, event_rx) = mpsc::channel(32);
@@ -296,7 +296,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_session_does_not_emit_effort_for_non_thinking_model() {
+    async fn hydrate_session_snapshot_does_not_emit_effort_for_non_thinking_model() {
         let temp = unique_temp_root("switch-session");
         let cwd = temp.path.join("cwd");
         let project = project_for(&temp.path, &cwd);
@@ -305,7 +305,7 @@ mod tests {
         while event_rx.try_recv().is_ok() {}
 
         runtime
-            .switch_session(LoadedSession {
+            .hydrate_session_snapshot(LoadedSession {
                 session_id: "s1".to_string(),
                 provider: "openai".to_string(),
                 model: "fast".to_string(),
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(runtime.settings.thinking_effort, None);
         let mut model_changed = None;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToUiEvent::ModelChanged {
+            if let RuntimeToServerEvent::ModelChanged {
                 thinking_effort, ..
             } = event
             {

@@ -3,7 +3,9 @@ use crate::config::project::ProjectDir;
 use crate::persistence::RuntimePersistenceEvent;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
-use crate::types::events::{ActiveProfile, Notification, RuntimeToUiEvent, SessionUsageSnapshot};
+use crate::types::events::{
+    ActiveProfile, Notification, RuntimeToServerEvent, SessionUsageSnapshot,
+};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -14,7 +16,7 @@ pub(super) async fn toggle_active_profile(
     active_profile: &mut ActiveProfile,
     settings: &mut Settings,
     capabilities: &CapabilityStore,
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
 ) {
     let next = match *active_profile {
         ActiveProfile::Main => ActiveProfile::Auto,
@@ -24,13 +26,13 @@ pub(super) async fn toggle_active_profile(
     *active_profile = next;
     rebuild_system_prompt(settings, capabilities, next);
     let _ = event_tx
-        .send(RuntimeToUiEvent::ActiveProfileChanged(next))
+        .send(RuntimeToServerEvent::ActiveProfileChanged(next))
         .await;
 }
 
-pub(super) async fn reject_request(event_tx: &mpsc::Sender<RuntimeToUiEvent>) {
+pub(super) async fn reject_request(event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
     let _ = event_tx
-        .send(RuntimeToUiEvent::error(
+        .send(RuntimeToServerEvent::error(
             "Cannot handle this request while a run is active".to_string(),
         ))
         .await;
@@ -71,7 +73,7 @@ pub(super) struct ModelSelection<'a> {
 }
 
 pub(super) struct RuntimeSinks<'a> {
-    pub(super) event_tx: &'a mpsc::Sender<RuntimeToUiEvent>,
+    pub(super) event_tx: &'a mpsc::Sender<RuntimeToServerEvent>,
     pub(super) persistence_tx: &'a mpsc::Sender<RuntimePersistenceEvent>,
     pub(super) usage_state: &'a Arc<Mutex<SessionUsageSnapshot>>,
 }
@@ -122,7 +124,7 @@ pub(super) async fn apply_model_selection(
 
         let _ = sinks
             .event_tx
-            .send(RuntimeToUiEvent::ModelChanged {
+            .send(RuntimeToServerEvent::ModelChanged {
                 provider: provider.to_string(),
                 model: model.to_string(),
                 thinking_effort: settings.thinking_effort,
@@ -133,7 +135,7 @@ pub(super) async fn apply_model_selection(
     } else {
         let _ = sinks
             .event_tx
-            .send(RuntimeToUiEvent::error(format!(
+            .send(RuntimeToServerEvent::error(format!(
                 "提供商 '{provider}' 不存在"
             )))
             .await;
@@ -145,7 +147,7 @@ pub(super) async fn apply_thinking_effort(
     project: &ProjectDir,
     session_id: Option<&str>,
     effort: ThinkingEffort,
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
     if effort != ThinkingEffort::None {
@@ -161,7 +163,7 @@ pub(super) async fn apply_thinking_effort(
             .is_some_and(|model| model.thinking);
         if !supports_thinking {
             let _ = event_tx
-                .send(RuntimeToUiEvent::error(format!(
+                .send(RuntimeToServerEvent::error(format!(
                     "当前模型 '{}' 不支持思考模式",
                     settings.model
                 )))
@@ -181,7 +183,7 @@ pub(super) async fn apply_thinking_effort(
             .is_err()
         {
             let _ = event_tx
-                .send(RuntimeToUiEvent::error("更新思考程度失败".to_string()))
+                .send(RuntimeToServerEvent::error("更新思考程度失败".to_string()))
                 .await;
             return;
         }
@@ -190,7 +192,9 @@ pub(super) async fn apply_thinking_effort(
             Ok(state) => state,
             Err(e) => {
                 let _ = event_tx
-                    .send(RuntimeToUiEvent::error(format!("读取项目状态失败: {e}")))
+                    .send(RuntimeToServerEvent::error(format!(
+                        "读取项目状态失败: {e}"
+                    )))
                     .await;
                 return;
             }
@@ -198,7 +202,9 @@ pub(super) async fn apply_thinking_effort(
         state.thinking_effort = effective_effort;
         if let Err(e) = project.save_state(&state) {
             let _ = event_tx
-                .send(RuntimeToUiEvent::error(format!("保存项目状态失败: {e}")))
+                .send(RuntimeToServerEvent::error(format!(
+                    "保存项目状态失败: {e}"
+                )))
                 .await;
             return;
         }
@@ -206,7 +212,7 @@ pub(super) async fn apply_thinking_effort(
 
     settings.thinking_effort = effective_effort;
     let _ = event_tx
-        .send(RuntimeToUiEvent::ModelChanged {
+        .send(RuntimeToServerEvent::ModelChanged {
             provider: settings.active_provider.clone(),
             model: settings.model.clone(),
             thinking_effort: settings.thinking_effort,
@@ -218,21 +224,21 @@ pub(super) async fn apply_thinking_effort(
 pub(super) async fn set_thinking_display(
     project: &ProjectDir,
     show: Option<bool>,
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
 ) {
     match apply_thinking_display(project, show) {
         Ok(show) => {
             let _ = event_tx
-                .send(RuntimeToUiEvent::ThinkingDisplayChanged { show })
+                .send(RuntimeToServerEvent::ThinkingDisplayChanged { show })
                 .await;
             let _ = event_tx
-                .send(RuntimeToUiEvent::Notification(
+                .send(RuntimeToServerEvent::Notification(
                     thinking_display_notification(show),
                 ))
                 .await;
         }
         Err(error) => {
-            let _ = event_tx.send(RuntimeToUiEvent::error(error)).await;
+            let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
         }
     }
 }
@@ -260,14 +266,14 @@ fn thinking_display_notification(show: bool) -> Notification {
 }
 
 async fn send_usage_snapshot(
-    event_tx: &mpsc::Sender<RuntimeToUiEvent>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
     settings: &Settings,
 ) {
     let context_window = current_context_window(settings);
     let mut snapshot = usage_state.lock().await;
     snapshot.context_window = context_window;
-    let event = RuntimeToUiEvent::UsageChanged(*snapshot);
+    let event = RuntimeToServerEvent::UsageChanged(*snapshot);
     drop(snapshot);
     let _ = event_tx.send(event).await;
 }

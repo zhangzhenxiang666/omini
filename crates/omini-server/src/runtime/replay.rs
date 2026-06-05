@@ -12,7 +12,7 @@ pub(crate) struct SequencedRuntimeEvent {
 pub(super) struct RuntimeReplayBuffer {
     // run_started 之前的用户注入事件先暂存，确保重连客户端能看到刚提交的输入。
     pending_prefix: Vec<SequencedRuntimeEvent>,
-    // run_started 是 replay 的锚点；run 结束或 session_changed 后会清空。
+    // run_started 是 replay 的锚点；run 结束或 session snapshot 后会清空。
     run_started: Option<SequencedRuntimeEvent>,
     // 当前 turn 尚未被持久化 snapshot 覆盖的尾部增量。
     current_tail: Vec<SequencedRuntimeEvent>,
@@ -52,7 +52,7 @@ impl RuntimeReplayBuffer {
                     self.pending_plan_approval = None;
                 }
             }
-            "session_changed" => {
+            kind if is_session_snapshot_kind(kind) => {
                 if self.run_started.is_some() || self.compact_started.is_some() {
                     self.clear();
                 } else {
@@ -263,6 +263,10 @@ pub(super) fn runtime_replay_kind(event: &RuntimeEvent) -> &str {
         .unwrap_or(event.kind.as_str())
 }
 
+pub(super) fn is_session_snapshot_kind(kind: &str) -> bool {
+    kind == "session_snapshot"
+}
+
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
 fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &LoadedSession) -> bool {
     if runtime_replay_kind(&event.event) != "user_message_injected" {
@@ -331,7 +335,7 @@ fn push_delta_block(blocks: &mut Vec<ContentBlock>, event: &SequencedRuntimeEven
 mod tests {
     use super::*;
     use omini_core::types::events::{
-        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, RuntimeToUiEvent,
+        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, RuntimeToServerEvent,
         SessionUsageSnapshot, SubmittedPlan,
     };
 
@@ -355,7 +359,7 @@ mod tests {
         }
     }
 
-    fn runtime_event(seq: u64, event: RuntimeToUiEvent) -> SequencedRuntimeEvent {
+    fn runtime_event(seq: u64, event: RuntimeToServerEvent) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
             event: runtime_event_from_internal(event).expect("event should encode"),
@@ -434,7 +438,7 @@ mod tests {
 
         buffer.record(runtime_event(
             1,
-            RuntimeToUiEvent::PlanSubmitted(SubmittedPlan {
+            RuntimeToServerEvent::PlanSubmitted(SubmittedPlan {
                 id: "plan_1".to_string(),
                 title: "Plan".to_string(),
                 markdown: "# Plan".to_string(),
@@ -447,7 +451,7 @@ mod tests {
 
         buffer.record(runtime_event(
             2,
-            RuntimeToUiEvent::PlanApprovalResolved {
+            RuntimeToServerEvent::PlanApprovalResolved {
                 plan_id: "plan_1".to_string(),
                 action: protocol::PlanApprovalAction::ContinueDiscussing,
             },
@@ -461,7 +465,7 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "user_message_injected"));
-        buffer.record(sequenced(2, "session_changed"));
+        buffer.record(sequenced(2, "session_snapshot"));
         buffer.record(sequenced(3, "run_started"));
 
         assert_eq!(
@@ -475,7 +479,7 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
         let item = HistoryItem::Message(Message::from_user_text("hello".to_string()));
         let event =
-            runtime_event_from_internal(RuntimeToUiEvent::UserMessageInjected(item.clone()))
+            runtime_event_from_internal(RuntimeToServerEvent::UserMessageInjected(item.clone()))
                 .expect("event should encode");
 
         buffer.record(SequencedRuntimeEvent { seq: 1, event });
@@ -557,7 +561,7 @@ mod tests {
         buffer.record(delta(4, "text_delta", "answer"));
         buffer.record(SequencedRuntimeEvent {
             seq: 5,
-            event: runtime_event_from_internal(RuntimeToUiEvent::ToolUse(
+            event: runtime_event_from_internal(RuntimeToServerEvent::ToolUse(
                 match assistant.content[2].clone() {
                     ContentBlock::ToolUse(tool_use) => tool_use,
                     _ => unreachable!(),
@@ -608,7 +612,7 @@ mod tests {
         buffer.record(sequenced(2, "turn_started"));
         buffer.record(SequencedRuntimeEvent {
             seq: 3,
-            event: runtime_event_from_internal(RuntimeToUiEvent::ToolResult(tool_result_event))
+            event: runtime_event_from_internal(RuntimeToServerEvent::ToolResult(tool_result_event))
                 .expect("event should encode"),
         });
         buffer.record_snapshot(&snapshot(vec![HistoryItem::Message(Message::new(
@@ -659,7 +663,7 @@ mod tests {
 
         buffer.record(runtime_event(
             1,
-            RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+            RuntimeToServerEvent::CompactSummaryStarted(CompactEvent {
                 trigger: CompactTrigger::Manual,
                 session_id: Some("s1".to_string()),
                 agent_label: None,
@@ -667,7 +671,7 @@ mod tests {
         ));
         buffer.record(runtime_event(
             2,
-            RuntimeToUiEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
+            RuntimeToServerEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
                 trigger: CompactTrigger::Manual,
                 delta: "partial".to_string(),
                 session_id: Some("s1".to_string()),
@@ -699,13 +703,13 @@ mod tests {
     }
 
     #[test]
-    fn replay_buffer_clears_active_run_on_session_changed() {
+    fn replay_buffer_clears_active_run_on_session_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "run_started"));
         buffer.record(sequenced(2, "turn_started"));
         buffer.record(delta(3, "text_delta", "hello"));
-        buffer.record(sequenced(4, "session_changed"));
+        buffer.record(sequenced(4, "session_snapshot"));
 
         assert!(buffer.replay().is_empty());
     }

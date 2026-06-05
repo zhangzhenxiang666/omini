@@ -10,7 +10,7 @@ impl AgentRuntime {
         match action {
             PlanApprovalAction::ContinueDiscussing => {
                 self.set_active_profile(ActiveProfile::Plan);
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
                     self.active_profile(),
                 ))
                 .await;
@@ -20,14 +20,14 @@ impl AgentRuntime {
                 let plan_message = Message::from_user_text(plan::approval_message());
                 self.send_plan_approval_resolved(plan_id, action).await;
                 self.set_active_profile(profile.active_profile());
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
                     self.active_profile(),
                 ))
                 .await;
                 self.messages.push(plan_message.clone());
-                self.send_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
-                    plan_message,
-                )))
+                self.send_event(RuntimeToServerEvent::UserMessageInjected(
+                    HistoryItem::Message(plan_message),
+                ))
                 .await;
                 self.process_run(RunStart::UserMessage).await;
             }
@@ -36,7 +36,7 @@ impl AgentRuntime {
                 let plan_content = match std::fs::read_to_string(&path) {
                     Ok(content) => content,
                     Err(e) => {
-                        self.send_event(RuntimeToUiEvent::error(format!(
+                        self.send_event(RuntimeToServerEvent::error(format!(
                             "无法压缩规划上下文，读取计划失败 {}: {e}",
                             path.display()
                         )))
@@ -55,7 +55,7 @@ impl AgentRuntime {
                     .await;
                 self.persist_compacted_plan_initial_message(plan_message)
                     .await;
-                self.send_event(RuntimeToUiEvent::ActiveProfileChanged(
+                self.send_event(RuntimeToServerEvent::ActiveProfileChanged(
                     self.active_profile(),
                 ))
                 .await;
@@ -65,7 +65,7 @@ impl AgentRuntime {
     }
 
     async fn send_plan_approval_resolved(&self, plan_id: &str, action: PlanApprovalAction) {
-        self.send_event(RuntimeToUiEvent::PlanApprovalResolved {
+        self.send_event(RuntimeToServerEvent::PlanApprovalResolved {
             plan_id: plan_id.to_string(),
             action,
         })
