@@ -25,9 +25,11 @@ const CLIENT_ID_HEADER: &str = "x-omini-client-id";
 pub(crate) enum ClientRequest {
     RunSubmitUserInput {
         input: protocol::UserInput,
+        client_echo_id: Option<String>,
     },
     RunInterveneInput {
         input: protocol::UserInput,
+        client_echo_id: Option<String>,
     },
     RunCancel,
     ProfileToggle,
@@ -911,25 +913,33 @@ async fn handle_local_request(
 ) -> Result<LocalAction, String> {
     // 返回 Switch/Blank 表示该请求要求外层退出当前 session loop。
     match request {
-        ClientRequest::RunSubmitUserInput { input } => {
+        ClientRequest::RunSubmitUserInput {
+            input,
+            client_echo_id,
+        } => {
             post_json::<_, protocol::RunSubmittedResponse>(
                 http,
                 &format!("{base}/runs"),
                 client_id,
                 &protocol::SubmitRunRequest {
                     input,
+                    client_echo_id,
                     mode: protocol::RunInputMode::Submit,
                 },
             )
             .await?;
         }
-        ClientRequest::RunInterveneInput { input } => {
+        ClientRequest::RunInterveneInput {
+            input,
+            client_echo_id,
+        } => {
             post_json::<_, protocol::RunSubmittedResponse>(
                 http,
                 &format!("{base}/runs"),
                 client_id,
                 &protocol::SubmitRunRequest {
                     input,
+                    client_echo_id,
                     mode: protocol::RunInputMode::Intervene,
                 },
             )
@@ -1122,6 +1132,7 @@ async fn handle_local_request(
                 client_id,
                 &protocol::SubmitRunRequest {
                     input: run_input,
+                    client_echo_id: None,
                     mode: protocol::RunInputMode::Submit,
                 },
             )

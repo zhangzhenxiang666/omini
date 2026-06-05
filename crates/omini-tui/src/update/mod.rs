@@ -981,6 +981,7 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
     let Some((name, args)) = parse_slash_command(&draft.text) else {
         return Some(ClientRequest::RunSubmitUserInput {
             input: protocol::user_input_from_draft(draft),
+            client_echo_id: None,
         });
     };
 
@@ -1011,7 +1012,10 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
                 prompt.push_str(&args);
             }
             input.text = prompt;
-            Some(ClientRequest::RunSubmitUserInput { input })
+            Some(ClientRequest::RunSubmitUserInput {
+                input,
+                client_echo_id: None,
+            })
         }
         "thinking" => match args.as_str() {
             "" => Some(ClientRequest::ThinkingDisplaySet { show: None }),
@@ -1110,11 +1114,13 @@ async fn handle_composer_key(
                             }
                         }
                     };
-                    state.messages.push(ui_message);
+                    let client_echo_id = uuid::Uuid::new_v4().to_string();
+                    state.push_optimistic_echo(ui_message, client_echo_id.clone());
                     state.mark_plan_mode_message_sent();
                     let _ = request_tx
                         .send(ClientRequest::RunSubmitUserInput {
                             input: protocol::user_input_from_draft(draft),
+                            client_echo_id: Some(client_echo_id),
                         })
                         .await;
                     state.scroll_offset = 0;

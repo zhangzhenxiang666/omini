@@ -34,19 +34,23 @@ impl AgentRuntime {
             while let Some(event) = engine_rx.recv().await {
                 match event {
                     // ===== 需要持久化的事件 =====
-                    EngineToRuntimeEvent::UserMessageProduced(msg) => {
+                    EngineToRuntimeEvent::UserMessageProduced {
+                        message,
+                        client_echo_id,
+                    } => {
                         history::persist_one(
                             &session_dir,
                             &session_id,
                             &blocks_dir,
-                            msg.clone(),
+                            message.clone(),
                             &persistence_tx,
                         )
                         .await;
                         let _ = event_tx
-                            .send(RuntimeToServerEvent::UserMessageInjected(
-                                HistoryItem::Message(msg),
-                            ))
+                            .send(RuntimeToServerEvent::UserMessageInjected {
+                                item: HistoryItem::Message(message),
+                                client_echo_id,
+                            })
                             .await;
                     }
                     EngineToRuntimeEvent::LlmHistoryProduced(msg) => {

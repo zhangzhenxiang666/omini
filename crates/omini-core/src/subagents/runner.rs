@@ -300,12 +300,12 @@ fn spawn_subagent_bridge(
     tokio::spawn(async move {
         while let Some(event) = child_rx.recv().await {
             match event {
-                EngineToRuntimeEvent::UserMessageProduced(msg) => {
+                EngineToRuntimeEvent::UserMessageProduced { message, .. } => {
                     let _ = parent_tx
                         .send(EngineToRuntimeEvent::SubagentMessageProduced(
                             SubagentMessageEvent {
                                 session_id: session_id.clone(),
-                                message: msg,
+                                message,
                                 persist_llm_history: true,
                             },
                         ))

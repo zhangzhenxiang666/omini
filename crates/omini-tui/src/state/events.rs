@@ -15,6 +15,19 @@ use std::collections::VecDeque;
 
 const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
 
+fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
+    match item {
+        HistoryItem::Message(message) => UiMessage::Message(message),
+        HistoryItem::Display(display) => UiMessage::Display(display),
+        HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+            text: plan.markdown,
+        },
+        HistoryItem::Summary(summary) => UiMessage::CompactSummary {
+            text: summary.markdown,
+        },
+    }
+}
+
 impl UiState {
     pub fn is_run_active(&self) -> bool {
         matches!(
@@ -36,7 +49,10 @@ impl UiState {
         Self::draft_from_inputs(&mut self.queued_user_inputs)
     }
 
-    pub fn take_queued_user_draft_for_intervention(&mut self) -> Option<UserDraft> {
+    pub fn take_queued_user_draft_for_intervention(
+        &mut self,
+        client_echo_id: String,
+    ) -> Option<UserDraft> {
         if !self.pending_intervention_inputs.is_empty() {
             return None;
         }
@@ -44,23 +60,41 @@ impl UiState {
         let pending = self.queued_user_inputs.drain(..).collect::<VecDeque<_>>();
         let draft = Self::draft_from_input_iter(pending.iter())?;
         self.pending_intervention_inputs = pending;
+        self.pending_intervention_client_echo_id = Some(client_echo_id);
         Some(draft)
     }
 
-    fn take_pending_intervention_ui_messages(&mut self) -> Vec<UiMessage> {
-        self.pending_intervention_inputs
+    fn take_pending_intervention_ui_messages(&mut self) -> (Vec<UiMessage>, Option<String>) {
+        let messages = self
+            .pending_intervention_inputs
             .drain(..)
-            .map(|draft| match draft.history_item() {
-                HistoryItem::Message(message) => UiMessage::Message(message),
-                HistoryItem::Display(display) => UiMessage::Display(display),
-                HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
-                    text: plan.markdown,
-                },
-                HistoryItem::Summary(summary) => UiMessage::CompactSummary {
-                    text: summary.markdown,
-                },
-            })
-            .collect()
+            .map(|draft| ui_message_from_history_item(draft.history_item()))
+            .collect();
+        (messages, self.pending_intervention_client_echo_id.take())
+    }
+
+    pub(crate) fn push_optimistic_echo(&mut self, ui_message: UiMessage, client_echo_id: String) {
+        self.extend_optimistic_echoes(vec![ui_message], client_echo_id);
+    }
+
+    pub(crate) fn extend_optimistic_echoes(
+        &mut self,
+        ui_messages: Vec<UiMessage>,
+        client_echo_id: String,
+    ) {
+        if ui_messages.is_empty() {
+            return;
+        }
+
+        let start = self.messages.len();
+        let count = ui_messages.len();
+        self.messages.extend(ui_messages);
+        self.pending_client_echoes
+            .insert(client_echo_id, (start..start + count).collect());
+    }
+
+    fn take_client_echo_positions(&mut self, client_echo_id: Option<&str>) -> Option<Vec<usize>> {
+        self.pending_client_echoes.remove(client_echo_id?)
     }
 
     fn draft_from_inputs(inputs: &mut VecDeque<UserDraft>) -> Option<UserDraft> {
@@ -251,19 +285,17 @@ impl UiState {
                 }
                 self.agent_status = AgentStatus::Thinking;
             }
-            RuntimeToUiEvent::UserMessageInjected(item) => {
+            RuntimeToUiEvent::UserMessageInjected {
+                item,
+                client_echo_id,
+            } => {
                 self.show_start_screen = false;
-                let ui_message = match item {
-                    HistoryItem::Message(message) => UiMessage::Message(message),
-                    HistoryItem::Display(display) => UiMessage::Display(display),
-                    HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
-                        text: plan.markdown,
-                    },
-                    HistoryItem::Summary(summary) => UiMessage::CompactSummary {
-                        text: summary.markdown,
-                    },
-                };
-                if self.messages.last() != Some(&ui_message) {
+                let ui_message = ui_message_from_history_item(item);
+                if self
+                    .take_client_echo_positions(client_echo_id.as_deref())
+                    .is_none()
+                    && self.messages.last() != Some(&ui_message)
+                {
                     self.messages.push(ui_message);
                 }
                 if self.auto_scroll {
@@ -352,8 +384,12 @@ impl UiState {
                 {
                     self.messages.push(UiMessage::Message(msg));
                 }
-                let pending_inputs = self.take_pending_intervention_ui_messages();
-                self.messages.extend(pending_inputs);
+                let (pending_inputs, client_echo_id) = self.take_pending_intervention_ui_messages();
+                if let Some(client_echo_id) = client_echo_id {
+                    self.extend_optimistic_echoes(pending_inputs, client_echo_id);
+                } else {
+                    self.messages.extend(pending_inputs);
+                }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -375,6 +411,8 @@ impl UiState {
                     self.messages.push(UiMessage::RunDivider { elapsed });
                 }
                 self.pending_intervention_inputs.clear();
+                self.pending_intervention_client_echo_id = None;
+                self.pending_client_echoes.clear();
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -674,6 +712,7 @@ impl UiState {
         self.show_start_screen = false;
         self.current_session_id = session_id;
         self.messages = UiMessage::from_history_items(messages);
+        self.pending_client_echoes.clear();
         self.status_bar.current_context_tokens = usage.current_context_tokens;
         self.status_bar.total_tokens = usage.total_tokens;
         self.status_bar.total_cached_tokens = usage.total_cached_tokens;
@@ -688,6 +727,7 @@ impl UiState {
         }
         self.pending_assistant = None;
         self.pending_proposed_plan = None;
+        self.pending_intervention_client_echo_id = None;
         self.activity_status_title = None;
         self.run_timer = None;
         self.manual_compact_running = false;
@@ -773,6 +813,7 @@ fn compact_summary_failed_text(
 mod tests {
     use super::*;
     use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
+    use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
     use crate::types::events::{
         ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
         CompactSummaryFinishedEvent, CompactTrigger,
@@ -798,6 +839,21 @@ mod tests {
             )]),
             current_provider: "openai".to_string(),
             current_model: "reasoner".to_string(),
+        }
+    }
+
+    fn subagent_display_message(description: &str) -> DisplayMessage {
+        DisplayMessage {
+            role: Role::User,
+            text: "@code-reviewer review this".to_string(),
+            mentions: vec![DisplayMention {
+                start_char: 0,
+                end_char: 14,
+                kind: MentionKind::Subagent,
+                label: "code-reviewer".to_string(),
+                target: "code-reviewer".to_string(),
+                description: description.to_string(),
+            }],
         }
     }
 
@@ -902,11 +958,56 @@ mod tests {
         let message = Message::from_user_text("hello".to_string());
         state.messages.push(UiMessage::Message(message.clone()));
 
-        state.apply_event(RuntimeToUiEvent::UserMessageInjected(HistoryItem::Message(
-            message,
-        )));
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+            item: HistoryItem::Message(message),
+            client_echo_id: None,
+        });
 
         assert_eq!(state.messages.len(), 1);
+    }
+
+    #[test]
+    fn user_message_injected_uses_client_echo_id_for_display_metadata_differences() {
+        let mut state = UiState::new();
+        let local = subagent_display_message("Review code changes");
+        let runtime = subagent_display_message("subagent");
+
+        state.push_optimistic_echo(UiMessage::Display(local.clone()), "echo-1".to_string());
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+            item: HistoryItem::Display(runtime),
+            client_echo_id: Some("echo-1".to_string()),
+        });
+
+        assert_eq!(state.messages, vec![UiMessage::Display(local)]);
+        assert!(state.pending_client_echoes.is_empty());
+    }
+
+    #[test]
+    fn user_message_injected_without_client_echo_id_keeps_compatible_dedup() {
+        let mut state = UiState::new();
+        let local = subagent_display_message("Review code changes");
+        let runtime = subagent_display_message("subagent");
+
+        state.messages.push(UiMessage::Display(local));
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+            item: HistoryItem::Display(runtime),
+            client_echo_id: None,
+        });
+
+        assert_eq!(state.messages.len(), 2);
+    }
+
+    #[test]
+    fn user_message_injected_with_unmatched_client_echo_id_appends_for_observers() {
+        let mut state = UiState::new();
+        let runtime = subagent_display_message("subagent");
+
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+            item: HistoryItem::Display(runtime.clone()),
+            client_echo_id: Some("echo-1".to_string()),
+        });
+
+        assert_eq!(state.messages, vec![UiMessage::Display(runtime)]);
     }
 
     #[test]

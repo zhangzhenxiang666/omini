@@ -25,9 +25,10 @@ impl AgentRuntime {
                 ))
                 .await;
                 self.messages.push(plan_message.clone());
-                self.send_event(RuntimeToServerEvent::UserMessageInjected(
-                    HistoryItem::Message(plan_message),
-                ))
+                self.send_event(RuntimeToServerEvent::UserMessageInjected {
+                    item: HistoryItem::Message(plan_message),
+                    client_echo_id: None,
+                })
                 .await;
                 self.process_run(RunStart::UserMessage).await;
             }

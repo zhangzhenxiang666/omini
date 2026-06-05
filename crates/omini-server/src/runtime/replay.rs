@@ -478,9 +478,11 @@ mod tests {
     fn replay_buffer_drops_user_injection_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
         let item = HistoryItem::Message(Message::from_user_text("hello".to_string()));
-        let event =
-            runtime_event_from_internal(RuntimeToServerEvent::UserMessageInjected(item.clone()))
-                .expect("event should encode");
+        let event = runtime_event_from_internal(RuntimeToServerEvent::UserMessageInjected {
+            item: item.clone(),
+            client_echo_id: Some("echo-1".to_string()),
+        })
+        .expect("event should encode");
 
         buffer.record(SequencedRuntimeEvent { seq: 1, event });
         buffer.record_snapshot(&snapshot(vec![item]));

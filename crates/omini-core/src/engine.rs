@@ -80,8 +80,13 @@ pub struct QueryEngine {
     tool_pause_resolver: ToolPauseResolver,
     permission_engine: Arc<PermissionEngine>,
     cancel_notify: Arc<Notify>,
-    pending_user_messages: Mutex<VecDeque<Message>>,
+    pending_user_messages: Mutex<VecDeque<PendingUserMessage>>,
     auto_compact_state: Mutex<AutoCompactState>,
+}
+
+struct PendingUserMessage {
+    message: Message,
+    client_echo_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -181,12 +186,15 @@ impl QueryEngine {
     }
 
     /// 将用户干预消息排队，等待当前轮结束后、下一轮 LLM 调用前插入历史。
-    pub fn enqueue_user_message(&self, msg: Message) {
+    pub fn enqueue_user_message(&self, message: Message, client_echo_id: Option<String>) {
         let mut pending = self
             .pending_user_messages
             .lock()
             .expect("pending user messages mutex poisoned");
-        pending.push_back(msg);
+        pending.push_back(PendingUserMessage {
+            message,
+            client_echo_id,
+        });
     }
 
     fn clear_pending_user_messages(&self) {
@@ -634,10 +642,13 @@ impl QueryEngine {
         };
 
         let injected = !pending.is_empty();
-        for msg in pending {
-            messages.push(msg.clone());
+        for pending in pending {
+            messages.push(pending.message.clone());
             let _ = event_tx
-                .send(EngineToRuntimeEvent::UserMessageProduced(msg))
+                .send(EngineToRuntimeEvent::UserMessageProduced {
+                    message: pending.message,
+                    client_echo_id: pending.client_echo_id,
+                })
                 .await;
         }
         injected

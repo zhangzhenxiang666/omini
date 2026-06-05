@@ -18,7 +18,11 @@ pub enum ServerToRuntimeEvent {
     /// 用户取消当前正在运行的对话
     CancelRun,
     /// 用户发送一条消息给 runtime
-    SendMessage(UserDraft),
+    SendMessage {
+        draft: UserDraft,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
     /// 用户请求压缩当前会话上下文。
     CompactContext { instructions: Option<String> },
     /// 用户请求调整 thinking effort。
@@ -30,7 +34,11 @@ pub enum ServerToRuntimeEvent {
     /// 用户显式设置当前 active profile
     SetActiveProfile(ActiveProfile),
     /// 用户发送一条消息插入正在运行的 query，在下一轮 LLM 调用前生效
-    InterveneMessage(UserDraft),
+    InterveneMessage {
+        draft: UserDraft,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
     /// 用户在模型选择页中确认选择
     ModelSelected {
         provider: String,
@@ -68,7 +76,10 @@ pub enum ServerToRuntimeEvent {
 #[derive(Debug, Clone)]
 pub enum EngineToRuntimeEvent {
     /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。
-    UserMessageProduced(Message),
+    UserMessageProduced {
+        message: Message,
+        client_echo_id: Option<String>,
+    },
 
     /// 引擎完成一轮流式输出，产出一条完整的 Assistant Message。
     MessageProduced(Message),
@@ -152,7 +163,11 @@ pub enum RuntimeToServerEvent {
     /// 用户输入已提交，运行时开始处理
     RunStarted,
     /// Runtime 注入了一条用户消息，客户端需要显示到消息区。
-    UserMessageInjected(#[serde(with = "serde_runtime_event_payload::history_item")] HistoryItem),
+    UserMessageInjected {
+        item: HistoryItem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
     /// 所有轮次完成，运行结束
     RunFinished,
 
@@ -259,7 +274,6 @@ impl RuntimeToServerEvent {
 }
 
 mod serde_runtime_event_payload {
-    use crate::types::display::HistoryItem;
     use crate::types::events::ActiveProfile;
     use serde::Deserialize;
     use serde::Serializer;
@@ -287,31 +301,6 @@ mod serde_runtime_event_payload {
             }
 
             Ok(DeltaPayload::deserialize(deserializer)?.delta)
-        }
-    }
-
-    pub mod history_item {
-        use super::*;
-
-        pub fn serialize<S>(item: &HistoryItem, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut state = serializer.serialize_struct("HistoryItemPayload", 1)?;
-            state.serialize_field("item", item)?;
-            state.end()
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<HistoryItem, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            #[derive(Deserialize)]
-            struct HistoryItemPayload {
-                item: HistoryItem,
-            }
-
-            Ok(HistoryItemPayload::deserialize(deserializer)?.item)
         }
     }
 
@@ -357,13 +346,14 @@ mod tests {
             serde_json::from_value(value).expect("deserialize thinking delta");
         assert!(matches!(decoded, RuntimeToServerEvent::ThinkingDelta(delta) if delta == "思考"));
 
-        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected(
-            HistoryItem::Display(DisplayMessage {
+        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected {
+            item: HistoryItem::Display(DisplayMessage {
                 role: Role::User,
                 text: "@worker hello".to_string(),
                 mentions: Vec::new(),
             }),
-        ))
+            client_echo_id: None,
+        })
         .expect("serialize display user message");
         assert_eq!(
             value,
@@ -376,20 +366,22 @@ mod tests {
                 }
             })
         );
-        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected(
-            HistoryItem::Message(Message::new(
+        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected {
+            item: HistoryItem::Message(Message::new(
                 Role::User,
                 vec![ContentBlock::from_base64_image(
                     "image/png".to_string(),
                     "abc".to_string(),
                 )],
             )),
-        ))
+            client_echo_id: Some("echo-1".to_string()),
+        })
         .expect("serialize image user message");
         assert_eq!(
             value,
             json!({
                 "type": "user_message_injected",
+                "client_echo_id": "echo-1",
                 "item": {
                     "type": "message",
                     "role": "user",

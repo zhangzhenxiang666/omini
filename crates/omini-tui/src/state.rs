@@ -364,6 +364,8 @@ impl HelpDrawerState {
 #[derive(Debug)]
 pub struct UiState {
     pub messages: Vec<UiMessage>,
+    /// 本地 optimistic echo 的一次性 runtime 回显关联表；只存在于当前 TUI 进程内。
+    pub pending_client_echoes: HashMap<String, Vec<usize>>,
     /// 正在流式构建中的 assistant 消息（SSE 实时显示）
     pub pending_assistant: Option<Message>,
     /// 正在流式构建中的 proposed plan markdown。
@@ -402,6 +404,8 @@ pub struct UiState {
     pub queued_user_inputs: VecDeque<UserDraft>,
     /// 已提交给 engine、等待当前轮结束后插入历史的用户输入。
     pub pending_intervention_inputs: VecDeque<UserDraft>,
+    /// 当前 intervention 请求对应的 optimistic echo token。
+    pub pending_intervention_client_echo_id: Option<String>,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
@@ -487,6 +491,7 @@ impl UiState {
     pub fn new() -> Self {
         Self {
             messages: Vec::new(),
+            pending_client_echoes: HashMap::new(),
             pending_assistant: None,
             pending_proposed_plan: None,
             total_lines: 0,
@@ -510,6 +515,7 @@ impl UiState {
             input_wrap_width: DEFAULT_INPUT_WRAP_WIDTH,
             queued_user_inputs: VecDeque::new(),
             pending_intervention_inputs: VecDeque::new(),
+            pending_intervention_client_echo_id: None,
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
             activity_status_title: None,

@@ -10,8 +10,8 @@ impl AgentRuntime {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            ServerToRuntimeEvent::SendMessage(draft) => {
-                                self.submit_user_message(draft).await;
+                            ServerToRuntimeEvent::SendMessage { draft, client_echo_id } => {
+                                self.submit_user_message(draft, client_echo_id).await;
                             }
                             ServerToRuntimeEvent::CompactContext { instructions } => {
                                 self.compact_context(instructions.as_deref()).await;
@@ -41,7 +41,7 @@ impl AgentRuntime {
                                 ))
                                 .await;
                             }
-                            ServerToRuntimeEvent::InterveneMessage(draft) => {
+                            ServerToRuntimeEvent::InterveneMessage { draft, .. } => {
                                 let _ = draft;
                                 self.send_event(RuntimeToServerEvent::error(
                                     "Cannot intervene because no run is active".to_string(),
@@ -123,7 +123,11 @@ impl AgentRuntime {
     }
 
     /// 接收一条用户消息，先回显给 UI，再启动运行。
-    pub(super) async fn submit_user_message(&mut self, draft: UserDraft) {
+    pub(super) async fn submit_user_message(
+        &mut self,
+        draft: UserDraft,
+        client_echo_id: Option<String>,
+    ) {
         let submission = match draft.into_submission() {
             Ok(submission) => submission,
             Err(error) => {
@@ -133,8 +137,11 @@ impl AgentRuntime {
         };
         let history_item = submission.clone().history_item();
         self.messages.push(submission.llm_message);
-        self.send_event(RuntimeToServerEvent::UserMessageInjected(history_item))
-            .await;
+        self.send_event(RuntimeToServerEvent::UserMessageInjected {
+            item: history_item,
+            client_echo_id,
+        })
+        .await;
         if let Some(display_message) = submission.display_message {
             self.process_run(RunStart::SplitDisplayMessage { display_message })
                 .await;
@@ -243,7 +250,7 @@ impl AgentRuntime {
                                     let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
                                 }
                             }
-                            ServerToRuntimeEvent::InterveneMessage(draft) => {
+                            ServerToRuntimeEvent::InterveneMessage { draft, client_echo_id } => {
                                 let submission = match draft.into_submission() {
                                     Ok(submission) => submission,
                                     Err(error) => {
@@ -252,7 +259,7 @@ impl AgentRuntime {
                                     }
                                 };
                                 self.query_engine
-                                    .enqueue_user_message(submission.llm_message);
+                                    .enqueue_user_message(submission.llm_message, client_echo_id);
                             }
                             ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 let _ = (plan_id, action);
@@ -331,7 +338,7 @@ impl AgentRuntime {
                                 )
                                 .await;
                             }
-                            ServerToRuntimeEvent::SendMessage(_)
+                            ServerToRuntimeEvent::SendMessage { .. }
                             | ServerToRuntimeEvent::CompactContext { .. }
                             | ServerToRuntimeEvent::HydrateSessionSnapshot { .. }
                             | ServerToRuntimeEvent::CloseRuntime

@@ -695,6 +695,9 @@ pub enum RunInputMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitRunRequest {
     pub input: UserInput,
+    /// 发起方客户端用于关联本地 optimistic echo 与 runtime echo 的一次性 token。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_echo_id: Option<String>,
     /// 不传时按普通用户回合处理，以保持旧客户端兼容。
     #[serde(default, skip_serializing_if = "is_submit_run_mode")]
     pub mode: RunInputMode,
@@ -810,6 +813,7 @@ mod tests {
     fn submit_run_request_serializes_as_endpoint_body() {
         let request = SubmitRunRequest {
             input: UserInput::plain("summarize this file"),
+            client_echo_id: None,
             mode: RunInputMode::Submit,
         };
 
@@ -819,6 +823,25 @@ mod tests {
                 "input": {
                     "text": "summarize this file"
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn submit_run_request_serializes_optional_client_echo_id() {
+        let request = SubmitRunRequest {
+            input: UserInput::plain("summarize this file"),
+            client_echo_id: Some("echo-1".to_string()),
+            mode: RunInputMode::Submit,
+        };
+
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            json!({
+                "input": {
+                    "text": "summarize this file"
+                },
+                "client_echo_id": "echo-1"
             })
         );
     }

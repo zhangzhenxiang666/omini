@@ -280,13 +280,21 @@ impl AgentCoreSession {
         &self,
         request: protocol::SubmitRunRequest,
     ) -> Result<protocol::RunSubmittedResponse, CoreError> {
-        let event = match request.mode {
-            protocol::RunInputMode::Submit => {
-                ServerToRuntimeEvent::SendMessage(user_input_from_protocol(request.input))
-            }
-            protocol::RunInputMode::Intervene => {
-                ServerToRuntimeEvent::InterveneMessage(user_input_from_protocol(request.input))
-            }
+        let protocol::SubmitRunRequest {
+            input,
+            client_echo_id,
+            mode,
+        } = request;
+        let draft = user_input_from_protocol(input);
+        let event = match mode {
+            protocol::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
+                draft,
+                client_echo_id,
+            },
+            protocol::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
+                draft,
+                client_echo_id,
+            },
         };
         self.send_to_runtime(event).await?;
         Ok(protocol::RunSubmittedResponse {

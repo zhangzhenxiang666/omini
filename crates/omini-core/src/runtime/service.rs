@@ -390,7 +390,10 @@ mod tests {
         drain_events(&mut event_rx);
 
         runtime
-            .submit_user_message(UserDraft::plain("hello".to_string()))
+            .submit_user_message(
+                UserDraft::plain("hello".to_string()),
+                Some("echo-1".to_string()),
+            )
             .await;
 
         let events = drain_events(&mut event_rx);
@@ -399,8 +402,11 @@ mod tests {
             .position(|event| {
                 matches!(
                     event,
-                    RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(message))
-                        if text_content(message) == "hello"
+                    RuntimeToServerEvent::UserMessageInjected {
+                        item: HistoryItem::Message(message),
+                        client_echo_id,
+                    } if text_content(message) == "hello"
+                        && client_echo_id.as_deref() == Some("echo-1")
                 )
             })
             .expect("user message should be echoed to UI");
@@ -900,7 +906,10 @@ mod tests {
 
         let mut saw_short_approval_event = false;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(message)) = event
+            if let RuntimeToServerEvent::UserMessageInjected {
+                item: HistoryItem::Message(message),
+                client_echo_id: None,
+            } = event
                 && text_content(&message) == "Approved. Implement the proposed plan now."
             {
                 saw_short_approval_event = true;
@@ -1422,7 +1431,10 @@ mod tests {
         let message = Message::from_user_text("intervention".to_string());
 
         engine_tx
-            .send(EngineToRuntimeEvent::UserMessageProduced(message.clone()))
+            .send(EngineToRuntimeEvent::UserMessageProduced {
+                message: message.clone(),
+                client_echo_id: Some("echo-intervention".to_string()),
+            })
             .await
             .expect("user message event should send");
 
@@ -1430,11 +1442,15 @@ mod tests {
             .await
             .expect("ui user message event should arrive")
             .expect("ui event channel should stay open");
-        let RuntimeToServerEvent::UserMessageInjected(HistoryItem::Message(event_message)) = event
+        let RuntimeToServerEvent::UserMessageInjected {
+            item: HistoryItem::Message(event_message),
+            client_echo_id,
+        } = event
         else {
             panic!("expected user message injection");
         };
         assert_eq!(event_message, message);
+        assert_eq!(client_echo_id.as_deref(), Some("echo-intervention"));
 
         let mut saw_persistence_event = false;
         while let Ok(event) = persistence_rx.try_recv() {

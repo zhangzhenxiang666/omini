@@ -894,7 +894,8 @@ pub(super) async fn flush_queued_user_inputs(
     };
 
     state.clear_run_dividers();
-    state.messages.extend(ui_messages);
+    let client_echo_id = uuid::Uuid::new_v4().to_string();
+    state.extend_optimistic_echoes(ui_messages, client_echo_id.clone());
     state.scroll_offset = 0;
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
@@ -902,6 +903,7 @@ pub(super) async fn flush_queued_user_inputs(
     let _ = request_tx
         .send(ClientRequest::RunSubmitUserInput {
             input: protocol::user_input_from_draft(draft),
+            client_echo_id: Some(client_echo_id),
         })
         .await;
 }
@@ -910,16 +912,21 @@ pub(super) async fn submit_queued_intervention(
     state: &mut UiState,
     request_tx: &mpsc::Sender<ClientRequest>,
 ) {
-    if state.is_run_active()
-        && state.pending_intervention_inputs.is_empty()
-        && let Some(draft) = state.take_queued_user_draft_for_intervention()
-    {
-        let _ = request_tx
-            .send(ClientRequest::RunInterveneInput {
-                input: protocol::user_input_from_draft(draft),
-            })
-            .await;
+    if !state.is_run_active() || !state.pending_intervention_inputs.is_empty() {
+        return;
     }
+
+    let client_echo_id = uuid::Uuid::new_v4().to_string();
+    let Some(draft) = state.take_queued_user_draft_for_intervention(client_echo_id.clone()) else {
+        return;
+    };
+
+    let _ = request_tx
+        .send(ClientRequest::RunInterveneInput {
+            input: protocol::user_input_from_draft(draft),
+            client_echo_id: Some(client_echo_id),
+        })
+        .await;
 }
 
 pub(super) fn is_intervention_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
