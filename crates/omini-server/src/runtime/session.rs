@@ -227,7 +227,9 @@ impl RuntimeSession {
         self.db
             .update_session_title(&self.session_id, &title)
             .await
-            .map_err(|error| CoreError::new(format!("Failed to rename session: {error}")))?;
+            .map_err(|error| {
+                CoreError::persistence("failed to rename session", error.to_string())
+            })?;
         self.broadcast_session_title_changed(title);
         Ok(())
     }
@@ -244,7 +246,7 @@ impl RuntimeSession {
             .set_initial_session_title(&self.session_id, &title)
             .await
             .map_err(|error| {
-                CoreError::new(format!("Failed to set initial session title: {error}"))
+                CoreError::persistence("failed to set initial session title", error.to_string())
             })?;
         if updated {
             self.broadcast_session_title_changed(title);
@@ -268,7 +270,7 @@ impl RuntimeSession {
             RuntimeLoadAction::Wait(waiter) => match waiter.await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(message)) => Err(CoreError::new(message)),
-                Err(_) => Err(CoreError::new("Runtime session loading was interrupted")),
+                Err(_) => Err(CoreError::RuntimeLoadInterrupted),
             },
             RuntimeLoadAction::Load => {
                 // core 只加载一次持久化 snapshot；后续运行时事件会继续增量更新 core 状态。
@@ -304,8 +306,8 @@ impl RuntimeSession {
             .db
             .get_session(&self.session_id)
             .await
-            .map_err(|error| CoreError::new(format!("Failed to load session: {error}")))?
-            .ok_or_else(|| CoreError::new("Session does not exist"))?;
+            .map_err(|error| CoreError::persistence("failed to load session", error.to_string()))?
+            .ok_or(CoreError::SessionNotFound)?;
         let session_dir = self.project.session(&self.session_id);
         let blocks_dir = session_dir.path().join("blocks");
         let messages = history::load_messages(&self.db, &self.session_id, &blocks_dir).await;

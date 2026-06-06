@@ -1,6 +1,7 @@
 use super::service::AgentRuntime;
 use super::usage::record_total_usage_and_notify;
 use super::*;
+use crate::error::RuntimeError;
 
 impl AgentRuntime {
     pub(super) async fn compact_context(&mut self, custom_instructions: Option<&str>) {
@@ -9,7 +10,7 @@ impl AgentRuntime {
             .await
         {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
-                error,
+                error.to_string(),
             )))
             .await;
         }
@@ -18,12 +19,16 @@ impl AgentRuntime {
     pub(crate) async fn force_compact_current_session(
         &mut self,
         custom_instructions: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeError> {
         if self.messages.is_empty() {
-            return Err("没有可压缩的会话历史".to_string());
+            return Err(RuntimeError::InvalidRequest {
+                message: "没有可压缩的会话历史".to_string(),
+            });
         }
         if self.session_id.is_none() || self.session_dir.is_none() {
-            return Err("当前没有已创建的会话，无法压缩历史".to_string());
+            return Err(RuntimeError::InvalidRequest {
+                message: "当前没有已创建的会话，无法压缩历史".to_string(),
+            });
         }
 
         let subagent_registry = self.capabilities.subagent_registry();

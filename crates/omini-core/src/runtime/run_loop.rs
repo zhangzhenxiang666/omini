@@ -247,7 +247,8 @@ impl AgentRuntime {
                                     .query_engine
                                     .resolve_tool_pause(&tool_use_id, response)
                                 {
-                                    let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
+                                    let _ =
+                                        event_tx.send(RuntimeToServerEvent::error(e.to_string())).await;
                                 }
                             }
                             ServerToRuntimeEvent::InterveneMessage { draft, client_echo_id } => {

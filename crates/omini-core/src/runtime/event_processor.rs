@@ -108,7 +108,9 @@ impl AgentRuntime {
                                     note: None,
                                 },
                             ) {
-                                let _ = event_tx.send(RuntimeToServerEvent::error(e)).await;
+                                let _ = event_tx
+                                    .send(RuntimeToServerEvent::error(e.to_string()))
+                                    .await;
                             }
                             continue;
                         }

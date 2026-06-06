@@ -61,7 +61,8 @@ impl GlobalDaemonManager {
             )));
         }
 
-        let config = load_validated_config(&self.root).map_err(ProjectAttachError::Config)?;
+        let config = load_validated_config(&self.root)
+            .map_err(|error| ProjectAttachError::Config(error.to_string()))?;
         let project = self
             .root
             .init_project(&cwd, &config)
@@ -197,14 +198,17 @@ impl SessionManager {
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
         let settings = self.fresh_settings_with_project_state()?;
         let provider = settings.providers.get(&request.provider).ok_or_else(|| {
-            CoreError::new(format!("Unknown provider profile: {}", request.provider))
+            CoreError::invalid_model_selection(format!(
+                "Unknown provider profile: {}",
+                request.provider
+            ))
         })?;
         if !provider
             .models
             .iter()
             .any(|model| model.id == request.model)
         {
-            return Err(CoreError::new(format!(
+            return Err(CoreError::invalid_model_selection(format!(
                 "Unknown model '{}' for provider '{}'",
                 request.model, request.provider
             )));
@@ -212,7 +216,7 @@ impl SessionManager {
         let mut state = self
             .project
             .load_state()
-            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
         let provider = request.provider;
         let model = request.model;
         state.default_provider = Some(provider.clone());
@@ -224,7 +228,7 @@ impl SessionManager {
         );
         self.project
             .save_state(&state)
-            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to save project state", error))?;
         self.project_runtime_config_response()
     }
 
@@ -237,7 +241,7 @@ impl SessionManager {
         if effort != omini_core::types::config::ThinkingEffort::None
             && !settings.current_model_supports_thinking()
         {
-            return Err(CoreError::new(format!(
+            return Err(CoreError::invalid_model_selection(format!(
                 "Current model '{}' does not support thinking",
                 settings.model
             )));
@@ -246,11 +250,11 @@ impl SessionManager {
         let mut state = self
             .project
             .load_state()
-            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
         state.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
         self.project
             .save_state(&state)
-            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to save project state", error))?;
         self.project_runtime_config_response()
     }
 
@@ -261,11 +265,11 @@ impl SessionManager {
         let mut state = self
             .project
             .load_state()
-            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
         state.show_thinking_blocks = request.show.unwrap_or(!state.show_thinking_blocks);
         self.project
             .save_state(&state)
-            .map_err(|error| CoreError::new(format!("Failed to save project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to save project state", error))?;
         self.project_runtime_config_response()
     }
 
@@ -399,14 +403,17 @@ impl SessionManager {
         let mut settings = self.fresh_settings_with_project_state()?;
         let (api_key, base_url, endpoint) = {
             let provider = settings.providers.get(&request.provider).ok_or_else(|| {
-                CoreError::new(format!("Unknown provider profile: {}", request.provider))
+                CoreError::invalid_model_selection(format!(
+                    "Unknown provider profile: {}",
+                    request.provider
+                ))
             })?;
             if !provider
                 .models
                 .iter()
                 .any(|candidate| candidate.id == request.model)
             {
-                return Err(CoreError::new(format!(
+                return Err(CoreError::invalid_model_selection(format!(
                     "Unknown model '{}' for provider '{}'",
                     request.model, request.provider
                 )));
@@ -427,7 +434,7 @@ impl SessionManager {
             if effort != omini_core::types::config::ThinkingEffort::None
                 && !settings.current_model_supports_thinking()
             {
-                return Err(CoreError::new(format!(
+                return Err(CoreError::invalid_model_selection(format!(
                     "Model '{}' does not support thinking",
                     settings.model
                 )));
@@ -464,14 +471,14 @@ impl SessionManager {
         let state = self
             .project
             .load_state()
-            .map_err(|error| CoreError::new(format!("Failed to load project state: {error}")))?;
+            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
         let mut settings = config
             .to_settings(
                 state.default_provider.as_deref(),
                 state.default_model.as_deref(),
                 state.thinking_effort,
             )
-            .map_err(|error| CoreError::new(format!("Failed to build settings: {error}")))?;
+            .map_err(|error| CoreError::config("failed to build settings", error))?;
         settings.cwd = self.cwd.clone();
         Ok(settings)
     }
@@ -489,7 +496,9 @@ impl SessionManager {
             .db
             .list_sessions(&project_path)
             .await
-            .map_err(|error| CoreError::new(format!("Failed to list sessions: {error}")))?;
+            .map_err(|error| {
+                CoreError::persistence("failed to list sessions", error.to_string())
+            })?;
         let sessions = session_summaries_with_runtime_states(sessions, &runtime_states);
         Ok(protocol::SessionsResponse { sessions })
     }
@@ -541,7 +550,7 @@ impl SessionManager {
         let settings = self.settings_for_new_session(&request)?;
         let session_id = uuid::Uuid::new_v4().to_string();
         self.project.create_session(&session_id).map_err(|error| {
-            CoreError::new(format!("Failed to create session directory: {error}"))
+            CoreError::project_state("failed to create session directory", error)
         })?;
         let now = chrono::Utc::now();
         let session = Session {
@@ -561,10 +570,9 @@ impl SessionManager {
             created_at: now,
             updated_at: now,
         };
-        self.db
-            .create_session(&session)
-            .await
-            .map_err(|error| CoreError::new(format!("Failed to persist session: {error}")))?;
+        self.db.create_session(&session).await.map_err(|error| {
+            CoreError::persistence("failed to persist session", error.to_string())
+        })?;
         let active_profile = request
             .profile
             .map(active_profile_from_protocol)
@@ -591,10 +599,9 @@ impl SessionManager {
     ) -> Result<omini_core::types::config::Settings, CoreError> {
         let mut settings = self.fresh_settings_with_project_state()?;
         if let Some(provider) = &request.provider {
-            let profile = settings
-                .providers
-                .get(provider)
-                .ok_or_else(|| CoreError::new(format!("Unknown provider profile: {provider}")))?;
+            let profile = settings.providers.get(provider).ok_or_else(|| {
+                CoreError::invalid_model_selection(format!("Unknown provider profile: {provider}"))
+            })?;
             settings.active_provider = provider.clone();
             settings.api_key = profile.api_key.clone();
             settings.base_url = profile.base_url.clone();
@@ -605,7 +612,7 @@ impl SessionManager {
                 .providers
                 .get(&settings.active_provider)
                 .ok_or_else(|| {
-                    CoreError::new(format!(
+                    CoreError::invalid_model_selection(format!(
                         "Unknown provider profile: {}",
                         settings.active_provider
                     ))
@@ -615,7 +622,7 @@ impl SessionManager {
                 .iter()
                 .any(|candidate| candidate.id == *model)
             {
-                return Err(CoreError::new(format!(
+                return Err(CoreError::invalid_model_selection(format!(
                     "Unknown model '{}' for provider '{}'",
                     model, settings.active_provider
                 )));
@@ -627,7 +634,7 @@ impl SessionManager {
             if effort != omini_core::types::config::ThinkingEffort::None
                 && !settings.current_model_supports_thinking()
             {
-                return Err(CoreError::new(format!(
+                return Err(CoreError::invalid_model_selection(format!(
                     "Model '{}' does not support thinking",
                     settings.model
                 )));
@@ -650,14 +657,17 @@ impl SessionManager {
 
         let (api_key, base_url, endpoint) = {
             let profile = settings.providers.get(&session.provider).ok_or_else(|| {
-                CoreError::new(format!("Unknown provider profile: {}", session.provider))
+                CoreError::invalid_model_selection(format!(
+                    "Unknown provider profile: {}",
+                    session.provider
+                ))
             })?;
             if !profile
                 .models
                 .iter()
                 .any(|candidate| candidate.id == session.model)
             {
-                return Err(CoreError::new(format!(
+                return Err(CoreError::invalid_model_selection(format!(
                     "Unknown model '{}' for provider '{}'",
                     session.model, session.provider
                 )));
@@ -699,11 +709,10 @@ impl SessionManager {
         }
 
         let project_path = sanitize(&self.cwd);
-        let Some(session_record) = self
-            .db
-            .get_session(session_id)
-            .await
-            .map_err(|error| CoreError::new(format!("Failed to load session: {error}")))?
+        let Some(session_record) =
+            self.db.get_session(session_id).await.map_err(|error| {
+                CoreError::persistence("failed to load session", error.to_string())
+            })?
         else {
             return Err(SessionError::NotFound);
         };
@@ -808,14 +817,16 @@ impl SessionManager {
     }
 }
 
-fn load_validated_config(root: &OminiRoot) -> Result<UserConfig, String> {
-    let config = root.load_config().map_err(|error| error.to_string())?;
-    config.validate().map_err(|error| error.to_string())?;
+fn load_validated_config(
+    root: &OminiRoot,
+) -> Result<UserConfig, omini_core::types::config::ConfigError> {
+    let config = root.load_config()?;
+    config.validate()?;
     Ok(config)
 }
 
-fn config_core_error(message: String) -> CoreError {
-    CoreError::new(format!("Failed to load user config: {message}"))
+fn config_core_error(error: omini_core::types::config::ConfigError) -> CoreError {
+    CoreError::config("failed to load user config", error)
 }
 
 fn agents_response_from_settings(

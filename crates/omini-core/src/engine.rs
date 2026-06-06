@@ -1,4 +1,5 @@
-use crate::api::{ApiRequest, ApiStream, FinishReason, LlmClient, RequestError};
+use crate::api::{ApiRequest, ApiStream, FinishReason, LlmClient, RequestError, StreamError};
+use crate::error::RuntimeError;
 use crate::permissions::PermissionEngine;
 use crate::runtime::compact::{self, AutoCompactState};
 use crate::tools::{
@@ -109,7 +110,7 @@ impl ToolPauseResolver {
         &self,
         tool_use_id: &str,
         response: ToolPauseResponse,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeError> {
         let waiter = {
             let mut pending = self
                 .pending_tool_pauses
@@ -125,7 +126,9 @@ impl ToolPauseResolver {
             )
             | (Some(PendingToolPause::Permission(tx)), response @ ToolPauseResponse::Cancelled) => {
                 tx.send(response)
-                    .map_err(|_| format!("Tool pause waiter closed: {tool_use_id}"))
+                    .map_err(|_| RuntimeError::ToolPauseWaiterClosed {
+                        tool_use_id: tool_use_id.to_string(),
+                    })
             }
             (
                 Some(PendingToolPause::UserInput(tx)),
@@ -133,9 +136,13 @@ impl ToolPauseResolver {
             )
             | (Some(PendingToolPause::UserInput(tx)), response @ ToolPauseResponse::Cancelled) => {
                 tx.send(response)
-                    .map_err(|_| format!("Tool pause waiter closed: {tool_use_id}"))
+                    .map_err(|_| RuntimeError::ToolPauseWaiterClosed {
+                        tool_use_id: tool_use_id.to_string(),
+                    })
             }
-            (Some(_), _) => Err(format!("Tool pause response type mismatch: {tool_use_id}")),
+            (Some(_), _) => Err(RuntimeError::ToolPauseResponseTypeMismatch {
+                tool_use_id: tool_use_id.to_string(),
+            }),
             (None, _) => Ok(()),
         }
     }
@@ -212,11 +219,11 @@ impl QueryEngine {
     }
 
     /// 用户响应工具暂停请求。
-    pub fn resolve_tool_pause(
+    pub(crate) fn resolve_tool_pause(
         &self,
         tool_use_id: &str,
         response: ToolPauseResponse,
-    ) -> Result<(), String> {
+    ) -> Result<(), RuntimeError> {
         self.tool_pause_resolver
             .resolve_tool_pause(tool_use_id, response)
     }
@@ -300,7 +307,8 @@ impl QueryEngine {
             {
                 Some(Ok(s)) => s,
                 Some(Err(e)) => {
-                    let error = format!("LLM request failed: {e}");
+                    let error = RuntimeError::ProviderRequest(e);
+                    let error = error.to_string();
                     finish_reason = FinishReason::Error(error.clone());
                     let _ = event_tx.send(EngineToRuntimeEvent::Error(error)).await;
                     let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
@@ -391,7 +399,7 @@ impl QueryEngine {
                         }
                     },
                     Err(stream_err) => {
-                        stream_error = Some(format!("Stream error: {stream_err}"));
+                        stream_error = Some(RuntimeError::ProviderStream(stream_err));
                         break;
                     }
                 }
@@ -433,8 +441,9 @@ impl QueryEngine {
             let completion = match stream_completion {
                 Some(c) => c,
                 None => {
-                    let error =
-                        stream_error.unwrap_or_else(|| "Stream ended unexpectedly".to_string());
+                    let error = stream_error
+                        .unwrap_or(RuntimeError::ProviderStream(StreamError::UnexpectedEnd));
+                    let error = error.to_string();
                     finish_reason = FinishReason::Error(error.clone());
                     had_tool_use |= self
                         .finish_interrupted_turn(
@@ -1201,7 +1210,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result, Ok(()));
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::api::{ApiEvent, ApiRequest, LlmClient};
 use crate::config::project::SessionDir;
+use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
 use crate::types::config::{CompactConfig, Settings};
 use crate::types::events::{
@@ -29,8 +30,6 @@ const CONTEXT_COLLAPSE_TAIL_CHARS: usize = 500;
 const MAX_COMPACT_STREAMING_RETRIES: usize = 2;
 const MAX_PTL_RETRIES: usize = 3;
 const PTL_RETRY_MARKER: &str = "[earlier conversation truncated for compaction retry]";
-const ERROR_MESSAGE_INCOMPLETE_RESPONSE: &str =
-    "Compaction interrupted before a complete summary was returned.";
 
 #[derive(Debug, Default)]
 pub struct AutoCompactState {
@@ -220,7 +219,7 @@ pub async fn auto_compact_if_needed(
                 event_tx,
                 CompactTrigger::Auto,
                 runtime_context.as_deref(),
-                error,
+                error.to_string(),
             )
             .await;
             changed
@@ -236,7 +235,7 @@ pub async fn force_compact(
     custom_instructions: Option<&str>,
     runtime_context: Option<Arc<ToolRuntimeContext>>,
     event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-) -> Result<CompactOutcome, String> {
+) -> Result<CompactOutcome, RuntimeError> {
     let _ = event_tx
         .send(EngineToRuntimeEvent::CompactShrinkStarted(compact_event(
             CompactTrigger::Manual,
@@ -270,10 +269,10 @@ pub async fn force_compact(
                 event_tx,
                 CompactTrigger::Manual,
                 runtime_context.as_deref(),
-                error.clone(),
+                error.to_string(),
             )
             .await;
-            Err(error)
+            Err(error.into())
         }
     }
 }
@@ -516,7 +515,7 @@ fn collapse_text(text: &str) -> String {
 async fn full_compact(
     messages: &mut Vec<Message>,
     ctx: CompactRequestContext<'_>,
-) -> Result<CompactOutcome, String> {
+) -> Result<CompactOutcome, CompactError> {
     let config = normalized_config(&ctx.settings.compact);
     let before_messages = messages.len();
     let before_tokens = estimate_request_tokens(
@@ -585,7 +584,7 @@ async fn collect_summary(
     older: Vec<Message>,
     max_tokens: usize,
     ctx: &CompactRequestContext<'_>,
-) -> Result<CollectedSummary, String> {
+) -> Result<CollectedSummary, CompactError> {
     let compact_prompt = get_compact_prompt(ctx.custom_instructions);
     let mut retry_messages = replace_images_with_placeholders(&older);
     retry_messages.push(Message::from_user_text(compact_prompt));
@@ -601,8 +600,11 @@ async fn collect_summary(
                     visible,
                 });
             }
-            Ok(_) => last_error = Some(ERROR_MESSAGE_INCOMPLETE_RESPONSE.to_string()),
-            Err(error) if is_prompt_too_long_error(&error) && ptl_retries < MAX_PTL_RETRIES => {
+            Ok(_) => last_error = Some(CompactError::IncompleteResponse),
+            Err(error)
+                if is_prompt_too_long_error(&error.to_string())
+                    && ptl_retries < MAX_PTL_RETRIES =>
+            {
                 let Some(truncated) =
                     truncate_head_for_ptl_retry(&retry_messages[..retry_messages.len() - 1])
                 else {
@@ -623,14 +625,14 @@ async fn collect_summary(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| ERROR_MESSAGE_INCOMPLETE_RESPONSE.to_string()))
+    Err(last_error.unwrap_or(CompactError::IncompleteResponse))
 }
 
 async fn invoke_summary(
     messages: &[Message],
     max_tokens: usize,
     ctx: &CompactRequestContext<'_>,
-) -> Result<String, String> {
+) -> Result<String, CompactError> {
     let request = ApiRequest {
         messages,
         model: &ctx.settings.model,
@@ -644,11 +646,11 @@ async fn invoke_summary(
         .llm_client
         .invoke(request)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(CompactError::Request)?;
     let mut summary = String::new();
     let mut forwarder = CompactSummaryForwarder::new();
     while let Some(event) = stream.next().await {
-        match event.map_err(|error| error.to_string())? {
+        match event.map_err(CompactError::Stream)? {
             ApiEvent::Text(delta) => {
                 summary.push_str(&delta);
                 forward_compact_summary_deltas(
@@ -682,7 +684,7 @@ async fn invoke_summary(
     )
     .await;
     if summary.trim().is_empty() {
-        Err(ERROR_MESSAGE_INCOMPLETE_RESPONSE.to_string())
+        Err(CompactError::IncompleteResponse)
     } else {
         Ok(summary)
     }

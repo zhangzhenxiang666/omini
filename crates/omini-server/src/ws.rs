@@ -53,7 +53,8 @@ pub(crate) async fn handle_socket(
             }
         }
         Err(error) => {
-            let _ = send_notification(&mut write, "error", error.message()).await;
+            let message = error.message();
+            let _ = send_notification(&mut write, "error", message.as_ref()).await;
         }
     }
 
@@ -61,7 +62,8 @@ pub(crate) async fn handle_socket(
     match timeout(Duration::from_secs(5), session.ensure_loaded()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            let _ = send_notification(&mut write, "error", error.message()).await;
+            let message = error.message();
+            let _ = send_notification(&mut write, "error", message.as_ref()).await;
         }
         Err(_) => {
             let _ = send_notification(

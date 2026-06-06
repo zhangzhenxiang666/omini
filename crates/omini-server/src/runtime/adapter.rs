@@ -122,8 +122,9 @@ pub(super) fn session_snapshot_events(
 pub(super) fn runtime_event_from_internal(
     event: omini_core::types::events::RuntimeToServerEvent,
 ) -> Result<RuntimeEvent, CoreError> {
-    let payload = serde_json::to_value(event)
-        .map_err(|error| CoreError::new(format!("Failed to encode runtime event: {error}")))?;
+    let payload = serde_json::to_value(event).map_err(|source| CoreError::RuntimeEventEncode {
+        source: Box::new(source),
+    })?;
     Ok(RuntimeEvent::new(runtime_event_kind(&payload), payload))
 }
 

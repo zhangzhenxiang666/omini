@@ -36,11 +36,20 @@ pub(crate) fn api_error(
 }
 
 pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
-    api_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "core_error",
-        error.message().to_string(),
-    )
+    let status = match &error {
+        omini_core::CoreError::RuntimeClosed | omini_core::CoreError::RuntimeLoadInterrupted => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        omini_core::CoreError::SessionNotFound => StatusCode::NOT_FOUND,
+        omini_core::CoreError::InvalidModelSelection { .. } => StatusCode::BAD_REQUEST,
+        omini_core::CoreError::Internal { .. }
+        | omini_core::CoreError::Config { .. }
+        | omini_core::CoreError::ProjectState { .. }
+        | omini_core::CoreError::Persistence { .. }
+        | omini_core::CoreError::RuntimeEventEncode { .. }
+        | omini_core::CoreError::Subagent { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    api_error(status, error.code(), error.message().into_owned())
 }
 
 pub(crate) async fn require_project(
@@ -163,5 +172,36 @@ fn session_lookup_error(error: SessionError) -> ApiError {
             "Session does not exist",
         ),
         SessionError::Core(error) => core_error(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn core_error_maps_runtime_closed_to_unavailable() {
+        let error = core_error(omini_core::CoreError::RuntimeClosed);
+
+        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.1.0.code, "runtime_closed");
+    }
+
+    #[test]
+    fn core_error_maps_invalid_model_to_bad_request() {
+        let error = core_error(omini_core::CoreError::invalid_model_selection(
+            "Unknown model 'test'",
+        ));
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert_eq!(error.1.0.code, "invalid_model_selection");
+    }
+
+    #[test]
+    fn core_error_maps_missing_session_to_not_found() {
+        let error = core_error(omini_core::CoreError::SessionNotFound);
+
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert_eq!(error.1.0.code, "session_not_found");
     }
 }

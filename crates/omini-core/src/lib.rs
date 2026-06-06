@@ -1,6 +1,7 @@
 pub mod api;
 pub mod config;
 pub mod engine;
+pub mod error;
 pub mod frontmatter;
 pub mod mcp;
 pub mod permissions;
@@ -25,30 +26,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
-#[derive(Debug)]
-pub struct CoreError {
-    message: String,
-}
-
-impl CoreError {
-    pub fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
-    }
-
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl std::fmt::Display for CoreError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for CoreError {}
+pub use crate::error::CoreError;
 
 /// 会话级 core facade，是 `omini-server` 和真正 agent runtime 之间的通信边界。
 ///
@@ -411,7 +389,7 @@ impl AgentCoreSession {
         self.request_tx
             .send(event)
             .await
-            .map_err(|_| CoreError::new("Runtime session is closed"))
+            .map_err(|_| CoreError::RuntimeClosed)
     }
 }
 
