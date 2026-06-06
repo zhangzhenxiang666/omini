@@ -44,6 +44,7 @@ pub struct ProviderConfig {
 /// 从 `~/.omini/config.toml` 中读取时 key 即为模型 ID，
 /// 因此这里不再包含 `id` 字段，`limit` 和 `thinking` 为可选（由默认值填充）。
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelEntry {
     /// 展示名称（可选，用于 TUI）
     pub name: Option<String>,
@@ -288,6 +289,53 @@ gpt-test = { input_modalities = ["text", "image"] }
             Some(&[InputModality::Text, InputModality::Image][..])
         );
         assert!(settings.supports_input_modality(InputModality::Image));
+    }
+
+    #[test]
+    fn quoted_dotted_model_id_parses_as_single_model_id() {
+        let config = config_from_toml(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models."gpt-4.1"]
+name = "GPT 4.1"
+"#,
+        );
+
+        let settings = config
+            .to_settings(Some("openai"), Some("gpt-4.1"), None)
+            .unwrap();
+
+        assert_eq!(settings.model, "gpt-4.1");
+        assert_eq!(
+            settings
+                .current_model_config()
+                .and_then(|model| model.name.as_deref()),
+            Some("GPT 4.1")
+        );
+    }
+
+    #[test]
+    fn unquoted_dotted_model_id_is_rejected() {
+        let error = toml::from_str::<UserConfig>(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
+
+[providers.openai.models.gpt-4.1]
+name = "GPT 4.1"
+"#,
+        )
+        .expect_err("unquoted dotted model ids should be rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("unknown field"));
+        assert!(message.contains("1"));
     }
 
     #[test]
