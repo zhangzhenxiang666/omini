@@ -162,6 +162,7 @@ pub struct ToolExecutionContext {
 #[derive(Clone)]
 pub struct ToolRuntimeContext {
     pub session_id: String,
+    pub run_id: Option<String>,
     pub session_type: String,
     pub agent_label: Option<String>,
     pub session_dir: SessionDir,
@@ -175,6 +176,7 @@ impl std::fmt::Debug for ToolRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRuntimeContext")
             .field("session_id", &self.session_id)
+            .field("run_id", &self.run_id)
             .field("session_type", &self.session_type)
             .field("agent_label", &self.agent_label)
             .field("session_dir", &self.session_dir)

@@ -2,13 +2,20 @@ use super::service::AgentRuntime;
 use super::usage::record_total_usage_and_notify;
 use super::*;
 use crate::error::RuntimeError;
+use tracing::Instrument;
 
 impl AgentRuntime {
     pub(super) async fn compact_context(&mut self, custom_instructions: Option<&str>) {
+        tracing::debug!(
+            session_id = ?self.session_id,
+            has_custom_instructions = custom_instructions.is_some(),
+            "manual compact requested"
+        );
         if let Err(error) = self
             .force_compact_current_session(custom_instructions)
             .await
         {
+            tracing::warn!(error = %error, "manual compact failed");
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
                 error.to_string(),
             )))
@@ -38,6 +45,7 @@ impl AgentRuntime {
                 .session_id
                 .clone()
                 .expect("session id checked before compact"),
+            run_id: None,
             session_type: "main".to_string(),
             agent_label: None,
             session_dir: self
@@ -57,49 +65,87 @@ impl AgentRuntime {
             .session_id
             .clone()
             .expect("session id checked before compact");
-        let forwarder = tokio::spawn(async move {
-            while let Some(event) = compact_rx.recv().await {
-                match event {
-                    EngineToRuntimeEvent::CompactShrinkStarted(_)
-                    | EngineToRuntimeEvent::CompactShrinkFinished(_)
-                    | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
-                        // TODO(compact): 收缩操作暂不通知 UI，后续再决定是否记录内部状态。
-                    }
-                    EngineToRuntimeEvent::CompactSummaryStarted(event) => {
-                        let _ = event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryStarted(event))
+        let span_session_id = session_id.clone();
+        let forwarder = tokio::spawn(
+            async move {
+                while let Some(event) = compact_rx.recv().await {
+                    match event {
+                        EngineToRuntimeEvent::CompactShrinkStarted(_)
+                        | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                        | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
+                            tracing::debug!("manual compact shrink event received");
+                            // TODO(compact): 收缩操作暂不通知 UI，后续再决定是否记录内部状态。
+                        }
+                        EngineToRuntimeEvent::CompactSummaryStarted(event) => {
+                            tracing::debug!(
+                                trigger = %event.trigger,
+                                compact_session_id = ?event.session_id,
+                                agent_label = ?event.agent_label,
+                                "manual compact summary started"
+                            );
+                            let _ = event_tx
+                                .send(RuntimeToServerEvent::CompactSummaryStarted(event))
+                                .await;
+                        }
+                        EngineToRuntimeEvent::CompactSummaryDelta(event) => {
+                            let _ = event_tx
+                                .send(RuntimeToServerEvent::CompactSummaryDelta(event))
+                                .await;
+                        }
+                        EngineToRuntimeEvent::CompactSummaryFinished(event) => {
+                            tracing::debug!(
+                                trigger = %event.trigger,
+                                compact_session_id = ?event.session_id,
+                                agent_label = ?event.agent_label,
+                                summary_chars = event.summary.chars().count(),
+                                after_tokens = event.after_tokens,
+                                "manual compact summary finished"
+                            );
+                            persist_compact_summary_event(&session_id, &event, &persistence_tx)
+                                .await;
+                            let _ = event_tx
+                                .send(RuntimeToServerEvent::CompactSummaryFinished(event))
+                                .await;
+                        }
+                        EngineToRuntimeEvent::CompactSummaryFailed(event) => {
+                            tracing::warn!(
+                                trigger = %event.trigger,
+                                compact_session_id = ?event.session_id,
+                                agent_label = ?event.agent_label,
+                                message = %event.message,
+                                "manual compact summary failed"
+                            );
+                            let _ = event_tx
+                                .send(RuntimeToServerEvent::CompactSummaryFailed(event))
+                                .await;
+                        }
+                        EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
+                            tracing::debug!(
+                                prompt_tokens = usage.prompt_tokens,
+                                completion_tokens = usage.completion_tokens,
+                                cached_tokens = usage.cached_tokens,
+                                "manual compact usage recorded"
+                            );
+                            record_total_usage_and_notify(
+                                &session_id,
+                                usage,
+                                &event_tx,
+                                &persistence_tx,
+                                &usage_state,
+                            )
                             .await;
+                        }
+                        _ => {}
                     }
-                    EngineToRuntimeEvent::CompactSummaryDelta(event) => {
-                        let _ = event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryDelta(event))
-                            .await;
-                    }
-                    EngineToRuntimeEvent::CompactSummaryFinished(event) => {
-                        persist_compact_summary_event(&session_id, &event, &persistence_tx).await;
-                        let _ = event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryFinished(event))
-                            .await;
-                    }
-                    EngineToRuntimeEvent::CompactSummaryFailed(event) => {
-                        let _ = event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryFailed(event))
-                            .await;
-                    }
-                    EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
-                        record_total_usage_and_notify(
-                            &session_id,
-                            usage,
-                            &event_tx,
-                            &persistence_tx,
-                            &usage_state,
-                        )
-                        .await;
-                    }
-                    _ => {}
                 }
             }
-        });
+            .instrument(tracing::debug_span!(
+                "compact",
+                session_id = %span_session_id,
+                compact_kind = "manual",
+                task_kind = "manual_compact_forwarder"
+            )),
+        );
         let tool_definitions = self.tool_registry_snapshot().definitions();
         let result = compact::force_compact(
             &mut self.messages,
@@ -116,6 +162,7 @@ impl AgentRuntime {
 
         match result {
             Ok(outcome) => {
+                tracing::debug!(outcome = ?outcome, "manual compact finished");
                 if compact_outcome_is_noop(&outcome) {
                     // 手动 compact 已经让 TUI 进入 working；无可压缩内容也要给一个终止事件。
                     self.send_event(RuntimeToServerEvent::warning(

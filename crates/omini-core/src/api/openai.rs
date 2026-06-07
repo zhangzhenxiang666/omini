@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio_stream::StreamExt;
+use tracing::Instrument;
 
 pub(super) async fn invoke_openai(
     http_client: &reqwest::Client,
@@ -323,7 +324,8 @@ pub(super) async fn invoke_openai(
         let _ = tx.send(Ok(ApiEvent::Done(completion))).await;
 
         tracing::debug!("SSE stream task finished, channel closed");
-    });
+    }
+    .in_current_span());
     Ok(result_stream)
 }
 

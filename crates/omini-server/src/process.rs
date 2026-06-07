@@ -42,6 +42,8 @@ pub fn daemonize_if_needed(options: ProcessOptions) -> io::Result<()> {
 /// daemonize 需要发生在 Tokio runtime 创建之前，避免 fork 后携带复杂运行时状态。
 pub fn run_daemon_process(options: ProcessOptions) -> Result<(), Box<dyn std::error::Error>> {
     daemonize_if_needed(options)?;
+    let log_dir = crate::logging::init()?;
+    tracing::info!(log_dir = %log_dir.display(), "logging initialized");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

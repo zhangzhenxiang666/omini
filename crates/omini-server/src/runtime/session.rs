@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 /// projection 和 replay buffer。HTTP 路由拿到的 `RuntimeSession` 不直接操作 core 的内部
 /// loop，而是通过这个类型做 daemon 级的持久化、重连补发和多客户端控制权协调。
@@ -48,9 +49,10 @@ impl RuntimeSession {
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
         let (server_event_tx, _) = broadcast::channel(128);
-        let core = AgentCoreSession::spawn_with_active_profile(
+        let core = AgentCoreSession::spawn_for_session_with_active_profile(
             settings.clone(),
             project.clone(),
+            session_id.clone(),
             active_profile,
         );
         let mut persistence_rx = core.subscribe_persistence();
@@ -64,74 +66,98 @@ impl RuntimeSession {
         let persisted_replay_buffer = Arc::clone(&replay_buffer);
         let replay_session_id = session_id.clone();
         // core 发出的持久化事件先落 SQLite，成功后再裁剪 replay，避免重连时漏掉未落盘内容。
-        let persistence_handle = tokio::spawn(async move {
-            loop {
-                match persistence_rx.recv().await {
-                    Ok(event) => {
-                        let persisted_event = event.clone();
-                        if let Err(error) = persistence_db.apply_persistence_event(event).await {
-                            eprintln!("runtime persistence event failed: {error}");
-                        } else {
-                            persisted_replay_buffer
-                                .lock()
-                                .expect("replay buffer lock poisoned")
-                                .record_persistence(&replay_session_id, &persisted_event);
+        let persistence_handle = tokio::spawn(
+            async move {
+                loop {
+                    match persistence_rx.recv().await {
+                        Ok(event) => {
+                            let persisted_event = event.clone();
+                            if let Err(error) = persistence_db.apply_persistence_event(event).await
+                            {
+                                tracing::error!(error = %error, "runtime persistence event failed");
+                            } else {
+                                persisted_replay_buffer
+                                    .lock()
+                                    .expect("replay buffer lock poisoned")
+                                    .record_persistence(&replay_session_id, &persisted_event);
+                            }
                         }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(skipped, "runtime persistence event stream lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        eprintln!("runtime persistence event stream lagged; skipped {skipped}");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+            .instrument(tracing::debug_span!(
+                "session",
+                session_id = %session_id,
+                task_kind = "persistence_fanout"
+            )),
+        );
         let runtime_event_fanout_tx = runtime_event_tx.clone();
         let runtime_replay_buffer = Arc::clone(&replay_buffer);
         let runtime_status_projection = Arc::clone(&status_projection);
         // runtime 事件加上本地 seq 后再广播，WebSocket 层用 seq 处理 replay/订阅交叠。
-        let runtime_event_handle = tokio::spawn(async move {
-            let mut next_seq = 1u64;
-            loop {
-                match runtime_event_rx.recv().await {
-                    Ok(event) => {
-                        let sequenced = SequencedRuntimeEvent {
-                            seq: next_seq,
-                            event,
-                        };
-                        next_seq = next_seq.saturating_add(1);
-                        runtime_replay_buffer
-                            .lock()
-                            .expect("replay buffer lock poisoned")
-                            .record(sequenced.clone());
-                        runtime_status_projection
-                            .lock()
-                            .expect("status projection lock poisoned")
-                            .record_event(&sequenced.event, Utc::now());
-                        let _ = runtime_event_fanout_tx.send(sequenced);
+        let runtime_event_handle = tokio::spawn(
+            async move {
+                let mut next_seq = 1u64;
+                loop {
+                    match runtime_event_rx.recv().await {
+                        Ok(event) => {
+                            let event_kind = event.kind.clone();
+                            let sequenced = SequencedRuntimeEvent {
+                                seq: next_seq,
+                                event,
+                            };
+                            log_runtime_event_broadcast(sequenced.seq, &event_kind);
+                            next_seq = next_seq.saturating_add(1);
+                            runtime_replay_buffer
+                                .lock()
+                                .expect("replay buffer lock poisoned")
+                                .record(sequenced.clone());
+                            runtime_status_projection
+                                .lock()
+                                .expect("status projection lock poisoned")
+                                .record_event(&sequenced.event, Utc::now());
+                            let _ = runtime_event_fanout_tx.send(sequenced);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(skipped, "runtime event stream lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        eprintln!("runtime event stream lagged; skipped {skipped}");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+            .instrument(tracing::debug_span!(
+                "session",
+                session_id = %session_id,
+                task_kind = "runtime_event_fanout"
+            )),
+        );
         let pending_tool_pauses = Arc::new(Mutex::new(HashSet::new()));
         let pending_tool_pause_events = Arc::clone(&pending_tool_pauses);
         // 工具暂停状态跟随 runtime 事件维护，HTTP resolve 用它做幂等和重复点击保护。
-        let tool_pause_handle = tokio::spawn(async move {
-            loop {
-                match tool_pause_rx.recv().await {
-                    Ok(event) => {
-                        apply_tool_pause_update(&pending_tool_pause_events, &event);
+        let tool_pause_handle = tokio::spawn(
+            async move {
+                loop {
+                    match tool_pause_rx.recv().await {
+                        Ok(event) => {
+                            apply_tool_pause_update(&pending_tool_pause_events, &event);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(skipped, "runtime tool pause event stream lagged");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        eprintln!("runtime tool pause event stream lagged; skipped {skipped}");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-        });
+            .instrument(tracing::debug_span!(
+                "session",
+                session_id = %session_id,
+                task_kind = "tool_pause_watcher"
+            )),
+        );
         Self {
             core,
             session_id,
@@ -494,6 +520,21 @@ impl RuntimeSession {
             .runtime_event_tx
             .send(SequencedRuntimeEvent { seq: 0, event });
     }
+}
+
+fn log_runtime_event_broadcast(seq: u64, kind: &str) {
+    if high_volume_runtime_event(kind) {
+        tracing::trace!(seq, event_kind = %kind, "broadcasting runtime event");
+    } else {
+        tracing::debug!(seq, event_kind = %kind, "broadcasting runtime event");
+    }
+}
+
+fn high_volume_runtime_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "thinking_delta" | "text_delta" | "proposed_plan_delta" | "compact_summary_delta"
+    )
 }
 
 fn effective_session_thinking_effort(

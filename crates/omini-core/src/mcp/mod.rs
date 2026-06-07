@@ -24,6 +24,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
+use tracing::Instrument;
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -215,10 +216,18 @@ impl McpManager {
         let mut handles = Vec::new();
         for (server_name, config, cwd) in inputs {
             self.mark_connecting(&server_name);
-            handles.push(tokio::spawn(async move {
-                let result = initialize_service(&server_name, config, cwd).await;
-                (server_name, result)
-            }));
+            let task_server_name = server_name.clone();
+            handles.push(tokio::spawn(
+                async move {
+                    tracing::debug!(server_name = %server_name, "initializing mcp server");
+                    let result = initialize_service(&server_name, config, cwd).await;
+                    (server_name, result)
+                }
+                .instrument(tracing::debug_span!(
+                    "mcp_server_initialization",
+                    server_name = %task_server_name
+                )),
+            ));
         }
 
         let mut warnings = Vec::new();

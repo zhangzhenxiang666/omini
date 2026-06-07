@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
+use tracing::Instrument;
+
+const LOG_SUMMARY_MAX_CHARS: usize = 2048;
 
 /// 一次查询执行后的结果摘要。
 #[derive(Debug, Clone)]
@@ -247,6 +250,41 @@ impl QueryEngine {
         event_tx: mpsc::Sender<EngineToRuntimeEvent>,
         cancelled: Arc<AtomicBool>,
     ) -> QueryResult {
+        if ctx.runtime_context.is_none() {
+            tracing::warn!(
+                "query started without runtime context; log fields will use fallback values"
+            );
+        }
+        let session_id = ctx
+            .runtime_context
+            .as_ref()
+            .map(|runtime| runtime.session_id.as_str())
+            .unwrap_or("unknown");
+        let run_id = ctx
+            .runtime_context
+            .as_ref()
+            .and_then(|runtime| runtime.run_id.as_deref())
+            .unwrap_or("unknown");
+        let session_type = ctx
+            .runtime_context
+            .as_ref()
+            .map(|runtime| runtime.session_type.as_str())
+            .unwrap_or("unknown");
+        let agent_label = ctx
+            .runtime_context
+            .as_ref()
+            .and_then(|runtime| runtime.agent_label.as_deref());
+        tracing::debug!(
+            session_id,
+            run_id,
+            session_type,
+            agent_label,
+            provider = %ctx.settings.active_provider,
+            model = %ctx.settings.model,
+            thinking_effort = ?ctx.settings.thinking_effort,
+            max_turns = ?ctx.settings.max_turns,
+            "query started"
+        );
         self.tool_pause_resolver.drain_pending_tool_pauses();
         self.clear_pending_user_messages();
         let max_turns = ctx.settings.max_turns.unwrap_or(200);
@@ -259,7 +297,10 @@ impl QueryEngine {
         let tool_definitions = ctx.tool_registry.definitions();
 
         for _turn in 0..max_turns {
+            let turn_index = turns;
+            tracing::debug!(turn_index, max_turns, "turn started");
             if cancelled.load(Ordering::Relaxed) {
+                tracing::debug!(turn_index, "query cancelled before turn");
                 break;
             }
 
@@ -281,6 +322,14 @@ impl QueryEngine {
                 &event_tx,
                 &mut compact_state,
             )
+            .instrument(tracing::debug_span!(
+                "compact",
+                session_id,
+                run_id,
+                session_type,
+                turn_index,
+                compact_kind = "auto"
+            ))
             .await;
             {
                 let mut state = self
@@ -301,12 +350,37 @@ impl QueryEngine {
             };
 
             // TODO: 需要优化api的错误处理, 对于因上下文过长的输入而失败的请求要尝试收缩上下文然后再调研llm摘要
+            let llm_span = tracing::debug_span!(
+                "llm_request",
+                session_id,
+                run_id,
+                session_type,
+                turn_index,
+                provider = %ctx.settings.active_provider,
+                model = %ctx.settings.model,
+                tool_count = tool_definitions.len(),
+                message_count = ctx.messages.len(),
+                thinking_effort = ?ctx.settings.thinking_effort
+            );
+            tracing::debug!(
+                turn_index,
+                provider = %ctx.settings.active_provider,
+                model = %ctx.settings.model,
+                tool_count = tool_definitions.len(),
+                message_count = ctx.messages.len(),
+                "llm request started"
+            );
             let mut stream = match self
                 .invoke_or_cancel(ctx.llm_client.invoke(request), &cancelled)
+                .instrument(llm_span)
                 .await
             {
-                Some(Ok(s)) => s,
+                Some(Ok(s)) => {
+                    tracing::debug!(turn_index, "llm request accepted stream");
+                    s
+                }
                 Some(Err(e)) => {
+                    tracing::warn!(turn_index, error = %e, "llm request failed");
                     let error = RuntimeError::ProviderRequest(e);
                     let error = error.to_string();
                     finish_reason = FinishReason::Error(error.clone());
@@ -316,6 +390,7 @@ impl QueryEngine {
                     break;
                 }
                 None => {
+                    tracing::debug!(turn_index, "llm request cancelled");
                     finish_reason = FinishReason::Error("Cancelled".to_string());
                     let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
                     turns += 1;
@@ -362,6 +437,13 @@ impl QueryEngine {
                                 .await;
                         }
                         crate::api::ApiEvent::ToolUse(tool_use) => {
+                            tracing::debug!(
+                                turn_index,
+                                tool_use_id = %tool_use.id,
+                                tool_name = %tool_use.name,
+                                tool_input = %summarize_tool_input(&tool_use.input),
+                                "tool use received"
+                            );
                             partial_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
                             // 通知 UI：tool 开始执行
                             let _ = event_tx
@@ -387,11 +469,32 @@ impl QueryEngine {
                                 runtime_context,
                                 tool_registry: Arc::clone(&tool_registry),
                             };
-                            tool_tasks.spawn(async move {
-                                Self::execute_tool(&tool_registry, &tool_use, &tx, controls).await
-                            });
+                            let tool_span = tracing::debug_span!(
+                                "tool_task",
+                                session_id,
+                                run_id,
+                                session_type,
+                                turn_index,
+                                tool_use_id = %tool_use.id,
+                                tool_name = %tool_use.name
+                            );
+                            tool_tasks.spawn(
+                                async move {
+                                    Self::execute_tool(&tool_registry, &tool_use, &tx, controls)
+                                        .await
+                                }
+                                .instrument(tool_span),
+                            );
                         }
                         crate::api::ApiEvent::Done(completion) => {
+                            tracing::debug!(
+                                turn_index,
+                                finish_reason = ?completion.finish_reason,
+                                prompt_tokens = completion.usage.prompt_tokens,
+                                completion_tokens = completion.usage.completion_tokens,
+                                cached_tokens = completion.usage.cached_tokens,
+                                "llm stream completed"
+                            );
                             let _ = event_tx
                                 .send(EngineToRuntimeEvent::UsageRecorded(completion.usage))
                                 .await;
@@ -399,6 +502,7 @@ impl QueryEngine {
                         }
                     },
                     Err(stream_err) => {
+                        tracing::warn!(turn_index, error = %stream_err, "llm stream error");
                         stream_error = Some(RuntimeError::ProviderStream(stream_err));
                         break;
                     }
@@ -406,6 +510,7 @@ impl QueryEngine {
             }
 
             if query_cancelled || cancelled.load(Ordering::Relaxed) {
+                tracing::debug!(turn_index, "turn cancelled");
                 finish_reason = FinishReason::Error("Cancelled".to_string());
                 if !partial_blocks.is_empty() {
                     let msg = Message::new(Role::Assistant, partial_blocks);
@@ -441,6 +546,7 @@ impl QueryEngine {
             let completion = match stream_completion {
                 Some(c) => c,
                 None => {
+                    tracing::warn!(turn_index, "llm stream ended without completion");
                     let error = stream_error
                         .unwrap_or(RuntimeError::ProviderStream(StreamError::UnexpectedEnd));
                     let error = error.to_string();
@@ -545,6 +651,12 @@ impl QueryEngine {
             }
 
             let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+            tracing::debug!(
+                turn_index,
+                finish_reason = ?finish_reason,
+                had_tool_use,
+                "turn ended"
+            );
             turns += 1;
 
             let had_intervention = self
@@ -566,6 +678,15 @@ impl QueryEngine {
 
         self.tool_pause_resolver.drain_pending_tool_pauses();
         self.clear_pending_user_messages();
+        tracing::debug!(
+            session_id,
+            run_id,
+            session_type,
+            turns,
+            finish_reason = ?finish_reason,
+            had_tool_use,
+            "query ended"
+        );
 
         QueryResult {
             turns,
@@ -750,10 +871,19 @@ impl QueryEngine {
 
             match task_result {
                 Ok(tool_result) => {
+                    tracing::debug!(
+                        tool_use_id = %tool_result.block.tool_use_id,
+                        is_error = tool_result.block.is_error,
+                        output_summary = %summarize_output(&tool_result.block.content),
+                        "tool task joined"
+                    );
                     tool_results.push(tool_result);
                 }
-                Err(join_err) if cancelled.load(Ordering::Relaxed) && join_err.is_cancelled() => {}
+                Err(join_err) if cancelled.load(Ordering::Relaxed) && join_err.is_cancelled() => {
+                    tracing::debug!("tool task cancelled");
+                }
                 Err(join_err) => {
+                    tracing::error!(error = %join_err, "tool task panicked");
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::Error(format!(
                             "Tool task panicked: {join_err}"
@@ -814,8 +944,11 @@ impl QueryEngine {
         while let Some(task_result) = tool_tasks.join_next().await {
             match task_result {
                 Ok(tool_result) => tool_results.push(tool_result),
-                Err(join_err) if join_err.is_cancelled() => {}
+                Err(join_err) if join_err.is_cancelled() => {
+                    tracing::debug!("aborted tool task cancelled");
+                }
                 Err(join_err) => {
+                    tracing::error!(error = %join_err, "aborted tool task panicked");
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::Error(format!(
                             "Tool task panicked: {join_err}"
@@ -940,6 +1073,11 @@ impl QueryEngine {
         controls: ToolRunControls,
     ) -> ToolRunResult {
         if controls.cancelled.load(Ordering::Relaxed) {
+            tracing::debug!(
+                tool_use_id = %tool_use.id,
+                tool_name = %tool_use.name,
+                "tool execution skipped because run is cancelled"
+            );
             return ToolRunResult::new(
                 ToolResultBlock {
                     tool_use_id: tool_use.id.clone(),
@@ -951,6 +1089,12 @@ impl QueryEngine {
             );
         }
 
+        tracing::debug!(
+            tool_use_id = %tool_use.id,
+            tool_name = %tool_use.name,
+            tool_input = %summarize_tool_input(&tool_use.input),
+            "tool execution started"
+        );
         let result = if let Some(tool) = tool_registry.get(&tool_use.name) {
             let runtime_context = controls.runtime_context;
             let ctx = ToolExecutionContext {
@@ -973,14 +1117,43 @@ impl QueryEngine {
             };
             tool.execute(tool_use.input.clone(), ctx).await
         } else {
+            tracing::warn!(tool_use_id = %tool_use.id, tool_name = %tool_use.name, "unknown tool requested");
             ToolResult::error(format!("Unknown tool: {}", tool_use.name))
         };
 
         let (block, extra_blocks) = result.into_parts(&tool_use.id);
+        tracing::debug!(
+            tool_use_id = %block.tool_use_id,
+            tool_name = %tool_use.name,
+            is_error = block.is_error,
+            output_summary = %summarize_output(&block.content),
+            metadata = ?block.metadata,
+            extra_block_count = extra_blocks.as_ref().map_or(0, Vec::len),
+            "tool execution finished"
+        );
         let _ = event_tx
             .send(EngineToRuntimeEvent::ToolResult(block.clone()))
             .await;
         ToolRunResult::new(block, extra_blocks)
+    }
+}
+
+fn summarize_tool_input(input: &HashMap<String, serde_json::Value>) -> String {
+    let value = serde_json::to_string(input).unwrap_or_else(|_| "<invalid json>".to_string());
+    summarize_text(&value, LOG_SUMMARY_MAX_CHARS)
+}
+
+fn summarize_output(output: &str) -> String {
+    summarize_text(output, LOG_SUMMARY_MAX_CHARS)
+}
+
+fn summarize_text(value: &str, max_chars: usize) -> String {
+    let mut iter = value.chars();
+    let summary = iter.by_ref().take(max_chars).collect::<String>();
+    if iter.next().is_some() {
+        format!("{summary}...[truncated]")
+    } else {
+        summary
     }
 }
 

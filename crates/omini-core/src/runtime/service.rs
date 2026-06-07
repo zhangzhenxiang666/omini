@@ -44,6 +44,16 @@ pub(super) enum RunStart {
     Continue,
 }
 
+impl RunStart {
+    pub(super) fn kind(&self) -> &'static str {
+        match self {
+            Self::UserMessage => "user_message",
+            Self::SplitDisplayMessage { .. } => "split_display_message",
+            Self::Continue => "continue",
+        }
+    }
+}
+
 pub(super) fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
     match start {
         RunStart::SplitDisplayMessage { display_message } => {

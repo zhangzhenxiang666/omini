@@ -17,6 +17,7 @@ use omini_domain::project::sanitize_project_path as sanitize;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -83,9 +84,33 @@ async fn run_subagent(
     warnings.extend(model_warnings);
 
     let session_id = Uuid::new_v4().to_string();
+    let subagent_span = tracing::debug_span!(
+        "subagent_run",
+        parent_session_id = %runtime.session_id,
+        subagent_session_id = %session_id,
+        run_id = ?runtime.run_id.as_deref(),
+        tool_use_id = %ctx.tool_use_id,
+        agent_label = %spec.name,
+        title = %request.title
+    );
+    tracing::debug!(
+        parent_session_id = %runtime.session_id,
+        subagent_session_id = %session_id,
+        tool_use_id = %ctx.tool_use_id,
+        agent_label = %spec.name,
+        title = %request.title,
+        "subagent session creating"
+    );
     let session_dir = match runtime.session_dir.create_subagent(&session_id) {
         Ok(dir) => dir,
-        Err(e) => return ToolResult::error(format!("failed to create subagent session: {e}")),
+        Err(e) => {
+            tracing::warn!(
+                subagent_session_id = %session_id,
+                error = %e,
+                "failed to create subagent session"
+            );
+            return ToolResult::error(format!("failed to create subagent session: {e}"));
+        }
     };
 
     let now = Utc::now();
@@ -150,6 +175,7 @@ async fn run_subagent(
     );
     let child_runtime = Arc::new(ToolRuntimeContext {
         session_id: session_id.clone(),
+        run_id: runtime.run_id.clone(),
         session_type: "subagent".to_string(),
         agent_label: Some(spec.name.clone()),
         session_dir: session_dir.clone(),
@@ -172,7 +198,13 @@ async fn run_subagent(
         .await;
 
     let (child_tx, child_rx) = mpsc::channel::<EngineToRuntimeEvent>(256);
-    let bridge = spawn_subagent_bridge(child_rx, ctx.event_tx.clone(), session_id.clone());
+    let bridge = spawn_subagent_bridge(
+        child_rx,
+        ctx.event_tx.clone(),
+        session_id.clone(),
+        runtime.session_id.clone(),
+        spec.name.clone(),
+    );
 
     let engine = QueryEngine::with_shared_tool_controls(
         ctx.pending_tool_pauses.clone(),
@@ -192,6 +224,7 @@ async fn run_subagent(
             child_tx,
             ctx.cancelled.clone(),
         )
+        .instrument(subagent_span)
         .await;
     let _ = bridge.await;
 
@@ -212,6 +245,11 @@ async fn run_subagent(
             },
         ))
         .await;
+    tracing::debug!(
+        subagent_session_id = %session_id,
+        status = ?status,
+        "subagent run finished"
+    );
 
     let summary = extract_final_text(&messages);
     let payload = json!({
@@ -296,121 +334,154 @@ fn spawn_subagent_bridge(
     mut child_rx: mpsc::Receiver<EngineToRuntimeEvent>,
     parent_tx: mpsc::Sender<EngineToRuntimeEvent>,
     session_id: String,
+    parent_session_id: String,
+    agent_label: String,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        while let Some(event) = child_rx.recv().await {
-            match event {
-                EngineToRuntimeEvent::UserMessageProduced { message, .. } => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentMessageProduced(
-                            SubagentMessageEvent {
+    let span_parent_session_id = parent_session_id.clone();
+    let span_session_id = session_id.clone();
+    let span_agent_label = agent_label.clone();
+    tokio::spawn(
+        async move {
+            tracing::debug!("subagent bridge started");
+            while let Some(event) = child_rx.recv().await {
+                match event {
+                    EngineToRuntimeEvent::UserMessageProduced { message, .. } => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentMessageProduced(
+                                SubagentMessageEvent {
+                                    session_id: session_id.clone(),
+                                    message,
+                                    persist_llm_history: true,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::MessageProduced(msg) => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentMessageProduced(
+                                SubagentMessageEvent {
+                                    session_id: session_id.clone(),
+                                    message: msg,
+                                    persist_llm_history: true,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::ToolResultsProduced(msg) => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentMessageProduced(
+                                SubagentMessageEvent {
+                                    session_id: session_id.clone(),
+                                    message: msg,
+                                    persist_llm_history: true,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::ToolResultsDisplayProduced(msg) => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentMessageProduced(
+                                SubagentMessageEvent {
+                                    session_id: session_id.clone(),
+                                    message: msg,
+                                    persist_llm_history: false,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::ToolUse(tool_use) => {
+                        tracing::debug!(
+                            subagent_session_id = %session_id,
+                            tool_use_id = %tool_use.id,
+                            tool_name = %tool_use.name,
+                            "bridging subagent tool use"
+                        );
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentToolUse(
+                                SubagentToolUseEvent {
+                                    session_id: session_id.clone(),
+                                    tool_use,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::ToolResult(tool_result) => {
+                        tracing::debug!(
+                            subagent_session_id = %session_id,
+                            tool_use_id = %tool_result.tool_use_id,
+                            is_error = tool_result.is_error,
+                            "bridging subagent tool result"
+                        );
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentToolResult(
+                                SubagentToolResultEvent {
+                                    session_id: session_id.clone(),
+                                    tool_result,
+                                },
+                            ))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::ToolPauseRequested(req) => {
+                        tracing::debug!(
+                            subagent_session_id = %session_id,
+                            tool_use_id = %req.tool_use_id,
+                            tool_name = %req.tool_name,
+                            "bridging subagent tool pause"
+                        );
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::ToolPauseRequested(req))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::PlanSubmitted(plan) => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::PlanSubmitted(plan))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::UsageRecorded(usage) => {
+                        let _ = parent_tx
+                            .send(EngineToRuntimeEvent::SubagentUsageRecorded {
                                 session_id: session_id.clone(),
-                                message,
-                                persist_llm_history: true,
-                            },
-                        ))
-                        .await;
+                                usage,
+                            })
+                            .await;
+                    }
+                    EngineToRuntimeEvent::Error(e) => {
+                        let _ = parent_tx.send(EngineToRuntimeEvent::Error(e)).await;
+                    }
+                    EngineToRuntimeEvent::Warning(warning) => {
+                        let _ = parent_tx.send(EngineToRuntimeEvent::Warning(warning)).await;
+                    }
+                    EngineToRuntimeEvent::TurnStarted
+                    | EngineToRuntimeEvent::LlmHistoryProduced(_)
+                    | EngineToRuntimeEvent::TurnEnded
+                    | EngineToRuntimeEvent::ThinkingDelta(_)
+                    | EngineToRuntimeEvent::TextDelta(_)
+                    | EngineToRuntimeEvent::CompactShrinkStarted(_)
+                    | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                    | EngineToRuntimeEvent::CompactShrinkFailed(_)
+                    | EngineToRuntimeEvent::CompactSummaryStarted(_)
+                    | EngineToRuntimeEvent::CompactSummaryDelta(_)
+                    | EngineToRuntimeEvent::CompactSummaryFinished(_)
+                    | EngineToRuntimeEvent::CompactSummaryFailed(_)
+                    | EngineToRuntimeEvent::CompactSummaryUsageRecorded(_)
+                    | EngineToRuntimeEvent::SubagentStarted(_)
+                    | EngineToRuntimeEvent::SubagentSessionCreated(_)
+                    | EngineToRuntimeEvent::SubagentUsageRecorded { .. }
+                    | EngineToRuntimeEvent::SubagentMessageProduced(_)
+                    | EngineToRuntimeEvent::SubagentToolUse(_)
+                    | EngineToRuntimeEvent::SubagentToolResult(_)
+                    | EngineToRuntimeEvent::SubagentFinished(_) => {}
                 }
-                EngineToRuntimeEvent::MessageProduced(msg) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentMessageProduced(
-                            SubagentMessageEvent {
-                                session_id: session_id.clone(),
-                                message: msg,
-                                persist_llm_history: true,
-                            },
-                        ))
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolResultsProduced(msg) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentMessageProduced(
-                            SubagentMessageEvent {
-                                session_id: session_id.clone(),
-                                message: msg,
-                                persist_llm_history: true,
-                            },
-                        ))
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolResultsDisplayProduced(msg) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentMessageProduced(
-                            SubagentMessageEvent {
-                                session_id: session_id.clone(),
-                                message: msg,
-                                persist_llm_history: false,
-                            },
-                        ))
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolUse(tool_use) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentToolUse(
-                            SubagentToolUseEvent {
-                                session_id: session_id.clone(),
-                                tool_use,
-                            },
-                        ))
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolResult(tool_result) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentToolResult(
-                            SubagentToolResultEvent {
-                                session_id: session_id.clone(),
-                                tool_result,
-                            },
-                        ))
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolPauseRequested(req) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::ToolPauseRequested(req))
-                        .await;
-                }
-                EngineToRuntimeEvent::PlanSubmitted(plan) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::PlanSubmitted(plan))
-                        .await;
-                }
-                EngineToRuntimeEvent::UsageRecorded(usage) => {
-                    let _ = parent_tx
-                        .send(EngineToRuntimeEvent::SubagentUsageRecorded {
-                            session_id: session_id.clone(),
-                            usage,
-                        })
-                        .await;
-                }
-                EngineToRuntimeEvent::Error(e) => {
-                    let _ = parent_tx.send(EngineToRuntimeEvent::Error(e)).await;
-                }
-                EngineToRuntimeEvent::Warning(warning) => {
-                    let _ = parent_tx.send(EngineToRuntimeEvent::Warning(warning)).await;
-                }
-                EngineToRuntimeEvent::TurnStarted
-                | EngineToRuntimeEvent::LlmHistoryProduced(_)
-                | EngineToRuntimeEvent::TurnEnded
-                | EngineToRuntimeEvent::ThinkingDelta(_)
-                | EngineToRuntimeEvent::TextDelta(_)
-                | EngineToRuntimeEvent::CompactShrinkStarted(_)
-                | EngineToRuntimeEvent::CompactShrinkFinished(_)
-                | EngineToRuntimeEvent::CompactShrinkFailed(_)
-                | EngineToRuntimeEvent::CompactSummaryStarted(_)
-                | EngineToRuntimeEvent::CompactSummaryDelta(_)
-                | EngineToRuntimeEvent::CompactSummaryFinished(_)
-                | EngineToRuntimeEvent::CompactSummaryFailed(_)
-                | EngineToRuntimeEvent::CompactSummaryUsageRecorded(_)
-                | EngineToRuntimeEvent::SubagentStarted(_)
-                | EngineToRuntimeEvent::SubagentSessionCreated(_)
-                | EngineToRuntimeEvent::SubagentUsageRecorded { .. }
-                | EngineToRuntimeEvent::SubagentMessageProduced(_)
-                | EngineToRuntimeEvent::SubagentToolUse(_)
-                | EngineToRuntimeEvent::SubagentToolResult(_)
-                | EngineToRuntimeEvent::SubagentFinished(_) => {}
             }
+            tracing::debug!("subagent bridge stopped");
         }
-    })
+        .instrument(tracing::debug_span!(
+            "subagent_bridge",
+            parent_session_id = %span_parent_session_id,
+            subagent_session_id = %span_session_id,
+            agent_label = %span_agent_label
+        )),
+    )
 }
 
 fn subagent_system_prompt(

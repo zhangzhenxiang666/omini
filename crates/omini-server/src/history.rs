@@ -22,7 +22,7 @@ pub(crate) async fn load_messages(
     let stored = match db.get_messages(session_id).await {
         Ok(rows) => rows,
         Err(error) => {
-            eprintln!("load_messages: {error}");
+            tracing::warn!(session_id, error = %error, "failed to load messages");
             return Vec::new();
         }
     };
@@ -41,7 +41,9 @@ pub(crate) async fn load_messages(
         if sm.kind == "display" {
             match serde_json::from_str::<DisplayMessage>(&sm.content) {
                 Ok(display) => messages.push(HistoryItem::Display(display)),
-                Err(error) => eprintln!("load_messages: parse display failed: {error}"),
+                Err(error) => {
+                    tracing::warn!(session_id, error = %error, "failed to parse display message");
+                }
             }
             continue;
         }
@@ -49,7 +51,9 @@ pub(crate) async fn load_messages(
         if sm.kind == "plan" {
             match serde_json::from_str::<DisplayPlan>(&sm.content) {
                 Ok(plan) => messages.push(HistoryItem::Plan(plan)),
-                Err(error) => eprintln!("load_messages: parse plan failed: {error}"),
+                Err(error) => {
+                    tracing::warn!(session_id, error = %error, "failed to parse plan message");
+                }
             }
             continue;
         }
@@ -57,7 +61,13 @@ pub(crate) async fn load_messages(
         if sm.kind == "compact_summary" {
             match serde_json::from_str::<DisplaySummary>(&sm.content) {
                 Ok(summary) => messages.push(HistoryItem::Summary(summary)),
-                Err(error) => eprintln!("load_messages: parse compact summary failed: {error}"),
+                Err(error) => {
+                    tracing::warn!(
+                        session_id,
+                        error = %error,
+                        "failed to parse compact summary message"
+                    );
+                }
             }
             continue;
         }
@@ -70,14 +80,14 @@ pub(crate) async fn load_messages(
         let content_json: Vec<serde_json::Value> = match serde_json::from_str(&sm.content) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!("load_messages: parse content failed: {error}");
+                tracing::warn!(session_id, error = %error, "failed to parse message content");
                 continue;
             }
         };
         let blocks = match store::load_blocks(&content_json, blocks_dir) {
             Ok(blocks) => blocks,
             Err(error) => {
-                eprintln!("load_messages: load blocks failed: {error}");
+                tracing::warn!(session_id, error = %error, "failed to load message blocks");
                 continue;
             }
         };
@@ -106,7 +116,7 @@ pub(crate) async fn load_subagents_for_session(
     let sessions = match db.list_child_sessions(session_id).await {
         Ok(sessions) => sessions,
         Err(error) => {
-            eprintln!("load_subagents_for_session: {error}");
+            tracing::warn!(session_id, error = %error, "failed to load subagents for session");
             return Vec::new();
         }
     };

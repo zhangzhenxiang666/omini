@@ -55,6 +55,8 @@ tokio-stream = { version = "0.1.18", features = ["time"] }
 tokio-tungstenite = "0.28.0"
 toml = "1.1.2"
 tracing = "0.1.44"
+tracing-appender = "0.2.3"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter", "json"] }
 unicode-width = "0.2"
 uuid = { version = "1.23.1", features = ["v4"] }
 

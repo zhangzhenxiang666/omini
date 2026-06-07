@@ -25,6 +25,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 pub use crate::error::CoreError;
 
@@ -43,6 +44,8 @@ pub use crate::error::CoreError;
 /// session registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
 /// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
 pub struct AgentCoreSession {
+    // server 持有的 daemon session id；core facade task 日志用它做稳定关联字段。
+    session_id: Option<String>,
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
     request_tx: mpsc::Sender<ServerToRuntimeEvent>,
     // runtime 输出事件在 fanout 任务中转成协议事件后广播给 server。
@@ -81,6 +84,24 @@ impl AgentCoreSession {
         project: config::project::ProjectDir,
         active_profile: ActiveProfile,
     ) -> Self {
+        Self::spawn_with_session_id(settings, project, None, active_profile)
+    }
+
+    pub fn spawn_for_session_with_active_profile(
+        settings: crate::types::config::Settings,
+        project: config::project::ProjectDir,
+        session_id: String,
+        active_profile: ActiveProfile,
+    ) -> Self {
+        Self::spawn_with_session_id(settings, project, Some(session_id), active_profile)
+    }
+
+    fn spawn_with_session_id(
+        settings: crate::types::config::Settings,
+        project: config::project::ProjectDir,
+        session_id: Option<String>,
+        active_profile: ActiveProfile,
+    ) -> Self {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
@@ -104,39 +125,76 @@ impl AgentCoreSession {
         );
         let runtime_handle = runtime.run();
         let fanout_tx = event_tx.clone();
-        let fanout_handle = tokio::spawn(async move {
-            while let Some(event) = runtime_event_rx.recv().await {
-                let key_event = key_runtime_event_from_internal(&event);
-                match serde_json::to_value(event) {
-                    Ok(payload) => {
-                        let mut event =
-                            protocol::RuntimeEvent::new(runtime_event_kind(&payload), payload);
-                        if let Some(key_event) = key_event {
-                            event = event.with_key_event(key_event);
+        let runtime_fanout_session_id = session_id
+            .clone()
+            .unwrap_or_else(|| "unassigned".to_string());
+        let fanout_handle = tokio::spawn(
+            async move {
+                tracing::debug!("core runtime event fanout started");
+                while let Some(event) = runtime_event_rx.recv().await {
+                    let key_event = key_runtime_event_from_internal(&event);
+                    match serde_json::to_value(event) {
+                        Ok(payload) => {
+                            let kind = runtime_event_kind(&payload);
+                            log_runtime_event_fanout(&kind);
+                            let mut event = protocol::RuntimeEvent::new(kind, payload);
+                            if let Some(key_event) = key_event {
+                                event = event.with_key_event(key_event);
+                            }
+                            let _ = fanout_tx.send(event);
                         }
-                        let _ = fanout_tx.send(event);
-                    }
-                    Err(error) => {
-                        let payload = serde_json::json!({
-                            "type": "notification",
-                            "kind": "error",
-                            "message": format!("Failed to encode runtime event: {error}"),
-                            "details": [],
-                        });
-                        let _ =
-                            fanout_tx.send(protocol::RuntimeEvent::new("notification", payload));
+                        Err(error) => {
+                            tracing::error!(error = %error, "failed to encode runtime event");
+                            let payload = serde_json::json!({
+                                "type": "notification",
+                                "kind": "error",
+                                "message": format!("Failed to encode runtime event: {error}"),
+                                "details": [],
+                            });
+                            let _ = fanout_tx
+                                .send(protocol::RuntimeEvent::new("notification", payload));
+                        }
                     }
                 }
+                tracing::debug!("core runtime event fanout stopped");
             }
-        });
+            .instrument(tracing::debug_span!(
+                "core_fanout",
+                session_id = %runtime_fanout_session_id,
+                task_kind = "runtime_event_fanout"
+            )),
+        );
         let persistence_fanout_tx = persistence_tx.clone();
-        let persistence_handle = tokio::spawn(async move {
-            while let Some(event) = runtime_persistence_rx.recv().await {
-                let _ = persistence_fanout_tx.send(event);
+        let persistence_fanout_session_id = session_id
+            .clone()
+            .unwrap_or_else(|| "unassigned".to_string());
+        let persistence_handle = tokio::spawn(
+            async move {
+                tracing::debug!("core persistence fanout started");
+                while let Some(event) = runtime_persistence_rx.recv().await {
+                    let summary = runtime_persistence_event_summary(&event);
+                    tracing::trace!(
+                        event_kind = summary.kind,
+                        session_id = ?summary.session_id,
+                        item_count = ?summary.item_count,
+                        prompt_tokens = ?summary.prompt_tokens,
+                        completion_tokens = ?summary.completion_tokens,
+                        cached_tokens = ?summary.cached_tokens,
+                        "fanout persistence event"
+                    );
+                    let _ = persistence_fanout_tx.send(event);
+                }
+                tracing::debug!("core persistence fanout stopped");
             }
-        });
+            .instrument(tracing::debug_span!(
+                "core_fanout",
+                session_id = %persistence_fanout_session_id,
+                task_kind = "persistence_fanout"
+            )),
+        );
 
         Self {
+            session_id,
             request_tx,
             event_tx,
             persistence_tx,
@@ -386,10 +444,38 @@ impl AgentCoreSession {
     ///
     /// channel 关闭意味着对应会话的 runtime 已退出，调用方应把它视为 core 会话不可用。
     async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
+        tracing::trace!(
+            session_id = %session_log_id(self.session_id.as_deref()),
+            event_kind = server_to_runtime_event_kind(&event),
+            "sending event to runtime"
+        );
         self.request_tx
             .send(event)
             .await
             .map_err(|_| CoreError::RuntimeClosed)
+    }
+}
+
+fn session_log_id(session_id: Option<&str>) -> &str {
+    session_id.unwrap_or("unassigned")
+}
+
+fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
+    match event {
+        ServerToRuntimeEvent::SendMessage { .. } => "send_message",
+        ServerToRuntimeEvent::InterveneMessage { .. } => "intervene_message",
+        ServerToRuntimeEvent::CancelRun => "cancel_run",
+        ServerToRuntimeEvent::CompactContext { .. } => "compact_context",
+        ServerToRuntimeEvent::ModelSelected { .. } => "model_selected",
+        ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",
+        ServerToRuntimeEvent::SetThinkingDisplay { .. } => "set_thinking_display",
+        ServerToRuntimeEvent::ToggleActiveProfile => "toggle_active_profile",
+        ServerToRuntimeEvent::SetActiveProfile(_) => "set_active_profile",
+        ServerToRuntimeEvent::HydrateSessionSnapshot { .. } => "hydrate_session_snapshot",
+        ServerToRuntimeEvent::ResolveToolPause { .. } => "resolve_tool_pause",
+        ServerToRuntimeEvent::ResolvePlanApproval { .. } => "resolve_plan_approval",
+        ServerToRuntimeEvent::SubagentRegistryChanged => "subagent_registry_changed",
+        ServerToRuntimeEvent::CloseRuntime => "close_runtime",
     }
 }
 
@@ -399,6 +485,141 @@ fn runtime_event_kind(payload: &serde_json::Value) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or("runtime.event")
         .to_string()
+}
+
+fn log_runtime_event_fanout(kind: &str) {
+    if high_volume_runtime_event(kind) {
+        tracing::trace!(event_kind = kind, "fanout runtime event");
+    } else {
+        tracing::debug!(event_kind = kind, "fanout runtime event");
+    }
+}
+
+fn high_volume_runtime_event(kind: &str) -> bool {
+    matches!(
+        kind,
+        "thinking_delta" | "text_delta" | "proposed_plan_delta" | "compact_summary_delta"
+    )
+}
+
+struct RuntimePersistenceEventSummary<'a> {
+    kind: &'static str,
+    session_id: Option<&'a str>,
+    item_count: Option<usize>,
+    prompt_tokens: Option<usize>,
+    completion_tokens: Option<usize>,
+    cached_tokens: Option<usize>,
+}
+
+fn runtime_persistence_event_summary(
+    event: &crate::persistence::RuntimePersistenceEvent,
+) -> RuntimePersistenceEventSummary<'_> {
+    use crate::persistence::RuntimePersistenceEvent;
+
+    match event {
+        RuntimePersistenceEvent::CreateSession(session) => RuntimePersistenceEventSummary {
+            kind: "create_session",
+            session_id: Some(&session.id),
+            item_count: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+        },
+        RuntimePersistenceEvent::UpdateSessionUpdatedAt { session_id } => {
+            RuntimePersistenceEventSummary {
+                kind: "update_session_updated_at",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::UpdateSessionConfig { session_id, .. } => {
+            RuntimePersistenceEventSummary {
+                kind: "update_session_config",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::UpdateSessionThinkingEffort { session_id, .. } => {
+            RuntimePersistenceEventSummary {
+                kind: "update_session_thinking_effort",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::InsertMessage {
+            session_id, blocks, ..
+        } => RuntimePersistenceEventSummary {
+            kind: "insert_message",
+            session_id: Some(session_id),
+            item_count: Some(blocks.len()),
+            prompt_tokens: None,
+            completion_tokens: None,
+            cached_tokens: None,
+        },
+        RuntimePersistenceEvent::InsertDisplayMessage { session_id, .. } => {
+            RuntimePersistenceEventSummary {
+                kind: "insert_display_message",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::InsertPlanMessage { session_id, .. } => {
+            RuntimePersistenceEventSummary {
+                kind: "insert_plan_message",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::InsertCompactSummaryMessage { session_id, .. } => {
+            RuntimePersistenceEventSummary {
+                kind: "insert_compact_summary_message",
+                session_id: Some(session_id),
+                item_count: None,
+                prompt_tokens: None,
+                completion_tokens: None,
+                cached_tokens: None,
+            }
+        }
+        RuntimePersistenceEvent::RecordSessionUsage { session_id, usage } => {
+            usage_persistence_summary("record_session_usage", session_id, *usage)
+        }
+        RuntimePersistenceEvent::RecordSessionTotalUsage { session_id, usage } => {
+            usage_persistence_summary("record_session_total_usage", session_id, *usage)
+        }
+        RuntimePersistenceEvent::RecordParentSubagentUsage { session_id, usage } => {
+            usage_persistence_summary("record_parent_subagent_usage", session_id, *usage)
+        }
+    }
+}
+
+fn usage_persistence_summary<'a>(
+    kind: &'static str,
+    session_id: &'a str,
+    usage: crate::types::usage::Usage,
+) -> RuntimePersistenceEventSummary<'a> {
+    RuntimePersistenceEventSummary {
+        kind,
+        session_id: Some(session_id),
+        item_count: None,
+        prompt_tokens: Some(usage.prompt_tokens),
+        completion_tokens: Some(usage.completion_tokens),
+        cached_tokens: Some(usage.cached_tokens),
+    }
 }
 
 fn key_runtime_event_from_internal(

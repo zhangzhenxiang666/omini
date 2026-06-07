@@ -36,7 +36,7 @@ pub struct AutoCompactState {
     pub consecutive_failures: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct CompactOutcome {
     pub before_tokens: usize,
     pub after_tokens: usize,
@@ -83,6 +83,13 @@ pub async fn auto_compact_if_needed(
 ) -> bool {
     let config = normalized_config(&settings.compact);
     if !config.enabled || state.consecutive_failures >= config.max_consecutive_failures {
+        tracing::debug!(
+            compact_trigger = %CompactTrigger::Auto,
+            enabled = config.enabled,
+            consecutive_failures = state.consecutive_failures,
+            max_consecutive_failures = config.max_consecutive_failures,
+            "auto compact skipped by config or failure budget"
+        );
         return false;
     }
     // TODO(compact): 等 parent/subagent 的 UI 展示和 history 语义确定后，
@@ -92,6 +99,13 @@ pub async fn auto_compact_if_needed(
             .as_ref()
             .map(|runtime| runtime.session_type.as_str()),
     ) {
+        tracing::debug!(
+            compact_trigger = %CompactTrigger::Auto,
+            session_id = ?compact_session_id(runtime_context.as_deref()),
+            session_type = ?compact_session_type(runtime_context.as_deref()),
+            agent_label = ?compact_agent_label(runtime_context.as_deref()),
+            "auto compact skipped for subagent session"
+        );
         return false;
     }
 
@@ -102,6 +116,19 @@ pub async fn auto_compact_if_needed(
     );
     let thresholds = auto_compact_thresholds(settings);
     let decision = auto_compact_decision(before_tokens, thresholds);
+    tracing::debug!(
+        compact_trigger = %CompactTrigger::Auto,
+        session_id = ?compact_session_id(runtime_context.as_deref()),
+        session_type = ?compact_session_type(runtime_context.as_deref()),
+        agent_label = ?compact_agent_label(runtime_context.as_deref()),
+        before_tokens,
+        before_messages = messages.len(),
+        soft_threshold = thresholds.soft,
+        hard_threshold = thresholds.hard,
+        decision = ?decision,
+        consecutive_failures = state.consecutive_failures,
+        "auto compact evaluated"
+    );
     if decision == AutoCompactDecision::Skip {
         return false;
     }
@@ -113,7 +140,8 @@ pub async fn auto_compact_if_needed(
 
     let before_messages = messages.len();
     let mut changed = false;
-    if microcompact_messages(messages, 5) > 0 {
+    let microcompacted = microcompact_messages(messages, 5);
+    if microcompacted > 0 {
         changed = true;
     }
 
@@ -121,6 +149,13 @@ pub async fn auto_compact_if_needed(
         messages,
         settings.system_prompt.as_deref(),
         tool_definitions,
+    );
+    tracing::debug!(
+        compact_trigger = %CompactTrigger::Auto,
+        microcompacted_tool_results = microcompacted,
+        after_micro_tokens = after_micro,
+        before_tokens,
+        "auto compact micro pass finished"
     );
     if changed && after_micro < thresholds.soft {
         rewrite_runtime_history(runtime_context.as_deref(), messages);
@@ -138,18 +173,38 @@ pub async fn auto_compact_if_needed(
         )
         .await;
         state.consecutive_failures = 0;
+        tracing::debug!(
+            compact_trigger = %CompactTrigger::Auto,
+            before_tokens = outcome.before_tokens,
+            after_tokens = outcome.after_tokens,
+            before_messages = outcome.before_messages,
+            after_messages = outcome.after_messages,
+            "auto compact completed with local micro pass"
+        );
         return true;
     }
 
     if let Some(collapsed) = try_context_collapse(messages, config.preserve_recent) {
         *messages = collapsed;
         changed = true;
+        tracing::debug!(
+            compact_trigger = %CompactTrigger::Auto,
+            preserve_recent = config.preserve_recent,
+            "auto compact context collapse applied"
+        );
     }
 
     let after_collapse = estimate_request_tokens(
         messages,
         settings.system_prompt.as_deref(),
         tool_definitions,
+    );
+    tracing::debug!(
+        compact_trigger = %CompactTrigger::Auto,
+        after_collapse_tokens = after_collapse,
+        before_tokens,
+        changed,
+        "auto compact collapse pass finished"
     );
     if changed && after_collapse < thresholds.soft {
         rewrite_runtime_history(runtime_context.as_deref(), messages);
@@ -167,6 +222,14 @@ pub async fn auto_compact_if_needed(
         )
         .await;
         state.consecutive_failures = 0;
+        tracing::debug!(
+            compact_trigger = %CompactTrigger::Auto,
+            before_tokens = outcome.before_tokens,
+            after_tokens = outcome.after_tokens,
+            before_messages = outcome.before_messages,
+            after_messages = outcome.after_messages,
+            "auto compact completed with context collapse"
+        );
         return true;
     }
 
@@ -187,6 +250,14 @@ pub async fn auto_compact_if_needed(
             )
             .await;
             state.consecutive_failures = 0;
+            tracing::debug!(
+                compact_trigger = %CompactTrigger::Auto,
+                before_tokens = outcome.before_tokens,
+                after_tokens = outcome.after_tokens,
+                before_messages = outcome.before_messages,
+                after_messages = outcome.after_messages,
+                "auto compact completed with local-only shrink"
+            );
         }
         return changed;
     }
@@ -211,10 +282,24 @@ pub async fn auto_compact_if_needed(
             )
             .await;
             state.consecutive_failures = 0;
+            tracing::debug!(
+                compact_trigger = %CompactTrigger::Auto,
+                before_tokens = outcome.before_tokens,
+                after_tokens = outcome.after_tokens,
+                before_messages = outcome.before_messages,
+                after_messages = outcome.after_messages,
+                "auto compact completed with summary"
+            );
             true
         }
         Err(error) => {
             state.consecutive_failures += 1;
+            tracing::warn!(
+                compact_trigger = %CompactTrigger::Auto,
+                error = %error,
+                consecutive_failures = state.consecutive_failures,
+                "auto compact failed"
+            );
             emit_compact_summary_failed(
                 event_tx,
                 CompactTrigger::Auto,
@@ -236,6 +321,15 @@ pub async fn force_compact(
     runtime_context: Option<Arc<ToolRuntimeContext>>,
     event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
 ) -> Result<CompactOutcome, RuntimeError> {
+    tracing::debug!(
+        compact_trigger = %CompactTrigger::Manual,
+        session_id = ?compact_session_id(runtime_context.as_deref()),
+        session_type = ?compact_session_type(runtime_context.as_deref()),
+        agent_label = ?compact_agent_label(runtime_context.as_deref()),
+        message_count = messages.len(),
+        has_custom_instructions = custom_instructions.is_some(),
+        "manual compact started"
+    );
     let _ = event_tx
         .send(EngineToRuntimeEvent::CompactShrinkStarted(compact_event(
             CompactTrigger::Manual,
@@ -259,12 +353,25 @@ pub async fn force_compact(
                 event_tx,
                 CompactTrigger::Manual,
                 runtime_context.as_deref(),
-                outcome.clone(),
+                outcome,
             )
             .await;
+            tracing::debug!(
+                compact_trigger = %CompactTrigger::Manual,
+                before_tokens = outcome.before_tokens,
+                after_tokens = outcome.after_tokens,
+                before_messages = outcome.before_messages,
+                after_messages = outcome.after_messages,
+                "manual compact completed"
+            );
             Ok(outcome)
         }
         Err(error) => {
+            tracing::warn!(
+                compact_trigger = %CompactTrigger::Manual,
+                error = %error,
+                "manual compact failed"
+            );
             emit_compact_summary_failed(
                 event_tx,
                 CompactTrigger::Manual,
@@ -523,7 +630,24 @@ async fn full_compact(
         ctx.settings.system_prompt.as_deref(),
         ctx.tool_definitions,
     );
+    tracing::debug!(
+        compact_trigger = %ctx.trigger,
+        session_id = ?compact_session_id(ctx.runtime_context),
+        session_type = ?compact_session_type(ctx.runtime_context),
+        agent_label = ?compact_agent_label(ctx.runtime_context),
+        before_tokens,
+        before_messages,
+        preserve_recent = config.preserve_recent,
+        summary_output_tokens = config.summary_output_tokens,
+        "full compact evaluated"
+    );
     if messages.len() <= config.preserve_recent {
+        tracing::debug!(
+            compact_trigger = %ctx.trigger,
+            before_messages,
+            preserve_recent = config.preserve_recent,
+            "full compact skipped because history is within preserve_recent"
+        );
         return Ok(CompactOutcome {
             before_tokens,
             after_tokens: before_tokens,
@@ -536,6 +660,12 @@ async fn full_compact(
     microcompact_messages(&mut compact_input, 5);
     let (older, newer) = split_preserving_tool_pairs(&compact_input, config.preserve_recent);
     if older.is_empty() {
+        tracing::debug!(
+            compact_trigger = %ctx.trigger,
+            newer_messages = newer.len(),
+            preserve_recent = config.preserve_recent,
+            "full compact skipped because no older messages are compactable"
+        );
         return Ok(CompactOutcome {
             before_tokens,
             after_tokens: before_tokens,
@@ -544,8 +674,20 @@ async fn full_compact(
         });
     }
 
+    tracing::debug!(
+        compact_trigger = %ctx.trigger,
+        older_messages = older.len(),
+        newer_messages = newer.len(),
+        "full compact summary request starting"
+    );
     emit_compact_summary_started(ctx.event_tx, ctx.trigger, ctx.runtime_context).await;
     let summary = collect_summary(older, config.summary_output_tokens, &ctx).await?;
+    tracing::debug!(
+        compact_trigger = %ctx.trigger,
+        raw_summary_chars = summary.raw.chars().count(),
+        visible_summary_chars = summary.visible.chars().count(),
+        "full compact summary collected"
+    );
     let summary_message = Message::from_user_text(build_compact_summary_message(
         &summary.raw,
         !newer.is_empty(),
@@ -571,6 +713,14 @@ async fn full_compact(
         after_tokens,
     )
     .await;
+    tracing::debug!(
+        compact_trigger = %ctx.trigger,
+        before_tokens,
+        after_tokens,
+        before_messages,
+        after_messages,
+        "full compact finished"
+    );
 
     Ok(CompactOutcome {
         before_tokens,
@@ -592,19 +742,48 @@ async fn collect_summary(
     let mut last_error = None;
 
     for attempt in 0..=MAX_COMPACT_STREAMING_RETRIES {
+        tracing::debug!(
+            compact_trigger = %ctx.trigger,
+            attempt,
+            ptl_retries,
+            retry_message_count = retry_messages.len(),
+            max_tokens,
+            "compact summary attempt started"
+        );
         match invoke_summary(&retry_messages, max_tokens, ctx).await {
             Ok(summary) if !summary.trim().is_empty() => {
                 let visible = visible_compact_summary(&summary);
+                tracing::debug!(
+                    compact_trigger = %ctx.trigger,
+                    attempt,
+                    raw_summary_chars = summary.chars().count(),
+                    visible_summary_chars = visible.chars().count(),
+                    "compact summary attempt succeeded"
+                );
                 return Ok(CollectedSummary {
                     raw: summary,
                     visible,
                 });
             }
-            Ok(_) => last_error = Some(CompactError::IncompleteResponse),
+            Ok(_) => {
+                tracing::warn!(
+                    compact_trigger = %ctx.trigger,
+                    attempt,
+                    "compact summary attempt returned empty response"
+                );
+                last_error = Some(CompactError::IncompleteResponse)
+            }
             Err(error)
                 if is_prompt_too_long_error(&error.to_string())
                     && ptl_retries < MAX_PTL_RETRIES =>
             {
+                tracing::warn!(
+                    compact_trigger = %ctx.trigger,
+                    attempt,
+                    ptl_retries,
+                    error = %error,
+                    "compact summary prompt too long; retrying with truncated history"
+                );
                 let Some(truncated) =
                     truncate_head_for_ptl_retry(&retry_messages[..retry_messages.len() - 1])
                 else {
@@ -618,7 +797,15 @@ async fn collect_summary(
                 )));
                 continue;
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => {
+                tracing::warn!(
+                    compact_trigger = %ctx.trigger,
+                    attempt,
+                    error = %error,
+                    "compact summary attempt failed"
+                );
+                last_error = Some(error)
+            }
         }
         if attempt == MAX_COMPACT_STREAMING_RETRIES {
             break;
@@ -647,6 +834,14 @@ async fn invoke_summary(
         .invoke(request)
         .await
         .map_err(CompactError::Request)?;
+    tracing::debug!(
+        compact_trigger = %ctx.trigger,
+        request_messages = messages.len(),
+        max_tokens,
+        model = %ctx.settings.model,
+        provider = %ctx.settings.active_provider,
+        "compact summary stream opened"
+    );
     let mut summary = String::new();
     let mut forwarder = CompactSummaryForwarder::new();
     while let Some(event) = stream.next().await {
@@ -662,6 +857,14 @@ async fn invoke_summary(
                 .await;
             }
             ApiEvent::Done(completion) => {
+                tracing::debug!(
+                    compact_trigger = %ctx.trigger,
+                    finish_reason = ?completion.finish_reason,
+                    prompt_tokens = completion.usage.prompt_tokens,
+                    completion_tokens = completion.usage.completion_tokens,
+                    cached_tokens = completion.usage.cached_tokens,
+                    "compact summary stream completed"
+                );
                 let _ = ctx
                     .event_tx
                     .send(EngineToRuntimeEvent::CompactSummaryUsageRecorded(
@@ -684,8 +887,17 @@ async fn invoke_summary(
     )
     .await;
     if summary.trim().is_empty() {
+        tracing::warn!(
+            compact_trigger = %ctx.trigger,
+            "compact summary stream ended without summary text"
+        );
         Err(CompactError::IncompleteResponse)
     } else {
+        tracing::debug!(
+            compact_trigger = %ctx.trigger,
+            summary_chars = summary.chars().count(),
+            "compact summary stream finished"
+        );
         Ok(summary)
     }
 }
@@ -1145,6 +1357,18 @@ fn compact_event(
         session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
         agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
     }
+}
+
+fn compact_session_id(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
+    runtime_context.map(|runtime| runtime.session_id.as_str())
+}
+
+fn compact_session_type(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
+    runtime_context.map(|runtime| runtime.session_type.as_str())
+}
+
+fn compact_agent_label(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
+    runtime_context.and_then(|runtime| runtime.agent_label.as_deref())
 }
 
 async fn emit_compact_shrink_finished(

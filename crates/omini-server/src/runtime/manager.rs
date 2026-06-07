@@ -1,4 +1,5 @@
 use super::*;
+use tracing::Instrument;
 
 /// 项目 attach 入口的错误分类，路由层会映射成协议错误。
 pub(crate) enum ProjectAttachError {
@@ -758,23 +759,34 @@ impl SessionManager {
         let manager = Arc::clone(self);
         let session_id = session_id.to_string();
         let session = Arc::clone(session);
-        tokio::spawn(async move {
-            while matches!(
-                events.recv().await,
-                Ok(_) | Err(broadcast::error::RecvError::Lagged(_))
-            ) {
-                // RunFinished 后可能紧跟 PlanSubmitted。
-                // 先等投影状态稳定，再判断 runtime 是否可回收。
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                if manager.remove_session_if_reclaimable(&session_id, &session) {
-                    Self::shutdown_session(&session).await;
-                    break;
+        let watcher_session_id = session_id.clone();
+        tokio::spawn(
+            async move {
+                tracing::debug!("idle reclaim watcher started");
+                while matches!(
+                    events.recv().await,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_))
+                ) {
+                    // RunFinished 后可能紧跟 PlanSubmitted。
+                    // 先等投影状态稳定，再判断 runtime 是否可回收。
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    if manager.remove_session_if_reclaimable(&session_id, &session) {
+                        tracing::debug!("reclaiming idle runtime session");
+                        Self::shutdown_session(&session).await;
+                        break;
+                    }
+                    if !manager.should_wait_for_reclaim(&session_id, &session) {
+                        break;
+                    }
                 }
-                if !manager.should_wait_for_reclaim(&session_id, &session) {
-                    break;
-                }
+                tracing::debug!("idle reclaim watcher stopped");
             }
-        });
+            .instrument(tracing::debug_span!(
+                "session",
+                session_id = %watcher_session_id,
+                task_kind = "idle_reclaim_watcher"
+            )),
+        );
     }
 
     fn remove_session_if_reclaimable(
@@ -812,7 +824,7 @@ impl SessionManager {
 
     async fn shutdown_session(session: &RuntimeSession) {
         if let Err(error) = session.shutdown().await {
-            eprintln!("runtime session shutdown failed: {error}");
+            tracing::warn!(error = %error, "runtime session shutdown failed");
         }
     }
 }
