@@ -16,8 +16,8 @@ pub(crate) struct RuntimeSession {
     db: Arc<Database>,
     // core runtime 事件经过本地 seq 编号后的广播流，WebSocket 订阅和 replay 去重都用它。
     runtime_event_tx: broadcast::Sender<SequencedRuntimeEvent>,
-    // server 本地产生的协议事件广播流，例如 session title 变更，不经过 core runtime。
-    server_event_tx: broadcast::Sender<RuntimeEvent>,
+    // server 本地产生的协议事件入口，例如 session title 变更；fanout 会统一编号和广播。
+    server_event_inbox_tx: mpsc::UnboundedSender<RuntimeEvent>,
     // 当前连接的 client 集合和 controller 归属；HTTP mutation 会用它做控制权检查。
     pub(super) presence: Mutex<ClientPresence>,
     // 尚未 resolve 的 tool pause id 集合；resolve API 用它保证幂等并防止重复点击。
@@ -48,7 +48,7 @@ impl RuntimeSession {
     ) -> Self {
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
-        let (server_event_tx, _) = broadcast::channel(128);
+        let (server_event_inbox_tx, mut server_event_inbox_rx) = mpsc::unbounded_channel();
         let core = AgentCoreSession::spawn_for_session_with_active_profile(
             settings.clone(),
             project.clone(),
@@ -103,48 +103,39 @@ impl RuntimeSession {
             async move {
                 let mut next_seq = 1u64;
                 loop {
-                    match runtime_event_rx.recv().await {
-                        Ok(event) => {
-                            let event = match runtime_event_from_internal(event) {
-                                Ok(event) => event,
-                                Err(error) => {
-                                    tracing::error!(error = %error, "failed to encode runtime event");
-                                    let fallback = RuntimeToServerEvent::error(format!(
-                                        "Failed to encode runtime event: {error}"
-                                    ));
-                                    match runtime_event_from_internal(fallback) {
-                                        Ok(event) => event,
-                                        Err(error) => {
-                                            tracing::error!(
-                                                error = %error,
-                                                "failed to encode fallback runtime event"
-                                            );
-                                            continue;
-                                        }
-                                    }
+                    tokio::select! {
+                        event = runtime_event_rx.recv() => {
+                            match event {
+                                Ok(event) => {
+                                    let Some(event) = runtime_event_from_core_with_fallback(event) else {
+                                        continue;
+                                    };
+                                    broadcast_sequenced_runtime_event(
+                                        event,
+                                        &mut next_seq,
+                                        &runtime_replay_buffer,
+                                        &runtime_status_projection,
+                                        &runtime_event_fanout_tx,
+                                    );
                                 }
+                                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                    tracing::warn!(skipped, "runtime event stream lagged");
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        event = server_event_inbox_rx.recv() => {
+                            let Some(event) = event else {
+                                break;
                             };
-                            let event_kind = event.kind();
-                            let sequenced = SequencedRuntimeEvent {
-                                seq: next_seq,
+                            broadcast_sequenced_runtime_event(
                                 event,
-                            };
-                            log_runtime_event_broadcast(sequenced.seq, event_kind);
-                            next_seq = next_seq.saturating_add(1);
-                            runtime_replay_buffer
-                                .lock()
-                                .expect("replay buffer lock poisoned")
-                                .record(sequenced.clone());
-                            runtime_status_projection
-                                .lock()
-                                .expect("status projection lock poisoned")
-                                .record_event(&sequenced.event, Utc::now());
-                            let _ = runtime_event_fanout_tx.send(sequenced);
+                                &mut next_seq,
+                                &runtime_replay_buffer,
+                                &runtime_status_projection,
+                                &runtime_event_fanout_tx,
+                            );
                         }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(skipped, "runtime event stream lagged");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
@@ -184,7 +175,7 @@ impl RuntimeSession {
             settings,
             db,
             runtime_event_tx,
-            server_event_tx,
+            server_event_inbox_tx,
             presence: Mutex::new(ClientPresence::default()),
             pending_tool_pauses,
             status_projection,
@@ -206,10 +197,6 @@ impl RuntimeSession {
             .lock()
             .expect("replay buffer lock poisoned")
             .replay()
-    }
-
-    pub(crate) fn subscribe_server_events(&self) -> broadcast::Receiver<RuntimeEvent> {
-        self.server_event_tx.subscribe()
     }
 
     pub(crate) fn subscribe_controller(&self) -> broadcast::Receiver<Option<String>> {
@@ -260,7 +247,7 @@ impl RuntimeSession {
     ) -> Result<(), CoreError> {
         let event =
             runtime_event_from_internal(RuntimeToServerEvent::AgentManagementUpdated { records })?;
-        let _ = self.server_event_tx.send(event);
+        self.broadcast_server_local_event(event);
         Ok(())
     }
 
@@ -310,7 +297,7 @@ impl RuntimeSession {
         let event = runtime_event_from_internal(RuntimeToServerEvent::SessionTitleChanged {
             title: Some(title),
         })?;
-        let _ = self.server_event_tx.send(event);
+        self.broadcast_server_local_event(event);
         Ok(())
     }
 
@@ -328,14 +315,16 @@ impl RuntimeSession {
     }
 
     fn broadcast_thinking_display_changed(&self, show: bool) -> Result<(), CoreError> {
-        let _ = self
-            .server_event_tx
-            .send(thinking_display_changed_event(show));
+        self.broadcast_server_local_event(thinking_display_changed_event(show));
         let notification = runtime_event_from_internal(RuntimeToServerEvent::Notification(
             thinking_display_notification(show),
         ))?;
-        let _ = self.server_event_tx.send(notification);
+        self.broadcast_server_local_event(notification);
         Ok(())
+    }
+
+    fn broadcast_server_local_event(&self, event: RuntimeEvent) {
+        let _ = self.server_event_inbox_tx.send(event);
     }
 
     pub(crate) async fn ensure_loaded(&self) -> Result<(), CoreError> {
@@ -569,6 +558,52 @@ impl RuntimeSession {
     }
 }
 
+fn runtime_event_from_core_with_fallback(event: RuntimeToServerEvent) -> Option<RuntimeEvent> {
+    match runtime_event_from_internal(event) {
+        Ok(event) => Some(event),
+        Err(error) => {
+            tracing::error!(error = %error, "failed to encode runtime event");
+            let fallback =
+                RuntimeToServerEvent::error(format!("Failed to encode runtime event: {error}"));
+            match runtime_event_from_internal(fallback) {
+                Ok(event) => Some(event),
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "failed to encode fallback runtime event"
+                    );
+                    None
+                }
+            }
+        }
+    }
+}
+
+fn broadcast_sequenced_runtime_event(
+    event: RuntimeEvent,
+    next_seq: &mut u64,
+    replay_buffer: &Arc<Mutex<RuntimeReplayBuffer>>,
+    status_projection: &Arc<Mutex<RuntimeStatusProjection>>,
+    runtime_event_tx: &broadcast::Sender<SequencedRuntimeEvent>,
+) {
+    let event_kind = event.kind();
+    let sequenced = SequencedRuntimeEvent {
+        seq: *next_seq,
+        event,
+    };
+    log_runtime_event_broadcast(sequenced.seq, event_kind);
+    *next_seq = (*next_seq).saturating_add(1);
+    replay_buffer
+        .lock()
+        .expect("replay buffer lock poisoned")
+        .record(sequenced.clone());
+    status_projection
+        .lock()
+        .expect("status projection lock poisoned")
+        .record_event(&sequenced.event, Utc::now());
+    let _ = runtime_event_tx.send(sequenced);
+}
+
 fn log_runtime_event_broadcast(seq: u64, kind: &str) {
     if high_volume_runtime_event(kind) {
         tracing::trace!(seq, event_kind = %kind, "broadcasting runtime event");
@@ -595,14 +630,12 @@ fn effective_session_thinking_effort(
 }
 
 fn thinking_display_notification(show: bool) -> omini_core::types::events::Notification {
-    let status = if show { "on" } else { "off" };
-    let detail = if show {
-        "已打开思考内容块展示"
+    let message = if show {
+        "思考内容展示已开启"
     } else {
-        "已关闭思考内容块展示"
+        "思考内容展示已关闭"
     };
-    omini_core::types::events::Notification::info(format!("/thinking {status}"))
-        .with_details(vec![detail.to_string()])
+    omini_core::types::events::Notification::info(message)
 }
 
 #[cfg(test)]

@@ -989,6 +989,25 @@ thinking = true
             .any(|candidate| candidate.id == provider)
     }
 
+    async fn recv_runtime_event_kind(
+        events: &mut broadcast::Receiver<SequencedRuntimeEvent>,
+        kind: &str,
+    ) -> SequencedRuntimeEvent {
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let event = events
+                    .recv()
+                    .await
+                    .expect("runtime event should be broadcast");
+                if event.event.kind() == kind {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("expected runtime event should arrive")
+    }
+
     fn test_session(id: &str) -> Session {
         let now = Utc::now();
         Session {
@@ -1105,7 +1124,7 @@ thinking = true
             .session(&session_id)
             .await
             .expect("session should load");
-        let mut events = session.subscribe_server_events();
+        let mut events = session.subscribe();
 
         manager
             .save_agent(
@@ -1126,13 +1145,10 @@ thinking = true
             .await
             .expect("agent should save");
 
-        let event = events
-            .recv()
-            .await
-            .expect("agent update should be broadcast");
-        assert_eq!(event.kind(), "agent_management_updated");
+        let event = recv_runtime_event_kind(&mut events, "agent_management_updated").await;
+        assert!(event.seq > 0);
         assert!(matches!(
-            event.event,
+            event.event.event,
             protocol::TypedRuntimeEvent::AgentManagementUpdated { records }
                 if records.iter().any(|record| record.name == "target-helper")
         ));

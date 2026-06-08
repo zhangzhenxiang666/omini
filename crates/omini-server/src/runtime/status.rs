@@ -90,6 +90,9 @@ impl RuntimeStatusProjection {
             protocol::TypedRuntimeEvent::ActiveProfileChanged(event) => {
                 self.active_profile = event.profile;
             }
+            protocol::TypedRuntimeEvent::SessionTitleChanged(_)
+            | protocol::TypedRuntimeEvent::ThinkingDisplayChanged(_)
+            | protocol::TypedRuntimeEvent::AgentManagementUpdated { .. } => {}
             // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
             protocol::TypedRuntimeEvent::RunStarted => self.start_query(now),
             protocol::TypedRuntimeEvent::RunFinished

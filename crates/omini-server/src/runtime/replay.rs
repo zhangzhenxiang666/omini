@@ -7,7 +7,7 @@ pub(crate) struct SequencedRuntimeEvent {
     pub(crate) event: RuntimeEvent,
 }
 
-/// 保存重连时必须补发、但尚未被持久化 snapshot 覆盖的运行中事件尾部。
+/// 保存重连时必须补发、但尚未被 snapshot/status 覆盖的运行中尾部和少量 UI 状态。
 #[derive(Default)]
 pub(super) struct RuntimeReplayBuffer {
     // run_started 之前的用户注入事件先暂存，确保重连客户端能看到刚提交的输入。
@@ -21,6 +21,10 @@ pub(super) struct RuntimeReplayBuffer {
     compact_tail: Vec<SequencedRuntimeEvent>,
     // 计划确认发生在 run_finished 后，不能依赖 run tail；保留到任一客户端完成确认。
     pending_plan_approval: Option<SequencedRuntimeEvent>,
+    // server/core 的轻量 UI 状态事件不一定落在消息 snapshot 中；每类只保留最新值。
+    latest_session_title: Option<SequencedRuntimeEvent>,
+    latest_thinking_display: Option<SequencedRuntimeEvent>,
+    latest_agent_management: Option<SequencedRuntimeEvent>,
 }
 
 impl RuntimeReplayBuffer {
@@ -51,6 +55,15 @@ impl RuntimeReplayBuffer {
                 if self.pending_plan_matches(&event) {
                     self.pending_plan_approval = None;
                 }
+            }
+            "session_title_changed" => {
+                self.latest_session_title = Some(event);
+            }
+            "thinking_display_changed" => {
+                self.latest_thinking_display = Some(event);
+            }
+            "agent_management_updated" => {
+                self.latest_agent_management = Some(event);
             }
             kind if is_session_snapshot_kind(kind) => {
                 if self.run_started.is_some() || self.compact_started.is_some() {
@@ -99,7 +112,10 @@ impl RuntimeReplayBuffer {
                 + self.current_tail.len()
                 + usize::from(self.compact_started.is_some())
                 + self.compact_tail.len()
-                + usize::from(self.pending_plan_approval.is_some()),
+                + usize::from(self.pending_plan_approval.is_some())
+                + usize::from(self.latest_session_title.is_some())
+                + usize::from(self.latest_thinking_display.is_some())
+                + usize::from(self.latest_agent_management.is_some()),
         );
         replay.extend(self.pending_prefix.iter().cloned());
         if let Some(run_started) = &self.run_started {
@@ -113,6 +129,16 @@ impl RuntimeReplayBuffer {
             replay.push(compact_started.clone());
         }
         replay.extend(self.compact_tail.iter().cloned());
+        if let Some(event) = &self.latest_session_title {
+            replay.push(event.clone());
+        }
+        if let Some(event) = &self.latest_thinking_display {
+            replay.push(event.clone());
+        }
+        if let Some(event) = &self.latest_agent_management {
+            replay.push(event.clone());
+        }
+        replay.sort_by_key(|event| event.seq);
         replay
     }
 
@@ -154,6 +180,7 @@ impl RuntimeReplayBuffer {
     pub(super) fn record_snapshot(&mut self, snapshot: &LoadedSession) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
+        self.drop_session_title_in_snapshot(snapshot);
         if self.current_assistant_tail_is_in_snapshot(snapshot) {
             self.drop_current_assistant_tail();
         }
@@ -226,6 +253,15 @@ impl RuntimeReplayBuffer {
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
     }
 
+    fn drop_session_title_in_snapshot(&mut self, snapshot: &LoadedSession) {
+        let Some(event) = &self.latest_session_title else {
+            return;
+        };
+        if session_title_payload(&event.event) == Some(snapshot.title.as_ref()) {
+            self.latest_session_title = None;
+        }
+    }
+
     fn current_assistant_tail_is_in_snapshot(&self, snapshot: &LoadedSession) -> bool {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
@@ -269,6 +305,13 @@ fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &Loade
         return false;
     };
     snapshot.messages.iter().any(|message| message == item)
+}
+
+fn session_title_payload(event: &RuntimeEvent) -> Option<Option<&String>> {
+    let protocol::TypedRuntimeEvent::SessionTitleChanged(event) = &event.event else {
+        return None;
+    };
+    Some(event.title.as_ref())
 }
 
 /// 把当前 assistant 流式尾部重组为完整内容块，供 snapshot 去重比较。
@@ -428,13 +471,17 @@ mod tests {
     }
 
     fn snapshot(messages: Vec<HistoryItem>) -> LoadedSession {
+        snapshot_with_title(None, messages)
+    }
+
+    fn snapshot_with_title(title: Option<String>, messages: Vec<HistoryItem>) -> LoadedSession {
         LoadedSession {
             session_id: "s1".to_string(),
             provider: "main".to_string(),
             model: "test-model".to_string(),
             thinking_effort: None,
             active_profile: ActiveProfile::Main,
-            title: None,
+            title,
             messages,
             subagents: Vec::new(),
             usage: SessionUsageSnapshot::default(),
@@ -461,6 +508,72 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "notification"));
+
+        assert!(buffer.replay().is_empty());
+    }
+
+    #[test]
+    fn replay_buffer_replays_latest_server_local_state_events() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(runtime_event(
+            1,
+            RuntimeToServerEvent::SessionTitleChanged {
+                title: Some("old".to_string()),
+            },
+        ));
+        buffer.record(SequencedRuntimeEvent {
+            seq: 2,
+            event: thinking_display_changed_event(false),
+        });
+        buffer.record(runtime_event(
+            3,
+            RuntimeToServerEvent::AgentManagementUpdated {
+                records: Vec::new(),
+            },
+        ));
+        buffer.record(runtime_event(
+            4,
+            RuntimeToServerEvent::SessionTitleChanged {
+                title: Some("new".to_string()),
+            },
+        ));
+
+        let replay = buffer.replay();
+
+        assert_eq!(
+            replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            replay
+                .iter()
+                .map(|event| event.event.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                "thinking_display_changed",
+                "agent_management_updated",
+                "session_title_changed"
+            ]
+        );
+        assert!(matches!(
+            &replay[2].event.event,
+            protocol::TypedRuntimeEvent::SessionTitleChanged(event)
+                if event.title.as_deref() == Some("new")
+        ));
+    }
+
+    #[test]
+    fn replay_buffer_drops_session_title_recovered_by_snapshot() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(runtime_event(
+            1,
+            RuntimeToServerEvent::SessionTitleChanged {
+                title: Some("hello".to_string()),
+            },
+        ));
+        buffer.record_snapshot(&snapshot_with_title(Some("hello".to_string()), Vec::new()));
 
         assert!(buffer.replay().is_empty());
     }

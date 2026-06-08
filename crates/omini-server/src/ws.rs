@@ -21,7 +21,6 @@ pub(crate) async fn handle_socket(
 ) {
     // 先订阅再登记连接，避免 controller 变化或 runtime 事件夹在连接建立过程中丢失。
     let mut events = session.subscribe();
-    let mut server_events = session.subscribe_server_events();
     let mut controller_events = session.subscribe_controller();
     let mut replay_through = 0u64;
     let (mut write, mut read) = socket.split();
@@ -163,19 +162,6 @@ pub(crate) async fn handle_socket(
                         };
                         let _ = send_axum_envelope(&mut write, &envelope).await;
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-            event = server_events.recv() => {
-                match event {
-                    Ok(event) => {
-                        let envelope = ServerEnvelope::Event { event };
-                        if send_axum_envelope(&mut write, &envelope).await.is_err() {
-                            break;
-                        }
-                    }
-                    // server event 多为派生通知，丢中间项不需要打断 socket。
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
