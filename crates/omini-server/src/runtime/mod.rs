@@ -37,6 +37,12 @@ mod status;
 mod tool_pause;
 
 use adapter::*;
+pub(crate) use adapter::{
+    resolve_plan_command_from_protocol, resolve_tool_pause_command_from_protocol,
+    run_submitted_to_protocol, set_active_profile_command_from_protocol,
+    set_model_command_from_protocol, set_thinking_effort_command_from_protocol,
+    submit_run_command_from_protocol,
+};
 use load_gate::*;
 use presence::*;
 use replay::*;

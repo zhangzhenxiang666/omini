@@ -1,5 +1,8 @@
 use super::*;
+use omini_core::types::display as display_types;
 use omini_core::types::events as event_types;
+use omini_core::types::session as session_types;
+use std::path::Path;
 
 pub(super) fn thinking_effort_to_protocol(
     effort: omini_core::types::config::ThinkingEffort,
@@ -32,6 +35,153 @@ pub(super) fn active_profile_from_protocol(profile: protocol::ActiveProfile) -> 
         protocol::ActiveProfile::Main => ActiveProfile::Main,
         protocol::ActiveProfile::Auto => ActiveProfile::Auto,
         protocol::ActiveProfile::Plan => ActiveProfile::Plan,
+    }
+}
+
+pub(crate) fn submit_run_command_from_protocol(
+    request: protocol::SubmitRunRequest,
+) -> session_types::SubmitRunCommand {
+    session_types::SubmitRunCommand {
+        draft: user_input_from_protocol(request.input),
+        client_echo_id: request.client_echo_id,
+        mode: run_input_mode_from_protocol(request.mode),
+    }
+}
+
+pub(crate) fn run_submitted_to_protocol(
+    result: session_types::RunSubmitted,
+) -> protocol::RunSubmittedResponse {
+    protocol::RunSubmittedResponse {
+        run_id: result.run_id,
+    }
+}
+
+pub(crate) fn set_model_command_from_protocol(
+    request: protocol::SetModelRequest,
+) -> session_types::SetModelCommand {
+    session_types::SetModelCommand {
+        provider: request.provider,
+        model: request.model,
+        thinking_effort: request.thinking_effort.map(thinking_effort_from_protocol),
+    }
+}
+
+pub(crate) fn set_thinking_effort_command_from_protocol(
+    request: protocol::SetThinkingEffortRequest,
+) -> session_types::SetThinkingEffortCommand {
+    session_types::SetThinkingEffortCommand {
+        effort: thinking_effort_from_protocol(request.effort),
+    }
+}
+
+pub(crate) fn set_active_profile_command_from_protocol(
+    request: protocol::SetActiveProfileRequest,
+) -> session_types::SetActiveProfileCommand {
+    session_types::SetActiveProfileCommand {
+        profile: active_profile_from_protocol(request.profile),
+    }
+}
+
+pub(crate) fn resolve_tool_pause_command_from_protocol(
+    tool_use_id: String,
+    request: protocol::ResolveToolPauseRequest,
+) -> session_types::ResolveToolPauseCommand {
+    session_types::ResolveToolPauseCommand {
+        tool_use_id,
+        response: request.response,
+    }
+}
+
+pub(crate) fn resolve_plan_command_from_protocol(
+    plan_id: String,
+    request: protocol::ResolvePlanRequest,
+) -> session_types::ResolvePlanCommand {
+    session_types::ResolvePlanCommand {
+        plan_id,
+        action: request.action,
+    }
+}
+
+fn run_input_mode_from_protocol(mode: protocol::RunInputMode) -> session_types::RunInputMode {
+    match mode {
+        protocol::RunInputMode::Submit => session_types::RunInputMode::Submit,
+        protocol::RunInputMode::Intervene => session_types::RunInputMode::Intervene,
+    }
+}
+
+fn user_input_from_protocol(input: protocol::UserInput) -> display_types::UserDraft {
+    display_types::UserDraft {
+        text: input.text.clone(),
+        mentions: input
+            .context_refs
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|context_ref| mention_from_protocol(&input.text, context_ref))
+            .collect(),
+        images: input
+            .attachments
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(image_from_protocol)
+            .collect(),
+    }
+}
+
+fn mention_from_protocol(
+    text: &str,
+    context_ref: protocol::ContextRef,
+) -> Option<display_types::DisplayMention> {
+    let label = context_ref.label();
+    let target = context_ref.target().to_string();
+    let (start_char, end_char) = find_reference_span(text, &label).unwrap_or((0, 0));
+    let (kind, description) = match context_ref {
+        protocol::ContextRef::File { .. } => (display_types::MentionKind::File, "file"),
+        protocol::ContextRef::Directory { .. } => {
+            (display_types::MentionKind::Directory, "directory")
+        }
+        protocol::ContextRef::Subagent { .. } => (display_types::MentionKind::Subagent, "subagent"),
+        protocol::ContextRef::Url { .. } => return None,
+    };
+
+    Some(display_types::DisplayMention {
+        start_char,
+        end_char,
+        kind,
+        label,
+        target,
+        description: description.to_string(),
+    })
+}
+
+fn find_reference_span(text: &str, label: &str) -> Option<(usize, usize)> {
+    let needle = format!("@{label}");
+    let byte_start = text.find(&needle)?;
+    let start = text[..byte_start].chars().count();
+    let end = start + needle.chars().count();
+    Some((start, end))
+}
+
+fn image_from_protocol(
+    attachment: protocol::AttachmentRef,
+) -> Option<display_types::DisplayImageAttachment> {
+    match attachment {
+        protocol::AttachmentRef::LocalPath { path, name, .. } => {
+            let file_name = name.unwrap_or_else(|| {
+                Path::new(&path)
+                    .file_name()
+                    .and_then(|file_name| file_name.to_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
+            Some(display_types::DisplayImageAttachment {
+                start_char: 0,
+                end_char: 0,
+                marker: String::new(),
+                source_path: path,
+                file_name,
+            })
+        }
+        protocol::AttachmentRef::Uploaded { .. } => None,
     }
 }
 
@@ -320,6 +470,45 @@ mod tests {
         let input = protocol::UserInput::plain("   ");
 
         assert_eq!(initial_session_title_from_input(&input), None);
+    }
+
+    #[test]
+    fn submit_run_command_from_protocol_maps_input_and_mode() {
+        let command = submit_run_command_from_protocol(protocol::SubmitRunRequest {
+            input: protocol::UserInput {
+                text: "open @src/lib.rs".to_string(),
+                context_refs: Some(vec![
+                    protocol::ContextRef::File {
+                        path: "src/lib.rs".to_string(),
+                        label: None,
+                    },
+                    protocol::ContextRef::Url {
+                        url: "https://example.com".to_string(),
+                        label: None,
+                    },
+                ]),
+                attachments: Some(vec![protocol::AttachmentRef::LocalPath {
+                    path: "/tmp/diagram.png".to_string(),
+                    mime_type: Some("image/png".to_string()),
+                    name: None,
+                }]),
+            },
+            client_echo_id: Some("echo-1".to_string()),
+            mode: protocol::RunInputMode::Intervene,
+        });
+
+        assert_eq!(command.mode, session_types::RunInputMode::Intervene);
+        assert_eq!(command.client_echo_id.as_deref(), Some("echo-1"));
+        assert_eq!(command.draft.text, "open @src/lib.rs");
+        assert_eq!(command.draft.mentions.len(), 1);
+        assert_eq!(
+            command.draft.mentions[0].kind,
+            display_types::MentionKind::File
+        );
+        assert_eq!(command.draft.mentions[0].start_char, 5);
+        assert_eq!(command.draft.mentions[0].end_char, 16);
+        assert_eq!(command.draft.images.len(), 1);
+        assert_eq!(command.draft.images[0].file_name, "diagram.png");
     }
 
     #[test]

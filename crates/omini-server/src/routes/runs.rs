@@ -9,6 +9,10 @@ use crate::routes::{
     require_daemon_session,
 };
 use crate::runtime::{GlobalDaemonManager, ToolPauseResolutionStart};
+use crate::runtime::{
+    resolve_plan_command_from_protocol, resolve_tool_pause_command_from_protocol,
+    run_submitted_to_protocol, submit_run_command_from_protocol,
+};
 
 /// 向当前会话提交一次新的运行请求。
 pub(crate) async fn submit_run(
@@ -27,8 +31,9 @@ pub(crate) async fn submit_run(
     }
     session
         .core
-        .submit_run(request)
+        .submit_run(submit_run_command_from_protocol(request))
         .await
+        .map(run_submitted_to_protocol)
         .map(Json)
         .map_err(core_error)
 }
@@ -78,7 +83,10 @@ pub(crate) async fn resolve_tool_pause(
     }
     session
         .core
-        .resolve_tool_pause(tool_use_id, request)
+        .resolve_tool_pause(resolve_tool_pause_command_from_protocol(
+            tool_use_id,
+            request,
+        ))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)
@@ -95,7 +103,7 @@ pub(crate) async fn resolve_plan(
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
-        .resolve_plan(plan_id, request)
+        .resolve_plan(resolve_plan_command_from_protocol(plan_id, request))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)

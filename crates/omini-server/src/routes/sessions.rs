@@ -11,7 +11,10 @@ use crate::routes::{
     ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
     ensure_controller, require_daemon_session, require_project, require_session,
 };
-use crate::runtime::GlobalDaemonManager;
+use crate::runtime::{
+    GlobalDaemonManager, set_active_profile_command_from_protocol, set_model_command_from_protocol,
+    set_thinking_effort_command_from_protocol,
+};
 use crate::ws;
 
 /// 列出指定项目下的会话。
@@ -90,7 +93,7 @@ pub(crate) async fn set_model(
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
-        .set_model(request)
+        .set_model(set_model_command_from_protocol(request))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)
@@ -107,7 +110,7 @@ pub(crate) async fn set_thinking_effort(
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
-        .set_thinking_effort(request)
+        .set_thinking_effort(set_thinking_effort_command_from_protocol(request))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)
@@ -124,7 +127,7 @@ pub(crate) async fn set_profile(
     ensure_connected_controller(&session, &headers).await?;
     session
         .core
-        .set_active_profile(request)
+        .set_active_profile(set_active_profile_command_from_protocol(request))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)

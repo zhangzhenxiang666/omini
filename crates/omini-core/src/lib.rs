@@ -15,12 +15,11 @@ pub mod types;
 pub mod util;
 
 use crate::runtime::AgentRuntime;
-use crate::types::display as display_types;
 use crate::types::events as event_types;
 use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
+use crate::types::session as session_types;
 use crate::types::subagents as subagent_types;
 use omini_protocol as protocol;
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -290,26 +289,25 @@ impl AgentCoreSession {
 
     pub async fn submit_run(
         &self,
-        request: protocol::SubmitRunRequest,
-    ) -> Result<protocol::RunSubmittedResponse, CoreError> {
-        let protocol::SubmitRunRequest {
-            input,
+        command: session_types::SubmitRunCommand,
+    ) -> Result<session_types::RunSubmitted, CoreError> {
+        let session_types::SubmitRunCommand {
+            draft,
             client_echo_id,
             mode,
-        } = request;
-        let draft = user_input_from_protocol(input);
+        } = command;
         let event = match mode {
-            protocol::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
+            session_types::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
                 draft,
                 client_echo_id,
             },
-            protocol::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
+            session_types::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
                 draft,
                 client_echo_id,
             },
         };
         self.send_to_runtime(event).await?;
-        Ok(protocol::RunSubmittedResponse {
+        Ok(session_types::RunSubmitted {
             run_id: "current".to_string(),
         })
     }
@@ -330,31 +328,33 @@ impl AgentCoreSession {
 
     pub async fn set_active_profile(
         &self,
-        request: protocol::SetActiveProfileRequest,
+        command: session_types::SetActiveProfileCommand,
     ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::SetActiveProfile(
-            active_profile_from_protocol(request.profile),
-        ))
-        .await
+        self.send_to_runtime(ServerToRuntimeEvent::SetActiveProfile(command.profile))
+            .await
     }
 
-    pub async fn set_model(&self, request: protocol::SetModelRequest) -> Result<(), CoreError> {
-        let requested_effort = request.thinking_effort.map(thinking_effort_from_protocol);
+    pub async fn set_model(
+        &self,
+        command: session_types::SetModelCommand,
+    ) -> Result<(), CoreError> {
+        let session_types::SetModelCommand {
+            provider,
+            model,
+            thinking_effort: requested_effort,
+        } = command;
         let thinking_effort;
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
-            thinking_effort = settings.effective_thinking_effort_for(
-                &request.provider,
-                &request.model,
-                requested_effort,
-            );
-            settings.active_provider = request.provider.clone();
-            settings.model = request.model.clone();
+            thinking_effort =
+                settings.effective_thinking_effort_for(&provider, &model, requested_effort);
+            settings.active_provider = provider.clone();
+            settings.model = model.clone();
             settings.thinking_effort = thinking_effort;
         }
         self.send_to_runtime(ServerToRuntimeEvent::ModelSelected {
-            provider: request.provider,
-            model: request.model,
+            provider,
+            model,
             thinking_effort,
         })
         .await
@@ -362,9 +362,9 @@ impl AgentCoreSession {
 
     pub async fn set_thinking_effort(
         &self,
-        request: protocol::SetThinkingEffortRequest,
+        command: session_types::SetThinkingEffortCommand,
     ) -> Result<(), CoreError> {
-        let requested_effort = thinking_effort_from_protocol(request.effort);
+        let requested_effort = command.effort;
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
             settings.thinking_effort =
@@ -376,26 +376,26 @@ impl AgentCoreSession {
 
     pub async fn resolve_tool_pause(
         &self,
-        tool_use_id: String,
-        request: protocol::ResolveToolPauseRequest,
+        command: session_types::ResolveToolPauseCommand,
     ) -> Result<(), CoreError> {
+        let session_types::ResolveToolPauseCommand {
+            tool_use_id,
+            response,
+        } = command;
         self.send_to_runtime(ServerToRuntimeEvent::ResolveToolPause {
             tool_use_id,
-            response: tool_pause_response_from_protocol(request.response),
+            response,
         })
         .await
     }
 
     pub async fn resolve_plan(
         &self,
-        plan_id: String,
-        request: protocol::ResolvePlanRequest,
+        command: session_types::ResolvePlanCommand,
     ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::ResolvePlanApproval {
-            plan_id,
-            action: plan_approval_action_from_protocol(request.action),
-        })
-        .await
+        let session_types::ResolvePlanCommand { plan_id, action } = command;
+        self.send_to_runtime(ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action })
+            .await
     }
 
     pub async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
@@ -566,90 +566,6 @@ fn usage_persistence_summary<'a>(
     }
 }
 
-fn user_input_from_protocol(input: protocol::UserInput) -> display_types::UserDraft {
-    display_types::UserDraft {
-        text: input.text.clone(),
-        mentions: input
-            .context_refs
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|context_ref| mention_from_protocol(&input.text, context_ref))
-            .collect(),
-        images: input
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(image_from_protocol)
-            .collect(),
-    }
-}
-
-fn mention_from_protocol(
-    text: &str,
-    context_ref: protocol::ContextRef,
-) -> Option<display_types::DisplayMention> {
-    let label = context_ref.label();
-    let target = context_ref.target().to_string();
-    let (start_char, end_char) = find_reference_span(text, &label).unwrap_or((0, 0));
-    let (kind, description) = match context_ref {
-        protocol::ContextRef::File { .. } => (display_types::MentionKind::File, "file"),
-        protocol::ContextRef::Directory { .. } => {
-            (display_types::MentionKind::Directory, "directory")
-        }
-        protocol::ContextRef::Subagent { .. } => (display_types::MentionKind::Subagent, "subagent"),
-        protocol::ContextRef::Url { .. } => return None,
-    };
-
-    Some(display_types::DisplayMention {
-        start_char,
-        end_char,
-        kind,
-        label,
-        target,
-        description: description.to_string(),
-    })
-}
-
-fn find_reference_span(text: &str, label: &str) -> Option<(usize, usize)> {
-    let needle = format!("@{label}");
-    let byte_start = text.find(&needle)?;
-    let start = text[..byte_start].chars().count();
-    let end = start + needle.chars().count();
-    Some((start, end))
-}
-
-fn image_from_protocol(
-    attachment: protocol::AttachmentRef,
-) -> Option<display_types::DisplayImageAttachment> {
-    match attachment {
-        protocol::AttachmentRef::LocalPath { path, name, .. } => {
-            let file_name = name.unwrap_or_else(|| {
-                Path::new(&path)
-                    .file_name()
-                    .and_then(|file_name| file_name.to_str())
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            Some(display_types::DisplayImageAttachment {
-                start_char: 0,
-                end_char: 0,
-                marker: String::new(),
-                source_path: path,
-                file_name,
-            })
-        }
-        protocol::AttachmentRef::Uploaded { .. } => None,
-    }
-}
-
-fn active_profile_from_protocol(profile: protocol::ActiveProfile) -> event_types::ActiveProfile {
-    match profile {
-        protocol::ActiveProfile::Main => event_types::ActiveProfile::Main,
-        protocol::ActiveProfile::Auto => event_types::ActiveProfile::Auto,
-        protocol::ActiveProfile::Plan => event_types::ActiveProfile::Plan,
-    }
-}
-
 fn skill_source_kind_to_protocol(
     source_kind: crate::skills::SkillSourceKind,
 ) -> protocol::SkillSourceKind {
@@ -665,62 +581,6 @@ fn skill_source_sort(source_kind: protocol::SkillSourceKind) -> u8 {
         protocol::SkillSourceKind::BuiltIn => 0,
         protocol::SkillSourceKind::Project => 1,
         protocol::SkillSourceKind::User => 2,
-    }
-}
-
-fn thinking_effort_from_protocol(
-    effort: protocol::ThinkingEffort,
-) -> crate::types::config::ThinkingEffort {
-    match effort {
-        protocol::ThinkingEffort::None => crate::types::config::ThinkingEffort::None,
-        protocol::ThinkingEffort::Low => crate::types::config::ThinkingEffort::Low,
-        protocol::ThinkingEffort::Medium => crate::types::config::ThinkingEffort::Medium,
-        protocol::ThinkingEffort::High => crate::types::config::ThinkingEffort::High,
-        protocol::ThinkingEffort::XHigh => crate::types::config::ThinkingEffort::XHigh,
-        protocol::ThinkingEffort::Max => crate::types::config::ThinkingEffort::Max,
-    }
-}
-
-fn tool_pause_response_from_protocol(
-    response: protocol::ToolPauseResponse,
-) -> event_types::ToolPauseResponse {
-    match response {
-        protocol::ToolPauseResponse::Permission { approved, note } => {
-            event_types::ToolPauseResponse::Permission { approved, note }
-        }
-        protocol::ToolPauseResponse::UserInput { value } => {
-            event_types::ToolPauseResponse::UserInput { value }
-        }
-        protocol::ToolPauseResponse::Cancelled => event_types::ToolPauseResponse::Cancelled,
-    }
-}
-
-fn plan_approval_action_from_protocol(
-    action: protocol::PlanApprovalAction,
-) -> event_types::PlanApprovalAction {
-    match action {
-        protocol::PlanApprovalAction::Approve { profile } => {
-            event_types::PlanApprovalAction::Approve {
-                profile: plan_execution_profile_from_protocol(profile),
-            }
-        }
-        protocol::PlanApprovalAction::ApproveAndCompact { profile } => {
-            event_types::PlanApprovalAction::ApproveAndCompact {
-                profile: plan_execution_profile_from_protocol(profile),
-            }
-        }
-        protocol::PlanApprovalAction::ContinueDiscussing => {
-            event_types::PlanApprovalAction::ContinueDiscussing
-        }
-    }
-}
-
-fn plan_execution_profile_from_protocol(
-    profile: protocol::PlanExecutionProfile,
-) -> event_types::PlanExecutionProfile {
-    match profile {
-        protocol::PlanExecutionProfile::Main => event_types::PlanExecutionProfile::Main,
-        protocol::PlanExecutionProfile::Auto => event_types::PlanExecutionProfile::Auto,
     }
 }
 
