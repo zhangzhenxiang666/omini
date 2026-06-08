@@ -12,7 +12,6 @@ mod service;
 mod session_lifecycle;
 mod usage;
 
-use crate::api::LlmClient;
 use crate::engine::{QueryContext, ToolPauseResolver};
 use crate::persistence::{RuntimePersistenceEvent, SessionRecord};
 use crate::skills::SkillRegistry;
@@ -30,6 +29,7 @@ use crate::types::message::Message;
 use crate::types::usage::Usage;
 use chrono::Utc;
 use omini_domain::project::sanitize_project_path as sanitize;
+use omini_provider_api::LlmClient;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::Ordering;

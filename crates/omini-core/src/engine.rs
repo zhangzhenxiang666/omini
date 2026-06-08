@@ -1,4 +1,3 @@
-use crate::api::{ApiRequest, ApiStream, FinishReason, LlmClient, RequestError, StreamError};
 use crate::error::RuntimeError;
 use crate::permissions::PermissionEngine;
 use crate::runtime::compact::{self, AutoCompactState};
@@ -10,6 +9,9 @@ use crate::types::config::Settings;
 use crate::types::events::{ActiveProfile, EngineToRuntimeEvent, ToolPauseResponse};
 use crate::types::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
+};
+use omini_provider_api::{
+    ApiEvent, ApiRequest, ApiStream, FinishReason, LlmClient, RequestError, StreamError,
 };
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
@@ -426,17 +428,17 @@ impl QueryEngine {
 
                 match event {
                     Ok(api_event) => match api_event {
-                        crate::api::ApiEvent::Text(delta) => {
+                        ApiEvent::Text(delta) => {
                             Self::push_text_delta(&mut partial_blocks, &delta);
                             let _ = event_tx.send(EngineToRuntimeEvent::TextDelta(delta)).await;
                         }
-                        crate::api::ApiEvent::Thinking(delta) => {
+                        ApiEvent::Thinking(delta) => {
                             Self::push_thinking_delta(&mut partial_blocks, &delta);
                             let _ = event_tx
                                 .send(EngineToRuntimeEvent::ThinkingDelta(delta))
                                 .await;
                         }
-                        crate::api::ApiEvent::ToolUse(tool_use) => {
+                        ApiEvent::ToolUse(tool_use) => {
                             tracing::debug!(
                                 turn_index,
                                 tool_use_id = %tool_use.id,
@@ -486,7 +488,7 @@ impl QueryEngine {
                                 .instrument(tool_span),
                             );
                         }
-                        crate::api::ApiEvent::Done(completion) => {
+                        ApiEvent::Done(completion) => {
                             tracing::debug!(
                                 turn_index,
                                 finish_reason = ?completion.finish_reason,
@@ -1243,12 +1245,12 @@ mod tests {
     }
 
     fn test_llm_client(base_url: String) -> LlmClient {
-        LlmClient {
-            http_client: test_http_client(),
-            api_key: "test-key".to_string(),
+        LlmClient::with_http_client(
+            ProviderType::OpenAI,
+            "test-key".to_string(),
             base_url,
-            protocol: ProviderType::OpenAI,
-        }
+            test_http_client(),
+        )
     }
 
     fn spawn_hanging_openai_server() -> (String, std_mpsc::Receiver<()>, thread::JoinHandle<()>) {

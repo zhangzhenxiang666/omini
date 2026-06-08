@@ -1,10 +1,10 @@
-use crate::api::{
+use crate::{
     ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, api_channel,
     send_with_retry, sse::IntoSseStream,
 };
-use crate::types::config::ThinkingEffort;
-use crate::types::message::{ContentBlock, Message, Role, ToolUseBlock};
-use crate::types::usage::Usage;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::message::{ContentBlock, Message, Role, ToolUseBlock};
+use omini_domain::usage::Usage;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -450,7 +450,7 @@ fn set_if_missing(current: &mut usize, value: Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
+    use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
     use std::collections::HashMap;
 
     #[test]

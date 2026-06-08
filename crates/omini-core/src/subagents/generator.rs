@@ -1,5 +1,6 @@
 use super::GeneratedAgentDraft;
-use crate::types::config::ThinkingEffort;
+use crate::types::config::{Settings, ThinkingEffort};
+use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use std::fmt;
 use tokio_stream::StreamExt;
 
@@ -22,8 +23,26 @@ impl fmt::Display for GenerateAgentDraftError {
 
 impl std::error::Error for GenerateAgentDraftError {}
 
+pub async fn generate_agent_draft_checked_from_settings(
+    settings: &Settings,
+    description: &str,
+) -> Result<GeneratedAgentDraft, GenerateAgentDraftError> {
+    let llm_client = LlmClient::new(
+        settings.endpoint,
+        settings.api_key.clone(),
+        settings.base_url.clone(),
+    );
+    generate_agent_draft_checked(
+        &llm_client,
+        &settings.model,
+        settings.thinking_effort,
+        description,
+    )
+    .await
+}
+
 pub async fn generate_agent_draft(
-    llm_client: &crate::api::LlmClient,
+    llm_client: &LlmClient,
     model: &str,
     thinking_effort: Option<ThinkingEffort>,
     description: &str,
@@ -34,7 +53,7 @@ pub async fn generate_agent_draft(
 }
 
 pub async fn generate_agent_draft_checked(
-    llm_client: &crate::api::LlmClient,
+    llm_client: &LlmClient,
     model: &str,
     thinking_effort: Option<ThinkingEffort>,
     description: &str,
@@ -44,7 +63,7 @@ pub async fn generate_agent_draft_checked(
         role: crate::types::message::Role::User,
         content: vec![crate::types::message::ContentBlock::from_text(prompt)],
     }];
-    let request = crate::api::ApiRequest {
+    let request = ApiRequest {
         messages: &messages,
         model,
         system_prompt: Some(
@@ -62,8 +81,8 @@ pub async fn generate_agent_draft_checked(
     let mut text = String::new();
     while let Some(event) = stream.next().await {
         match event {
-            Ok(crate::api::ApiEvent::Text(delta)) => text.push_str(&delta),
-            Ok(crate::api::ApiEvent::Done(_)) => break,
+            Ok(ApiEvent::Text(delta)) => text.push_str(&delta),
+            Ok(ApiEvent::Done(_)) => break,
             Ok(_) => {}
             Err(e) => {
                 return Err(GenerateAgentDraftError::Stream(format!(

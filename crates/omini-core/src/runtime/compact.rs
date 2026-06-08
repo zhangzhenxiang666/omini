@@ -1,4 +1,3 @@
-use crate::api::{ApiEvent, ApiRequest, LlmClient};
 use crate::config::project::SessionDir;
 use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
@@ -11,6 +10,7 @@ use crate::types::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
 use crate::types::tool::ToolDefinition;
+use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;

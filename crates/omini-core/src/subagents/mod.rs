@@ -12,7 +12,7 @@ pub use crate::types::subagents::{
 };
 pub use generator::{
     GenerateAgentDraftError, generate_agent_draft, generate_agent_draft_checked,
-    parse_generated_agent,
+    generate_agent_draft_checked_from_settings, parse_generated_agent,
 };
 pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 

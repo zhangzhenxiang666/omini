@@ -1,5 +1,5 @@
-use crate::api::{RequestError, StreamError};
 use crate::types::config::ConfigError;
+use omini_provider_api::{RequestError, StreamError};
 use std::borrow::Cow;
 use thiserror::Error;
 

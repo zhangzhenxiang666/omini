@@ -1,4 +1,3 @@
-use crate::api::LlmClient;
 use crate::config::project::ProjectDir;
 use crate::config::project::SessionDir;
 use crate::engine::QueryEngine;
@@ -13,6 +12,7 @@ use crate::types::events::{
     ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent, SessionUsageSnapshot,
 };
 use crate::types::message::Message;
+use omini_provider_api::LlmClient;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;

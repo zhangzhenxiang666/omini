@@ -1,8 +1,9 @@
-use crate::types::config::ProviderType;
-use crate::types::config::ThinkingEffort;
-use crate::types::message::{Message, ToolUseBlock};
-use crate::types::tool::ToolDefinition;
-use crate::types::usage::Usage;
+pub use omini_domain::config::ProviderEndpointKind as ProviderType;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::message::{Message, ToolUseBlock};
+use omini_domain::tool::ToolDefinition;
+use omini_domain::usage::Usage;
+use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -23,7 +24,22 @@ pub struct LlmClient {
 impl LlmClient {
     pub fn new(protocol: ProviderType, api_key: String, base_url: String) -> Self {
         Self {
-            http_client: crate::util::http_client(),
+            http_client: http_client(),
+            api_key,
+            base_url,
+            protocol,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_http_client(
+        protocol: ProviderType,
+        api_key: String,
+        base_url: String,
+        http_client: &'static reqwest::Client,
+    ) -> Self {
+        Self {
+            http_client,
             api_key,
             base_url,
             protocol,
@@ -193,4 +209,37 @@ pub async fn send_with_retry(
 pub fn api_channel(buffer: usize) -> (mpsc::Sender<Result<ApiEvent, StreamError>>, ApiStream) {
     let (tx, rx) = mpsc::channel(buffer);
     (tx, ReceiverStream::new(rx))
+}
+
+/// 全局唯一的 reqwest::Client。
+///
+/// reqwest 官方推荐全局单例以复用连接池和 DNS 缓存。
+/// 自动读取代理环境变量（按优先级）：
+/// `HTTPS_PROXY` / `https_proxy` -> https 请求
+/// `HTTP_PROXY` / `http_proxy`   -> http 请求
+/// `ALL_PROXY` / `all_proxy`     -> 兜底
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(300));
+
+        if let Some(proxy_url) = proxy_from_env() {
+            builder = builder.proxy(reqwest::Proxy::all(&proxy_url).expect("Invalid proxy URL"));
+        }
+
+        builder
+            .build()
+            .expect("Failed to create global reqwest::Client")
+    })
+}
+
+fn proxy_from_env() -> Option<String> {
+    std::env::var("HTTPS_PROXY")
+        .or_else(|_| std::env::var("https_proxy"))
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .or_else(|_| std::env::var("http_proxy"))
+        .or_else(|_| std::env::var("ALL_PROXY"))
+        .or_else(|_| std::env::var("all_proxy"))
+        .ok()
+        .filter(|s| !s.is_empty())
 }

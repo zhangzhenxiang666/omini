@@ -6,14 +6,11 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 dirs.workspace = true
-http.workspace = true
 omini-domain.workspace = true
+omini-provider-api.workspace = true
 omini-protocol.workspace = true
-pin-project-lite.workspace = true
-reqwest.workspace = true
 rmcp.workspace = true
 rmcp-reqwest.workspace = true
 schemars.workspace = true
@@ -27,3 +24,6 @@ toml.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true

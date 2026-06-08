@@ -328,17 +328,10 @@ impl SessionManager {
         request: protocol::GenerateAgentRequest,
     ) -> Result<protocol::GenerateAgentResponse, CoreError> {
         let settings = self.settings_for_agent_generation(&request)?;
-        let llm_client = omini_core::api::LlmClient::new(
-            settings.endpoint,
-            settings.api_key.clone(),
-            settings.base_url.clone(),
-        );
         let mut parse_error = None;
         for attempt in 0..2 {
-            match omini_core::subagents::generate_agent_draft_checked(
-                &llm_client,
-                &settings.model,
-                settings.thinking_effort,
+            match omini_core::subagents::generate_agent_draft_checked_from_settings(
+                &settings,
                 &request.description,
             )
             .await

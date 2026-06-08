@@ -1834,13 +1834,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64",
- "bytes",
  "chrono",
  "dirs",
- "http",
  "omini-domain",
  "omini-protocol",
- "pin-project-lite",
+ "omini-provider-api",
  "reqwest 0.12.28",
  "reqwest 0.13.3",
  "rmcp",
@@ -1876,6 +1874,22 @@ dependencies = [
  "omini-domain",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "omini-provider-api"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "omini-domain",
+ "pin-project-lite",
+ "reqwest 0.13.3",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
 ]
 
 [[package]]

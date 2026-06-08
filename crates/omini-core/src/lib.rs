@@ -1,4 +1,3 @@
-pub mod api;
 pub mod config;
 pub mod engine;
 pub mod error;
@@ -12,7 +11,6 @@ pub mod skills;
 pub mod subagents;
 pub mod tools;
 pub mod types;
-pub mod util;
 
 use crate::runtime::AgentRuntime;
 use crate::types::events as event_types;
