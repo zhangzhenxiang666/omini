@@ -20,7 +20,6 @@ use crate::types::events as event_types;
 use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
 use crate::types::subagents as subagent_types;
 use omini_protocol as protocol;
-use omini_protocol::RuntimeEvent;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
@@ -36,9 +35,8 @@ pub use crate::error::CoreError;
 /// 转成 core 内部的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
 /// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
 ///
-/// 这个类型目前还承担 core 到 protocol 的适配：内部 `RuntimeToServerEvent` 会被编码成
-/// `omini_protocol::RuntimeEvent`，并尽量附带 typed overlay 供新客户端消费。新增事件时
-/// 要同步考虑 `key_runtime_event_from_internal`，否则 server/TUI 只能看到 legacy payload。
+/// runtime 输出保持 core 内部的 `RuntimeToServerEvent` 形态，协议层 `RuntimeEvent`
+/// 编码由 `omini-server` 的 runtime adapter 负责。
 ///
 /// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
 /// session registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
@@ -48,8 +46,8 @@ pub struct AgentCoreSession {
     session_id: Option<String>,
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
     request_tx: mpsc::Sender<ServerToRuntimeEvent>,
-    // runtime 输出事件在 fanout 任务中转成协议事件后广播给 server。
-    event_tx: broadcast::Sender<RuntimeEvent>,
+    // runtime 输出事件保持 core 内部形态广播给 server。
+    event_tx: broadcast::Sender<RuntimeToServerEvent>,
     // 持久化事件保持 core 内部形态，由 server 负责事务、replay 裁剪和错误处理。
     persistence_tx: broadcast::Sender<crate::persistence::RuntimePersistenceEvent>,
     // HTTP 查询和配置 mutation 需要读取当前会话配置快照；真正执行仍通过 request_tx 进入 runtime。
@@ -60,7 +58,7 @@ pub struct AgentCoreSession {
     capabilities: Arc<crate::runtime::CapabilityStore>,
     // agent runtime 主循环：消费 request_tx 输入并驱动模型、工具、权限和内部事件。
     _runtime_handle: JoinHandle<()>,
-    // runtime 事件 fanout：把 RuntimeToServerEvent 编码成 RuntimeEvent 并广播给 server。
+    // runtime 事件 fanout：把 RuntimeToServerEvent 广播给 server。
     _fanout_handle: JoinHandle<()>,
     // 持久化事件 fanout：把 core 产生的 RuntimePersistenceEvent 广播给 server 落盘。
     _persistence_handle: JoinHandle<()>,
@@ -70,8 +68,8 @@ impl AgentCoreSession {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
     /// 返回值是 server 唯一需要持有的 core 会话句柄。runtime 本身只消费
-    /// `ServerToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转换成 server
-    /// 能广播的协议事件，并把持久化事件转成 broadcast stream。
+    /// `ServerToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转成 broadcast
+    /// stream，并把持久化事件转成 broadcast stream。
     pub fn spawn(
         settings: crate::types::config::Settings,
         project: config::project::ProjectDir,
@@ -107,7 +105,7 @@ impl AgentCoreSession {
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
             mpsc::channel::<crate::persistence::RuntimePersistenceEvent>(512);
         let (request_tx, request_rx) = mpsc::channel::<ServerToRuntimeEvent>(512);
-        let (event_tx, _) = broadcast::channel::<RuntimeEvent>(512);
+        let (event_tx, _) = broadcast::channel::<RuntimeToServerEvent>(512);
         let (persistence_tx, _) =
             broadcast::channel::<crate::persistence::RuntimePersistenceEvent>(512);
         let handles = crate::runtime::RuntimeCapabilityHandles::load(&settings);
@@ -132,29 +130,7 @@ impl AgentCoreSession {
             async move {
                 tracing::debug!("core runtime event fanout started");
                 while let Some(event) = runtime_event_rx.recv().await {
-                    let key_event = key_runtime_event_from_internal(&event);
-                    match serde_json::to_value(event) {
-                        Ok(payload) => {
-                            let kind = runtime_event_kind(&payload);
-                            log_runtime_event_fanout(&kind);
-                            let mut event = protocol::RuntimeEvent::new(kind, payload);
-                            if let Some(key_event) = key_event {
-                                event = event.with_key_event(key_event);
-                            }
-                            let _ = fanout_tx.send(event);
-                        }
-                        Err(error) => {
-                            tracing::error!(error = %error, "failed to encode runtime event");
-                            let payload = serde_json::json!({
-                                "type": "notification",
-                                "kind": "error",
-                                "message": format!("Failed to encode runtime event: {error}"),
-                                "details": [],
-                            });
-                            let _ = fanout_tx
-                                .send(protocol::RuntimeEvent::new("notification", payload));
-                        }
-                    }
+                    let _ = fanout_tx.send(event);
                 }
                 tracing::debug!("core runtime event fanout stopped");
             }
@@ -207,11 +183,11 @@ impl AgentCoreSession {
         }
     }
 
-    /// 订阅面向客户端的 runtime 事件流。
+    /// 订阅 core 内部 runtime 事件流。
     ///
-    /// 每个 subscriber 都会收到 `RuntimeEvent`，server 会在此基础上追加本地序号、
-    /// 维护 replay/status projection，并通过 WebSocket 发给控制者和观察者。
-    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeEvent> {
+    /// 每个 subscriber 都会收到 `RuntimeToServerEvent`，server 会在此基础上编码协议事件、
+    /// 追加本地序号、维护 replay/status projection，并通过 WebSocket 发给控制者和观察者。
+    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeToServerEvent> {
         self.event_tx.subscribe()
     }
 
@@ -398,14 +374,6 @@ impl AgentCoreSession {
             .await
     }
 
-    pub async fn set_thinking_display(
-        &self,
-        request: protocol::SetThinkingDisplayRequest,
-    ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::SetThinkingDisplay { show: request.show })
-            .await
-    }
-
     pub async fn resolve_tool_pause(
         &self,
         tool_use_id: String,
@@ -468,7 +436,6 @@ fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
         ServerToRuntimeEvent::CompactContext { .. } => "compact_context",
         ServerToRuntimeEvent::ModelSelected { .. } => "model_selected",
         ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",
-        ServerToRuntimeEvent::SetThinkingDisplay { .. } => "set_thinking_display",
         ServerToRuntimeEvent::ToggleActiveProfile => "toggle_active_profile",
         ServerToRuntimeEvent::SetActiveProfile(_) => "set_active_profile",
         ServerToRuntimeEvent::HydrateSessionSnapshot { .. } => "hydrate_session_snapshot",
@@ -477,29 +444,6 @@ fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
         ServerToRuntimeEvent::SubagentRegistryChanged => "subagent_registry_changed",
         ServerToRuntimeEvent::CloseRuntime => "close_runtime",
     }
-}
-
-fn runtime_event_kind(payload: &serde_json::Value) -> String {
-    payload
-        .get("type")
-        .and_then(|value| value.as_str())
-        .unwrap_or("runtime.event")
-        .to_string()
-}
-
-fn log_runtime_event_fanout(kind: &str) {
-    if high_volume_runtime_event(kind) {
-        tracing::trace!(event_kind = kind, "fanout runtime event");
-    } else {
-        tracing::debug!(event_kind = kind, "fanout runtime event");
-    }
-}
-
-fn high_volume_runtime_event(kind: &str) -> bool {
-    matches!(
-        kind,
-        "thinking_delta" | "text_delta" | "proposed_plan_delta" | "compact_summary_delta"
-    )
 }
 
 struct RuntimePersistenceEventSummary<'a> {
@@ -619,125 +563,6 @@ fn usage_persistence_summary<'a>(
         prompt_tokens: Some(usage.prompt_tokens),
         completion_tokens: Some(usage.completion_tokens),
         cached_tokens: Some(usage.cached_tokens),
-    }
-}
-
-fn key_runtime_event_from_internal(
-    event: &event_types::RuntimeToServerEvent,
-) -> Option<protocol::KeyRuntimeEvent> {
-    match event {
-        event_types::RuntimeToServerEvent::RunStarted => {
-            Some(protocol::KeyRuntimeEvent::RunStarted)
-        }
-        event_types::RuntimeToServerEvent::RunFinished => {
-            Some(protocol::KeyRuntimeEvent::RunFinished)
-        }
-        event_types::RuntimeToServerEvent::Notification(notification) => Some(
-            protocol::KeyRuntimeEvent::Notification(protocol::NotificationEvent {
-                level: notification_level_to_protocol(notification.kind),
-                message: notification.message.clone(),
-                details: notification.details.clone(),
-            }),
-        ),
-        event_types::RuntimeToServerEvent::ActiveProfileChanged(profile) => {
-            Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
-                protocol::ActiveProfileChangedEvent { profile: *profile },
-            ))
-        }
-        event_types::RuntimeToServerEvent::ToolPauseRequested(request) => Some(
-            protocol::KeyRuntimeEvent::ToolPauseRequested(protocol::ToolPauseRequestedEvent {
-                tool_use_id: request.tool_use_id.clone(),
-                tool_name: request.tool_name.clone(),
-                kind: match &request.kind {
-                    event_types::ToolPauseKind::Permission(_) => {
-                        protocol::ToolPauseEventKind::Permission
-                    }
-                    event_types::ToolPauseKind::UserInput(_) => {
-                        protocol::ToolPauseEventKind::UserInput
-                    }
-                },
-                source_session_id: request.source_session_id.clone(),
-                source_agent_label: request.source_agent_label.clone(),
-            }),
-        ),
-        event_types::RuntimeToServerEvent::PlanSubmitted(plan) => Some(
-            protocol::KeyRuntimeEvent::PlanSubmitted(protocol::PlanSubmittedEvent {
-                plan_id: plan.id.clone(),
-                title: plan.title.clone(),
-                markdown: plan.markdown.clone(),
-            }),
-        ),
-        event_types::RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => Some(
-            protocol::KeyRuntimeEvent::PlanApprovalResolved(protocol::PlanApprovalResolvedEvent {
-                plan_id: plan_id.clone(),
-                action: *action,
-            }),
-        ),
-        event_types::RuntimeToServerEvent::CompactSummaryStarted(event) => {
-            Some(protocol::KeyRuntimeEvent::CompactSummaryStarted(
-                protocol::CompactSummaryStartedEvent {
-                    trigger: event.trigger,
-                    session_id: event.session_id.clone(),
-                    agent_label: event.agent_label.clone(),
-                },
-            ))
-        }
-        event_types::RuntimeToServerEvent::CompactSummaryDelta(event) => Some(
-            protocol::KeyRuntimeEvent::CompactSummaryDelta(protocol::CompactSummaryDeltaEvent {
-                trigger: event.trigger,
-                delta: event.delta.clone(),
-                session_id: event.session_id.clone(),
-                agent_label: event.agent_label.clone(),
-            }),
-        ),
-        event_types::RuntimeToServerEvent::CompactSummaryFinished(event) => {
-            Some(protocol::KeyRuntimeEvent::CompactSummaryFinished(
-                protocol::CompactSummaryFinishedEvent {
-                    trigger: event.trigger,
-                    summary: event.summary.clone(),
-                    after_tokens: event.after_tokens,
-                    session_id: event.session_id.clone(),
-                    agent_label: event.agent_label.clone(),
-                },
-            ))
-        }
-        event_types::RuntimeToServerEvent::CompactSummaryFailed(event) => Some(
-            protocol::KeyRuntimeEvent::CompactSummaryFailed(protocol::CompactSummaryFailedEvent {
-                trigger: event.trigger,
-                message: event.message.clone(),
-                session_id: event.session_id.clone(),
-                agent_label: event.agent_label.clone(),
-            }),
-        ),
-        event_types::RuntimeToServerEvent::SessionSnapshot {
-            session_id,
-            messages,
-            subagents,
-            usage,
-        } => Some(protocol::KeyRuntimeEvent::SessionSnapshot(
-            protocol::SessionSnapshotEvent {
-                session_id: session_id.clone(),
-                message_count: messages.len(),
-                subagent_count: subagents.len(),
-                usage: protocol::SessionUsage {
-                    current_context_tokens: usage.current_context_tokens,
-                    total_tokens: usage.total_tokens,
-                    total_cached_tokens: usage.total_cached_tokens,
-                    context_window: usage.context_window,
-                },
-            },
-        )),
-        _ => None,
-    }
-}
-
-fn notification_level_to_protocol(
-    kind: event_types::NotificationKind,
-) -> protocol::NotificationLevel {
-    match kind {
-        event_types::NotificationKind::Info => protocol::NotificationLevel::Info,
-        event_types::NotificationKind::Warn => protocol::NotificationLevel::Warn,
-        event_types::NotificationKind::Error => protocol::NotificationLevel::Error,
     }
 }
 
@@ -981,71 +806,5 @@ fn agent_record_to_protocol(record: subagent_types::AgentRecord) -> protocol::Ag
         model: record.model,
         source_kind: agent_source_kind_to_protocol(record.source_kind),
         editable: record.editable,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::types::events as event_types;
-    use omini_protocol as protocol;
-
-    #[test]
-    fn active_profile_changed_has_typed_overlay() {
-        let event = event_types::RuntimeToServerEvent::ActiveProfileChanged(
-            event_types::ActiveProfile::Plan,
-        );
-
-        assert_eq!(
-            super::key_runtime_event_from_internal(&event),
-            Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
-                protocol::ActiveProfileChangedEvent {
-                    profile: protocol::ActiveProfile::Plan,
-                },
-            ))
-        );
-    }
-
-    #[test]
-    fn compact_summary_finished_has_typed_overlay() {
-        let event = event_types::RuntimeToServerEvent::CompactSummaryFinished(
-            event_types::CompactSummaryFinishedEvent {
-                trigger: event_types::CompactTrigger::Manual,
-                summary: "summary".to_string(),
-                after_tokens: 42,
-                session_id: Some("session_1".to_string()),
-                agent_label: None,
-            },
-        );
-
-        assert_eq!(
-            super::key_runtime_event_from_internal(&event),
-            Some(protocol::KeyRuntimeEvent::CompactSummaryFinished(
-                protocol::CompactSummaryFinishedEvent {
-                    trigger: protocol::CompactTrigger::Manual,
-                    summary: "summary".to_string(),
-                    after_tokens: 42,
-                    session_id: Some("session_1".to_string()),
-                    agent_label: None,
-                },
-            ))
-        );
-    }
-
-    #[test]
-    fn plan_approval_resolved_has_typed_overlay() {
-        let event = event_types::RuntimeToServerEvent::PlanApprovalResolved {
-            plan_id: "plan_1".to_string(),
-            action: event_types::PlanApprovalAction::ContinueDiscussing,
-        };
-
-        assert_eq!(
-            super::key_runtime_event_from_internal(&event),
-            Some(protocol::KeyRuntimeEvent::PlanApprovalResolved(
-                protocol::PlanApprovalResolvedEvent {
-                    plan_id: "plan_1".to_string(),
-                    action: protocol::PlanApprovalAction::ContinueDiscussing,
-                },
-            ))
-        );
     }
 }

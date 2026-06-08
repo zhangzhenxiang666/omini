@@ -156,9 +156,7 @@ pub(crate) async fn set_thinking_display(
     let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     session
-        .core
         .set_thinking_display(request)
-        .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)
 }

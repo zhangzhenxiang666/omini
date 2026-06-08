@@ -1,4 +1,5 @@
 use super::*;
+use omini_core::types::events as event_types;
 
 pub(super) fn thinking_effort_to_protocol(
     effort: omini_core::types::config::ThinkingEffort,
@@ -94,17 +95,17 @@ pub(super) fn session_snapshot_events(
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
     let events = [
-        omini_core::types::events::RuntimeToServerEvent::SessionTitleChanged {
+        RuntimeToServerEvent::SessionTitleChanged {
             title: snapshot.title,
         },
-        omini_core::types::events::RuntimeToServerEvent::ModelChanged {
+        RuntimeToServerEvent::ModelChanged {
             provider: snapshot.provider,
             model: snapshot.model,
             thinking_effort: snapshot.thinking_effort,
             context_window,
         },
-        omini_core::types::events::RuntimeToServerEvent::ActiveProfileChanged(active_profile),
-        omini_core::types::events::RuntimeToServerEvent::SessionSnapshot {
+        RuntimeToServerEvent::ActiveProfileChanged(active_profile),
+        RuntimeToServerEvent::SessionSnapshot {
             session_id: Some(snapshot.session_id),
             messages: snapshot.messages,
             subagents: snapshot.subagents,
@@ -118,14 +119,29 @@ pub(super) fn session_snapshot_events(
         .collect()
 }
 
-/// 把 core/TUI 内部事件编码成协议 `RuntimeEvent`。
+/// 把 core 内部 runtime 事件编码成协议 `RuntimeEvent`。
 pub(super) fn runtime_event_from_internal(
-    event: omini_core::types::events::RuntimeToServerEvent,
+    event: RuntimeToServerEvent,
 ) -> Result<RuntimeEvent, CoreError> {
+    let key_event = key_runtime_event_from_internal(&event);
     let payload = serde_json::to_value(event).map_err(|source| CoreError::RuntimeEventEncode {
         source: Box::new(source),
     })?;
-    Ok(RuntimeEvent::new(runtime_event_kind(&payload), payload))
+    let mut event = RuntimeEvent::new(runtime_event_kind(&payload), payload);
+    if let Some(key_event) = key_event {
+        event = event.with_key_event(key_event);
+    }
+    Ok(event)
+}
+
+pub(super) fn thinking_display_changed_event(show: bool) -> RuntimeEvent {
+    RuntimeEvent::new(
+        "thinking_display_changed",
+        serde_json::json!({
+            "type": "thinking_display_changed",
+            "show": show,
+        }),
+    )
 }
 
 /// 从序列化后的 runtime payload 中取出旧协议事件名。
@@ -137,9 +153,125 @@ fn runtime_event_kind(payload: &serde_json::Value) -> String {
         .to_string()
 }
 
+fn key_runtime_event_from_internal(
+    event: &RuntimeToServerEvent,
+) -> Option<protocol::KeyRuntimeEvent> {
+    match event {
+        RuntimeToServerEvent::RunStarted => Some(protocol::KeyRuntimeEvent::RunStarted),
+        RuntimeToServerEvent::RunFinished => Some(protocol::KeyRuntimeEvent::RunFinished),
+        RuntimeToServerEvent::Notification(notification) => Some(
+            protocol::KeyRuntimeEvent::Notification(protocol::NotificationEvent {
+                level: notification_level_to_protocol(notification.kind),
+                message: notification.message.clone(),
+                details: notification.details.clone(),
+            }),
+        ),
+        RuntimeToServerEvent::ActiveProfileChanged(profile) => {
+            Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
+                protocol::ActiveProfileChangedEvent { profile: *profile },
+            ))
+        }
+        RuntimeToServerEvent::ToolPauseRequested(request) => Some(
+            protocol::KeyRuntimeEvent::ToolPauseRequested(protocol::ToolPauseRequestedEvent {
+                tool_use_id: request.tool_use_id.clone(),
+                tool_name: request.tool_name.clone(),
+                kind: match &request.kind {
+                    event_types::ToolPauseKind::Permission(_) => {
+                        protocol::ToolPauseEventKind::Permission
+                    }
+                    event_types::ToolPauseKind::UserInput(_) => {
+                        protocol::ToolPauseEventKind::UserInput
+                    }
+                },
+                source_session_id: request.source_session_id.clone(),
+                source_agent_label: request.source_agent_label.clone(),
+            }),
+        ),
+        RuntimeToServerEvent::PlanSubmitted(plan) => Some(
+            protocol::KeyRuntimeEvent::PlanSubmitted(protocol::PlanSubmittedEvent {
+                plan_id: plan.id.clone(),
+                title: plan.title.clone(),
+                markdown: plan.markdown.clone(),
+            }),
+        ),
+        RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => Some(
+            protocol::KeyRuntimeEvent::PlanApprovalResolved(protocol::PlanApprovalResolvedEvent {
+                plan_id: plan_id.clone(),
+                action: *action,
+            }),
+        ),
+        RuntimeToServerEvent::CompactSummaryStarted(event) => {
+            Some(protocol::KeyRuntimeEvent::CompactSummaryStarted(
+                protocol::CompactSummaryStartedEvent {
+                    trigger: event.trigger,
+                    session_id: event.session_id.clone(),
+                    agent_label: event.agent_label.clone(),
+                },
+            ))
+        }
+        RuntimeToServerEvent::CompactSummaryDelta(event) => Some(
+            protocol::KeyRuntimeEvent::CompactSummaryDelta(protocol::CompactSummaryDeltaEvent {
+                trigger: event.trigger,
+                delta: event.delta.clone(),
+                session_id: event.session_id.clone(),
+                agent_label: event.agent_label.clone(),
+            }),
+        ),
+        RuntimeToServerEvent::CompactSummaryFinished(event) => {
+            Some(protocol::KeyRuntimeEvent::CompactSummaryFinished(
+                protocol::CompactSummaryFinishedEvent {
+                    trigger: event.trigger,
+                    summary: event.summary.clone(),
+                    after_tokens: event.after_tokens,
+                    session_id: event.session_id.clone(),
+                    agent_label: event.agent_label.clone(),
+                },
+            ))
+        }
+        RuntimeToServerEvent::CompactSummaryFailed(event) => Some(
+            protocol::KeyRuntimeEvent::CompactSummaryFailed(protocol::CompactSummaryFailedEvent {
+                trigger: event.trigger,
+                message: event.message.clone(),
+                session_id: event.session_id.clone(),
+                agent_label: event.agent_label.clone(),
+            }),
+        ),
+        RuntimeToServerEvent::SessionSnapshot {
+            session_id,
+            messages,
+            subagents,
+            usage,
+        } => Some(protocol::KeyRuntimeEvent::SessionSnapshot(
+            protocol::SessionSnapshotEvent {
+                session_id: session_id.clone(),
+                message_count: messages.len(),
+                subagent_count: subagents.len(),
+                usage: protocol::SessionUsage {
+                    current_context_tokens: usage.current_context_tokens,
+                    total_tokens: usage.total_tokens,
+                    total_cached_tokens: usage.total_cached_tokens,
+                    context_window: usage.context_window,
+                },
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn notification_level_to_protocol(
+    kind: event_types::NotificationKind,
+) -> protocol::NotificationLevel {
+    match kind {
+        event_types::NotificationKind::Info => protocol::NotificationLevel::Info,
+        event_types::NotificationKind::Warn => protocol::NotificationLevel::Warn,
+        event_types::NotificationKind::Error => protocol::NotificationLevel::Error,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::types::events as event_types;
     use omini_core::types::events::SessionUsageSnapshot;
 
     #[test]
@@ -203,5 +335,106 @@ mod tests {
         assert_eq!(events[3].payload["session_id"], "s1");
         assert_eq!(events[3].payload["usage"]["context_window"], 1000);
         assert_eq!(events[3].payload["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            events[2].event,
+            Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
+                protocol::ActiveProfileChangedEvent {
+                    profile: protocol::ActiveProfile::Plan,
+                },
+            ))
+        );
+        assert_eq!(
+            events[3].event,
+            Some(protocol::KeyRuntimeEvent::SessionSnapshot(
+                protocol::SessionSnapshotEvent {
+                    session_id: Some("s1".to_string()),
+                    message_count: 1,
+                    subagent_count: 0,
+                    usage: protocol::SessionUsage {
+                        current_context_tokens: 3,
+                        total_tokens: 5,
+                        total_cached_tokens: 1,
+                        context_window: Some(1000),
+                    },
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn active_profile_changed_has_typed_overlay() {
+        let event = runtime_event_from_internal(RuntimeToServerEvent::ActiveProfileChanged(
+            ActiveProfile::Plan,
+        ))
+        .expect("event should encode");
+
+        assert_eq!(event.kind, "active_profile_changed");
+        assert_eq!(event.payload["profile"], "plan");
+        assert_eq!(
+            event.event,
+            Some(protocol::KeyRuntimeEvent::ActiveProfileChanged(
+                protocol::ActiveProfileChangedEvent {
+                    profile: protocol::ActiveProfile::Plan,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn compact_summary_finished_has_typed_overlay() {
+        let event = runtime_event_from_internal(RuntimeToServerEvent::CompactSummaryFinished(
+            event_types::CompactSummaryFinishedEvent {
+                trigger: event_types::CompactTrigger::Manual,
+                summary: "summary".to_string(),
+                after_tokens: 42,
+                session_id: Some("session_1".to_string()),
+                agent_label: None,
+            },
+        ))
+        .expect("event should encode");
+
+        assert_eq!(event.kind, "compact_summary_finished");
+        assert_eq!(
+            event.event,
+            Some(protocol::KeyRuntimeEvent::CompactSummaryFinished(
+                protocol::CompactSummaryFinishedEvent {
+                    trigger: protocol::CompactTrigger::Manual,
+                    summary: "summary".to_string(),
+                    after_tokens: 42,
+                    session_id: Some("session_1".to_string()),
+                    agent_label: None,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn plan_approval_resolved_has_typed_overlay() {
+        let event = runtime_event_from_internal(RuntimeToServerEvent::PlanApprovalResolved {
+            plan_id: "plan_1".to_string(),
+            action: event_types::PlanApprovalAction::ContinueDiscussing,
+        })
+        .expect("event should encode");
+
+        assert_eq!(event.kind, "plan_approval_resolved");
+        assert_eq!(
+            event.event,
+            Some(protocol::KeyRuntimeEvent::PlanApprovalResolved(
+                protocol::PlanApprovalResolvedEvent {
+                    plan_id: "plan_1".to_string(),
+                    action: protocol::PlanApprovalAction::ContinueDiscussing,
+                },
+            ))
+        );
+    }
+
+    #[test]
+    fn thinking_display_changed_preserves_legacy_payload() {
+        let event = thinking_display_changed_event(false);
+
+        assert_eq!(event.kind, "thinking_display_changed");
+        assert_eq!(event.payload["type"], "thinking_display_changed");
+        assert_eq!(event.payload["show"], false);
+        assert_eq!(event.event, None);
     }
 }

@@ -27,8 +27,6 @@ pub enum ServerToRuntimeEvent {
     CompactContext { instructions: Option<String> },
     /// 用户请求调整 thinking effort。
     SetThinkingEffort(ThinkingEffort),
-    /// 用户请求调整 thinking 块显示偏好。
-    SetThinkingDisplay { show: Option<bool> },
     /// 用户切换当前 active profile
     ToggleActiveProfile,
     /// 用户显式设置当前 active profile
@@ -181,8 +179,6 @@ pub enum RuntimeToServerEvent {
         thinking_effort: Option<ThinkingEffort>,
         context_window: Option<u32>,
     },
-    /// thinking 块显示偏好已变更。
-    ThinkingDisplayChanged { show: bool },
     /// 当前会话 token usage 状态已变更。
     UsageChanged(SessionUsageSnapshot),
     /// 当前会话累计 token usage 已变更，但当前 context used 不应同步。

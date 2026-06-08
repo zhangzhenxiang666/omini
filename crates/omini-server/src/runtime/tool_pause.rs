@@ -14,7 +14,10 @@ enum ToolPauseUpdate {
     Clear,
 }
 
-pub(super) fn apply_tool_pause_update(pending: &Arc<Mutex<HashSet<String>>>, event: &RuntimeEvent) {
+pub(super) fn apply_tool_pause_update(
+    pending: &Arc<Mutex<HashSet<String>>>,
+    event: &RuntimeToServerEvent,
+) {
     let Some(update) = tool_pause_update(event) else {
         return;
     };
@@ -32,41 +35,27 @@ pub(super) fn apply_tool_pause_update(pending: &Arc<Mutex<HashSet<String>>>, eve
     }
 }
 
-/// 从 runtime payload 提取 pending pause 的增删清空操作。
-fn tool_pause_update(event: &RuntimeEvent) -> Option<ToolPauseUpdate> {
-    match event
-        .payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)?
-    {
-        "tool_pause_requested" => event
-            .payload
-            .get("tool_use_id")
-            .and_then(serde_json::Value::as_str)
-            .map(|tool_use_id| ToolPauseUpdate::Add(tool_use_id.to_string())),
-        "tool_result" => event
-            .payload
-            .get("tool_use_id")
-            .and_then(serde_json::Value::as_str)
-            .map(|tool_use_id| ToolPauseUpdate::Remove(vec![tool_use_id.to_string()])),
-        "subagent_tool_result" => {
-            let session_id = event
-                .payload
-                .get("session_id")
-                .and_then(serde_json::Value::as_str)?;
-            let tool_use_id = event
-                .payload
-                .get("tool_result")
-                .and_then(|tool_result| tool_result.get("tool_use_id"))
-                .and_then(serde_json::Value::as_str)?;
+/// 从 runtime event 提取 pending pause 的增删清空操作。
+fn tool_pause_update(event: &RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
+    match event {
+        RuntimeToServerEvent::ToolPauseRequested(request) => {
+            Some(ToolPauseUpdate::Add(request.tool_use_id.clone()))
+        }
+        RuntimeToServerEvent::ToolResult(result) => {
+            Some(ToolPauseUpdate::Remove(vec![result.tool_use_id.clone()]))
+        }
+        RuntimeToServerEvent::SubagentToolResult(event) => {
+            let session_id = &event.session_id;
+            let tool_use_id = &event.tool_result.tool_use_id;
             // 子代理暂停在 UI 中可能用 session_id:tool_use_id 表示，两个 key 都要清掉。
             Some(ToolPauseUpdate::Remove(vec![
-                tool_use_id.to_string(),
+                tool_use_id.clone(),
                 format!("{session_id}:{tool_use_id}"),
             ]))
         }
-        "run_started" | "run_finished" => Some(ToolPauseUpdate::Clear),
-        kind if is_session_snapshot_kind(kind) => Some(ToolPauseUpdate::Clear),
+        RuntimeToServerEvent::RunStarted
+        | RuntimeToServerEvent::RunFinished
+        | RuntimeToServerEvent::SessionSnapshot { .. } => Some(ToolPauseUpdate::Clear),
         _ => None,
     }
 }
@@ -74,17 +63,22 @@ fn tool_pause_update(event: &RuntimeEvent) -> Option<ToolPauseUpdate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::types::events::{ToolPauseKind, ToolPauseRequest, UserInputPreview};
+    use omini_core::types::message::ToolResultBlock;
 
     #[test]
     fn tool_pause_requested_event_adds_pending_resolution_id() {
-        let event = RuntimeEvent::new(
-            "tool_pause_requested",
-            serde_json::json!({
-                "type": "tool_pause_requested",
-                "tool_use_id": "pause_1",
-                "tool_name": "write",
+        let event = RuntimeToServerEvent::ToolPauseRequested(ToolPauseRequest {
+            tool_use_id: "pause_1".to_string(),
+            preview_tool_use_id: None,
+            tool_name: "write".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(UserInputPreview {
+                questions: Vec::new(),
             }),
-        );
+        });
 
         assert_eq!(
             tool_pause_update(&event),
@@ -94,15 +88,12 @@ mod tests {
 
     #[test]
     fn tool_result_event_removes_pending_resolution_id() {
-        let event = RuntimeEvent::new(
-            "tool_result",
-            serde_json::json!({
-                "type": "tool_result",
-                "tool_use_id": "pause_1",
-                "content": "done",
-                "is_error": false,
-            }),
-        );
+        let event = RuntimeToServerEvent::ToolResult(ToolResultBlock {
+            tool_use_id: "pause_1".to_string(),
+            content: "done".to_string(),
+            is_error: false,
+            metadata: None,
+        });
 
         assert_eq!(
             tool_pause_update(&event),

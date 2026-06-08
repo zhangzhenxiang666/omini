@@ -32,11 +32,6 @@ impl AgentRuntime {
                                 )
                                 .await;
                             }
-                            ServerToRuntimeEvent::SetThinkingDisplay { show } => {
-                                tracing::debug!(request_kind = "set_thinking_display", show, "runtime request received");
-                                active_run::set_thinking_display(&self.project, show, &self.event_tx)
-                                    .await;
-                            }
                             ServerToRuntimeEvent::ToggleActiveProfile => {
                                 tracing::debug!(request_kind = "toggle_active_profile", "runtime request received");
                                 self.toggle_active_profile().await;
@@ -342,11 +337,6 @@ impl AgentRuntime {
                                     &self.persistence_tx,
                                 )
                                 .await;
-                            }
-                            ServerToRuntimeEvent::SetThinkingDisplay { show } => {
-                                tracing::debug!(show, "active run thinking display update");
-                                active_run::set_thinking_display(&self.project, show, &event_tx)
-                                    .await;
                             }
                             ServerToRuntimeEvent::ToggleActiveProfile => {
                                 tracing::debug!("active run profile toggle requested");

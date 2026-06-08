@@ -12,7 +12,7 @@ use omini_core::config::settings::OminiRoot;
 use omini_core::config::settings::UserConfig;
 use omini_core::persistence::RuntimePersistenceEvent;
 use omini_core::types::display::HistoryItem;
-use omini_core::types::events::{ActiveProfile, LoadedSession};
+use omini_core::types::events::{ActiveProfile, LoadedSession, RuntimeToServerEvent};
 use omini_core::types::message::{ContentBlock, Message, Role};
 use omini_domain::project::sanitize_project_path as sanitize;
 use omini_protocol as protocol;

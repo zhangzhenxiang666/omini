@@ -3,9 +3,7 @@ use crate::config::project::ProjectDir;
 use crate::persistence::RuntimePersistenceEvent;
 use crate::types::config::Settings;
 use crate::types::config::ThinkingEffort;
-use crate::types::events::{
-    ActiveProfile, Notification, RuntimeToServerEvent, SessionUsageSnapshot,
-};
+use crate::types::events::{ActiveProfile, RuntimeToServerEvent, SessionUsageSnapshot};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
@@ -219,50 +217,6 @@ pub(super) async fn apply_thinking_effort(
             context_window: current_context_window(settings),
         })
         .await;
-}
-
-pub(super) async fn set_thinking_display(
-    project: &ProjectDir,
-    show: Option<bool>,
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-) {
-    match apply_thinking_display(project, show) {
-        Ok(show) => {
-            let _ = event_tx
-                .send(RuntimeToServerEvent::ThinkingDisplayChanged { show })
-                .await;
-            let _ = event_tx
-                .send(RuntimeToServerEvent::Notification(
-                    thinking_display_notification(show),
-                ))
-                .await;
-        }
-        Err(error) => {
-            let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
-        }
-    }
-}
-
-fn apply_thinking_display(project: &ProjectDir, show: Option<bool>) -> Result<bool, String> {
-    let mut state = project
-        .load_state()
-        .map_err(|e| format!("读取项目状态失败: {e}"))?;
-    let show = show.unwrap_or(!state.show_thinking_blocks);
-    state.show_thinking_blocks = show;
-    project
-        .save_state(&state)
-        .map_err(|e| format!("保存项目状态失败: {e}"))?;
-    Ok(show)
-}
-
-fn thinking_display_notification(show: bool) -> Notification {
-    let status = if show { "on" } else { "off" };
-    let detail = if show {
-        "已打开思考内容块展示"
-    } else {
-        "已关闭思考内容块展示"
-    };
-    Notification::info(format!("/thinking {status}")).with_details(vec![detail.to_string()])
 }
 
 async fn send_usage_snapshot(

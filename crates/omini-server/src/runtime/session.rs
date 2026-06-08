@@ -105,6 +105,25 @@ impl RuntimeSession {
                 loop {
                     match runtime_event_rx.recv().await {
                         Ok(event) => {
+                            let event = match runtime_event_from_internal(event) {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    tracing::error!(error = %error, "failed to encode runtime event");
+                                    let fallback = RuntimeToServerEvent::error(format!(
+                                        "Failed to encode runtime event: {error}"
+                                    ));
+                                    match runtime_event_from_internal(fallback) {
+                                        Ok(event) => event,
+                                        Err(error) => {
+                                            tracing::error!(
+                                                error = %error,
+                                                "failed to encode fallback runtime event"
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
                             let event_kind = event.kind.clone();
                             let sequenced = SequencedRuntimeEvent {
                                 seq: next_seq,
@@ -227,13 +246,20 @@ impl RuntimeSession {
         self.core.reload_subagent_registry().await
     }
 
+    pub(crate) fn set_thinking_display(
+        &self,
+        request: protocol::SetThinkingDisplayRequest,
+    ) -> Result<(), CoreError> {
+        let show = self.save_thinking_display(request.show)?;
+        self.broadcast_thinking_display_changed(show)
+    }
+
     pub(crate) fn broadcast_agent_management_updated(
         &self,
         records: Vec<omini_core::subagents::AgentRecord>,
     ) -> Result<(), CoreError> {
-        let event = runtime_event_from_internal(
-            omini_core::types::events::RuntimeToServerEvent::AgentManagementUpdated { records },
-        )?;
+        let event =
+            runtime_event_from_internal(RuntimeToServerEvent::AgentManagementUpdated { records })?;
         let _ = self.server_event_tx.send(event);
         Ok(())
     }
@@ -256,7 +282,7 @@ impl RuntimeSession {
             .map_err(|error| {
                 CoreError::persistence("failed to rename session", error.to_string())
             })?;
-        self.broadcast_session_title_changed(title);
+        self.broadcast_session_title_changed(title)?;
         Ok(())
     }
 
@@ -275,19 +301,41 @@ impl RuntimeSession {
                 CoreError::persistence("failed to set initial session title", error.to_string())
             })?;
         if updated {
-            self.broadcast_session_title_changed(title);
+            self.broadcast_session_title_changed(title)?;
         }
         Ok(())
     }
 
-    fn broadcast_session_title_changed(&self, title: String) {
-        let payload = serde_json::json!({
-            "type": "session_title_changed",
-            "title": title,
-        });
+    fn broadcast_session_title_changed(&self, title: String) -> Result<(), CoreError> {
+        let event = runtime_event_from_internal(RuntimeToServerEvent::SessionTitleChanged {
+            title: Some(title),
+        })?;
+        let _ = self.server_event_tx.send(event);
+        Ok(())
+    }
+
+    fn save_thinking_display(&self, show: Option<bool>) -> Result<bool, CoreError> {
+        let mut state = self
+            .project
+            .load_state()
+            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
+        let show = show.unwrap_or(!state.show_thinking_blocks);
+        state.show_thinking_blocks = show;
+        self.project
+            .save_state(&state)
+            .map_err(|error| CoreError::project_state("failed to save project state", error))?;
+        Ok(show)
+    }
+
+    fn broadcast_thinking_display_changed(&self, show: bool) -> Result<(), CoreError> {
         let _ = self
             .server_event_tx
-            .send(RuntimeEvent::new("session_title_changed", payload));
+            .send(thinking_display_changed_event(show));
+        let notification = runtime_event_from_internal(RuntimeToServerEvent::Notification(
+            thinking_display_notification(show),
+        ))?;
+        let _ = self.server_event_tx.send(notification);
+        Ok(())
     }
 
     pub(crate) async fn ensure_loaded(&self) -> Result<(), CoreError> {
@@ -545,6 +593,17 @@ fn effective_session_thinking_effort(
 ) -> Option<omini_core::types::config::ThinkingEffort> {
     let effort = effort.and_then(|effort| effort.parse().ok());
     settings.effective_thinking_effort_for(provider, model, effort)
+}
+
+fn thinking_display_notification(show: bool) -> omini_core::types::events::Notification {
+    let status = if show { "on" } else { "off" };
+    let detail = if show {
+        "已打开思考内容块展示"
+    } else {
+        "已关闭思考内容块展示"
+    };
+    omini_core::types::events::Notification::info(format!("/thinking {status}"))
+        .with_details(vec![detail.to_string()])
 }
 
 #[cfg(test)]
