@@ -61,18 +61,17 @@ Current boundary notes:
 
 ## Protocol Events
 
-`RuntimeEvent` currently preserves the legacy `{ kind, payload }` shape for TUI compatibility and carries an optional typed `event` overlay for key events. New clients should prefer typed event data when present.
+`RuntimeEvent` carries a required typed protocol event. WebSocket clients consume `TypedRuntimeEvent` directly instead of decoding legacy `{ kind, payload }` runtime JSON.
 
-Stable first-pass typed events include:
+Typed runtime events cover the current TUI-consumed runtime stream, including:
 
 - run started/finished
 - notifications
 - tool pause requested
 - plan submitted
 - session snapshot
+- model, usage, title, thinking display, stream delta, tool use/result, agent, compact, and subagent events
 - controller changes through `ServerEnvelope::ControllerChanged`
-
-Non-critical UI events may continue to use legacy payloads temporarily.
 
 ## Where Changes Usually Go
 

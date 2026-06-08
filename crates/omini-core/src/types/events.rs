@@ -2,7 +2,7 @@ use crate::persistence::SessionRecord;
 use crate::types::config::ThinkingEffort;
 use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
-use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
+use crate::types::subagents::AgentRecord;
 use crate::types::usage::Usage;
 pub use omini_domain::events::*;
 use serde::{Deserialize, Serialize};
@@ -200,13 +200,6 @@ pub enum RuntimeToServerEvent {
     ActiveProfileChanged(#[serde(with = "serde_runtime_event_payload::profile")] ActiveProfile),
     /// Runtime 刷新 `/agents` 面板数据
     AgentManagementUpdated { records: Vec<AgentRecord> },
-    /// LLM 已生成 agent 草稿，供 `/agents` 面板预览和保存
-    AgentGenerated {
-        source_kind: AgentSourceKind,
-        draft: AgentDraft,
-    },
-    /// LLM 生成 agent 失败，供 `/agents` 面板恢复输入态并显示错误。
-    AgentGenerateFailed { message: String },
 
     /// 新一轮 LLM 调用开始
     TurnStarted,

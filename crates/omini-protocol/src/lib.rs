@@ -7,13 +7,20 @@ use chrono::{DateTime, Utc};
 pub use omini_domain::config::{
     InputModality, ModelInfo, ProviderEndpointKind, ProviderInfo, ThinkingEffort,
 };
+pub use omini_domain::display::HistoryItem;
 pub use omini_domain::events::{
-    ActiveProfile, CompactTrigger, PlanApprovalAction, PlanExecutionProfile, SessionRuntimeState,
-    SessionSummary, SessionUsage, SubagentStatus, ToolPauseResponse,
+    ActiveProfile, CompactTrigger, PermissionPreview, PlanApprovalAction, PlanExecutionProfile,
+    SessionRuntimeState, SessionSummary, SessionUsage, SessionUsageSnapshot, SubagentFinishedEvent,
+    SubagentMessageEvent, SubagentSnapshot, SubagentStartedEvent, SubagentStatus,
+    SubagentToolResultEvent, SubagentToolUseEvent, SubmittedPlan, ToolPauseKind, ToolPauseRequest,
+    ToolPauseResponse,
 };
-pub use omini_domain::subagents::{AgentDraft, AgentSourceKind, AgentSummary, GeneratedAgentDraft};
+pub use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+pub use omini_domain::subagents::{
+    AgentDraft, AgentRecord as RuntimeAgentRecord, AgentSourceKind, AgentSummary,
+    GeneratedAgentDraft,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// daemon 健康检查响应，用于客户端确认本地服务可用并识别服务名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,50 +91,101 @@ pub struct ProjectRuntimeConfigResponse {
     pub show_thinking_blocks: bool,
 }
 
-/// WebSocket runtime 事件保留 legacy payload，同时允许逐步增加稳定 typed overlay。
+/// WebSocket runtime 事件直接承载 typed protocol event。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RuntimeEvent {
-    /// 旧协议事件名，TUI 兼容层仍用它和 `payload` 解码历史事件。
-    pub kind: String,
-    /// 旧协议原始载荷；非关键 UI 事件可以继续只放在这里。
-    pub payload: Value,
-    /// 新协议稳定覆盖层；新客户端应优先消费这里的关键事件。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub event: Option<KeyRuntimeEvent>,
+    pub event: TypedRuntimeEvent,
 }
 
 impl RuntimeEvent {
-    pub fn new(kind: impl Into<String>, payload: Value) -> Self {
-        Self {
-            kind: kind.into(),
-            payload,
-            event: None,
-        }
+    pub fn new(event: TypedRuntimeEvent) -> Self {
+        Self { event }
     }
 
-    pub fn with_key_event(mut self, event: KeyRuntimeEvent) -> Self {
-        self.event = Some(event);
-        self
+    pub fn kind(&self) -> &'static str {
+        self.event.kind()
     }
 }
 
-/// 跨客户端值得稳定消费的关键事件；其它 UI 细节可以暂时继续放在 legacy payload 中。
+/// WebSocket runtime 事件的完整 typed 协议表示。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum KeyRuntimeEvent {
+pub enum TypedRuntimeEvent {
     RunStarted,
+    UserMessageInjected {
+        item: HistoryItem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
     RunFinished,
     Notification(NotificationEvent),
+    ModelChanged(ModelChangedEvent),
+    ThinkingDisplayChanged(ThinkingDisplayChangedEvent),
+    UsageChanged(SessionUsageSnapshot),
+    UsageTotalsChanged(UsageTotalsChangedEvent),
     ActiveProfileChanged(ActiveProfileChangedEvent),
+    SessionTitleChanged(SessionTitleChangedEvent),
     ToolPauseRequested(ToolPauseRequestedEvent),
-    PlanSubmitted(PlanSubmittedEvent),
+    PlanSubmitted(SubmittedPlan),
     PlanApprovalResolved(PlanApprovalResolvedEvent),
+    AgentManagementUpdated {
+        records: Vec<RuntimeAgentRecord>,
+    },
+    TurnStarted,
+    TurnEnded,
+    ThinkingDelta(RuntimeDeltaEvent),
+    TextDelta(RuntimeDeltaEvent),
+    ProposedPlanDelta(RuntimeDeltaEvent),
+    ToolUse(ToolUseBlock),
+    ToolResult(ToolResultBlock),
     CompactSummaryStarted(CompactSummaryStartedEvent),
     CompactSummaryDelta(CompactSummaryDeltaEvent),
     CompactSummaryFinished(CompactSummaryFinishedEvent),
     CompactSummaryFailed(CompactSummaryFailedEvent),
     SessionSnapshot(SessionSnapshotEvent),
-    LegacyRuntime { kind: String },
+    SubagentStarted(SubagentStartedEvent),
+    SubagentMessageProduced(SubagentMessageEvent),
+    SubagentToolUse(SubagentToolUseEvent),
+    SubagentToolResult(SubagentToolResultEvent),
+    SubagentFinished(SubagentFinishedEvent),
+}
+
+impl TypedRuntimeEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::RunStarted => "run_started",
+            Self::UserMessageInjected { .. } => "user_message_injected",
+            Self::RunFinished => "run_finished",
+            Self::Notification(_) => "notification",
+            Self::ModelChanged(_) => "model_changed",
+            Self::ThinkingDisplayChanged(_) => "thinking_display_changed",
+            Self::UsageChanged(_) => "usage_changed",
+            Self::UsageTotalsChanged(_) => "usage_totals_changed",
+            Self::ActiveProfileChanged(_) => "active_profile_changed",
+            Self::SessionTitleChanged(_) => "session_title_changed",
+            Self::ToolPauseRequested(_) => "tool_pause_requested",
+            Self::PlanSubmitted(_) => "plan_submitted",
+            Self::PlanApprovalResolved(_) => "plan_approval_resolved",
+            Self::AgentManagementUpdated { .. } => "agent_management_updated",
+            Self::TurnStarted => "turn_started",
+            Self::TurnEnded => "turn_ended",
+            Self::ThinkingDelta(_) => "thinking_delta",
+            Self::TextDelta(_) => "text_delta",
+            Self::ProposedPlanDelta(_) => "proposed_plan_delta",
+            Self::ToolUse(_) => "tool_use",
+            Self::ToolResult(_) => "tool_result",
+            Self::CompactSummaryStarted(_) => "compact_summary_started",
+            Self::CompactSummaryDelta(_) => "compact_summary_delta",
+            Self::CompactSummaryFinished(_) => "compact_summary_finished",
+            Self::CompactSummaryFailed(_) => "compact_summary_failed",
+            Self::SessionSnapshot(_) => "session_snapshot",
+            Self::SubagentStarted(_) => "subagent_started",
+            Self::SubagentMessageProduced(_) => "subagent_message_produced",
+            Self::SubagentToolUse(_) => "subagent_tool_use",
+            Self::SubagentToolResult(_) => "subagent_tool_result",
+            Self::SubagentFinished(_) => "subagent_finished",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,10 +205,40 @@ pub struct NotificationEvent {
     pub details: Vec<String>,
 }
 
+/// 当前会话模型配置已变化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChangedEvent {
+    pub provider: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effort: Option<ThinkingEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+}
+
+/// 当前会话 thinking 块显示偏好已变化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingDisplayChangedEvent {
+    pub show: bool,
+}
+
+/// 当前会话累计 token usage 已变化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotalsChangedEvent {
+    pub total_tokens: i64,
+    pub total_cached_tokens: i64,
+}
+
 /// 当前会话活跃 profile 已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveProfileChangedEvent {
     pub profile: ActiveProfile,
+}
+
+/// 当前会话标题已变化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTitleChangedEvent {
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,19 +248,8 @@ pub enum ToolPauseEventKind {
     UserInput,
 }
 
-/// runtime 暂停等待客户端处理工具请求时广播的关键事件。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ToolPauseRequestedEvent {
-    pub tool_use_id: String,
-    pub tool_name: String,
-    pub kind: ToolPauseEventKind,
-    /// 暂停来自子 agent 时，这里标识源会话。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_session_id: Option<String>,
-    /// 暂停来自子 agent 时，这里提供人类可读的 agent 标签。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_agent_label: Option<String>,
-}
+/// runtime 暂停等待客户端处理工具请求时广播的完整事件。
+pub type ToolPauseRequestedEvent = ToolPauseRequest;
 
 /// plan mode 中模型提交给客户端审批的计划内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +264,12 @@ pub struct PlanSubmittedEvent {
 pub struct PlanApprovalResolvedEvent {
     pub plan_id: String,
     pub action: PlanApprovalAction,
+}
+
+/// 流式输出增量事件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDeltaEvent {
+    pub delta: String,
 }
 
 /// 当前 session 开始 LLM 压缩摘要。
@@ -239,9 +322,9 @@ pub struct SessionSnapshotEvent {
     /// 快照所属会话；旧事件可能不带该字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    pub message_count: usize,
-    pub subagent_count: usize,
-    pub usage: SessionUsage,
+    pub messages: Vec<HistoryItem>,
+    pub subagents: Vec<SubagentSnapshot>,
+    pub usage: SessionUsageSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -784,11 +867,11 @@ pub enum ClientSessionRole {
     Observer,
 }
 
-/// WebSocket 外层 envelope 区分 runtime payload 和 server 自己维护的连接/控制权状态。
+/// WebSocket 外层 envelope 区分 runtime event 和 server 自己维护的连接/控制权状态。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerEnvelope {
-    /// runtime 原始事件或 typed overlay 事件。
+    /// typed runtime 事件。
     Event { event: RuntimeEvent },
     /// 连接建立时的实时运行状态快照；补足持久化 snapshot 不包含的运行中状态。
     RuntimeStatus { status: SessionRuntimeStatus },
@@ -959,22 +1042,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_event_can_carry_typed_key_event_overlay() {
-        let event = RuntimeEvent::new(
-            "run_started",
-            json!({
-                "type": "run_started"
-            }),
-        )
-        .with_key_event(KeyRuntimeEvent::RunStarted);
+    fn runtime_event_serializes_typed_event() {
+        let event = RuntimeEvent::new(TypedRuntimeEvent::RunStarted);
 
         assert_eq!(
             serde_json::to_value(event).unwrap(),
             json!({
-                "kind": "run_started",
-                "payload": {
-                    "type": "run_started"
-                },
                 "event": {
                     "type": "run_started"
                 }
@@ -984,7 +1057,7 @@ mod tests {
 
     #[test]
     fn active_profile_changed_event_uses_stable_semantic_fields() {
-        let event = KeyRuntimeEvent::ActiveProfileChanged(ActiveProfileChangedEvent {
+        let event = TypedRuntimeEvent::ActiveProfileChanged(ActiveProfileChangedEvent {
             profile: ActiveProfile::Plan,
         });
 
@@ -999,7 +1072,7 @@ mod tests {
 
     #[test]
     fn compact_summary_finished_event_uses_stable_semantic_fields() {
-        let event = KeyRuntimeEvent::CompactSummaryFinished(CompactSummaryFinishedEvent {
+        let event = TypedRuntimeEvent::CompactSummaryFinished(CompactSummaryFinishedEvent {
             trigger: CompactTrigger::Manual,
             summary: "# Summary".to_string(),
             after_tokens: 42,
@@ -1021,7 +1094,7 @@ mod tests {
 
     #[test]
     fn plan_approval_resolved_event_uses_stable_semantic_fields() {
-        let event = KeyRuntimeEvent::PlanApprovalResolved(PlanApprovalResolvedEvent {
+        let event = TypedRuntimeEvent::PlanApprovalResolved(PlanApprovalResolvedEvent {
             plan_id: "plan_1".to_string(),
             action: PlanApprovalAction::ContinueDiscussing,
         });
@@ -1141,13 +1214,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_pause_requested_event_uses_stable_semantic_fields() {
-        let event = KeyRuntimeEvent::ToolPauseRequested(ToolPauseRequestedEvent {
+    fn tool_pause_requested_event_carries_full_request() {
+        let event = TypedRuntimeEvent::ToolPauseRequested(ToolPauseRequestedEvent {
             tool_use_id: "tool_1".to_string(),
+            preview_tool_use_id: None,
             tool_name: "bash".to_string(),
-            kind: ToolPauseEventKind::Permission,
+            permission_source: None,
             source_session_id: Some("session_1".to_string()),
             source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+                tool_name: "bash".to_string(),
+                payload: serde_json::Map::new(),
+            }),
         });
 
         assert_eq!(
@@ -1156,7 +1234,14 @@ mod tests {
                 "type": "tool_pause_requested",
                 "tool_use_id": "tool_1",
                 "tool_name": "bash",
-                "kind": "permission",
+                "kind": {
+                    "type": "permission",
+                    "preview": {
+                        "type": "custom",
+                        "tool_name": "bash",
+                        "payload": {}
+                    }
+                },
                 "source_session_id": "session_1"
             })
         );

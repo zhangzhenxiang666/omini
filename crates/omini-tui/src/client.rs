@@ -1,4 +1,7 @@
-use crate::types::events::{RuntimeToUiEvent, SessionUsageSnapshot};
+use crate::types::events::{
+    CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent, CompactSummaryFinishedEvent,
+    Notification, NotificationKind, RuntimeToUiEvent, SessionUsageSnapshot,
+};
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol as protocol;
 use omini_protocol::ProtocolError;
@@ -755,9 +758,7 @@ async fn handle_server_text(
         .map_err(|err| format!("decode server envelope: {err}"))?
     {
         protocol::ServerEnvelope::Event { event } => {
-            // RuntimeEvent 保留 payload 兼容层，TUI 当前仍按历史 RuntimeToUiEvent 解码。
-            let event = serde_json::from_value::<RuntimeToUiEvent>(event.payload)
-                .map_err(|err| format!("decode runtime event: {err}"))?;
+            let event = runtime_event_from_protocol(event);
             event_tx
                 .send(event)
                 .await
@@ -771,9 +772,139 @@ async fn handle_server_text(
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(true)
         }
-        // controller/role envelope 先作为协议能力保留，当前 TUI 渲染还主要依赖 runtime payload。
+        // controller/role envelope 先作为协议能力保留，当前 TUI 渲染还主要依赖 runtime status。
         protocol::ServerEnvelope::ControllerChanged { .. } => Ok(false),
         protocol::ServerEnvelope::ClientRoleChanged { .. } => Ok(false),
+    }
+}
+
+fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEvent {
+    match event.event {
+        protocol::TypedRuntimeEvent::RunStarted => RuntimeToUiEvent::RunStarted,
+        protocol::TypedRuntimeEvent::UserMessageInjected {
+            item,
+            client_echo_id,
+        } => RuntimeToUiEvent::UserMessageInjected {
+            item,
+            client_echo_id,
+        },
+        protocol::TypedRuntimeEvent::RunFinished => RuntimeToUiEvent::RunFinished,
+        protocol::TypedRuntimeEvent::Notification(event) => {
+            RuntimeToUiEvent::Notification(Notification {
+                kind: notification_kind_from_protocol(event.level),
+                message: event.message,
+                details: event.details,
+            })
+        }
+        protocol::TypedRuntimeEvent::ModelChanged(event) => RuntimeToUiEvent::ModelChanged {
+            provider: event.provider,
+            model: event.model,
+            thinking_effort: event.thinking_effort,
+            context_window: event.context_window,
+        },
+        protocol::TypedRuntimeEvent::ThinkingDisplayChanged(event) => {
+            RuntimeToUiEvent::ThinkingDisplayChanged { show: event.show }
+        }
+        protocol::TypedRuntimeEvent::UsageChanged(usage) => RuntimeToUiEvent::UsageChanged(usage),
+        protocol::TypedRuntimeEvent::UsageTotalsChanged(event) => {
+            RuntimeToUiEvent::UsageTotalsChanged {
+                total_tokens: event.total_tokens,
+                total_cached_tokens: event.total_cached_tokens,
+            }
+        }
+        protocol::TypedRuntimeEvent::ActiveProfileChanged(event) => {
+            RuntimeToUiEvent::ActiveProfileChanged(event.profile)
+        }
+        protocol::TypedRuntimeEvent::SessionTitleChanged(event) => {
+            RuntimeToUiEvent::SessionTitleChanged { title: event.title }
+        }
+        protocol::TypedRuntimeEvent::ToolPauseRequested(request) => {
+            RuntimeToUiEvent::ToolPauseRequested(request)
+        }
+        protocol::TypedRuntimeEvent::PlanSubmitted(plan) => RuntimeToUiEvent::PlanSubmitted(plan),
+        protocol::TypedRuntimeEvent::PlanApprovalResolved(event) => {
+            RuntimeToUiEvent::PlanApprovalResolved {
+                plan_id: event.plan_id,
+                action: event.action,
+            }
+        }
+        protocol::TypedRuntimeEvent::AgentManagementUpdated { records } => {
+            RuntimeToUiEvent::AgentManagementUpdated { records }
+        }
+        protocol::TypedRuntimeEvent::TurnStarted => RuntimeToUiEvent::TurnStarted,
+        protocol::TypedRuntimeEvent::TurnEnded => RuntimeToUiEvent::TurnEnded,
+        protocol::TypedRuntimeEvent::ThinkingDelta(event) => {
+            RuntimeToUiEvent::ThinkingDelta(event.delta)
+        }
+        protocol::TypedRuntimeEvent::TextDelta(event) => RuntimeToUiEvent::TextDelta(event.delta),
+        protocol::TypedRuntimeEvent::ProposedPlanDelta(event) => {
+            RuntimeToUiEvent::ProposedPlanDelta(event.delta)
+        }
+        protocol::TypedRuntimeEvent::ToolUse(tool_use) => RuntimeToUiEvent::ToolUse(tool_use),
+        protocol::TypedRuntimeEvent::ToolResult(tool_result) => {
+            RuntimeToUiEvent::ToolResult(tool_result)
+        }
+        protocol::TypedRuntimeEvent::CompactSummaryStarted(event) => {
+            RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
+                trigger: event.trigger,
+                session_id: event.session_id,
+                agent_label: event.agent_label,
+            })
+        }
+        protocol::TypedRuntimeEvent::CompactSummaryDelta(event) => {
+            RuntimeToUiEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
+                trigger: event.trigger,
+                delta: event.delta,
+                session_id: event.session_id,
+                agent_label: event.agent_label,
+            })
+        }
+        protocol::TypedRuntimeEvent::CompactSummaryFinished(event) => {
+            RuntimeToUiEvent::CompactSummaryFinished(CompactSummaryFinishedEvent {
+                trigger: event.trigger,
+                summary: event.summary,
+                after_tokens: event.after_tokens,
+                session_id: event.session_id,
+                agent_label: event.agent_label,
+            })
+        }
+        protocol::TypedRuntimeEvent::CompactSummaryFailed(event) => {
+            RuntimeToUiEvent::CompactSummaryFailed(CompactSummaryFailedEvent {
+                trigger: event.trigger,
+                message: event.message,
+                session_id: event.session_id,
+                agent_label: event.agent_label,
+            })
+        }
+        protocol::TypedRuntimeEvent::SessionSnapshot(event) => RuntimeToUiEvent::SessionSnapshot {
+            session_id: event.session_id,
+            messages: event.messages,
+            subagents: event.subagents,
+            usage: event.usage,
+        },
+        protocol::TypedRuntimeEvent::SubagentStarted(event) => {
+            RuntimeToUiEvent::SubagentStarted(event)
+        }
+        protocol::TypedRuntimeEvent::SubagentMessageProduced(event) => {
+            RuntimeToUiEvent::SubagentMessageProduced(event)
+        }
+        protocol::TypedRuntimeEvent::SubagentToolUse(event) => {
+            RuntimeToUiEvent::SubagentToolUse(event)
+        }
+        protocol::TypedRuntimeEvent::SubagentToolResult(event) => {
+            RuntimeToUiEvent::SubagentToolResult(event)
+        }
+        protocol::TypedRuntimeEvent::SubagentFinished(event) => {
+            RuntimeToUiEvent::SubagentFinished(event)
+        }
+    }
+}
+
+fn notification_kind_from_protocol(level: protocol::NotificationLevel) -> NotificationKind {
+    match level {
+        protocol::NotificationLevel::Info => NotificationKind::Info,
+        protocol::NotificationLevel::Warn => NotificationKind::Warn,
+        protocol::NotificationLevel::Error => NotificationKind::Error,
     }
 }
 
@@ -1671,9 +1802,9 @@ mod tests {
         }
     }
 
-    fn runtime_event_envelope_text(kind: &str, payload: serde_json::Value) -> String {
+    fn runtime_event_envelope_text(event: protocol::TypedRuntimeEvent) -> String {
         serde_json::to_string(&protocol::ServerEnvelope::Event {
-            event: protocol::RuntimeEvent::new(kind, payload),
+            event: protocol::RuntimeEvent::new(event),
         })
         .expect("envelope should serialize")
     }
@@ -1826,21 +1957,14 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(4);
 
         let saw_runtime_status = handle_server_text(
-            &runtime_event_envelope_text(
-                "session_snapshot",
-                serde_json::json!({
-                    "type": "session_snapshot",
-                    "session_id": "session_1",
-                    "messages": [],
-                    "subagents": [],
-                    "usage": {
-                        "current_context_tokens": 0,
-                        "total_tokens": 0,
-                        "total_cached_tokens": 0,
-                        "context_window": null
-                    }
-                }),
-            ),
+            &runtime_event_envelope_text(protocol::TypedRuntimeEvent::SessionSnapshot(
+                protocol::SessionSnapshotEvent {
+                    session_id: Some("session_1".to_string()),
+                    messages: Vec::new(),
+                    subagents: Vec::new(),
+                    usage: SessionUsageSnapshot::default(),
+                },
+            )),
             &tx,
         )
         .await

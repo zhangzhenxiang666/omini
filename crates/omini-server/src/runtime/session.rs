@@ -124,12 +124,12 @@ impl RuntimeSession {
                                     }
                                 }
                             };
-                            let event_kind = event.kind.clone();
+                            let event_kind = event.kind();
                             let sequenced = SequencedRuntimeEvent {
                                 seq: next_seq,
                                 event,
                             };
-                            log_runtime_event_broadcast(sequenced.seq, &event_kind);
+                            log_runtime_event_broadcast(sequenced.seq, event_kind);
                             next_seq = next_seq.saturating_add(1);
                             runtime_replay_buffer
                                 .lock()
@@ -554,12 +554,11 @@ impl RuntimeSession {
 
     #[cfg(test)]
     pub(crate) fn record_runtime_event_for_test(&self, kind: &str) {
-        let event = RuntimeEvent::new(
-            kind,
-            serde_json::json!({
-                "type": kind,
-            }),
-        );
+        let event = RuntimeEvent::new(match kind {
+            "run_started" => protocol::TypedRuntimeEvent::RunStarted,
+            "run_finished" => protocol::TypedRuntimeEvent::RunFinished,
+            _ => panic!("unsupported test runtime event kind: {kind}"),
+        });
         self.status_projection
             .lock()
             .expect("status projection lock poisoned")

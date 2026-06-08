@@ -1130,16 +1130,12 @@ thinking = true
             .recv()
             .await
             .expect("agent update should be broadcast");
-        assert_eq!(event.kind, "agent_management_updated");
-        assert!(
-            event
-                .payload
-                .get("records")
-                .and_then(serde_json::Value::as_array)
-                .expect("records should be an array")
-                .iter()
-                .any(|record| record["name"] == "target-helper")
-        );
+        assert_eq!(event.kind(), "agent_management_updated");
+        assert!(matches!(
+            event.event,
+            protocol::TypedRuntimeEvent::AgentManagementUpdated { records }
+                if records.iter().any(|record| record.name == "target-helper")
+        ));
         session.shutdown().await.expect("session should shut down");
     }
 

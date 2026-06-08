@@ -255,12 +255,8 @@ impl RuntimeReplayBuffer {
     }
 }
 
-pub(super) fn runtime_replay_kind(event: &RuntimeEvent) -> &str {
-    event
-        .payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or(event.kind.as_str())
+pub(super) fn runtime_replay_kind(event: &RuntimeEvent) -> &'static str {
+    event.kind()
 }
 
 pub(super) fn is_session_snapshot_kind(kind: &str) -> bool {
@@ -269,17 +265,10 @@ pub(super) fn is_session_snapshot_kind(kind: &str) -> bool {
 
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
 fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &LoadedSession) -> bool {
-    if runtime_replay_kind(&event.event) != "user_message_injected" {
-        return false;
-    }
-    let Some(item) = event.event.payload.get("item") else {
+    let protocol::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event else {
         return false;
     };
-    snapshot
-        .messages
-        .iter()
-        .filter_map(|message| serde_json::to_value(message).ok())
-        .any(|message| message == *item)
+    snapshot.messages.iter().any(|message| message == item)
 }
 
 /// 把当前 assistant 流式尾部重组为完整内容块，供 snapshot 去重比较。
@@ -287,15 +276,15 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> 
     // 增量事件需要还原成完整 ContentBlock，才能和 snapshot 中的 assistant message 比较。
     let mut blocks = Vec::new();
     for event in events {
-        match runtime_replay_kind(&event.event) {
-            "thinking_delta" => push_delta_block(&mut blocks, event, true),
-            "text_delta" => push_delta_block(&mut blocks, event, false),
-            "tool_use" => {
-                if let Ok(block @ ContentBlock::ToolUse(_)) =
-                    serde_json::from_value(event.event.payload.clone())
-                {
-                    blocks.push(block);
-                }
+        match &event.event.event {
+            protocol::TypedRuntimeEvent::ThinkingDelta(event) => {
+                push_delta_block(&mut blocks, &event.delta, true)
+            }
+            protocol::TypedRuntimeEvent::TextDelta(event) => {
+                push_delta_block(&mut blocks, &event.delta, false)
+            }
+            protocol::TypedRuntimeEvent::ToolUse(tool_use) => {
+                blocks.push(ContentBlock::ToolUse(tool_use.clone()));
             }
             _ => {}
         }
@@ -307,22 +296,17 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> 
 fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> {
     events
         .iter()
-        .filter(|event| runtime_replay_kind(&event.event) == "tool_result")
-        .filter_map(|event| serde_json::from_value(event.event.payload.clone()).ok())
+        .filter_map(|event| match &event.event.event {
+            protocol::TypedRuntimeEvent::ToolResult(tool_result) => {
+                Some(ContentBlock::ToolResult(tool_result.clone()))
+            }
+            _ => None,
+        })
         .collect()
 }
 
 /// 将连续文本或 thinking delta 合并成可比较的 `ContentBlock`。
-fn push_delta_block(blocks: &mut Vec<ContentBlock>, event: &SequencedRuntimeEvent, thinking: bool) {
-    let Some(delta) = event
-        .event
-        .payload
-        .get("delta")
-        .and_then(serde_json::Value::as_str)
-    else {
-        return;
-    };
-
+fn push_delta_block(blocks: &mut Vec<ContentBlock>, delta: &str, thinking: bool) {
     match (thinking, blocks.last_mut()) {
         (true, Some(ContentBlock::Thinking(block))) => block.thinking.push_str(delta),
         (false, Some(ContentBlock::Text(block))) => block.text.push_str(delta),
@@ -334,29 +318,98 @@ fn push_delta_block(blocks: &mut Vec<ContentBlock>, event: &SequencedRuntimeEven
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::types::events as event_types;
     use omini_core::types::events::{
         CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, RuntimeToServerEvent,
         SessionUsageSnapshot, SubmittedPlan,
     };
+    use omini_core::types::message::{ToolResultBlock, ToolUseBlock};
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: RuntimeEvent::new(kind, serde_json::json!({ "type": kind })),
+            event: typed_test_event(kind),
         }
     }
 
     fn delta(seq: u64, kind: &str, text: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: RuntimeEvent::new(
-                kind,
-                serde_json::json!({
-                    "type": kind,
-                    "delta": text,
-                }),
-            ),
+            event: RuntimeEvent::new(match kind {
+                "thinking_delta" => {
+                    protocol::TypedRuntimeEvent::ThinkingDelta(protocol::RuntimeDeltaEvent {
+                        delta: text.to_string(),
+                    })
+                }
+                "text_delta" => {
+                    protocol::TypedRuntimeEvent::TextDelta(protocol::RuntimeDeltaEvent {
+                        delta: text.to_string(),
+                    })
+                }
+                "proposed_plan_delta" => {
+                    protocol::TypedRuntimeEvent::ProposedPlanDelta(protocol::RuntimeDeltaEvent {
+                        delta: text.to_string(),
+                    })
+                }
+                _ => panic!("unsupported delta test event kind: {kind}"),
+            }),
         }
+    }
+
+    fn typed_test_event(kind: &str) -> RuntimeEvent {
+        RuntimeEvent::new(match kind {
+            "notification" => {
+                protocol::TypedRuntimeEvent::Notification(protocol::NotificationEvent {
+                    level: protocol::NotificationLevel::Info,
+                    message: "notice".to_string(),
+                    details: Vec::new(),
+                })
+            }
+            "user_message_injected" => protocol::TypedRuntimeEvent::UserMessageInjected {
+                item: HistoryItem::Message(Message::from_user_text("hello".to_string())),
+                client_echo_id: None,
+            },
+            "run_started" => protocol::TypedRuntimeEvent::RunStarted,
+            "run_finished" => protocol::TypedRuntimeEvent::RunFinished,
+            "turn_started" => protocol::TypedRuntimeEvent::TurnStarted,
+            "turn_ended" => protocol::TypedRuntimeEvent::TurnEnded,
+            "tool_use" => protocol::TypedRuntimeEvent::ToolUse(ToolUseBlock {
+                id: "tool_1".to_string(),
+                name: "read".to_string(),
+                input: HashMap::new(),
+            }),
+            "tool_result" => protocol::TypedRuntimeEvent::ToolResult(ToolResultBlock {
+                tool_use_id: "tool_1".to_string(),
+                is_error: false,
+                content: "done".to_string(),
+                metadata: None,
+            }),
+            "tool_pause_requested" => {
+                protocol::TypedRuntimeEvent::ToolPauseRequested(event_types::ToolPauseRequest {
+                    tool_use_id: "tool_1".to_string(),
+                    preview_tool_use_id: None,
+                    tool_name: "bash".to_string(),
+                    permission_source: None,
+                    source_session_id: None,
+                    source_agent_label: None,
+                    kind: event_types::ToolPauseKind::Permission(
+                        event_types::PermissionPreview::Custom {
+                            tool_name: "bash".to_string(),
+                            payload: serde_json::Map::new(),
+                        },
+                    ),
+                })
+            }
+            "session_snapshot" => {
+                protocol::TypedRuntimeEvent::SessionSnapshot(protocol::SessionSnapshotEvent {
+                    session_id: Some("s1".to_string()),
+                    messages: Vec::new(),
+                    subagents: Vec::new(),
+                    usage: SessionUsageSnapshot::default(),
+                })
+            }
+            _ => panic!("unsupported test event kind: {kind}"),
+        })
     }
 
     fn runtime_event(seq: u64, event: RuntimeToServerEvent) -> SequencedRuntimeEvent {
@@ -370,7 +423,7 @@ mod tests {
         buffer
             .replay()
             .into_iter()
-            .map(|event| event.event.kind)
+            .map(|event| event.event.kind().to_string())
             .collect()
     }
 
@@ -652,11 +705,14 @@ mod tests {
         assert_eq!(
             replay
                 .iter()
-                .map(|event| event.event.kind.as_str())
+                .map(|event| event.event.kind())
                 .collect::<Vec<_>>(),
             vec!["run_started", "turn_started", "text_delta"]
         );
-        assert_eq!(replay[2].event.payload["delta"], "second");
+        assert!(matches!(
+            &replay[2].event.event,
+            protocol::TypedRuntimeEvent::TextDelta(event) if event.delta == "second"
+        ));
     }
 
     #[test]
@@ -685,11 +741,14 @@ mod tests {
         assert_eq!(
             replay
                 .iter()
-                .map(|event| event.event.kind.as_str())
+                .map(|event| event.event.kind())
                 .collect::<Vec<_>>(),
             vec!["compact_summary_started", "compact_summary_delta"]
         );
-        assert_eq!(replay[1].event.payload["delta"], "partial");
+        assert!(matches!(
+            &replay[1].event.event,
+            protocol::TypedRuntimeEvent::CompactSummaryDelta(event) if event.delta == "partial"
+        ));
     }
 
     #[test]

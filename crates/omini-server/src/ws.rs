@@ -6,7 +6,7 @@
 use crate::runtime::{RuntimeSession, SessionManager};
 use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use omini_protocol::{RuntimeEvent, ServerEnvelope};
+use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{Duration, timeout};
@@ -156,14 +156,9 @@ pub(crate) async fn handle_socket(
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         // runtime 内容事件丢失会影响对话连续性，明确通知客户端显示告警。
                         let envelope = ServerEnvelope::Event {
-                            event: RuntimeEvent::new(
-                                "notification",
-                                serde_json::json!({
-                                    "type": "notification",
-                                    "kind": "warn",
-                                    "message": "Runtime event stream lagged; some events were dropped",
-                                    "details": [],
-                                }),
+                            event: notification_event(
+                                "warn",
+                                "Runtime event stream lagged; some events were dropped",
                             ),
                         };
                         let _ = send_axum_envelope(&mut write, &envelope).await;
@@ -210,15 +205,25 @@ where
     S::Error: std::fmt::Display,
 {
     let envelope = ServerEnvelope::Event {
-        event: RuntimeEvent::new(
-            "notification",
-            serde_json::json!({
-                "type": "notification",
-                "kind": kind,
-                "message": message,
-                "details": [],
-            }),
-        ),
+        event: notification_event(kind, message),
     };
     send_axum_envelope(sink, &envelope).await
+}
+
+fn notification_event(kind: &str, message: &str) -> RuntimeEvent {
+    RuntimeEvent::new(protocol::TypedRuntimeEvent::Notification(
+        protocol::NotificationEvent {
+            level: notification_level(kind),
+            message: message.to_string(),
+            details: Vec::new(),
+        },
+    ))
+}
+
+fn notification_level(kind: &str) -> protocol::NotificationLevel {
+    match kind {
+        "warn" => protocol::NotificationLevel::Warn,
+        "error" => protocol::NotificationLevel::Error,
+        _ => protocol::NotificationLevel::Info,
+    }
 }

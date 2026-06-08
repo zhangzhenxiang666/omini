@@ -86,51 +86,56 @@ impl RuntimeStatusProjection {
     }
 
     pub(super) fn record_event(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
-        match runtime_replay_kind(event) {
-            "active_profile_changed" => {
-                if let Some(profile) = active_profile_payload(event) {
-                    self.active_profile = profile;
-                }
+        match &event.event {
+            protocol::TypedRuntimeEvent::ActiveProfileChanged(event) => {
+                self.active_profile = event.profile;
             }
             // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
-            "run_started" => self.start_query(now),
-            "run_finished" => self.clear_active_run(),
-            kind if is_session_snapshot_kind(kind) => self.clear_active_run(),
-            "turn_started" => self.mark_query_thinking(),
-            "text_delta" => self.mark_query_working(),
-            "thinking_delta" => self.mark_query_thinking(),
-            "tool_use" => self.record_tool_use(event, now, None, None),
-            "tool_result" => {
-                if let Some(tool_use_id) = event
-                    .payload
-                    .get("tool_use_id")
-                    .and_then(serde_json::Value::as_str)
-                {
-                    self.finish_tool(tool_use_id);
-                    self.finish_pause(tool_use_id, now);
-                }
+            protocol::TypedRuntimeEvent::RunStarted => self.start_query(now),
+            protocol::TypedRuntimeEvent::RunFinished
+            | protocol::TypedRuntimeEvent::SessionSnapshot(_) => self.clear_active_run(),
+            protocol::TypedRuntimeEvent::TurnStarted => self.mark_query_thinking(),
+            protocol::TypedRuntimeEvent::TextDelta(_) => self.mark_query_working(),
+            protocol::TypedRuntimeEvent::ThinkingDelta(_) => self.mark_query_thinking(),
+            protocol::TypedRuntimeEvent::ToolUse(tool_use) => {
+                self.record_tool_use(tool_use, now, None, None)
+            }
+            protocol::TypedRuntimeEvent::ToolResult(tool_result) => {
+                self.finish_tool(&tool_result.tool_use_id);
+                self.finish_pause(&tool_result.tool_use_id, now);
                 self.mark_query_working();
             }
-            "tool_pause_requested" => self.record_tool_pause(event, now),
-            "plan_submitted" => {
+            protocol::TypedRuntimeEvent::ToolPauseRequested(request) => {
+                self.record_tool_pause(request, now)
+            }
+            protocol::TypedRuntimeEvent::PlanSubmitted(_) => {
                 self.pending_plan_approval = plan_submitted_payload(event);
             }
-            "plan_approval_resolved" => {
+            protocol::TypedRuntimeEvent::PlanApprovalResolved(_) => {
                 if self.pending_plan_matches(event) {
                     self.pending_plan_approval = None;
                 }
             }
-            "compact_summary_started" => {
+            protocol::TypedRuntimeEvent::CompactSummaryStarted(_) => {
                 self.compact_started_at = Some(now);
             }
-            "compact_summary_finished" | "compact_summary_failed" => {
+            protocol::TypedRuntimeEvent::CompactSummaryFinished(_)
+            | protocol::TypedRuntimeEvent::CompactSummaryFailed(_) => {
                 self.compact_started_at = None;
                 self.mark_query_working();
             }
-            "subagent_started" => self.record_subagent_started(event, now),
-            "subagent_tool_use" => self.record_subagent_tool_use(event, now),
-            "subagent_tool_result" => self.record_subagent_tool_result(event, now),
-            "subagent_finished" => self.record_subagent_finished(event, now),
+            protocol::TypedRuntimeEvent::SubagentStarted(event) => {
+                self.record_subagent_started(event, now)
+            }
+            protocol::TypedRuntimeEvent::SubagentToolUse(event) => {
+                self.record_subagent_tool_use(event, now)
+            }
+            protocol::TypedRuntimeEvent::SubagentToolResult(event) => {
+                self.record_subagent_tool_result(event, now)
+            }
+            protocol::TypedRuntimeEvent::SubagentFinished(event) => {
+                self.record_subagent_finished(event, now)
+            }
             _ => {}
         }
     }
@@ -209,27 +214,17 @@ impl RuntimeStatusProjection {
 
     fn record_tool_use(
         &mut self,
-        event: &RuntimeEvent,
+        tool_use: &protocol::ToolUseBlock,
         now: DateTime<Utc>,
         source_session_id: Option<String>,
         source_agent_label: Option<String>,
     ) {
-        let Some(tool_use) = tool_use_payload(event) else {
-            return;
-        };
-        let Some(tool_use_id) = tool_use.get("id").and_then(serde_json::Value::as_str) else {
-            return;
-        };
-        let Some(tool_name) = tool_use.get("name").and_then(serde_json::Value::as_str) else {
-            return;
-        };
         self.record_tool(
-            tool_use_id,
-            tool_name,
+            &tool_use.id,
+            &tool_use.name,
             now,
             source_session_id,
             source_agent_label,
-            tool_use.get("input"),
         );
         self.mark_query_working();
     }
@@ -241,7 +236,6 @@ impl RuntimeStatusProjection {
         now: DateTime<Utc>,
         source_session_id: Option<String>,
         source_agent_label: Option<String>,
-        input: Option<&serde_json::Value>,
     ) -> RuntimeToolActivity {
         let tool = RuntimeToolActivity {
             tool_use_id: tool_use_id.to_string(),
@@ -250,7 +244,6 @@ impl RuntimeStatusProjection {
             source_session_id,
             source_agent_label,
         };
-        let _ = input;
         self.active_tools
             .insert(tool_use_id.to_string(), tool.clone());
         tool
@@ -260,24 +253,11 @@ impl RuntimeStatusProjection {
         self.active_tools.remove(tool_use_id);
     }
 
-    fn record_tool_pause(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
-        let Some(tool_use_id) = event
-            .payload
-            .get("tool_use_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Some(tool_name) = event
-            .payload
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Some(kind) = tool_pause_kind(event) else {
-            return;
-        };
+    fn record_tool_pause(
+        &mut self,
+        request: &protocol::ToolPauseRequestedEvent,
+        now: DateTime<Utc>,
+    ) {
         if self.query_started_at.is_some()
             && self.pending_pauses.is_empty()
             && self.query_pause_started_at.is_none()
@@ -285,21 +265,13 @@ impl RuntimeStatusProjection {
             self.query_pause_started_at = Some(now);
         }
         self.pending_pauses.insert(
-            tool_use_id.to_string(),
+            request.tool_use_id.clone(),
             RuntimePendingPause {
-                tool_use_id: tool_use_id.to_string(),
-                tool_name: tool_name.to_string(),
-                kind,
-                source_session_id: event
-                    .payload
-                    .get("source_session_id")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-                source_agent_label: event
-                    .payload
-                    .get("source_agent_label")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
+                tool_use_id: request.tool_use_id.clone(),
+                tool_name: request.tool_name.clone(),
+                kind: tool_pause_request_kind(request),
+                source_session_id: request.source_session_id.clone(),
+                source_agent_label: request.source_agent_label.clone(),
             },
         );
     }
@@ -320,97 +292,67 @@ impl RuntimeStatusProjection {
             .saturating_add(elapsed_ms(paused_at, now));
     }
 
-    fn record_subagent_started(&mut self, event: &RuntimeEvent, _now: DateTime<Utc>) {
-        let Some(session_id) = event
-            .payload
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Some(agent_label) = event
-            .payload
-            .get("agent_label")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
+    fn record_subagent_started(
+        &mut self,
+        event: &protocol::SubagentStartedEvent,
+        _now: DateTime<Utc>,
+    ) {
         self.subagents.insert(
-            session_id.to_string(),
+            event.session_id.clone(),
             RuntimeSubagentContext {
-                agent_label: agent_label.to_string(),
+                agent_label: event.agent_label.clone(),
             },
         );
         self.mark_query_working();
     }
 
-    fn record_subagent_tool_use(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
-        let Some(session_id) = event
-            .payload
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
+    fn record_subagent_tool_use(
+        &mut self,
+        event: &protocol::SubagentToolUseEvent,
+        now: DateTime<Utc>,
+    ) {
         let agent_label = self
             .subagents
-            .get(session_id)
+            .get(&event.session_id)
             .map(|subagent| subagent.agent_label.clone());
-        self.record_tool_use_for_subagent(event, now, session_id, agent_label);
+        self.record_tool_use_for_subagent(&event.tool_use, now, &event.session_id, agent_label);
         self.mark_query_working();
     }
 
     fn record_tool_use_for_subagent(
         &mut self,
-        event: &RuntimeEvent,
+        tool_use: &protocol::ToolUseBlock,
         now: DateTime<Utc>,
         session_id: &str,
         agent_label: Option<String>,
     ) -> Option<RuntimeToolActivity> {
-        let tool_use = event.payload.get("tool_use")?;
-        let tool_use_id = tool_use.get("id").and_then(serde_json::Value::as_str)?;
-        let tool_name = tool_use.get("name").and_then(serde_json::Value::as_str)?;
         Some(self.record_tool(
-            tool_use_id,
-            tool_name,
+            &tool_use.id,
+            &tool_use.name,
             now,
             Some(session_id.to_string()),
             agent_label,
-            tool_use.get("input"),
         ))
     }
 
-    fn record_subagent_tool_result(&mut self, event: &RuntimeEvent, now: DateTime<Utc>) {
-        let Some(session_id) = event
-            .payload
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        let Some(tool_use_id) = event
-            .payload
-            .get("tool_result")
-            .and_then(|tool_result| tool_result.get("tool_use_id"))
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
+    fn record_subagent_tool_result(
+        &mut self,
+        event: &protocol::SubagentToolResultEvent,
+        now: DateTime<Utc>,
+    ) {
+        let tool_use_id = &event.tool_result.tool_use_id;
         self.finish_tool(tool_use_id);
         self.finish_pause(tool_use_id, now);
-        self.finish_pause(&format!("{session_id}:{tool_use_id}"), now);
+        self.finish_pause(&format!("{}:{tool_use_id}", event.session_id), now);
         self.mark_query_working();
     }
 
-    fn record_subagent_finished(&mut self, event: &RuntimeEvent, _now: DateTime<Utc>) {
-        let Some(session_id) = event
-            .payload
-            .get("session_id")
-            .and_then(serde_json::Value::as_str)
-        else {
-            return;
-        };
-        self.subagents.remove(session_id);
+    fn record_subagent_finished(
+        &mut self,
+        event: &protocol::SubagentFinishedEvent,
+        _now: DateTime<Utc>,
+    ) {
+        self.subagents.remove(&event.session_id);
         self.mark_query_working();
     }
 
@@ -472,124 +414,101 @@ fn elapsed_ms(started_at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
         .max(0) as u64
 }
 
-fn tool_use_payload(event: &RuntimeEvent) -> Option<&serde_json::Value> {
-    if runtime_replay_kind(event) == "tool_use" {
-        Some(&event.payload)
-    } else {
-        event.payload.get("tool_use")
-    }
-}
-
-fn tool_pause_kind(event: &RuntimeEvent) -> Option<protocol::ToolPauseEventKind> {
-    match event
-        .payload
-        .get("kind")
-        .and_then(|kind| kind.get("type"))
-        .and_then(serde_json::Value::as_str)?
-    {
-        "permission" => Some(protocol::ToolPauseEventKind::Permission),
-        "user_input" => Some(protocol::ToolPauseEventKind::UserInput),
-        _ => None,
-    }
-}
-
-fn active_profile_payload(event: &RuntimeEvent) -> Option<ActiveProfile> {
-    match event
-        .payload
-        .get("profile")
-        .and_then(serde_json::Value::as_str)?
-    {
-        "main" => Some(ActiveProfile::Main),
-        "auto" => Some(ActiveProfile::Auto),
-        "plan" => Some(ActiveProfile::Plan),
-        _ => None,
-    }
-}
-
 pub(super) fn plan_submitted_payload(event: &RuntimeEvent) -> Option<protocol::PlanSubmittedEvent> {
-    if let Some(protocol::KeyRuntimeEvent::PlanSubmitted(plan)) = &event.event {
-        return Some(plan.clone());
+    if let protocol::TypedRuntimeEvent::PlanSubmitted(plan) = &event.event {
+        Some(protocol::PlanSubmittedEvent {
+            plan_id: plan.id.clone(),
+            title: plan.title.clone(),
+            markdown: plan.markdown.clone(),
+        })
+    } else {
+        None
     }
-
-    let plan_id = event
-        .payload
-        .get("plan_id")
-        .or_else(|| event.payload.get("id"))
-        .and_then(serde_json::Value::as_str)?;
-    Some(protocol::PlanSubmittedEvent {
-        plan_id: plan_id.to_string(),
-        title: event
-            .payload
-            .get("title")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        markdown: event
-            .payload
-            .get("markdown")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-    })
 }
 
 pub(super) fn plan_approval_resolved_plan_id(event: &RuntimeEvent) -> Option<String> {
-    if let Some(protocol::KeyRuntimeEvent::PlanApprovalResolved(resolved)) = &event.event {
-        return Some(resolved.plan_id.clone());
+    if let protocol::TypedRuntimeEvent::PlanApprovalResolved(resolved) = &event.event {
+        Some(resolved.plan_id.clone())
+    } else {
+        None
     }
-    event
-        .payload
-        .get("plan_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::types::events as event_types;
+    use omini_core::types::message::{ToolResultBlock, ToolUseBlock};
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: RuntimeEvent::new(kind, serde_json::json!({ "type": kind })),
+            event: typed_test_event(kind),
         }
     }
 
     fn delta(seq: u64, kind: &str, text: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: RuntimeEvent::new(
-                kind,
-                serde_json::json!({
-                    "type": kind,
-                    "delta": text,
-                }),
-            ),
+            event: RuntimeEvent::new(match kind {
+                "thinking_delta" => {
+                    protocol::TypedRuntimeEvent::ThinkingDelta(protocol::RuntimeDeltaEvent {
+                        delta: text.to_string(),
+                    })
+                }
+                "text_delta" => {
+                    protocol::TypedRuntimeEvent::TextDelta(protocol::RuntimeDeltaEvent {
+                        delta: text.to_string(),
+                    })
+                }
+                _ => panic!("unsupported delta test event kind: {kind}"),
+            }),
         }
     }
 
+    fn typed_test_event(kind: &str) -> RuntimeEvent {
+        RuntimeEvent::new(match kind {
+            "run_started" => protocol::TypedRuntimeEvent::RunStarted,
+            "run_finished" => protocol::TypedRuntimeEvent::RunFinished,
+            "turn_started" => protocol::TypedRuntimeEvent::TurnStarted,
+            "session_snapshot" => {
+                protocol::TypedRuntimeEvent::SessionSnapshot(protocol::SessionSnapshotEvent {
+                    session_id: Some("s1".to_string()),
+                    messages: Vec::new(),
+                    subagents: Vec::new(),
+                    usage: protocol::SessionUsageSnapshot::default(),
+                })
+            }
+            _ => panic!("unsupported test event kind: {kind}"),
+        })
+    }
+
     fn tool_pause_event(tool_use_id: &str) -> RuntimeEvent {
-        RuntimeEvent::new(
-            "tool_pause_requested",
-            serde_json::json!({
-                "type": "tool_pause_requested",
-                "tool_use_id": tool_use_id,
-                "tool_name": "bash",
-                "kind": { "type": "permission", "preview": {} }
-            }),
-        )
+        RuntimeEvent::new(protocol::TypedRuntimeEvent::ToolPauseRequested(
+            event_types::ToolPauseRequest {
+                tool_use_id: tool_use_id.to_string(),
+                preview_tool_use_id: None,
+                tool_name: "bash".to_string(),
+                permission_source: None,
+                source_session_id: None,
+                source_agent_label: None,
+                kind: event_types::ToolPauseKind::Permission(
+                    event_types::PermissionPreview::Custom {
+                        tool_name: "bash".to_string(),
+                        payload: serde_json::Map::new(),
+                    },
+                ),
+            },
+        ))
     }
 
     fn tool_result_event(tool_use_id: &str) -> RuntimeEvent {
-        RuntimeEvent::new(
-            "tool_result",
-            serde_json::json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "is_error": false,
-                "content": "done"
-            }),
-        )
+        RuntimeEvent::new(protocol::TypedRuntimeEvent::ToolResult(ToolResultBlock {
+            tool_use_id: tool_use_id.to_string(),
+            is_error: false,
+            content: "done".to_string(),
+            metadata: None,
+        }))
     }
 
     fn status_snapshot(
@@ -615,13 +534,11 @@ mod tests {
         let mut projection = RuntimeStatusProjection::default();
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "active_profile_changed",
-                serde_json::json!({
-                    "type": "active_profile_changed",
-                    "profile": "plan"
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::ActiveProfileChanged(
+                protocol::ActiveProfileChangedEvent {
+                    profile: ActiveProfile::Plan,
+                },
+            )),
             Utc::now(),
         );
 
@@ -638,15 +555,15 @@ mod tests {
         let now = Utc::now();
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "plan_submitted",
-                serde_json::json!({
-                    "type": "plan_submitted",
-                    "id": "plan_1",
-                    "title": "Plan",
-                    "markdown": "# Plan"
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::PlanSubmitted(
+                protocol::SubmittedPlan {
+                    id: "plan_1".to_string(),
+                    title: "Plan".to_string(),
+                    markdown: "# Plan".to_string(),
+                    path: PathBuf::new(),
+                    created_at: now,
+                },
+            )),
             now,
         );
         let status = status_snapshot(&projection, now);
@@ -660,14 +577,12 @@ mod tests {
         );
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "plan_approval_resolved",
-                serde_json::json!({
-                    "type": "plan_approval_resolved",
-                    "plan_id": "plan_1",
-                    "action": { "type": "continue_discussing" }
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::PlanApprovalResolved(
+                protocol::PlanApprovalResolvedEvent {
+                    plan_id: "plan_1".to_string(),
+                    action: protocol::PlanApprovalAction::ContinueDiscussing,
+                },
+            )),
             now,
         );
         assert!(
@@ -799,15 +714,13 @@ mod tests {
         let started_at = Utc::now();
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "compact_summary_started",
-                serde_json::json!({
-                    "type": "compact_summary_started",
-                    "trigger": "manual",
-                    "session_id": "s1",
-                    "agent_label": null
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::CompactSummaryStarted(
+                protocol::CompactSummaryStartedEvent {
+                    trigger: protocol::CompactTrigger::Manual,
+                    session_id: Some("s1".to_string()),
+                    agent_label: None,
+                },
+            )),
             started_at,
         );
 
@@ -823,17 +736,15 @@ mod tests {
         );
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "compact_summary_finished",
-                serde_json::json!({
-                    "type": "compact_summary_finished",
-                    "trigger": "manual",
-                    "summary": "done",
-                    "after_tokens": 1,
-                    "session_id": "s1",
-                    "agent_label": null
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::CompactSummaryFinished(
+                protocol::CompactSummaryFinishedEvent {
+                    trigger: protocol::CompactTrigger::Manual,
+                    summary: "done".to_string(),
+                    after_tokens: 1,
+                    session_id: Some("s1".to_string()),
+                    agent_label: None,
+                },
+            )),
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
@@ -904,15 +815,14 @@ mod tests {
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         projection.record_event(
-            &RuntimeEvent::new(
-                "tool_use",
-                serde_json::json!({
-                    "type": "tool_use",
-                    "id": "tool_skill",
-                    "name": "skill",
-                    "input": { "name": "rust" }
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::ToolUse(ToolUseBlock {
+                id: "tool_skill".to_string(),
+                name: "skill".to_string(),
+                input: HashMap::from([(
+                    "name".to_string(),
+                    serde_json::Value::String("rust".to_string()),
+                )]),
+            })),
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
@@ -920,31 +830,27 @@ mod tests {
         assert_eq!(status.active_tools[0].tool_name, "skill");
 
         projection.record_event(
-            &RuntimeEvent::new(
-                "subagent_started",
-                serde_json::json!({
-                    "type": "subagent_started",
-                    "session_id": "sub_1",
-                    "parent_session_id": "s1",
-                    "spawn_tool_use_id": "tool_subagent",
-                    "agent_label": "explorer"
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::SubagentStarted(
+                protocol::SubagentStartedEvent {
+                    session_id: "sub_1".to_string(),
+                    parent_session_id: "s1".to_string(),
+                    spawn_tool_use_id: "tool_subagent".to_string(),
+                    agent_label: "explorer".to_string(),
+                },
+            )),
             started_at,
         );
         projection.record_event(
-            &RuntimeEvent::new(
-                "subagent_tool_use",
-                serde_json::json!({
-                    "type": "subagent_tool_use",
-                    "session_id": "sub_1",
-                    "tool_use": {
-                        "id": "sub_tool_1",
-                        "name": "read",
-                        "input": {}
-                    }
-                }),
-            ),
+            &RuntimeEvent::new(protocol::TypedRuntimeEvent::SubagentToolUse(
+                protocol::SubagentToolUseEvent {
+                    session_id: "sub_1".to_string(),
+                    tool_use: ToolUseBlock {
+                        id: "sub_tool_1".to_string(),
+                        name: "read".to_string(),
+                        input: HashMap::new(),
+                    },
+                },
+            )),
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
