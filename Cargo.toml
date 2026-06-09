@@ -3,6 +3,7 @@ members = [
     "crates/omini-cli",
     "crates/omini-core",
     "crates/omini-domain",
+    "crates/omini-mcp-client",
     "crates/omini-provider-api",
     "crates/omini-protocol",
     "crates/omini-server",
@@ -63,6 +64,7 @@ uuid = { version = "1.23.1", features = ["v4"] }
 
 omini-core = { path = "crates/omini-core" }
 omini-domain = { path = "crates/omini-domain" }
+omini-mcp-client = { path = "crates/omini-mcp-client" }
 omini-provider-api = { path = "crates/omini-provider-api" }
 omini-protocol = { path = "crates/omini-protocol" }
 omini-server = { path = "crates/omini-server" }

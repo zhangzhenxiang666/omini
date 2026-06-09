@@ -7,6 +7,8 @@ crates/
   omini-cli
   omini-core
   omini-domain
+  omini-mcp-client
+  omini-provider-api
   omini-protocol
   omini-server
   omini-tui
@@ -16,6 +18,8 @@ crates/
 
 - `omini-cli` is the user-facing binary entrypoint. It starts or connects to the installed `omini-server` daemon binary, registers the current project, and starts the TUI/client flow.
 - `omini-domain` owns stable data types and small domain helpers shared by core, protocol, TUI, and server-adjacent code: messages, tool definitions, usage, display/history records, proposed plan parsing, shared provider/model view enums, plan approval payloads, tool pause payloads, session summaries, compact event payloads, and subagent event payloads.
+- `omini-mcp-client` owns client-side MCP server runtime concerns: stdio and streamable HTTP connections, rmcp service lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls. It stays independent from core, protocol, server, and TUI.
+- `omini-provider-api` owns provider-facing API clients and shared LLM provider request/response glue used by core.
 - `omini-core` owns the agent implementation: provider clients, engine loop, tools, MCP, permissions, prompts, skills, subagents, compaction, plan handling, session runtime service, config, project state, and SQLite helpers during migration.
 - `omini-protocol` owns public HTTP and WebSocket request/response envelopes. It reuses or re-exports `omini-domain` types when the wire shape matches, and it must stay independent from core, server, and TUI implementation types.
 - `omini-server` owns the local daemon transport. It exposes HTTP endpoints, session-scoped WebSocket streams, session routing, multi-subscriber fanout, and per-session controller enforcement.
@@ -38,7 +42,10 @@ omini-protocol
       |
       +-- omini-tui
 
-omini-core --> omini-domain + omini-protocol
+omini-provider-api --> omini-domain
+omini-mcp-client
+
+omini-core --> omini-domain + omini-protocol + omini-provider-api + omini-mcp-client
 omini-tui  --> omini-domain + omini-protocol
 omini-cli --> omini-protocol + omini-tui
 ```
@@ -46,7 +53,10 @@ omini-cli --> omini-protocol + omini-tui
 Current boundary notes:
 
 - `omini-domain` owns the shared stable type surface used by core, TUI, and protocol.
+- `omini-provider-api` owns provider HTTP/SSE adapters and may depend on stable domain config/types, but it must not depend on core, server, protocol, CLI, or TUI.
+- `omini-mcp-client` owns the client-side MCP runtime layer and must not depend on core, server, protocol, CLI, or TUI.
 - `omini-core` still contains protocol adapter code in `AgentCoreSession`; that adapter should move toward the server boundary so core can become protocol-independent.
+- `omini-core` still owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
 - `omini-core` still contains a crate-private legacy command registry for compatibility; do not expose it or add new command behavior there.
 
 ## Runtime Flow
@@ -78,7 +88,9 @@ Typed runtime events cover the current TUI-consumed runtime stream, including:
 - CLI startup, installed daemon binary lookup, and client registration/attach: `omini-cli`.
 - Config loading, project initialization, and database initialization: `omini-server`.
 - Stable shared messages, usage records, display/history records, plan parsing helpers, no-secret provider/model view types, plan approval payloads, tool pause payloads, compact payloads, and subagent payloads: `omini-domain`.
-- Agent behavior, tools, providers, permissions, prompts, skills, subagents, compaction, plans, config, and project state: `omini-core`.
+- Provider HTTP clients, OpenAI/Anthropic adapters, SSE parsing, provider request/stream errors, and `LlmClient`: `omini-provider-api`.
+- Agent behavior, tools, provider orchestration, MCP capability adapters, permissions, prompts, skills, subagents, compaction, plans, config, and project state: `omini-core`.
+- Client-side MCP connection lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls: `omini-mcp-client`.
 - Public endpoint bodies, user input DTOs, attachments, controller DTOs, and typed WebSocket event DTO envelopes: `omini-protocol`.
 - HTTP routes, WebSocket fanout, session registry, controller lease enforcement, event persistence/replay, and daemon concerns: `omini-server`.
 - Terminal rendering, input/editing state, local commands, mention parsing, and observer/controller UI affordances: `omini-tui`.
@@ -89,6 +101,8 @@ For ordinary development, run focused crate-level checks:
 
 ```bash
 cargo test -p omini-domain
+cargo test -p omini-provider-api
+cargo test -p omini-mcp-client
 cargo check -p omini-protocol
 cargo check -p omini-core
 cargo check -p omini-server

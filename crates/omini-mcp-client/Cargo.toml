@@ -1,0 +1,12 @@
+[package]
+name = "omini-mcp-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+rmcp.workspace = true
+rmcp-reqwest.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true

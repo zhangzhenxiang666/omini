@@ -1837,11 +1837,10 @@ dependencies = [
  "chrono",
  "dirs",
  "omini-domain",
+ "omini-mcp-client",
  "omini-protocol",
  "omini-provider-api",
- "reqwest 0.12.28",
  "reqwest 0.13.3",
- "rmcp",
  "schemars",
  "serde",
  "serde_json",
@@ -1864,6 +1863,18 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "omini-mcp-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest 0.12.28",
+ "rmcp",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
