@@ -11,7 +11,6 @@ dirs.workspace = true
 omini-domain.workspace = true
 omini-mcp-client.workspace = true
 omini-provider-api.workspace = true
-omini-protocol.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

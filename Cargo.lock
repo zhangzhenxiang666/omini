@@ -1838,7 +1838,6 @@ dependencies = [
  "dirs",
  "omini-domain",
  "omini-mcp-client",
- "omini-protocol",
  "omini-provider-api",
  "reqwest 0.13.3",
  "schemars",

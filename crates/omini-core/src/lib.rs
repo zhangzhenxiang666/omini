@@ -17,7 +17,7 @@ use crate::types::events as event_types;
 use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
 use crate::types::session as session_types;
 use crate::types::subagents as subagent_types;
-use omini_protocol as protocol;
+use omini_domain::config::ProviderInfo;
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -197,9 +197,9 @@ impl AgentCoreSession {
         self.persistence_tx.subscribe()
     }
 
-    pub fn list_models(&self) -> protocol::ModelsResponse {
+    pub fn list_models(&self) -> session_types::ModelsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
-        models_response_from_settings(&settings)
+        models_snapshot_from_settings(&settings)
     }
 
     pub async fn load_session(
@@ -210,14 +210,11 @@ impl AgentCoreSession {
             .await
     }
 
-    pub fn list_agents(&self) -> protocol::AgentsResponse {
+    pub fn list_agents(&self) -> session_types::AgentsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
-        let records = crate::subagents::list_agent_records(&settings.cwd)
-            .into_iter()
-            .map(agent_record_to_protocol)
-            .collect();
-        let models = models_response_from_settings(&settings);
-        protocol::AgentsResponse {
+        let records = crate::subagents::list_agent_records(&settings.cwd);
+        let models = models_snapshot_from_settings(&settings);
+        session_types::AgentsSnapshot {
             records,
             providers: models.providers,
             current_provider: models.current_provider,
@@ -225,53 +222,51 @@ impl AgentCoreSession {
         }
     }
 
-    pub fn list_skills(&self) -> protocol::SkillsResponse {
+    pub fn list_skills(&self) -> Vec<session_types::SkillSummarySnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
         let mut skills = crate::skills::load_skill_registry(&settings.cwd)
             .skills()
             .filter(|skill| skill.user_invocable)
-            .map(|skill| protocol::SkillSummary {
+            .map(|skill| session_types::SkillSummarySnapshot {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
             })
             .collect::<Vec<_>>();
         skills.sort_by(|a, b| a.name.cmp(&b.name));
-        protocol::SkillsResponse { skills }
+        skills
     }
 
-    pub fn get_skill(&self, skill_name: &str) -> Option<protocol::SkillResponse> {
+    pub fn get_skill(&self, skill_name: &str) -> Option<session_types::SkillDetailSnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
         let registry = crate::skills::load_skill_registry(&settings.cwd);
         registry
             .get(skill_name)
-            .map(|skill| protocol::SkillResponse {
-                skill: protocol::SkillDetail {
-                    name: skill.name.clone(),
-                    description: skill.description.clone(),
-                    body: skill.body.clone(),
-                    directory: skill.directory.display().to_string(),
-                    user_invocable: skill.user_invocable,
-                },
+            .map(|skill| session_types::SkillDetailSnapshot {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                body: skill.body.clone(),
+                directory: skill.directory.clone(),
+                user_invocable: skill.user_invocable,
             })
     }
 
-    pub fn runtime_skills(&self) -> Vec<protocol::SessionRuntimeSkill> {
+    pub fn runtime_skills(&self) -> Vec<session_types::RuntimeSkillSnapshot> {
         let skill_registry = self.capabilities.skill_registry();
         let mut skills = skill_registry
             .skills()
-            .map(|skill| protocol::SessionRuntimeSkill {
+            .map(|skill| session_types::RuntimeSkillSnapshot {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
-                source_kind: skill_source_kind_to_protocol(skill.source_kind()),
-                directory: skill.directory.display().to_string(),
-                status: protocol::SessionRuntimeCapabilityStatus::Available,
+                source_kind: runtime_skill_source_kind(skill.source_kind()),
+                directory: skill.directory.clone(),
+                status: session_types::RuntimeCapabilityStatus::Available,
                 inject: skill.inject,
                 user_invocable: skill.user_invocable,
             })
             .collect::<Vec<_>>();
         skills.sort_by(|left, right| {
-            skill_source_sort(left.source_kind)
-                .cmp(&skill_source_sort(right.source_kind))
+            runtime_skill_source_sort(left.source_kind)
+                .cmp(&runtime_skill_source_sort(right.source_kind))
                 .then_with(|| left.name.cmp(&right.name))
         });
         skills
@@ -281,7 +276,7 @@ impl AgentCoreSession {
         self.mcp_manager.runtime_snapshots()
     }
 
-    pub fn runtime_subagents(&self) -> Vec<protocol::AgentSummary> {
+    pub fn runtime_subagents(&self) -> Vec<subagent_types::AgentSummary> {
         self.capabilities.subagent_registry().summaries()
     }
 
@@ -564,105 +559,42 @@ fn usage_persistence_summary<'a>(
     }
 }
 
-fn skill_source_kind_to_protocol(
+fn runtime_skill_source_kind(
     source_kind: crate::skills::SkillSourceKind,
-) -> protocol::SkillSourceKind {
+) -> session_types::RuntimeSkillSourceKind {
     match source_kind {
-        crate::skills::SkillSourceKind::BuiltIn => protocol::SkillSourceKind::BuiltIn,
-        crate::skills::SkillSourceKind::Project => protocol::SkillSourceKind::Project,
-        crate::skills::SkillSourceKind::User => protocol::SkillSourceKind::User,
+        crate::skills::SkillSourceKind::BuiltIn => session_types::RuntimeSkillSourceKind::BuiltIn,
+        crate::skills::SkillSourceKind::Project => session_types::RuntimeSkillSourceKind::Project,
+        crate::skills::SkillSourceKind::User => session_types::RuntimeSkillSourceKind::User,
     }
 }
 
-fn skill_source_sort(source_kind: protocol::SkillSourceKind) -> u8 {
+fn runtime_skill_source_sort(source_kind: session_types::RuntimeSkillSourceKind) -> u8 {
     match source_kind {
-        protocol::SkillSourceKind::BuiltIn => 0,
-        protocol::SkillSourceKind::Project => 1,
-        protocol::SkillSourceKind::User => 2,
+        session_types::RuntimeSkillSourceKind::BuiltIn => 0,
+        session_types::RuntimeSkillSourceKind::Project => 1,
+        session_types::RuntimeSkillSourceKind::User => 2,
     }
 }
 
-fn agent_source_kind_to_protocol(
-    source_kind: subagent_types::AgentSourceKind,
-) -> protocol::AgentSourceKind {
-    match source_kind {
-        subagent_types::AgentSourceKind::BuiltIn => protocol::AgentSourceKind::BuiltIn,
-        subagent_types::AgentSourceKind::Project => protocol::AgentSourceKind::Project,
-        subagent_types::AgentSourceKind::User => protocol::AgentSourceKind::User,
-    }
-}
-
-fn provider_endpoint_to_protocol(
-    endpoint: crate::types::config::ProviderType,
-) -> protocol::ProviderEndpointKind {
-    match endpoint {
-        crate::types::config::ProviderType::OpenAI => protocol::ProviderEndpointKind::OpenAI,
-        crate::types::config::ProviderType::Anthropic => protocol::ProviderEndpointKind::Anthropic,
-    }
-}
-
-fn input_modality_to_protocol(
-    modality: crate::types::config::InputModality,
-) -> protocol::InputModality {
-    match modality {
-        crate::types::config::InputModality::Text => protocol::InputModality::Text,
-        crate::types::config::InputModality::Image => protocol::InputModality::Image,
-    }
-}
-
-fn models_response_from_settings(
+fn models_snapshot_from_settings(
     settings: &crate::types::config::Settings,
-) -> protocol::ModelsResponse {
+) -> session_types::ModelsSnapshot {
     let mut providers = settings
         .providers
         .iter()
-        .map(|(id, provider)| protocol::ProviderInfo {
+        .map(|(id, provider)| ProviderInfo {
             id: id.clone(),
             name: provider.name.clone(),
-            endpoint: provider_endpoint_to_protocol(provider.endpoint),
+            endpoint: provider.endpoint,
             base_url: provider.base_url.clone(),
-            models: provider
-                .models
-                .iter()
-                .map(|model| protocol::ModelInfo {
-                    id: model.id.clone(),
-                    name: model.name.clone(),
-                    limit: model.limit,
-                    thinking: model.thinking,
-                    input_modalities: model.input_modalities.as_ref().map(|modalities| {
-                        modalities
-                            .iter()
-                            .copied()
-                            .map(input_modality_to_protocol)
-                            .collect()
-                    }),
-                })
-                .collect(),
+            models: provider.models.clone(),
         })
         .collect::<Vec<_>>();
     providers.sort_by(|a, b| a.id.cmp(&b.id));
-    protocol::ModelsResponse {
+    session_types::ModelsSnapshot {
         providers,
         current_provider: settings.active_provider.clone(),
         current_model: settings.model.clone(),
-    }
-}
-
-fn agent_record_to_protocol(record: subagent_types::AgentRecord) -> protocol::AgentRecord {
-    let id = record
-        .path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| record.name.clone());
-    protocol::AgentRecord {
-        id,
-        name: record.name,
-        description: record.description,
-        instructions: record.instructions,
-        tools: record.tools,
-        disallow_tools: record.disallow_tools,
-        model: record.model,
-        source_kind: agent_source_kind_to_protocol(record.source_kind),
-        editable: record.editable,
     }
 }

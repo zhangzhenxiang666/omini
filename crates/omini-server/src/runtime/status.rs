@@ -1,4 +1,5 @@
 use super::*;
+use omini_core::types::session as session_types;
 
 #[derive(Debug, Clone)]
 struct RuntimeToolActivity {
@@ -71,7 +72,7 @@ pub(super) struct RuntimeStatusSnapshotContext {
     pub loaded: bool,
     pub controller_id: Option<String>,
     pub connected_client_count: usize,
-    pub skills: Vec<protocol::SessionRuntimeSkill>,
+    pub skills: Vec<session_types::RuntimeSkillSnapshot>,
     // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
     pub mcp_servers: Vec<omini_core::mcp::RuntimeMcpServerSnapshot>,
     pub subagent_sessions: Vec<protocol::AgentSummary>,
@@ -174,7 +175,7 @@ impl RuntimeStatusProjection {
             pending_pauses,
             pending_plan_approval: self.pending_plan_approval.clone(),
             active_tools,
-            skills: context.skills,
+            skills: runtime_skills_to_protocol(context.skills),
             mcp_servers: mcp_servers_to_protocol(context.mcp_servers),
             subagent_sessions: context.subagent_sessions,
         }
@@ -812,12 +813,12 @@ mod tests {
                 loaded: true,
                 controller_id: None,
                 connected_client_count: 0,
-                skills: vec![protocol::SessionRuntimeSkill {
+                skills: vec![session_types::RuntimeSkillSnapshot {
                     name: "writer".to_string(),
                     description: "Write carefully".to_string(),
-                    source_kind: protocol::SkillSourceKind::Project,
-                    directory: "/repo/.omini/skills/writer".to_string(),
-                    status: protocol::SessionRuntimeCapabilityStatus::Available,
+                    source_kind: session_types::RuntimeSkillSourceKind::Project,
+                    directory: "/repo/.omini/skills/writer".into(),
+                    status: session_types::RuntimeCapabilityStatus::Available,
                     inject: true,
                     user_invocable: true,
                 }],

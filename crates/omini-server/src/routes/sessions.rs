@@ -12,8 +12,8 @@ use crate::routes::{
     ensure_controller, require_daemon_session, require_project, require_session,
 };
 use crate::runtime::{
-    GlobalDaemonManager, set_active_profile_command_from_protocol, set_model_command_from_protocol,
-    set_thinking_effort_command_from_protocol,
+    GlobalDaemonManager, models_snapshot_to_protocol, set_active_profile_command_from_protocol,
+    set_model_command_from_protocol, set_thinking_effort_command_from_protocol,
 };
 use crate::ws;
 
@@ -79,7 +79,9 @@ pub(crate) async fn list_models(
     Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<protocol::ModelsResponse> {
     let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    Ok(Json(session.core.list_models()))
+    Ok(Json(models_snapshot_to_protocol(
+        session.core.list_models(),
+    )))
 }
 
 /// 设置当前会话使用的模型。

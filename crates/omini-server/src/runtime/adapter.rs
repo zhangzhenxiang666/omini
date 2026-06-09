@@ -56,6 +56,76 @@ pub(crate) fn run_submitted_to_protocol(
     }
 }
 
+pub(crate) fn models_snapshot_to_protocol(
+    snapshot: session_types::ModelsSnapshot,
+) -> protocol::ModelsResponse {
+    protocol::ModelsResponse {
+        providers: snapshot.providers,
+        current_provider: snapshot.current_provider,
+        current_model: snapshot.current_model,
+    }
+}
+
+pub(crate) fn agents_snapshot_to_protocol(
+    snapshot: session_types::AgentsSnapshot,
+) -> protocol::AgentsResponse {
+    protocol::AgentsResponse {
+        records: snapshot
+            .records
+            .into_iter()
+            .map(agent_record_snapshot_to_protocol)
+            .collect(),
+        providers: snapshot.providers,
+        current_provider: snapshot.current_provider,
+        current_model: snapshot.current_model,
+    }
+}
+
+pub(crate) fn skill_summaries_to_protocol(
+    skills: Vec<session_types::SkillSummarySnapshot>,
+) -> protocol::SkillsResponse {
+    protocol::SkillsResponse {
+        skills: skills
+            .into_iter()
+            .map(|skill| protocol::SkillSummary {
+                name: skill.name,
+                description: skill.description,
+            })
+            .collect(),
+    }
+}
+
+pub(crate) fn skill_detail_to_protocol(
+    skill: session_types::SkillDetailSnapshot,
+) -> protocol::SkillResponse {
+    protocol::SkillResponse {
+        skill: protocol::SkillDetail {
+            name: skill.name,
+            description: skill.description,
+            body: skill.body,
+            directory: skill.directory.display().to_string(),
+            user_invocable: skill.user_invocable,
+        },
+    }
+}
+
+pub(crate) fn runtime_skills_to_protocol(
+    skills: Vec<session_types::RuntimeSkillSnapshot>,
+) -> Vec<protocol::SessionRuntimeSkill> {
+    skills
+        .into_iter()
+        .map(|skill| protocol::SessionRuntimeSkill {
+            name: skill.name,
+            description: skill.description,
+            source_kind: runtime_skill_source_kind_to_protocol(skill.source_kind),
+            directory: skill.directory.display().to_string(),
+            status: runtime_capability_status_to_protocol(skill.status),
+            inject: skill.inject,
+            user_invocable: skill.user_invocable,
+        })
+        .collect()
+}
+
 pub(crate) fn set_model_command_from_protocol(
     request: protocol::SetModelRequest,
 ) -> session_types::SetModelCommand {
@@ -182,6 +252,47 @@ fn image_from_protocol(
             })
         }
         protocol::AttachmentRef::Uploaded { .. } => None,
+    }
+}
+
+fn agent_record_snapshot_to_protocol(
+    record: omini_core::types::subagents::AgentRecord,
+) -> protocol::AgentRecord {
+    let id = record
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| record.name.clone());
+    protocol::AgentRecord {
+        id,
+        name: record.name,
+        description: record.description,
+        instructions: record.instructions,
+        tools: record.tools,
+        disallow_tools: record.disallow_tools,
+        model: record.model,
+        source_kind: record.source_kind,
+        editable: record.editable,
+    }
+}
+
+fn runtime_skill_source_kind_to_protocol(
+    source_kind: session_types::RuntimeSkillSourceKind,
+) -> protocol::SkillSourceKind {
+    match source_kind {
+        session_types::RuntimeSkillSourceKind::BuiltIn => protocol::SkillSourceKind::BuiltIn,
+        session_types::RuntimeSkillSourceKind::Project => protocol::SkillSourceKind::Project,
+        session_types::RuntimeSkillSourceKind::User => protocol::SkillSourceKind::User,
+    }
+}
+
+fn runtime_capability_status_to_protocol(
+    status: session_types::RuntimeCapabilityStatus,
+) -> protocol::SessionRuntimeCapabilityStatus {
+    match status {
+        session_types::RuntimeCapabilityStatus::Available => {
+            protocol::SessionRuntimeCapabilityStatus::Available
+        }
     }
 }
 

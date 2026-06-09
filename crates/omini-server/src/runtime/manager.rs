@@ -838,32 +838,13 @@ fn agents_response_from_settings(
     cwd: &std::path::Path,
     settings: &omini_core::types::config::Settings,
 ) -> protocol::AgentsResponse {
-    let records = omini_core::subagents::list_agent_records(cwd)
-        .into_iter()
-        .map(agent_record_to_protocol)
-        .collect();
     let models = models_response_from_settings(settings);
-    protocol::AgentsResponse {
-        records,
+    agents_snapshot_to_protocol(omini_core::types::session::AgentsSnapshot {
+        records: omini_core::subagents::list_agent_records(cwd),
         providers: models.providers,
         current_provider: models.current_provider,
         current_model: models.current_model,
-    }
-}
-
-fn agent_record_to_protocol(record: omini_core::subagents::AgentRecord) -> protocol::AgentRecord {
-    let id = agent_record_id(&record);
-    protocol::AgentRecord {
-        id,
-        name: record.name,
-        description: record.description,
-        instructions: record.instructions,
-        tools: record.tools,
-        disallow_tools: record.disallow_tools,
-        model: record.model,
-        source_kind: record.source_kind,
-        editable: record.editable,
-    }
+    })
 }
 
 fn agent_record_id(record: &omini_core::subagents::AgentRecord) -> String {
@@ -975,11 +956,8 @@ thinking = true
         )
     }
 
-    fn has_provider(response: &protocol::ModelsResponse, provider: &str) -> bool {
-        response
-            .providers
-            .iter()
-            .any(|candidate| candidate.id == provider)
+    fn has_provider(providers: &[protocol::ProviderInfo], provider: &str) -> bool {
+        providers.iter().any(|candidate| candidate.id == provider)
     }
 
     async fn recv_runtime_event_kind(
@@ -1053,12 +1031,12 @@ thinking = true
         let (manager, _project) = session_manager_for(&temp.path, &cwd).await;
 
         let initial = manager.list_models().expect("models should load");
-        assert!(!has_provider(&initial, "anthropic"));
+        assert!(!has_provider(&initial.providers, "anthropic"));
 
         write_config(&temp.path, true);
 
         let refreshed = manager.list_models().expect("models should reload");
-        assert!(has_provider(&refreshed, "anthropic"));
+        assert!(has_provider(&refreshed.providers, "anthropic"));
     }
 
     #[tokio::test]
@@ -1245,11 +1223,17 @@ thinking = true
             .session(&old_session_id)
             .await
             .expect("old runtime should be cached");
-        assert!(!has_provider(&old_runtime.core.list_models(), "anthropic"));
+        assert!(!has_provider(
+            &old_runtime.core.list_models().providers,
+            "anthropic"
+        ));
 
         write_config(&temp.path, true);
 
-        assert!(!has_provider(&old_runtime.core.list_models(), "anthropic"));
+        assert!(!has_provider(
+            &old_runtime.core.list_models().providers,
+            "anthropic"
+        ));
 
         let new_session_id = manager
             .create_session(protocol::CreateSessionRequest {
@@ -1287,7 +1271,7 @@ thinking = true
             .await
             .expect("old session should restore");
         let restored_models = restored.core.list_models();
-        assert!(has_provider(&restored_models, "anthropic"));
+        assert!(has_provider(&restored_models.providers, "anthropic"));
         assert_eq!(restored_models.current_provider, "openai");
         assert_eq!(restored_models.current_model, "fast");
 
