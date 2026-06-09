@@ -6,6 +6,7 @@ members = [
     "crates/omini-mcp-client",
     "crates/omini-provider-api",
     "crates/omini-protocol",
+    "crates/omini-runtime-api",
     "crates/omini-server",
     "crates/omini-tui",
 ]
@@ -67,5 +68,6 @@ omini-domain = { path = "crates/omini-domain" }
 omini-mcp-client = { path = "crates/omini-mcp-client" }
 omini-provider-api = { path = "crates/omini-provider-api" }
 omini-protocol = { path = "crates/omini-protocol" }
+omini-runtime-api = { path = "crates/omini-runtime-api" }
 omini-server = { path = "crates/omini-server" }
 omini-tui = { path = "crates/omini-tui" }

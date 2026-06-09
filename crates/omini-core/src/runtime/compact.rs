@@ -7,9 +7,7 @@ use omini_domain::events::{
     CompactEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
     CompactSummaryFinishedEvent, CompactTrigger,
 };
-use omini_domain::message::{
-    ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
-};
+use omini_domain::message::{ContentBlock, Message, Role, TextBlock, ToolResultBlock};
 use omini_domain::tool::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use serde_json::Value;
@@ -1444,15 +1442,12 @@ async fn emit_compact_summary_failed(
         .await;
 }
 
-#[allow(dead_code)]
-fn _preserve_block_types(_: &ThinkingBlock, _: &ToolUseBlock) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::config::ProviderProfile;
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
-    use omini_domain::message::ContentBlock;
+    use omini_domain::message::{ContentBlock, ToolUseBlock};
     use std::collections::HashMap;
     use std::path::PathBuf;
 

@@ -1,11 +1,11 @@
 use super::*;
 use omini_core::config::settings::Settings;
-use omini_core::session as session_types;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display as display_types;
 use omini_domain::events as event_types;
 use omini_domain::events::LoadedSession;
 use omini_domain::subagents::AgentRecord;
+use omini_runtime_api::session as session_types;
 use std::path::Path;
 
 pub(super) fn thinking_effort_to_protocol(effort: ThinkingEffort) -> protocol::ThinkingEffort {

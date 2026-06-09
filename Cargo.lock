@@ -1839,6 +1839,7 @@ dependencies = [
  "omini-domain",
  "omini-mcp-client",
  "omini-provider-api",
+ "omini-runtime-api",
  "reqwest 0.13.3",
  "schemars",
  "serde",
@@ -1903,6 +1904,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "omini-runtime-api"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "omini-domain",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omini-server"
 version = "0.1.0"
 dependencies = [
@@ -1916,6 +1927,7 @@ dependencies = [
  "omini-core",
  "omini-domain",
  "omini-protocol",
+ "omini-runtime-api",
  "serde",
  "serde_json",
  "sqlx",

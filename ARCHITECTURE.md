@@ -10,6 +10,7 @@ crates/
   omini-mcp-client
   omini-provider-api
   omini-protocol
+  omini-runtime-api
   omini-server
   omini-tui
 ```
@@ -20,8 +21,9 @@ crates/
 - `omini-domain` owns stable data types and small domain helpers shared by core, protocol, TUI, and server-adjacent code: messages, tool definitions, usage, display/history records, proposed plan parsing, shared provider/model view enums, plan approval payloads, tool pause payloads, session summaries, compact event payloads, and subagent event payloads.
 - `omini-mcp-client` owns client-side MCP server runtime concerns: stdio and streamable HTTP connections, rmcp service lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls. It stays independent from core, protocol, server, and TUI.
 - `omini-provider-api` owns provider-facing API clients and shared LLM provider request/response glue used by core.
-- `omini-core` owns the agent implementation: provider clients, engine loop, tools, MCP, permissions, prompts, skills, subagents, compaction, plan handling, session runtime service, config, project state, and SQLite helpers during migration.
+- `omini-core` owns the agent implementation: provider clients, engine loop, tools, MCP, permissions, prompts, skills, subagents, compaction, plan handling, session runtime service, config, and project state.
 - `omini-protocol` owns public HTTP and WebSocket request/response envelopes. It reuses or re-exports `omini-domain` types when the wire shape matches, and it must stay independent from core, server, and TUI implementation types.
+- `omini-runtime-api` owns the narrow server-core runtime contract: server-to-runtime events, runtime-to-server events, session commands/snapshots, project agent mutation commands, runtime capability/status snapshots, and runtime persistence events consumed by server. It must stay independent from core, server, protocol, CLI, and TUI implementation types.
 - `omini-server` owns the local daemon transport. It exposes HTTP endpoints, session-scoped WebSocket streams, session routing, multi-subscriber fanout, and per-session controller enforcement.
 - `omini-tui` owns the terminal client: input, rendering, local slash commands, mention parsing, attachment parsing, local UI state, permission drawers, and protocol request construction.
 
@@ -35,17 +37,29 @@ The intended final dependency direction is:
 omini-domain
       ^
       |
+      +-- omini-protocol
+      |
+      +-- omini-runtime-api
+
 omini-protocol
+      ^
+      |
+      +-- omini-server
+      |
+      +-- omini-tui
+
+omini-runtime-api
       ^
       |
       +-- omini-server --> omini-core
       |
-      +-- omini-tui
+      +-- omini-core
 
 omini-provider-api --> omini-domain
 omini-mcp-client
 
-omini-core --> omini-domain + omini-provider-api + omini-mcp-client
+omini-core --> omini-domain + omini-runtime-api + omini-provider-api + omini-mcp-client
+omini-server --> omini-domain + omini-protocol + omini-runtime-api + omini-core
 omini-tui  --> omini-domain + omini-protocol
 omini-cli --> omini-protocol + omini-tui
 ```
@@ -55,10 +69,13 @@ Current boundary notes:
 - `omini-domain` owns the shared stable type surface used by core, TUI, and protocol.
 - `omini-provider-api` owns provider HTTP/SSE adapters and may depend on stable domain config/types, but it must not depend on core, server, protocol, CLI, or TUI.
 - `omini-mcp-client` owns the client-side MCP runtime layer and must not depend on core, server, protocol, CLI, or TUI.
-- `AgentCoreSession` exposes core/domain runtime snapshots and commands. `omini-server` owns protocol response/event projection for those snapshots.
-- `omini-core` owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and core-owned MCP runtime snapshots. `omini-server` owns protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
+- `omini-runtime-api` is the explicit communication contract shared by `omini-server` and `omini-core`. Server should import runtime command/event/snapshot types from it directly instead of deep-linking core modules.
+- `EngineToRuntimeEvent`, `QueryEngine`, provider request/stream types, tool execution internals, config loading, API keys, project state loading, and persistence implementations do not belong in `omini-runtime-api`; they stay in core or their existing owner crates.
+- `RuntimePersistenceEvent` is part of the server-core contract because it is core output consumed by server persistence. SQLite schema, transactions, replay trimming, and store errors remain in `omini-server`.
+- `AgentCoreSession` exposes runtime-api/domain snapshots and commands. `omini-server` owns protocol response/event projection for those snapshots.
+- `omini-core` owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and MCP runtime snapshot production. `omini-runtime-api` owns only the snapshot structs consumed by server. `omini-server` owns protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
 - Skills and subagents discovery/file management are core implementation details. `omini-server` should call root-level core project capability facade functions and session snapshots instead of deep-linking `omini_core::skills` or `omini_core::subagents`.
-- Stable shared display/message/event/usage/subagent payloads are imported from `omini-domain` directly; `omini-core` does not provide `types/*` compatibility re-exports for those payloads. External crates should not deep-link through `omini_core::types`; core-owned session command/snapshot types are exposed through `omini_core::session`, while project agent mutation commands are exposed by the root-level core facade.
+- Stable shared display/message/event/usage/subagent payloads are imported from `omini-domain` directly; `omini-core` does not provide `types/*` compatibility re-exports for those payloads. External crates should not deep-link through `omini_core::types`; server-core session command/snapshot and project agent mutation command types are exposed by `omini-runtime-api`, while `AgentCoreSession` and root-level core facade functions consume or return those contract types.
 - `omini-core` still contains a crate-private legacy command registry for compatibility; do not expose it or add new command behavior there.
 
 ## Runtime Flow
@@ -91,6 +108,7 @@ Typed runtime events cover the current TUI-consumed runtime stream, including:
 - Config loading, project initialization, and database initialization: `omini-server`.
 - Stable shared messages, usage records, display/history records, plan parsing helpers, no-secret provider/model view types, plan approval payloads, tool pause payloads, compact payloads, and subagent payloads: `omini-domain`.
 - Provider HTTP clients, OpenAI/Anthropic adapters, SSE parsing, provider request/stream errors, and `LlmClient`: `omini-provider-api`.
+- Server-core runtime contract events, session command/snapshot types, project agent mutation commands, runtime MCP snapshots, and runtime persistence events: `omini-runtime-api`.
 - Agent behavior, tools, provider orchestration, MCP capability adapters, permissions, prompts, skills, subagents, compaction, plans, config, and project state: `omini-core`.
 - Client-side MCP connection lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls: `omini-mcp-client`.
 - Public endpoint bodies, user input DTOs, attachments, controller DTOs, and typed WebSocket event DTO envelopes: `omini-protocol`.
@@ -105,6 +123,7 @@ For ordinary development, run focused crate-level checks:
 cargo test -p omini-domain
 cargo test -p omini-provider-api
 cargo test -p omini-mcp-client
+cargo check -p omini-runtime-api
 cargo check -p omini-protocol
 cargo check -p omini-core
 cargo check -p omini-server

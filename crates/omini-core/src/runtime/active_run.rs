@@ -1,10 +1,10 @@
 use crate::config::project::ProjectDir;
-use crate::persistence::RuntimePersistenceEvent;
 use crate::types::config::Settings;
-use crate::types::events::RuntimeToServerEvent;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_provider_api::LlmClient;
+use omini_runtime_api::RuntimeToServerEvent;
+use omini_runtime_api::persistence::RuntimePersistenceEvent;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;

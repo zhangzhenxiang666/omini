@@ -1,9 +1,9 @@
 use super::service::RunStart;
 use crate::config::project::SessionDir;
-use crate::persistence::RuntimePersistenceEvent;
 use chrono::Utc;
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use omini_domain::message::{ContentBlock, Message};
+use omini_runtime_api::persistence::RuntimePersistenceEvent;
 use std::path::Path;
 use tokio::sync::mpsc;
 

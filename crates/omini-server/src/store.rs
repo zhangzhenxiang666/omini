@@ -4,10 +4,10 @@
 //! `ContentBlock` 会拆到 sidecar 文件，避免单行 JSON 过大影响数据库读写。
 
 use chrono::{DateTime, Utc};
-use omini_core::persistence::{RuntimePersistenceEvent, SessionRecord};
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
 use omini_domain::message::ContentBlock;
 use omini_domain::usage::Usage;
+use omini_runtime_api::persistence::{RuntimePersistenceEvent, SessionRecord};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::path::Path;

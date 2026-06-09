@@ -1,5 +1,6 @@
 use super::*;
-use omini_core::session as session_types;
+use omini_runtime_api::mcp::{RuntimeMcpServerSnapshot, RuntimeMcpServerStatus};
+use omini_runtime_api::session as session_types;
 
 #[derive(Debug, Clone)]
 struct RuntimeToolActivity {
@@ -74,7 +75,7 @@ pub(super) struct RuntimeStatusSnapshotContext {
     pub connected_client_count: usize,
     pub skills: Vec<session_types::RuntimeSkillSnapshot>,
     // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
-    pub mcp_servers: Vec<omini_core::mcp::RuntimeMcpServerSnapshot>,
+    pub mcp_servers: Vec<RuntimeMcpServerSnapshot>,
     pub subagent_sessions: Vec<protocol::AgentSummary>,
     pub now: DateTime<Utc>,
 }
@@ -415,7 +416,7 @@ impl RuntimeStatusProjection {
 
 // MCP status projection 留在 daemon 边界，避免 core 为运行态能力快照构造协议 DTO。
 fn mcp_servers_to_protocol(
-    snapshots: Vec<omini_core::mcp::RuntimeMcpServerSnapshot>,
+    snapshots: Vec<RuntimeMcpServerSnapshot>,
 ) -> Vec<protocol::SessionRuntimeMcpServer> {
     snapshots
         .into_iter()
@@ -424,7 +425,7 @@ fn mcp_servers_to_protocol(
 }
 
 fn runtime_mcp_server_to_protocol(
-    snapshot: omini_core::mcp::RuntimeMcpServerSnapshot,
+    snapshot: RuntimeMcpServerSnapshot,
 ) -> protocol::SessionRuntimeMcpServer {
     protocol::SessionRuntimeMcpServer {
         name: snapshot.name,
@@ -443,19 +444,13 @@ fn runtime_mcp_server_to_protocol(
 }
 
 fn runtime_mcp_server_status_to_protocol(
-    status: omini_core::mcp::RuntimeMcpServerStatus,
+    status: RuntimeMcpServerStatus,
 ) -> protocol::SessionRuntimeMcpStatus {
     match status {
-        omini_core::mcp::RuntimeMcpServerStatus::Disabled => {
-            protocol::SessionRuntimeMcpStatus::Disabled
-        }
-        omini_core::mcp::RuntimeMcpServerStatus::Connecting => {
-            protocol::SessionRuntimeMcpStatus::Connecting
-        }
-        omini_core::mcp::RuntimeMcpServerStatus::Ready => protocol::SessionRuntimeMcpStatus::Ready,
-        omini_core::mcp::RuntimeMcpServerStatus::Failed => {
-            protocol::SessionRuntimeMcpStatus::Failed
-        }
+        RuntimeMcpServerStatus::Disabled => protocol::SessionRuntimeMcpStatus::Disabled,
+        RuntimeMcpServerStatus::Connecting => protocol::SessionRuntimeMcpStatus::Connecting,
+        RuntimeMcpServerStatus::Ready => protocol::SessionRuntimeMcpStatus::Ready,
+        RuntimeMcpServerStatus::Failed => protocol::SessionRuntimeMcpStatus::Failed,
     }
 }
 
@@ -490,6 +485,7 @@ mod tests {
     use super::*;
     use omini_domain::events as event_types;
     use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+    use omini_runtime_api::mcp::RuntimeMcpToolSnapshot;
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
@@ -822,11 +818,11 @@ mod tests {
                     inject: true,
                     user_invocable: true,
                 }],
-                mcp_servers: vec![omini_core::mcp::RuntimeMcpServerSnapshot {
+                mcp_servers: vec![RuntimeMcpServerSnapshot {
                     name: "docs".to_string(),
-                    status: omini_core::mcp::RuntimeMcpServerStatus::Ready,
+                    status: RuntimeMcpServerStatus::Ready,
                     last_error: None,
-                    tools: vec![omini_core::mcp::RuntimeMcpToolSnapshot {
+                    tools: vec![RuntimeMcpToolSnapshot {
                         name: "search".to_string(),
                         registered_name: "mcp__docs__search".to_string(),
                         description: "Search docs".to_string(),

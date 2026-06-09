@@ -1,5 +1,4 @@
 use crate::engine::{QueryContext, QueryEngine};
-use crate::persistence::SessionRecord;
 use crate::skills::SkillSummary;
 use crate::subagents::AgentSpec;
 use crate::tools::{
@@ -15,6 +14,7 @@ use omini_domain::events::{
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::project::sanitize_project_path as sanitize;
 use omini_provider_api::{FinishReason, LlmClient};
+use omini_runtime_api::persistence::SessionRecord;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;

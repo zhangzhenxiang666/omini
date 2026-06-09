@@ -14,6 +14,7 @@ futures-util.workspace = true
 omini-core.workspace = true
 omini-domain.workspace = true
 omini-protocol.workspace = true
+omini-runtime-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true

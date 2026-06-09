@@ -1,0 +1,12 @@
+[package]
+name = "omini-runtime-api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+omini-domain.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

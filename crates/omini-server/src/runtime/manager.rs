@@ -286,7 +286,7 @@ impl SessionManager {
     ) -> Result<(), CoreError> {
         let update = omini_core::save_project_agent(
             &self.cwd,
-            omini_core::SaveProjectAgentCommand {
+            omini_runtime_api::SaveProjectAgentCommand {
                 source_kind: request.source_kind,
                 original_agent_id: request.original_agent_id,
                 draft: request.draft,
@@ -303,7 +303,7 @@ impl SessionManager {
     ) -> Result<(), CoreError> {
         let update = omini_core::delete_project_agent(
             &self.cwd,
-            omini_core::DeleteProjectAgentCommand {
+            omini_runtime_api::DeleteProjectAgentCommand {
                 agent_id: agent_id.to_string(),
             },
         )?;

@@ -4,23 +4,21 @@ pub mod error;
 pub mod frontmatter;
 pub mod mcp;
 pub mod permissions;
-pub mod persistence;
 pub mod prompts;
 pub mod runtime;
-pub mod session;
 mod skills;
 mod subagents;
 pub mod tools;
 pub mod types;
 
 use crate::runtime::AgentRuntime;
-use crate::types::events::ServerToRuntimeEvent;
-use crate::types::project as project_types;
-use crate::types::session as session_types;
 use omini_domain::config::ProviderInfo;
 use omini_domain::events::{ActiveProfile, LoadedSession};
 use omini_domain::subagents as subagent_types;
 use omini_domain::usage::Usage;
+use omini_runtime_api::project as project_types;
+use omini_runtime_api::session as session_types;
+use omini_runtime_api::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
@@ -28,8 +26,6 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 pub use crate::error::CoreError;
-pub use crate::types::events::RuntimeToServerEvent;
-pub use crate::types::project::{DeleteProjectAgentCommand, SaveProjectAgentCommand};
 
 pub fn project_agents_snapshot(
     settings: &crate::types::config::Settings,
@@ -114,11 +110,11 @@ pub async fn generate_project_agent_draft(
 ///
 /// `omini-server::runtime::RuntimeSession` 为每个 daemon 会话持有一个
 /// `AgentCoreSession`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
-/// 转成 core 内部的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
+/// 转成 `omini-runtime-api` 的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
 /// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
 ///
-/// runtime 输出保持 core 内部的 `RuntimeToServerEvent` 形态，协议层 `RuntimeEvent`
-/// 编码由 `omini-server` 的 runtime adapter 负责。
+/// runtime 输出保持 `omini-runtime-api` 的 `RuntimeToServerEvent` 形态，协议层
+/// `RuntimeEvent` 编码由 `omini-server` 的 runtime adapter 负责。
 ///
 /// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
 /// session registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
@@ -128,10 +124,10 @@ pub struct AgentCoreSession {
     session_id: Option<String>,
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
     request_tx: mpsc::Sender<ServerToRuntimeEvent>,
-    // runtime 输出事件保持 core 内部形态广播给 server。
+    // runtime 输出事件按 server-core 契约广播给 server。
     event_tx: broadcast::Sender<RuntimeToServerEvent>,
-    // 持久化事件保持 core 内部形态，由 server 负责事务、replay 裁剪和错误处理。
-    persistence_tx: broadcast::Sender<crate::persistence::RuntimePersistenceEvent>,
+    // 持久化事件按 server-core 契约广播给 server，由 server 负责事务、replay 裁剪和错误处理。
+    persistence_tx: broadcast::Sender<RuntimePersistenceEvent>,
     // HTTP 查询和配置 mutation 需要读取当前会话配置快照；真正执行仍通过 request_tx 进入 runtime。
     settings: Arc<RwLock<crate::types::config::Settings>>,
     // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前会话实际运行状态。
@@ -185,11 +181,10 @@ impl AgentCoreSession {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
-            mpsc::channel::<crate::persistence::RuntimePersistenceEvent>(512);
+            mpsc::channel::<RuntimePersistenceEvent>(512);
         let (request_tx, request_rx) = mpsc::channel::<ServerToRuntimeEvent>(512);
         let (event_tx, _) = broadcast::channel::<RuntimeToServerEvent>(512);
-        let (persistence_tx, _) =
-            broadcast::channel::<crate::persistence::RuntimePersistenceEvent>(512);
+        let (persistence_tx, _) = broadcast::channel::<RuntimePersistenceEvent>(512);
         let handles = crate::runtime::RuntimeCapabilityHandles::load(&settings);
         let mcp_manager = Arc::clone(&handles.mcp_manager);
         let capabilities = Arc::clone(&handles.capabilities);
@@ -276,9 +271,7 @@ impl AgentCoreSession {
     /// 订阅 core 产生的持久化事件。
     ///
     /// core 不直接写 daemon 数据库；server 消费这个 stream 后负责落盘和 replay buffer 裁剪。
-    pub fn subscribe_persistence(
-        &self,
-    ) -> broadcast::Receiver<crate::persistence::RuntimePersistenceEvent> {
+    pub fn subscribe_persistence(&self) -> broadcast::Receiver<RuntimePersistenceEvent> {
         self.persistence_tx.subscribe()
     }
 
@@ -329,7 +322,7 @@ impl AgentCoreSession {
         skills
     }
 
-    pub fn runtime_mcp_servers(&self) -> Vec<crate::mcp::RuntimeMcpServerSnapshot> {
+    pub fn runtime_mcp_servers(&self) -> Vec<omini_runtime_api::mcp::RuntimeMcpServerSnapshot> {
         self.mcp_manager.runtime_snapshots()
     }
 
@@ -555,10 +548,8 @@ struct RuntimePersistenceEventSummary<'a> {
 }
 
 fn runtime_persistence_event_summary(
-    event: &crate::persistence::RuntimePersistenceEvent,
+    event: &RuntimePersistenceEvent,
 ) -> RuntimePersistenceEventSummary<'_> {
-    use crate::persistence::RuntimePersistenceEvent;
-
     match event {
         RuntimePersistenceEvent::CreateSession(session) => RuntimePersistenceEventSummary {
             kind: "create_session",
