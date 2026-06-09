@@ -277,8 +277,8 @@ impl AgentCoreSession {
         skills
     }
 
-    pub fn runtime_mcp_servers(&self) -> Vec<protocol::SessionRuntimeMcpServer> {
-        self.mcp_manager.protocol_status()
+    pub fn runtime_mcp_servers(&self) -> Vec<crate::mcp::RuntimeMcpServerSnapshot> {
+        self.mcp_manager.runtime_snapshots()
     }
 
     pub fn runtime_subagents(&self) -> Vec<protocol::AgentSummary> {

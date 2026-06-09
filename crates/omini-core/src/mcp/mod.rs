@@ -11,7 +11,6 @@ use omini_mcp_client::{
     McpServerTransportConfig as ClientMcpServerTransportConfig, McpServiceSnapshot,
     McpServiceStatus, McpServiceSummary, ReadResourceResult,
 };
-use omini_protocol as protocol;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
@@ -25,6 +24,29 @@ const MAX_TOOL_NAME_LEN: usize = 64;
 
 pub(crate) struct McpManager {
     client_set: McpClientSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeMcpServerStatus {
+    Disabled,
+    Connecting,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeMcpToolSnapshot {
+    pub name: String,
+    pub registered_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeMcpServerSnapshot {
+    pub name: String,
+    pub status: RuntimeMcpServerStatus,
+    pub last_error: Option<String>,
+    pub tools: Vec<RuntimeMcpToolSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,8 +146,8 @@ impl McpManager {
         self.client_set.status()
     }
 
-    pub(crate) fn protocol_status(&self) -> Vec<protocol::SessionRuntimeMcpServer> {
-        protocol_status_from_snapshots(self.client_set.snapshots())
+    pub(crate) fn runtime_snapshots(&self) -> Vec<RuntimeMcpServerSnapshot> {
+        runtime_snapshots_from_service_snapshots(self.client_set.snapshots())
     }
 
     #[allow(dead_code)]
@@ -305,9 +327,9 @@ fn assign_registered_tool_names(
         .collect()
 }
 
-fn protocol_status_from_snapshots(
+fn runtime_snapshots_from_service_snapshots(
     snapshots: Vec<McpServiceSnapshot>,
-) -> Vec<protocol::SessionRuntimeMcpServer> {
+) -> Vec<RuntimeMcpServerSnapshot> {
     let registered_tools = assign_registered_tool_names(
         snapshots
             .iter()
@@ -324,14 +346,14 @@ fn protocol_status_from_snapshots(
     })
     .collect::<HashMap<_, _>>();
 
-    let mut protocol_snapshots = snapshots
+    let mut runtime_snapshots = snapshots
         .into_iter()
         .map(|service| {
             let mut tools = service
                 .catalog
                 .tools
                 .iter()
-                .map(|tool| protocol::SessionRuntimeMcpTool {
+                .map(|tool| RuntimeMcpToolSnapshot {
                     name: tool.server_tool_name.clone(),
                     registered_name: registered_tools
                         .get(&(tool.server_name.clone(), tool.server_tool_name.clone()))
@@ -344,24 +366,24 @@ fn protocol_status_from_snapshots(
                 .collect::<Vec<_>>();
             tools.sort_by(|left, right| left.name.cmp(&right.name));
 
-            protocol::SessionRuntimeMcpServer {
+            RuntimeMcpServerSnapshot {
                 name: service.name,
-                status: mcp_service_status_to_protocol(service.status),
+                status: mcp_service_status_to_runtime(service.status),
                 last_error: service.last_error,
                 tools,
             }
         })
         .collect::<Vec<_>>();
-    protocol_snapshots.sort_by(|left, right| left.name.cmp(&right.name));
-    protocol_snapshots
+    runtime_snapshots.sort_by(|left, right| left.name.cmp(&right.name));
+    runtime_snapshots
 }
 
-fn mcp_service_status_to_protocol(status: McpServiceStatus) -> protocol::SessionRuntimeMcpStatus {
+fn mcp_service_status_to_runtime(status: McpServiceStatus) -> RuntimeMcpServerStatus {
     match status {
-        McpServiceStatus::Disabled => protocol::SessionRuntimeMcpStatus::Disabled,
-        McpServiceStatus::Connecting => protocol::SessionRuntimeMcpStatus::Connecting,
-        McpServiceStatus::Ready => protocol::SessionRuntimeMcpStatus::Ready,
-        McpServiceStatus::Failed => protocol::SessionRuntimeMcpStatus::Failed,
+        McpServiceStatus::Disabled => RuntimeMcpServerStatus::Disabled,
+        McpServiceStatus::Connecting => RuntimeMcpServerStatus::Connecting,
+        McpServiceStatus::Ready => RuntimeMcpServerStatus::Ready,
+        McpServiceStatus::Failed => RuntimeMcpServerStatus::Failed,
     }
 }
 
@@ -564,8 +586,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_status_lists_mcp_services_and_tools() {
-        let status = protocol_status_from_snapshots(vec![
+    fn runtime_snapshots_list_mcp_services_and_tools() {
+        let status = runtime_snapshots_from_service_snapshots(vec![
             McpServiceSnapshot {
                 name: "docs".to_string(),
                 status: McpServiceStatus::Ready,
@@ -585,11 +607,11 @@ mod tests {
 
         assert_eq!(status.len(), 2);
         assert_eq!(status[0].name, "broken");
-        assert_eq!(status[0].status, protocol::SessionRuntimeMcpStatus::Failed);
+        assert_eq!(status[0].status, RuntimeMcpServerStatus::Failed);
         assert_eq!(status[0].last_error.as_deref(), Some("boom"));
         assert!(status[0].tools.is_empty());
         assert_eq!(status[1].name, "docs");
-        assert_eq!(status[1].status, protocol::SessionRuntimeMcpStatus::Ready);
+        assert_eq!(status[1].status, RuntimeMcpServerStatus::Ready);
         assert_eq!(status[1].tools.len(), 1);
         assert_eq!(status[1].tools[0].name, "search");
         assert_eq!(status[1].tools[0].registered_name, "mcp__docs__search");

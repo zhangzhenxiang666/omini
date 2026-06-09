@@ -72,7 +72,8 @@ pub(super) struct RuntimeStatusSnapshotContext {
     pub controller_id: Option<String>,
     pub connected_client_count: usize,
     pub skills: Vec<protocol::SessionRuntimeSkill>,
-    pub mcp_servers: Vec<protocol::SessionRuntimeMcpServer>,
+    // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
+    pub mcp_servers: Vec<omini_core::mcp::RuntimeMcpServerSnapshot>,
     pub subagent_sessions: Vec<protocol::AgentSummary>,
     pub now: DateTime<Utc>,
 }
@@ -174,7 +175,7 @@ impl RuntimeStatusProjection {
             pending_plan_approval: self.pending_plan_approval.clone(),
             active_tools,
             skills: context.skills,
-            mcp_servers: context.mcp_servers,
+            mcp_servers: mcp_servers_to_protocol(context.mcp_servers),
             subagent_sessions: context.subagent_sessions,
         }
     }
@@ -408,6 +409,52 @@ impl RuntimeStatusProjection {
             .unwrap_or(0);
         elapsed_ms(started_at, now)
             .saturating_sub(self.query_paused_ms.saturating_add(active_pause_ms))
+    }
+}
+
+// MCP status projection 留在 daemon 边界，避免 core 为运行态能力快照构造协议 DTO。
+fn mcp_servers_to_protocol(
+    snapshots: Vec<omini_core::mcp::RuntimeMcpServerSnapshot>,
+) -> Vec<protocol::SessionRuntimeMcpServer> {
+    snapshots
+        .into_iter()
+        .map(runtime_mcp_server_to_protocol)
+        .collect()
+}
+
+fn runtime_mcp_server_to_protocol(
+    snapshot: omini_core::mcp::RuntimeMcpServerSnapshot,
+) -> protocol::SessionRuntimeMcpServer {
+    protocol::SessionRuntimeMcpServer {
+        name: snapshot.name,
+        status: runtime_mcp_server_status_to_protocol(snapshot.status),
+        last_error: snapshot.last_error,
+        tools: snapshot
+            .tools
+            .into_iter()
+            .map(|tool| protocol::SessionRuntimeMcpTool {
+                name: tool.name,
+                registered_name: tool.registered_name,
+                description: tool.description,
+            })
+            .collect(),
+    }
+}
+
+fn runtime_mcp_server_status_to_protocol(
+    status: omini_core::mcp::RuntimeMcpServerStatus,
+) -> protocol::SessionRuntimeMcpStatus {
+    match status {
+        omini_core::mcp::RuntimeMcpServerStatus::Disabled => {
+            protocol::SessionRuntimeMcpStatus::Disabled
+        }
+        omini_core::mcp::RuntimeMcpServerStatus::Connecting => {
+            protocol::SessionRuntimeMcpStatus::Connecting
+        }
+        omini_core::mcp::RuntimeMcpServerStatus::Ready => protocol::SessionRuntimeMcpStatus::Ready,
+        omini_core::mcp::RuntimeMcpServerStatus::Failed => {
+            protocol::SessionRuntimeMcpStatus::Failed
+        }
     }
 }
 
@@ -774,11 +821,11 @@ mod tests {
                     inject: true,
                     user_invocable: true,
                 }],
-                mcp_servers: vec![protocol::SessionRuntimeMcpServer {
+                mcp_servers: vec![omini_core::mcp::RuntimeMcpServerSnapshot {
                     name: "docs".to_string(),
-                    status: protocol::SessionRuntimeMcpStatus::Ready,
+                    status: omini_core::mcp::RuntimeMcpServerStatus::Ready,
                     last_error: None,
-                    tools: vec![protocol::SessionRuntimeMcpTool {
+                    tools: vec![omini_core::mcp::RuntimeMcpToolSnapshot {
                         name: "search".to_string(),
                         registered_name: "mcp__docs__search".to_string(),
                         description: "Search docs".to_string(),
