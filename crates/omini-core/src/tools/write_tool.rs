@@ -1,6 +1,6 @@
 use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
-use crate::types::events::{EditPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
+use omini_domain::events::{EditPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;

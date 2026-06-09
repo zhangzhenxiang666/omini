@@ -1,4 +1,5 @@
 use super::*;
+use omini_domain::events::{Notification, SessionUsageSnapshot};
 use tracing::Instrument;
 
 /// projection 和 replay buffer。HTTP 路由拿到的 `RuntimeSession` 不直接操作 core 的内部
@@ -11,7 +12,7 @@ pub(crate) struct RuntimeSession {
     // 当前项目的目录句柄，用于加载 session snapshot、subagent 历史和 block 文件。
     project: ProjectDir,
     // 创建 runtime 时的项目配置快照；server 用它补充 snapshot/status 中的只读信息。
-    settings: omini_core::types::config::Settings,
+    settings: Settings,
     // session 元数据、消息、usage 和 core persistence event 的 SQLite 存储。
     db: Arc<Database>,
     // core runtime 事件经过本地 seq 编号后的广播流，WebSocket 订阅和 replay 去重都用它。
@@ -40,7 +41,7 @@ pub(crate) struct RuntimeSession {
 
 impl RuntimeSession {
     pub(super) fn spawn(
-        settings: omini_core::types::config::Settings,
+        settings: Settings,
         project: ProjectDir,
         session_id: String,
         db: Arc<Database>,
@@ -381,7 +382,7 @@ impl RuntimeSession {
             .lock()
             .expect("status projection lock poisoned")
             .active_profile();
-        Ok(omini_core::types::events::LoadedSession {
+        Ok(LoadedSession {
             session_id: session.id,
             provider: session.provider.clone(),
             model: session.model.clone(),
@@ -395,7 +396,7 @@ impl RuntimeSession {
             title: session.title,
             messages,
             subagents,
-            usage: omini_core::types::events::SessionUsageSnapshot {
+            usage: SessionUsageSnapshot {
                 current_context_tokens: session.current_context_tokens,
                 total_tokens: session.total_tokens,
                 total_cached_tokens: session.total_cached_tokens,
@@ -404,10 +405,7 @@ impl RuntimeSession {
         })
     }
 
-    fn context_window_for_snapshot(
-        &self,
-        snapshot: &omini_core::types::events::LoadedSession,
-    ) -> Option<u32> {
+    fn context_window_for_snapshot(&self, snapshot: &LoadedSession) -> Option<u32> {
         self.settings
             .providers
             .get(&snapshot.provider)
@@ -620,31 +618,32 @@ fn high_volume_runtime_event(kind: &str) -> bool {
 }
 
 fn effective_session_thinking_effort(
-    settings: &omini_core::types::config::Settings,
+    settings: &Settings,
     provider: &str,
     model: &str,
     effort: Option<&str>,
-) -> Option<omini_core::types::config::ThinkingEffort> {
+) -> Option<ThinkingEffort> {
     let effort = effort.and_then(|effort| effort.parse().ok());
     settings.effective_thinking_effort_for(provider, model, effort)
 }
 
-fn thinking_display_notification(show: bool) -> omini_core::types::events::Notification {
+fn thinking_display_notification(show: bool) -> Notification {
     let message = if show {
         "思考内容展示已开启"
     } else {
         "思考内容展示已关闭"
     };
-    omini_core::types::events::Notification::info(message)
+    Notification::info(message)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_core::config::settings::Settings;
     use omini_core::config::settings::{ModelEntry, ProviderConfig, UserConfig};
-    use omini_core::types::config::{ProviderType, ThinkingEffort};
+    use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
 
-    fn test_settings(model: &str) -> omini_core::types::config::Settings {
+    fn test_settings(model: &str) -> Settings {
         let models = HashMap::from([
             (
                 "fast".to_string(),
@@ -670,7 +669,7 @@ mod tests {
                 "openai".to_string(),
                 ProviderConfig {
                     name: Some("OpenAI".to_string()),
-                    endpoint: ProviderType::OpenAI,
+                    endpoint: ProviderEndpointKind::OpenAI,
                     base_url: "https://openai.example".to_string(),
                     api_key: "test-key".to_string(),
                     models: Some(models),

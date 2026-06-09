@@ -1,6 +1,6 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
-use crate::types::events::{BashPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
+use omini_domain::events::{BashPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::time::Duration;

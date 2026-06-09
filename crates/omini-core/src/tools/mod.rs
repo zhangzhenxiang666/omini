@@ -3,13 +3,14 @@ use crate::permissions::{PermissionDecision, PermissionEngine};
 use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::config::Settings;
-use crate::types::events::{
-    ActiveProfile, EngineToRuntimeEvent, PermissionPreview, PermissionSource, ToolPauseKind,
-    ToolPauseRequest, ToolPauseResponse, UserInputPreview,
-};
-use crate::types::message::{ContentBlock, ToolResultBlock};
-use crate::types::tool::ToolDefinition;
+use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;
+use omini_domain::events::{
+    ActiveProfile, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
+    ToolPauseResponse, UserInputPreview,
+};
+use omini_domain::message::{ContentBlock, ToolResultBlock};
+use omini_domain::tool::ToolDefinition;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;

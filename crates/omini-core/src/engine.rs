@@ -6,8 +6,9 @@ use crate::tools::{
     ToolRuntimeContext,
 };
 use crate::types::config::Settings;
-use crate::types::events::{ActiveProfile, EngineToRuntimeEvent, ToolPauseResponse};
-use crate::types::message::{
+use crate::types::events::EngineToRuntimeEvent;
+use omini_domain::events::{ActiveProfile, ToolPauseResponse};
+use omini_domain::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
 use omini_provider_api::{
@@ -1171,8 +1172,9 @@ impl Default for QueryEngine {
 mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
-    use crate::types::config::{CompactConfig, ProviderType};
-    use crate::types::message::ToolUseBlock;
+    use crate::types::config::CompactConfig;
+    use omini_domain::config::ProviderEndpointKind;
+    use omini_domain::message::ToolUseBlock;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::OnceLock;
@@ -1216,7 +1218,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: String::new(),
             model: "test-model".to_string(),
-            endpoint: ProviderType::OpenAI,
+            endpoint: ProviderEndpointKind::OpenAI,
             providers: HashMap::new(),
             active_provider: "test".to_string(),
             system_prompt: None,
@@ -1246,7 +1248,7 @@ mod tests {
 
     fn test_llm_client(base_url: String) -> LlmClient {
         LlmClient::with_http_client(
-            ProviderType::OpenAI,
+            ProviderEndpointKind::OpenAI,
             "test-key".to_string(),
             base_url,
             test_http_client(),

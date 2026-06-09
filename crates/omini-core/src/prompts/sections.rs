@@ -1,7 +1,7 @@
 use crate::skills::SkillSummary;
-use crate::subagents::AgentSummary;
 use crate::types::config::Settings;
-use crate::types::events::ActiveProfile;
+use omini_domain::events::ActiveProfile;
+use omini_domain::subagents::AgentSummary;
 
 const PLAN_MODE_INSTRUCTIONS: &str = include_str!("plan_mode.md");
 

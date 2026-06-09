@@ -1,7 +1,5 @@
 use crate::types::permissions::RawPermissionConfig;
-pub use omini_domain::config::{
-    InputModality, ModelInfo as ModelConfig, ProviderEndpointKind as ProviderType, ThinkingEffort,
-};
+use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind, ThinkingEffort};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,10 +7,10 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProviderProfile {
     pub name: String,
-    pub endpoint: ProviderType,
+    pub endpoint: ProviderEndpointKind,
     pub api_key: String,
     pub base_url: String,
-    pub models: Vec<ModelConfig>,
+    pub models: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -20,7 +18,7 @@ pub struct Settings {
     pub api_key: String,
     pub base_url: String,
     pub model: String,
-    pub endpoint: ProviderType,
+    pub endpoint: ProviderEndpointKind,
     pub providers: HashMap<String, ProviderProfile>,
     pub active_provider: String,
 
@@ -36,7 +34,7 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn current_model_config(&self) -> Option<&ModelConfig> {
+    pub fn current_model_config(&self) -> Option<&ModelInfo> {
         self.providers
             .get(&self.active_provider)
             .and_then(|provider| provider.models.iter().find(|model| model.id == self.model))
@@ -321,7 +319,7 @@ mod tests {
 
     #[test]
     fn model_config_input_modalities_can_be_undeclared() {
-        let model: ModelConfig = serde_json::from_value(json!({
+        let model: ModelInfo = serde_json::from_value(json!({
             "id": "gpt-test",
             "name": null,
             "limit": 256000,
@@ -334,7 +332,7 @@ mod tests {
 
     #[test]
     fn model_config_input_modalities_parse_image() {
-        let model: ModelConfig = serde_json::from_value(json!({
+        let model: ModelInfo = serde_json::from_value(json!({
             "id": "gpt-test",
             "name": null,
             "limit": 256000,

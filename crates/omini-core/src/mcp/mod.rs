@@ -3,8 +3,8 @@ use crate::types::config::{
     McpServerConfig as CoreMcpServerConfig,
     McpServerTransportConfig as CoreMcpServerTransportConfig, Settings,
 };
-use crate::types::events::{McpPermissionPreview, PermissionPreview};
 use async_trait::async_trait;
+use omini_domain::events::{McpPermissionPreview, PermissionPreview};
 use omini_mcp_client::{
     GetPromptResult, McpCallOutput, McpCatalog, McpClientSet,
     McpServerConfig as ClientMcpServerConfig, McpServerToolSpec,

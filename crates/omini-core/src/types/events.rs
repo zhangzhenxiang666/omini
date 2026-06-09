@@ -1,10 +1,16 @@
 use crate::persistence::SessionRecord;
-use crate::types::config::ThinkingEffort;
-use crate::types::display::{HistoryItem, UserDraft};
-use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
-use crate::types::subagents::AgentRecord;
-use crate::types::usage::Usage;
-pub use omini_domain::events::*;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::display::{HistoryItem, UserDraft};
+use omini_domain::events::{
+    ActiveProfile, CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent,
+    CompactSummaryDeltaEvent, CompactSummaryFailedEvent, CompactSummaryFinishedEvent,
+    LoadedSession, Notification, PlanApprovalAction, SessionUsageSnapshot, SubagentFinishedEvent,
+    SubagentMessageEvent, SubagentSnapshot, SubagentStartedEvent, SubagentToolResultEvent,
+    SubagentToolUseEvent, SubmittedPlan, ToolPauseRequest, ToolPauseResponse,
+};
+use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_domain::subagents::AgentRecord;
+use omini_domain::usage::Usage;
 use serde::{Deserialize, Serialize};
 
 // ===========================================================================
@@ -263,7 +269,7 @@ impl RuntimeToServerEvent {
 }
 
 mod serde_runtime_event_payload {
-    use crate::types::events::ActiveProfile;
+    use omini_domain::events::ActiveProfile;
     use serde::Deserialize;
     use serde::Serializer;
     use serde::ser::SerializeStruct;
@@ -321,9 +327,10 @@ mod serde_runtime_event_payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::display::{DisplayMessage, HistoryItem};
-    use crate::types::events::{ActiveProfile, RuntimeToServerEvent};
-    use crate::types::message::{ContentBlock, Message, Role};
+    use crate::types::events::RuntimeToServerEvent;
+    use omini_domain::display::{DisplayMessage, HistoryItem};
+    use omini_domain::events::ActiveProfile;
+    use omini_domain::message::{ContentBlock, Message, Role};
     use serde_json::json;
 
     #[test]

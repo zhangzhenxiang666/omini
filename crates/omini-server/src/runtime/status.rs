@@ -1,5 +1,5 @@
 use super::*;
-use omini_core::types::session as session_types;
+use omini_core::session as session_types;
 
 #[derive(Debug, Clone)]
 struct RuntimeToolActivity {
@@ -488,8 +488,8 @@ pub(super) fn plan_approval_resolved_plan_id(event: &RuntimeEvent) -> Option<Str
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::types::events as event_types;
-    use omini_core::types::message::{ToolResultBlock, ToolUseBlock};
+    use omini_domain::events as event_types;
+    use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {

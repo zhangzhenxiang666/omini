@@ -1,7 +1,7 @@
 use crate::config::settings::UserConfig;
 use crate::types::config::ConfigError;
-use crate::types::config::ThinkingEffort;
-use crate::types::message::Message;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::message::Message;
 use omini_domain::project::sanitize_project_path as sanitize;
 use serde::{Deserialize, Serialize};
 use std::fs;

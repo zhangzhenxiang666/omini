@@ -1,4 +1,4 @@
-use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
+use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveProjectAgentCommand {

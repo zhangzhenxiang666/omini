@@ -18,17 +18,17 @@ use crate::skills::SkillRegistry;
 use crate::subagents::AgentRegistry;
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::config::Settings;
-use crate::types::config::ThinkingEffort;
-use crate::types::display::{DisplaySummary, HistoryItem, UserDraft};
-use crate::types::events::{
-    ActiveProfile, EngineToRuntimeEvent, LoadedSession, Notification, PlanApprovalAction,
-    RuntimeToServerEvent, ServerToRuntimeEvent, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
-    ToolPauseRequest, ToolPauseResponse,
-};
-use crate::types::message::Message;
-use crate::types::usage::Usage;
+use crate::types::events::{EngineToRuntimeEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use chrono::Utc;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::display::{DisplaySummary, HistoryItem, UserDraft};
+use omini_domain::events::{
+    ActiveProfile, LoadedSession, Notification, PlanApprovalAction, SessionUsageSnapshot,
+    SubmittedPlan, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+};
+use omini_domain::message::Message;
 use omini_domain::project::sanitize_project_path as sanitize;
+use omini_domain::usage::Usage;
 use omini_provider_api::LlmClient;
 use std::sync::Arc;
 use std::sync::RwLock;

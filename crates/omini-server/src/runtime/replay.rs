@@ -361,12 +361,12 @@ fn push_delta_block(blocks: &mut Vec<ContentBlock>, delta: &str, thinking: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::types::events as event_types;
-    use omini_core::types::events::{
-        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, RuntimeToServerEvent,
-        SessionUsageSnapshot, SubmittedPlan,
+    use omini_core::RuntimeToServerEvent;
+    use omini_domain::events as event_types;
+    use omini_domain::events::{
+        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, SessionUsageSnapshot, SubmittedPlan,
     };
-    use omini_core::types::message::{ToolResultBlock, ToolUseBlock};
+    use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {

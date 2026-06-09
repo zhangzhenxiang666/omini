@@ -1,7 +1,7 @@
-use crate::types::display::{DisplayMessage, DisplayPlan, DisplaySummary};
-use crate::types::message::ContentBlock;
-use crate::types::usage::Usage;
 use chrono::{DateTime, Utc};
+use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::message::ContentBlock;
+use omini_domain::usage::Usage;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]

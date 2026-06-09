@@ -7,10 +7,8 @@ mod generator;
 mod parser;
 mod runner;
 
-pub use crate::types::subagents::{
-    AgentDraft, AgentRecord, AgentSourceKind, AgentSummary, GeneratedAgentDraft,
-};
 pub(crate) use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
+use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
 pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 
 #[derive(Debug, Clone)]

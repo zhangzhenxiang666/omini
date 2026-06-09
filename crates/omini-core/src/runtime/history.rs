@@ -1,9 +1,9 @@
 use super::service::RunStart;
 use crate::config::project::SessionDir;
 use crate::persistence::RuntimePersistenceEvent;
-use crate::types::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
-use crate::types::message::Message;
 use chrono::Utc;
+use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
+use omini_domain::message::{ContentBlock, Message};
 use std::path::Path;
 use tokio::sync::mpsc;
 
@@ -36,7 +36,7 @@ fn history_item_text(item: &HistoryItem) -> Option<String> {
 
 fn message_title_text(message: &Message) -> Option<String> {
     message.content.first().and_then(|block| {
-        if let crate::types::message::ContentBlock::Text(t) = block {
+        if let ContentBlock::Text(t) = block {
             let text = t.text.trim().to_string();
             if text.is_empty() { None } else { Some(text) }
         } else {

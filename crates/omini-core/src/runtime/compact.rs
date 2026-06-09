@@ -2,14 +2,15 @@ use crate::config::project::SessionDir;
 use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
 use crate::types::config::{CompactConfig, Settings};
-use crate::types::events::{
+use crate::types::events::EngineToRuntimeEvent;
+use omini_domain::events::{
     CompactEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
-    CompactSummaryFinishedEvent, CompactTrigger, EngineToRuntimeEvent,
+    CompactSummaryFinishedEvent, CompactTrigger,
 };
-use crate::types::message::{
+use omini_domain::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
-use crate::types::tool::ToolDefinition;
+use omini_domain::tool::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -1449,8 +1450,9 @@ fn _preserve_block_types(_: &ThinkingBlock, _: &ToolUseBlock) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
-    use crate::types::message::ContentBlock;
+    use crate::types::config::ProviderProfile;
+    use omini_domain::config::{ModelInfo, ProviderEndpointKind};
+    use omini_domain::message::ContentBlock;
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1479,10 +1481,10 @@ mod tests {
             provider.clone(),
             ProviderProfile {
                 name: "Test".to_string(),
-                endpoint: ProviderType::OpenAI,
+                endpoint: ProviderEndpointKind::OpenAI,
                 api_key: String::new(),
                 base_url: String::new(),
-                models: vec![ModelConfig {
+                models: vec![ModelInfo {
                     id: model.clone(),
                     name: None,
                     limit,
@@ -1496,7 +1498,7 @@ mod tests {
             api_key: String::new(),
             base_url: String::new(),
             model,
-            endpoint: ProviderType::OpenAI,
+            endpoint: ProviderEndpointKind::OpenAI,
             providers,
             active_provider: provider,
             system_prompt: None,

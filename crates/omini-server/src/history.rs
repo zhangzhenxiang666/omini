@@ -6,10 +6,10 @@
 use crate::store::{self, Database};
 use chrono::{DateTime, Utc};
 use omini_core::config::project::ProjectDir;
-use omini_core::types::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
-use omini_core::types::events::{SubagentSnapshot, SubagentStatus};
-use omini_core::types::message::{ContentBlock, Message, Role};
-use omini_core::types::proposed_plan::{extract_proposed_plan_text, strip_proposed_plan_blocks};
+use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
+use omini_domain::events::{SubagentSnapshot, SubagentStatus};
+use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::proposed_plan::{extract_proposed_plan_text, strip_proposed_plan_blocks};
 use std::collections::HashSet;
 use std::path::Path;
 

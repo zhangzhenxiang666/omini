@@ -179,7 +179,7 @@ impl AgentRuntime {
 
 pub(super) async fn persist_compact_summary_event(
     session_id: &str,
-    event: &crate::types::events::CompactSummaryFinishedEvent,
+    event: &omini_domain::events::CompactSummaryFinishedEvent,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
     let summary = DisplaySummary {

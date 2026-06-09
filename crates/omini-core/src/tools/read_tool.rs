@@ -1,6 +1,6 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
-use crate::types::events::{PermissionPreview, ReadPermissionPreview};
 use async_trait::async_trait;
+use omini_domain::events::{PermissionPreview, ReadPermissionPreview};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::fs;

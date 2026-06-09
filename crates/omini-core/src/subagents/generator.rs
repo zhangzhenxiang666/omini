@@ -1,5 +1,7 @@
-use super::GeneratedAgentDraft;
-use crate::types::config::{Settings, ThinkingEffort};
+use crate::types::config::Settings;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::subagents::GeneratedAgentDraft;
 use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use std::fmt;
 use tokio_stream::StreamExt;
@@ -48,9 +50,9 @@ async fn generate_agent_draft_checked(
     description: &str,
 ) -> Result<GeneratedAgentDraft, GenerateAgentDraftError> {
     let prompt = build_generate_agent_prompt(description);
-    let messages = vec![crate::types::message::Message {
-        role: crate::types::message::Role::User,
-        content: vec![crate::types::message::ContentBlock::from_text(prompt)],
+    let messages = vec![Message {
+        role: Role::User,
+        content: vec![ContentBlock::from_text(prompt)],
     }];
     let request = ApiRequest {
         messages: &messages,

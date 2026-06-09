@@ -1,8 +1,9 @@
 use crate::permissions::RawPermissionConfig;
 pub use crate::types::config::{
-    CompactConfig, ConfigError, InputModality, McpServerConfig, McpServerTransportConfig,
-    ModelConfig, ProviderProfile, ProviderType, Settings, ThinkingEffort,
+    CompactConfig, ConfigError, McpServerConfig, McpServerTransportConfig, ProviderProfile,
+    Settings,
 };
+use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind, ThinkingEffort};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,7 +31,7 @@ pub struct ProviderConfig {
     /// 展示名称（可选，用于 TUI；不填则回退到 TOML 表 key）
     pub name: Option<String>,
     /// 供应商类型（如 "OpenAI" / "Anthropic"）
-    pub endpoint: ProviderType,
+    pub endpoint: ProviderEndpointKind,
     /// API 基础地址（必填）
     pub base_url: String,
     /// API 密钥（必填）
@@ -81,7 +82,7 @@ impl UserConfig {
                 .as_ref()
                 .map(|m| {
                     m.iter()
-                        .map(|(id, entry)| ModelConfig {
+                        .map(|(id, entry)| ModelInfo {
                             id: id.clone(),
                             name: entry.name.clone(),
                             limit: entry.limit.unwrap_or(256000),

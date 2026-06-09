@@ -1,10 +1,10 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
-use crate::types::config::InputModality;
-use crate::types::events::{PermissionPreview, ReadPermissionPreview};
-use crate::types::message::ContentBlock;
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use omini_domain::config::InputModality;
+use omini_domain::events::{PermissionPreview, ReadPermissionPreview};
+use omini_domain::message::ContentBlock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -130,7 +130,8 @@ fn media_type_for_path(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType, Settings};
+    use crate::types::config::{ProviderProfile, Settings};
+    use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
 
     fn image_settings() -> Settings {
@@ -141,10 +142,10 @@ mod tests {
             provider.clone(),
             ProviderProfile {
                 name: "Test".to_string(),
-                endpoint: ProviderType::OpenAI,
+                endpoint: ProviderEndpointKind::OpenAI,
                 api_key: String::new(),
                 base_url: String::new(),
-                models: vec![ModelConfig {
+                models: vec![ModelInfo {
                     id: model.clone(),
                     name: None,
                     limit: 256000,
@@ -157,7 +158,7 @@ mod tests {
             api_key: String::new(),
             base_url: String::new(),
             model,
-            endpoint: ProviderType::OpenAI,
+            endpoint: ProviderEndpointKind::OpenAI,
             providers,
             active_provider: provider,
             system_prompt: None,

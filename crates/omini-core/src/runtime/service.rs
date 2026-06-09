@@ -7,11 +7,10 @@ use crate::persistence::RuntimePersistenceEvent;
 use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
 use crate::types::config::Settings;
-use crate::types::display::{DisplayMessage, HistoryItem};
-use crate::types::events::{
-    ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent, SessionUsageSnapshot,
-};
-use crate::types::message::Message;
+use crate::types::events::{RuntimeToServerEvent, ServerToRuntimeEvent};
+use omini_domain::display::{DisplayMessage, HistoryItem};
+use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
+use omini_domain::message::Message;
 use omini_provider_api::LlmClient;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -241,13 +240,17 @@ mod tests {
     use crate::engine::ToolPauseResolver;
     use crate::runtime::active_run;
     use crate::runtime::manual_compact::persist_compact_summary_event;
-    use crate::types::config::{ProviderType, Settings};
-    use crate::types::display::UserDraft;
-    use crate::types::events::{
-        EngineToRuntimeEvent, LoadedSession, NotificationKind, PlanApprovalAction,
-        PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+    use crate::types::config::Settings;
+    use crate::types::events::EngineToRuntimeEvent;
+    use omini_domain::config::ProviderEndpointKind;
+    use omini_domain::display::UserDraft;
+    use omini_domain::events::{
+        CompactSummaryFinishedEvent, CompactTrigger, LoadedSession, NotificationKind,
+        PermissionPreview, PlanApprovalAction, PlanExecutionProfile, ToolPauseKind,
+        ToolPauseRequest, ToolPauseResponse,
     };
-    use crate::types::message::{ContentBlock, Role};
+    use omini_domain::message::{ContentBlock, Role};
+    use omini_domain::usage::Usage;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;
@@ -297,7 +300,7 @@ mod tests {
             "openai".to_string(),
             ProviderConfig {
                 name: Some("OpenAI".to_string()),
-                endpoint: ProviderType::OpenAI,
+                endpoint: ProviderEndpointKind::OpenAI,
                 base_url: "https://openai.example".to_string(),
                 api_key: "test-key".to_string(),
                 models: Some(models),
@@ -346,7 +349,7 @@ mod tests {
             permission_source: None,
             source_session_id: None,
             source_agent_label: None,
-            kind: ToolPauseKind::Permission(crate::types::events::PermissionPreview::Custom {
+            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                 tool_name: "bash".to_string(),
                 payload: serde_json::Map::new(),
             }),
@@ -791,8 +794,8 @@ mod tests {
             .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
             .await;
         let session_id = runtime.session_id.clone().expect("session id should exist");
-        let event = crate::types::events::CompactSummaryFinishedEvent {
-            trigger: crate::types::events::CompactTrigger::Manual,
+        let event = CompactSummaryFinishedEvent {
+            trigger: CompactTrigger::Manual,
             summary: "# Summary\n\n- Keep this.".to_string(),
             after_tokens: 42,
             session_id: Some(session_id.clone()),
@@ -1255,8 +1258,8 @@ mod tests {
         );
         crate::subagents::write_agent_file(
             &cwd,
-            crate::subagents::AgentSourceKind::Project,
-            &crate::subagents::AgentDraft {
+            omini_domain::subagents::AgentSourceKind::Project,
+            &omini_domain::subagents::AgentDraft {
                 name: "cache-helper".to_string(),
                 description: "Use when checking cache-sensitive changes.".to_string(),
                 instructions: "Inspect cache-sensitive changes and report findings.".to_string(),
@@ -1614,19 +1617,17 @@ mod tests {
             .await;
 
         engine_tx
-            .send(EngineToRuntimeEvent::UsageRecorded(
-                crate::types::usage::Usage {
-                    prompt_tokens: 10,
-                    completion_tokens: 5,
-                    cached_tokens: 3,
-                },
-            ))
+            .send(EngineToRuntimeEvent::UsageRecorded(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                cached_tokens: 3,
+            }))
             .await
             .expect("usage event should send");
         engine_tx
             .send(EngineToRuntimeEvent::SubagentUsageRecorded {
                 session_id: subagent_session_id.clone(),
-                usage: crate::types::usage::Usage {
+                usage: Usage {
                     prompt_tokens: 7,
                     completion_tokens: 8,
                     cached_tokens: 4,

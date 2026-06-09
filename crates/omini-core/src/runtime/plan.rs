@@ -1,10 +1,11 @@
 use crate::config::project::ProjectDir;
-use crate::types::events::{ActiveProfile, RuntimeToServerEvent, SubmittedPlan};
-use crate::types::message::{ContentBlock, Message, Role};
-use crate::types::proposed_plan::{
+use crate::types::events::RuntimeToServerEvent;
+use chrono::Utc;
+use omini_domain::events::{ActiveProfile, SubmittedPlan};
+use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::proposed_plan::{
     ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text,
 };
-use chrono::Utc;
 use tokio::sync::mpsc;
 
 const CURRENT_PLAN_ID: &str = "plan";

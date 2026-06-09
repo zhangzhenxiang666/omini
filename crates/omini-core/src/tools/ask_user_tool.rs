@@ -1,8 +1,8 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
-use crate::types::events::{
+use async_trait::async_trait;
+use omini_domain::events::{
     ToolPauseResponse, UserInputOption, UserInputPreview, UserInputQuestion,
 };
-use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 

@@ -1,8 +1,8 @@
-use crate::types::config::ThinkingEffort;
-use crate::types::display::UserDraft;
-use crate::types::events::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
-use crate::types::subagents::AgentRecord;
 use omini_domain::config::ProviderInfo;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::display::UserDraft;
+use omini_domain::events::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
+use omini_domain::subagents::AgentRecord;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

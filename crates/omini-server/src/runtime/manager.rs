@@ -239,9 +239,7 @@ impl SessionManager {
     ) -> Result<protocol::ProjectRuntimeConfigResponse, CoreError> {
         let settings = self.fresh_settings_with_project_state()?;
         let effort = thinking_effort_from_protocol(request.effort);
-        if effort != omini_core::types::config::ThinkingEffort::None
-            && !settings.current_model_supports_thinking()
-        {
+        if effort != ThinkingEffort::None && !settings.current_model_supports_thinking() {
             return Err(CoreError::invalid_model_selection(format!(
                 "Current model '{}' does not support thinking",
                 settings.model
@@ -288,7 +286,7 @@ impl SessionManager {
     ) -> Result<(), CoreError> {
         let update = omini_core::save_project_agent(
             &self.cwd,
-            omini_core::types::project::SaveProjectAgentCommand {
+            omini_core::SaveProjectAgentCommand {
                 source_kind: request.source_kind,
                 original_agent_id: request.original_agent_id,
                 draft: request.draft,
@@ -305,7 +303,7 @@ impl SessionManager {
     ) -> Result<(), CoreError> {
         let update = omini_core::delete_project_agent(
             &self.cwd,
-            omini_core::types::project::DeleteProjectAgentCommand {
+            omini_core::DeleteProjectAgentCommand {
                 agent_id: agent_id.to_string(),
             },
         )?;
@@ -349,7 +347,7 @@ impl SessionManager {
     fn settings_for_agent_generation(
         &self,
         request: &protocol::GenerateAgentRequest,
-    ) -> Result<omini_core::types::config::Settings, CoreError> {
+    ) -> Result<Settings, CoreError> {
         let mut settings = self.fresh_settings_with_project_state()?;
         let (api_key, base_url, endpoint) = {
             let provider = settings.providers.get(&request.provider).ok_or_else(|| {
@@ -381,9 +379,7 @@ impl SessionManager {
         settings.model = request.model.clone();
         if let Some(effort) = request.thinking_effort {
             let effort = thinking_effort_from_protocol(effort);
-            if effort != omini_core::types::config::ThinkingEffort::None
-                && !settings.current_model_supports_thinking()
-            {
+            if effort != ThinkingEffort::None && !settings.current_model_supports_thinking() {
                 return Err(CoreError::invalid_model_selection(format!(
                     "Model '{}' does not support thinking",
                     settings.model
@@ -414,9 +410,7 @@ impl SessionManager {
         })
     }
 
-    fn fresh_settings_with_project_state(
-        &self,
-    ) -> Result<omini_core::types::config::Settings, CoreError> {
+    fn fresh_settings_with_project_state(&self) -> Result<Settings, CoreError> {
         let config = load_validated_config(&self.root).map_err(config_core_error)?;
         let state = self
             .project
@@ -546,7 +540,7 @@ impl SessionManager {
     fn settings_for_new_session(
         &self,
         request: &protocol::CreateSessionRequest,
-    ) -> Result<omini_core::types::config::Settings, CoreError> {
+    ) -> Result<Settings, CoreError> {
         let mut settings = self.fresh_settings_with_project_state()?;
         if let Some(provider) = &request.provider {
             let profile = settings.providers.get(provider).ok_or_else(|| {
@@ -581,9 +575,7 @@ impl SessionManager {
         }
         if let Some(effort) = request.thinking_effort {
             let effort = thinking_effort_from_protocol(effort);
-            if effort != omini_core::types::config::ThinkingEffort::None
-                && !settings.current_model_supports_thinking()
-            {
+            if effort != ThinkingEffort::None && !settings.current_model_supports_thinking() {
                 return Err(CoreError::invalid_model_selection(format!(
                     "Model '{}' does not support thinking",
                     settings.model
@@ -595,10 +587,7 @@ impl SessionManager {
         Ok(settings)
     }
 
-    fn settings_for_existing_session(
-        &self,
-        session: &Session,
-    ) -> Result<omini_core::types::config::Settings, CoreError> {
+    fn settings_for_existing_session(&self, session: &Session) -> Result<Settings, CoreError> {
         let mut settings = self.fresh_settings_with_project_state()?;
         if session.provider.is_empty() || session.model.is_empty() {
             settings.normalize_current_thinking_effort();
@@ -634,7 +623,7 @@ impl SessionManager {
         settings.base_url = base_url;
         settings.endpoint = endpoint;
         settings.model = session.model.clone();
-        let effort: Option<omini_core::types::config::ThinkingEffort> = session
+        let effort: Option<ThinkingEffort> = session
             .thinking_effort
             .as_deref()
             .and_then(|effort| effort.parse().ok());
@@ -778,15 +767,13 @@ impl SessionManager {
     }
 }
 
-fn load_validated_config(
-    root: &OminiRoot,
-) -> Result<UserConfig, omini_core::types::config::ConfigError> {
+fn load_validated_config(root: &OminiRoot) -> Result<UserConfig, ConfigError> {
     let config = root.load_config()?;
     config.validate()?;
     Ok(config)
 }
 
-fn config_core_error(error: omini_core::types::config::ConfigError) -> CoreError {
+fn config_core_error(error: ConfigError) -> CoreError {
     CoreError::config("failed to load user config", error)
 }
 
@@ -808,7 +795,6 @@ fn session_summaries_with_runtime_states(
 mod tests {
     use super::*;
     use omini_core::config::project::ProjectDir;
-    use omini_core::types::config::ThinkingEffort;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;

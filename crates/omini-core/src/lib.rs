@@ -7,18 +7,20 @@ pub mod permissions;
 pub mod persistence;
 pub mod prompts;
 pub mod runtime;
+pub mod session;
 mod skills;
 mod subagents;
 pub mod tools;
 pub mod types;
 
 use crate::runtime::AgentRuntime;
-use crate::types::events as event_types;
-use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
+use crate::types::events::ServerToRuntimeEvent;
 use crate::types::project as project_types;
 use crate::types::session as session_types;
-use crate::types::subagents as subagent_types;
 use omini_domain::config::ProviderInfo;
+use omini_domain::events::{ActiveProfile, LoadedSession};
+use omini_domain::subagents as subagent_types;
+use omini_domain::usage::Usage;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
@@ -26,6 +28,8 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 pub use crate::error::CoreError;
+pub use crate::types::events::RuntimeToServerEvent;
+pub use crate::types::project::{DeleteProjectAgentCommand, SaveProjectAgentCommand};
 
 pub fn project_agents_snapshot(
     settings: &crate::types::config::Settings,
@@ -283,10 +287,7 @@ impl AgentCoreSession {
         models_snapshot_from_settings(&settings)
     }
 
-    pub async fn load_session(
-        &self,
-        snapshot: event_types::LoadedSession,
-    ) -> Result<(), CoreError> {
+    pub async fn load_session(&self, snapshot: LoadedSession) -> Result<(), CoreError> {
         self.send_to_runtime(ServerToRuntimeEvent::HydrateSessionSnapshot { snapshot })
             .await
     }
@@ -652,7 +653,7 @@ fn runtime_persistence_event_summary(
 fn usage_persistence_summary<'a>(
     kind: &'static str,
     session_id: &'a str,
-    usage: crate::types::usage::Usage,
+    usage: Usage,
 ) -> RuntimePersistenceEventSummary<'a> {
     RuntimePersistenceEventSummary {
         kind,

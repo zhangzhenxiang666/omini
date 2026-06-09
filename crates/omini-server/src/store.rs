@@ -5,9 +5,9 @@
 
 use chrono::{DateTime, Utc};
 use omini_core::persistence::{RuntimePersistenceEvent, SessionRecord};
-use omini_core::types::display::{DisplayMessage, DisplayPlan, DisplaySummary};
-use omini_core::types::message::ContentBlock;
-use omini_core::types::usage::Usage;
+use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::message::ContentBlock;
+use omini_domain::usage::Usage;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::path::Path;
@@ -943,7 +943,7 @@ mod tests {
         db.insert_display_message(
             "s1",
             &DisplayMessage {
-                role: omini_core::types::message::Role::User,
+                role: omini_domain::message::Role::User,
                 text: "first message".to_string(),
                 mentions: Vec::new(),
             },

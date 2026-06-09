@@ -1,4 +1,4 @@
-use crate::types::events::{
+use omini_domain::events::{
     ActiveProfile, BashPermissionPreview, PermissionPreview, PermissionSource,
 };
 use serde_json::Value;
@@ -1627,7 +1627,7 @@ prefix_rule(
     #[test]
     fn search_path_rules_match_search_preview_path() {
         let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Search(**/.env)"]));
-        let preview = PermissionPreview::Search(crate::types::events::SearchPermissionPreview {
+        let preview = PermissionPreview::Search(omini_domain::events::SearchPermissionPreview {
             query: "KEY".to_string(),
             mode: "content".to_string(),
             path: "/repo/.env".to_string(),

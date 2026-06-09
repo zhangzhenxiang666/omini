@@ -172,8 +172,10 @@ mod tests {
     use super::*;
     use crate::config::project::{ProjectDir, ProjectsDir};
     use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
-    use crate::types::config::{ProviderType, Settings, ThinkingEffort};
-    use crate::types::events::{LoadedSession, RuntimeToServerEvent, SessionUsageSnapshot};
+    use crate::types::config::Settings;
+    use crate::types::events::RuntimeToServerEvent;
+    use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
+    use omini_domain::events::{LoadedSession, SessionUsageSnapshot};
     use std::collections::HashMap;
     use std::fs;
     use std::path::Path;
@@ -227,7 +229,7 @@ mod tests {
                 "openai".to_string(),
                 ProviderConfig {
                     name: Some("OpenAI".to_string()),
-                    endpoint: ProviderType::OpenAI,
+                    endpoint: ProviderEndpointKind::OpenAI,
                     base_url: "https://openai.example".to_string(),
                     api_key: "test-key".to_string(),
                     models: Some(models),

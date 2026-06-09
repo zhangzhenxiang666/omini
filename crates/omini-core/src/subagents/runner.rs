@@ -6,12 +6,13 @@ use crate::tools::{
     ToolExecutionContext, ToolResult, ToolRuntimeContext, create_subagent_registry_from_parent,
 };
 use crate::types::config::{ProviderProfile, Settings};
-use crate::types::events::{
-    EngineToRuntimeEvent, SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent,
-    SubagentStatus, SubagentToolResultEvent, SubagentToolUseEvent,
-};
-use crate::types::message::{ContentBlock, Message, Role};
+use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
+use omini_domain::events::{
+    SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent, SubagentStatus,
+    SubagentToolResultEvent, SubagentToolUseEvent,
+};
+use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::project::sanitize_project_path as sanitize;
 use omini_provider_api::{FinishReason, LlmClient};
 use serde_json::json;
@@ -548,7 +549,8 @@ fn extract_final_text(messages: &[Message]) -> String {
 mod tests {
     use super::*;
     use crate::subagents::{AgentModelSpec, AgentSource, AgentToolPolicy};
-    use crate::types::config::{ModelConfig, ProviderProfile, ProviderType, Settings};
+    use crate::types::config::{ProviderProfile, Settings};
+    use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -569,10 +571,10 @@ mod tests {
             "openai".to_string(),
             ProviderProfile {
                 name: "OpenAI".to_string(),
-                endpoint: ProviderType::OpenAI,
+                endpoint: ProviderEndpointKind::OpenAI,
                 api_key: "openai-key".to_string(),
                 base_url: "https://openai.example".to_string(),
-                models: vec![ModelConfig {
+                models: vec![ModelInfo {
                     id: "gpt-5.4".to_string(),
                     name: None,
                     limit: 256000,
@@ -585,10 +587,10 @@ mod tests {
             "anthropic".to_string(),
             ProviderProfile {
                 name: "Anthropic".to_string(),
-                endpoint: ProviderType::Anthropic,
+                endpoint: ProviderEndpointKind::Anthropic,
                 api_key: "anthropic-key".to_string(),
                 base_url: "https://anthropic.example".to_string(),
-                models: vec![ModelConfig {
+                models: vec![ModelInfo {
                     id: "claude-test".to_string(),
                     name: None,
                     limit: 200000,
@@ -602,7 +604,7 @@ mod tests {
             api_key: "openai-key".to_string(),
             base_url: "https://openai.example".to_string(),
             model: "gpt-5.4".to_string(),
-            endpoint: ProviderType::OpenAI,
+            endpoint: ProviderEndpointKind::OpenAI,
             providers,
             active_provider: "openai".to_string(),
             system_prompt: None,
@@ -680,7 +682,7 @@ mod tests {
         assert!(warnings.is_empty());
         assert_eq!(settings.active_provider, "anthropic");
         assert_eq!(settings.model, "claude-test");
-        assert_eq!(settings.endpoint, ProviderType::Anthropic);
+        assert_eq!(settings.endpoint, ProviderEndpointKind::Anthropic);
         assert_eq!(settings.api_key, "anthropic-key");
     }
 
@@ -696,7 +698,7 @@ mod tests {
 
         assert_eq!(settings.active_provider, "openai");
         assert_eq!(settings.model, "gpt-5.4");
-        assert_eq!(settings.endpoint, ProviderType::OpenAI);
+        assert_eq!(settings.endpoint, ProviderEndpointKind::OpenAI);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("falling back"));
     }

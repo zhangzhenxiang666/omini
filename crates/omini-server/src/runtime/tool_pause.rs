@@ -63,8 +63,8 @@ fn tool_pause_update(event: &RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::types::events::{ToolPauseKind, ToolPauseRequest, UserInputPreview};
-    use omini_core::types::message::ToolResultBlock;
+    use omini_domain::events::{ToolPauseKind, ToolPauseRequest, UserInputPreview};
+    use omini_domain::message::ToolResultBlock;
 
     #[test]
     fn tool_pause_requested_event_adds_pending_resolution_id() {

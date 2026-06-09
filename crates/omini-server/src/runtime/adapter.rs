@@ -1,32 +1,32 @@
 use super::*;
-use omini_core::types::display as display_types;
-use omini_core::types::events as event_types;
-use omini_core::types::session as session_types;
+use omini_core::config::settings::Settings;
+use omini_core::session as session_types;
+use omini_domain::config::ThinkingEffort;
+use omini_domain::display as display_types;
+use omini_domain::events as event_types;
+use omini_domain::events::LoadedSession;
+use omini_domain::subagents::AgentRecord;
 use std::path::Path;
 
-pub(super) fn thinking_effort_to_protocol(
-    effort: omini_core::types::config::ThinkingEffort,
-) -> protocol::ThinkingEffort {
+pub(super) fn thinking_effort_to_protocol(effort: ThinkingEffort) -> protocol::ThinkingEffort {
     match effort {
-        omini_core::types::config::ThinkingEffort::None => protocol::ThinkingEffort::None,
-        omini_core::types::config::ThinkingEffort::Low => protocol::ThinkingEffort::Low,
-        omini_core::types::config::ThinkingEffort::Medium => protocol::ThinkingEffort::Medium,
-        omini_core::types::config::ThinkingEffort::High => protocol::ThinkingEffort::High,
-        omini_core::types::config::ThinkingEffort::XHigh => protocol::ThinkingEffort::XHigh,
-        omini_core::types::config::ThinkingEffort::Max => protocol::ThinkingEffort::Max,
+        ThinkingEffort::None => protocol::ThinkingEffort::None,
+        ThinkingEffort::Low => protocol::ThinkingEffort::Low,
+        ThinkingEffort::Medium => protocol::ThinkingEffort::Medium,
+        ThinkingEffort::High => protocol::ThinkingEffort::High,
+        ThinkingEffort::XHigh => protocol::ThinkingEffort::XHigh,
+        ThinkingEffort::Max => protocol::ThinkingEffort::Max,
     }
 }
 
-pub(super) fn thinking_effort_from_protocol(
-    effort: protocol::ThinkingEffort,
-) -> omini_core::types::config::ThinkingEffort {
+pub(super) fn thinking_effort_from_protocol(effort: protocol::ThinkingEffort) -> ThinkingEffort {
     match effort {
-        protocol::ThinkingEffort::None => omini_core::types::config::ThinkingEffort::None,
-        protocol::ThinkingEffort::Low => omini_core::types::config::ThinkingEffort::Low,
-        protocol::ThinkingEffort::Medium => omini_core::types::config::ThinkingEffort::Medium,
-        protocol::ThinkingEffort::High => omini_core::types::config::ThinkingEffort::High,
-        protocol::ThinkingEffort::XHigh => omini_core::types::config::ThinkingEffort::XHigh,
-        protocol::ThinkingEffort::Max => omini_core::types::config::ThinkingEffort::Max,
+        protocol::ThinkingEffort::None => ThinkingEffort::None,
+        protocol::ThinkingEffort::Low => ThinkingEffort::Low,
+        protocol::ThinkingEffort::Medium => ThinkingEffort::Medium,
+        protocol::ThinkingEffort::High => ThinkingEffort::High,
+        protocol::ThinkingEffort::XHigh => ThinkingEffort::XHigh,
+        protocol::ThinkingEffort::Max => ThinkingEffort::Max,
     }
 }
 
@@ -255,9 +255,7 @@ fn image_from_protocol(
     }
 }
 
-fn agent_record_snapshot_to_protocol(
-    record: omini_core::types::subagents::AgentRecord,
-) -> protocol::AgentRecord {
+fn agent_record_snapshot_to_protocol(record: AgentRecord) -> protocol::AgentRecord {
     let id = record
         .path
         .as_ref()
@@ -296,9 +294,7 @@ fn runtime_capability_status_to_protocol(
     }
 }
 
-pub(super) fn models_response_from_settings(
-    settings: &omini_core::types::config::Settings,
-) -> protocol::ModelsResponse {
+pub(super) fn models_response_from_settings(settings: &Settings) -> protocol::ModelsResponse {
     let mut providers = settings
         .providers
         .iter()
@@ -349,7 +345,7 @@ pub(super) fn initial_session_title_from_input(input: &protocol::UserInput) -> O
 
 /// 将持久化 snapshot 转成一组 runtime 事件供 TUI 恢复 UI。
 pub(super) fn session_snapshot_events(
-    snapshot: omini_core::types::events::LoadedSession,
+    snapshot: LoadedSession,
     context_window: Option<u32>,
     active_profile: ActiveProfile,
 ) -> Result<Vec<RuntimeEvent>, CoreError> {
@@ -563,8 +559,8 @@ fn notification_level_to_protocol(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::types::events as event_types;
-    use omini_core::types::events::SessionUsageSnapshot;
+    use omini_domain::events as event_types;
+    use omini_domain::events::SessionUsageSnapshot;
 
     #[test]
     fn initial_session_title_from_input_trims_and_limits_text() {

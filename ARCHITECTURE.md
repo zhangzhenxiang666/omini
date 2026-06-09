@@ -58,6 +58,7 @@ Current boundary notes:
 - `AgentCoreSession` exposes core/domain runtime snapshots and commands. `omini-server` owns protocol response/event projection for those snapshots.
 - `omini-core` owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and core-owned MCP runtime snapshots. `omini-server` owns protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
 - Skills and subagents discovery/file management are core implementation details. `omini-server` should call root-level core project capability facade functions and session snapshots instead of deep-linking `omini_core::skills` or `omini_core::subagents`.
+- Stable shared display/message/event/usage/subagent payloads are imported from `omini-domain` directly; `omini-core` does not provide `types/*` compatibility re-exports for those payloads. External crates should not deep-link through `omini_core::types`; core-owned session command/snapshot types are exposed through `omini_core::session`, while project agent mutation commands are exposed by the root-level core facade.
 - `omini-core` still contains a crate-private legacy command registry for compatibility; do not expose it or add new command behavior there.
 
 ## Runtime Flow

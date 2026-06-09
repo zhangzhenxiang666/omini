@@ -3,13 +3,13 @@ mod instructions;
 mod sections;
 
 use crate::skills::SkillSummary;
-use crate::subagents::AgentSummary;
 use crate::types::config::Settings;
-use crate::types::events::ActiveProfile;
 use environment::{EnvironmentContext, environment_context_section};
 use instructions::{
     load_global_instructions, load_project_instructions, project_instructions_section,
 };
+use omini_domain::events::ActiveProfile;
+use omini_domain::subagents::AgentSummary;
 use sections::{
     agent_identity_section, core_behavior_section, plan_mode_instructions_section,
     subagent_section, tool_instructions_section,
@@ -100,7 +100,8 @@ fn project_context_prompt_for_profile(cwd: &Path, active_profile: ActiveProfile)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::{ProviderType, Settings};
+    use crate::types::config::Settings;
+    use omini_domain::config::ProviderEndpointKind;
     use std::collections::HashMap;
     use std::fs;
     use std::path::PathBuf;
@@ -111,7 +112,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: "https://openai.example".to_string(),
             model: "gpt-test".to_string(),
-            endpoint: ProviderType::OpenAI,
+            endpoint: ProviderEndpointKind::OpenAI,
             providers: HashMap::new(),
             active_provider: "openai".to_string(),
             system_prompt: None,
