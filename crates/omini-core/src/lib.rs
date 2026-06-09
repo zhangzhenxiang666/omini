@@ -7,23 +7,104 @@ pub mod permissions;
 pub mod persistence;
 pub mod prompts;
 pub mod runtime;
-pub mod skills;
-pub mod subagents;
+mod skills;
+mod subagents;
 pub mod tools;
 pub mod types;
 
 use crate::runtime::AgentRuntime;
 use crate::types::events as event_types;
 use crate::types::events::{ActiveProfile, RuntimeToServerEvent, ServerToRuntimeEvent};
+use crate::types::project as project_types;
 use crate::types::session as session_types;
 use crate::types::subagents as subagent_types;
 use omini_domain::config::ProviderInfo;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 pub use crate::error::CoreError;
+
+pub fn project_agents_snapshot(
+    settings: &crate::types::config::Settings,
+) -> session_types::AgentsSnapshot {
+    let records = project_agent_records(&settings.cwd);
+    let models = models_snapshot_from_settings(settings);
+    session_types::AgentsSnapshot {
+        records,
+        providers: models.providers,
+        current_provider: models.current_provider,
+        current_model: models.current_model,
+    }
+}
+
+pub fn project_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummarySnapshot> {
+    user_invocable_skill_summaries(cwd)
+}
+
+pub fn save_project_agent(
+    cwd: &Path,
+    command: project_types::SaveProjectAgentCommand,
+) -> Result<project_types::AgentManagementUpdate, CoreError> {
+    if command.source_kind == subagent_types::AgentSourceKind::BuiltIn {
+        return Err(CoreError::new("内置 agent 不能写入"));
+    }
+    let original_path = command
+        .original_agent_id
+        .as_deref()
+        .map(|agent_id| resolve_editable_agent_path(cwd, agent_id))
+        .transpose()?;
+    if crate::subagents::agent_name_exists(cwd, &command.draft.name, original_path.as_deref()) {
+        return Err(CoreError::new(format!(
+            "agent '{}' 已存在",
+            command.draft.name
+        )));
+    }
+    let written_path = crate::subagents::write_agent_file(cwd, command.source_kind, &command.draft)
+        .map_err(CoreError::new)?;
+    if let Some(path) = original_path
+        && path != written_path
+    {
+        crate::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+    }
+    Ok(project_types::AgentManagementUpdate {
+        records: project_agent_records(cwd),
+    })
+}
+
+pub fn delete_project_agent(
+    cwd: &Path,
+    command: project_types::DeleteProjectAgentCommand,
+) -> Result<project_types::AgentManagementUpdate, CoreError> {
+    let path = resolve_editable_agent_path(cwd, &command.agent_id)?;
+    crate::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+    Ok(project_types::AgentManagementUpdate {
+        records: project_agent_records(cwd),
+    })
+}
+
+pub async fn generate_project_agent_draft(
+    settings: &crate::types::config::Settings,
+    description: &str,
+) -> Result<subagent_types::GeneratedAgentDraft, CoreError> {
+    let mut parse_error = None;
+    for attempt in 0..2 {
+        match crate::subagents::generate_agent_draft_checked_from_settings(settings, description)
+            .await
+        {
+            Ok(draft) => return Ok(draft),
+            Err(crate::subagents::GenerateAgentDraftError::Parse(message)) if attempt == 0 => {
+                parse_error = Some(message);
+            }
+            Err(error) => return Err(CoreError::new(error.to_string())),
+        }
+    }
+    Err(CoreError::new(
+        parse_error.unwrap_or_else(|| "生成 agent 失败".to_string()),
+    ))
+}
 
 /// 会话级 core facade，是 `omini-server` 和真正 agent runtime 之间的通信边界。
 ///
@@ -212,42 +293,17 @@ impl AgentCoreSession {
 
     pub fn list_agents(&self) -> session_types::AgentsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
-        let records = crate::subagents::list_agent_records(&settings.cwd);
-        let models = models_snapshot_from_settings(&settings);
-        session_types::AgentsSnapshot {
-            records,
-            providers: models.providers,
-            current_provider: models.current_provider,
-            current_model: models.current_model,
-        }
+        project_agents_snapshot(&settings)
     }
 
     pub fn list_skills(&self) -> Vec<session_types::SkillSummarySnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
-        let mut skills = crate::skills::load_skill_registry(&settings.cwd)
-            .skills()
-            .filter(|skill| skill.user_invocable)
-            .map(|skill| session_types::SkillSummarySnapshot {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-            })
-            .collect::<Vec<_>>();
-        skills.sort_by(|a, b| a.name.cmp(&b.name));
-        skills
+        user_invocable_skill_summaries(&settings.cwd)
     }
 
     pub fn get_skill(&self, skill_name: &str) -> Option<session_types::SkillDetailSnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
-        let registry = crate::skills::load_skill_registry(&settings.cwd);
-        registry
-            .get(skill_name)
-            .map(|skill| session_types::SkillDetailSnapshot {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                body: skill.body.clone(),
-                directory: skill.directory.clone(),
-                user_invocable: skill.user_invocable,
-            })
+        skill_detail_snapshot(&settings.cwd, skill_name)
     }
 
     pub fn runtime_skills(&self) -> Vec<session_types::RuntimeSkillSnapshot> {
@@ -419,6 +475,55 @@ impl AgentCoreSession {
 
 fn session_log_id(session_id: Option<&str>) -> &str {
     session_id.unwrap_or("unassigned")
+}
+
+fn project_agent_records(cwd: &Path) -> Vec<subagent_types::AgentRecord> {
+    crate::subagents::list_agent_records(cwd)
+}
+
+fn resolve_editable_agent_path(cwd: &Path, agent_id: &str) -> Result<PathBuf, CoreError> {
+    project_agent_records(cwd)
+        .into_iter()
+        .find(|record| record.editable && agent_record_id(record) == agent_id)
+        .and_then(|record| record.path)
+        .ok_or_else(|| CoreError::new(format!("agent '{agent_id}' 不存在或不可编辑")))
+}
+
+fn agent_record_id(record: &subagent_types::AgentRecord) -> String {
+    record
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| record.name.clone())
+}
+
+fn user_invocable_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummarySnapshot> {
+    let mut skills = crate::skills::load_skill_registry(cwd)
+        .skills()
+        .filter(|skill| skill.user_invocable)
+        .map(|skill| session_types::SkillSummarySnapshot {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
+    skills
+}
+
+fn skill_detail_snapshot(
+    cwd: &Path,
+    skill_name: &str,
+) -> Option<session_types::SkillDetailSnapshot> {
+    let registry = crate::skills::load_skill_registry(cwd);
+    registry
+        .get(skill_name)
+        .map(|skill| session_types::SkillDetailSnapshot {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            body: skill.body.clone(),
+            directory: skill.directory.clone(),
+            user_invocable: skill.user_invocable,
+        })
 }
 
 fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {

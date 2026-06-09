@@ -3,6 +3,7 @@ pub mod display;
 pub mod events;
 pub mod message;
 pub mod permissions;
+pub mod project;
 pub mod proposed_plan;
 pub mod session;
 pub mod subagents;

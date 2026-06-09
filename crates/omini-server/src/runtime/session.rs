@@ -243,7 +243,7 @@ impl RuntimeSession {
 
     pub(crate) fn broadcast_agent_management_updated(
         &self,
-        records: Vec<omini_core::subagents::AgentRecord>,
+        records: Vec<omini_domain::subagents::AgentRecord>,
     ) -> Result<(), CoreError> {
         let event =
             runtime_event_from_internal(RuntimeToServerEvent::AgentManagementUpdated { records })?;

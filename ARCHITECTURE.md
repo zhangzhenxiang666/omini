@@ -45,7 +45,7 @@ omini-protocol
 omini-provider-api --> omini-domain
 omini-mcp-client
 
-omini-core --> omini-domain + omini-protocol + omini-provider-api + omini-mcp-client
+omini-core --> omini-domain + omini-provider-api + omini-mcp-client
 omini-tui  --> omini-domain + omini-protocol
 omini-cli --> omini-protocol + omini-tui
 ```
@@ -55,8 +55,9 @@ Current boundary notes:
 - `omini-domain` owns the shared stable type surface used by core, TUI, and protocol.
 - `omini-provider-api` owns provider HTTP/SSE adapters and may depend on stable domain config/types, but it must not depend on core, server, protocol, CLI, or TUI.
 - `omini-mcp-client` owns the client-side MCP runtime layer and must not depend on core, server, protocol, CLI, or TUI.
-- `omini-core` still contains protocol adapter code in `AgentCoreSession`; that adapter should move toward the server boundary so core can become protocol-independent.
-- `omini-core` still owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
+- `AgentCoreSession` exposes core/domain runtime snapshots and commands. `omini-server` owns protocol response/event projection for those snapshots.
+- `omini-core` owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and core-owned MCP runtime snapshots. `omini-server` owns protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
+- Skills and subagents discovery/file management are core implementation details. `omini-server` should call root-level core project capability facade functions and session snapshots instead of deep-linking `omini_core::skills` or `omini_core::subagents`.
 - `omini-core` still contains a crate-private legacy command registry for compatibility; do not expose it or add new command behavior there.
 
 ## Runtime Flow

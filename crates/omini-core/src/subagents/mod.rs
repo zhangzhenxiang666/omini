@@ -10,10 +10,7 @@ mod runner;
 pub use crate::types::subagents::{
     AgentDraft, AgentRecord, AgentSourceKind, AgentSummary, GeneratedAgentDraft,
 };
-pub use generator::{
-    GenerateAgentDraftError, generate_agent_draft, generate_agent_draft_checked,
-    generate_agent_draft_checked_from_settings, parse_generated_agent,
-};
+pub(crate) use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
 pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 
 #[derive(Debug, Clone)]

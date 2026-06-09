@@ -155,19 +155,19 @@ impl SessionManager {
             .load_state()
             .map(|state| state.show_thinking_blocks)
             .unwrap_or(true);
-        let agents = omini_core::subagents::list_agent_records(&self.cwd)
+        let agents = omini_core::project_agents_snapshot(&settings)
+            .records
             .into_iter()
             .map(|agent| protocol::AgentSummary {
                 name: agent.name,
                 description: agent.description,
             })
             .collect();
-        let skills = omini_core::skills::load_skill_registry(&self.cwd)
-            .skills()
-            .filter(|skill| skill.user_invocable)
+        let skills = omini_core::project_skill_summaries(&self.cwd)
+            .into_iter()
             .map(|skill| protocol::SkillSummary {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
+                name: skill.name,
+                description: skill.description,
             })
             .collect();
 
@@ -276,7 +276,9 @@ impl SessionManager {
 
     pub(crate) fn list_agents(&self) -> Result<protocol::AgentsResponse, CoreError> {
         let settings = self.fresh_settings_with_project_state()?;
-        Ok(agents_response_from_settings(&self.cwd, &settings))
+        Ok(agents_snapshot_to_protocol(
+            omini_core::project_agents_snapshot(&settings),
+        ))
     }
 
     pub(crate) async fn save_agent(
@@ -284,33 +286,16 @@ impl SessionManager {
         request: protocol::SaveAgentRequest,
         target_session_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        if request.source_kind == protocol::AgentSourceKind::BuiltIn {
-            return Err(CoreError::new("内置 agent 不能写入"));
-        }
-        let original_path = request
-            .original_agent_id
-            .as_deref()
-            .map(|agent_id| self.resolve_editable_agent_path(agent_id))
-            .transpose()?;
-        if omini_core::subagents::agent_name_exists(
+        let update = omini_core::save_project_agent(
             &self.cwd,
-            &request.draft.name,
-            original_path.as_deref(),
-        ) {
-            return Err(CoreError::new(format!(
-                "agent '{}' 已存在",
-                request.draft.name
-            )));
-        }
-        let written_path =
-            omini_core::subagents::write_agent_file(&self.cwd, request.source_kind, &request.draft)
-                .map_err(CoreError::new)?;
-        if let Some(path) = original_path
-            && path != written_path
-        {
-            omini_core::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
-        }
-        self.refresh_target_session_agents(target_session_id).await
+            omini_core::types::project::SaveProjectAgentCommand {
+                source_kind: request.source_kind,
+                original_agent_id: request.original_agent_id,
+                draft: request.draft,
+            },
+        )?;
+        self.refresh_target_session_agents(target_session_id, update.records)
+            .await
     }
 
     pub(crate) async fn delete_agent(
@@ -318,9 +303,14 @@ impl SessionManager {
         agent_id: &str,
         target_session_id: Option<&str>,
     ) -> Result<(), CoreError> {
-        let path = self.resolve_editable_agent_path(agent_id)?;
-        omini_core::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
-        self.refresh_target_session_agents(target_session_id).await
+        let update = omini_core::delete_project_agent(
+            &self.cwd,
+            omini_core::types::project::DeleteProjectAgentCommand {
+                agent_id: agent_id.to_string(),
+            },
+        )?;
+        self.refresh_target_session_agents(target_session_id, update.records)
+            .await
     }
 
     pub(crate) async fn generate_agent(
@@ -328,39 +318,15 @@ impl SessionManager {
         request: protocol::GenerateAgentRequest,
     ) -> Result<protocol::GenerateAgentResponse, CoreError> {
         let settings = self.settings_for_agent_generation(&request)?;
-        let mut parse_error = None;
-        for attempt in 0..2 {
-            match omini_core::subagents::generate_agent_draft_checked_from_settings(
-                &settings,
-                &request.description,
-            )
-            .await
-            {
-                Ok(draft) => {
-                    return Ok(protocol::GenerateAgentResponse {
-                        draft: protocol::GeneratedAgentDraft {
-                            name: draft.name,
-                            description: draft.description,
-                            instructions: draft.instructions,
-                        },
-                    });
-                }
-                Err(omini_core::subagents::GenerateAgentDraftError::Parse(message))
-                    if attempt == 0 =>
-                {
-                    parse_error = Some(message);
-                }
-                Err(error) => return Err(CoreError::new(error.to_string())),
-            }
-        }
-        Err(CoreError::new(
-            parse_error.unwrap_or_else(|| "生成 agent 失败".to_string()),
-        ))
+        let draft =
+            omini_core::generate_project_agent_draft(&settings, &request.description).await?;
+        Ok(protocol::GenerateAgentResponse { draft })
     }
 
     async fn refresh_target_session_agents(
         &self,
         target_session_id: Option<&str>,
+        records: Vec<omini_domain::subagents::AgentRecord>,
     ) -> Result<(), CoreError> {
         let Some(session_id) = target_session_id else {
             return Ok(());
@@ -369,9 +335,7 @@ impl SessionManager {
             return Ok(());
         };
         session.reload_subagent_registry().await?;
-        session.broadcast_agent_management_updated(omini_core::subagents::list_agent_records(
-            &self.cwd,
-        ))
+        session.broadcast_agent_management_updated(records)
     }
 
     fn cached_session(&self, session_id: &str) -> Option<Arc<RuntimeSession>> {
@@ -380,14 +344,6 @@ impl SessionManager {
             .expect("sessions lock poisoned")
             .get(session_id)
             .cloned()
-    }
-
-    fn resolve_editable_agent_path(&self, agent_id: &str) -> Result<PathBuf, CoreError> {
-        omini_core::subagents::list_agent_records(&self.cwd)
-            .into_iter()
-            .find(|record| record.editable && agent_record_id(record) == agent_id)
-            .and_then(|record| record.path)
-            .ok_or_else(|| CoreError::new(format!("agent '{agent_id}' 不存在或不可编辑")))
     }
 
     fn settings_for_agent_generation(
@@ -832,27 +788,6 @@ fn load_validated_config(
 
 fn config_core_error(error: omini_core::types::config::ConfigError) -> CoreError {
     CoreError::config("failed to load user config", error)
-}
-
-fn agents_response_from_settings(
-    cwd: &std::path::Path,
-    settings: &omini_core::types::config::Settings,
-) -> protocol::AgentsResponse {
-    let models = models_response_from_settings(settings);
-    agents_snapshot_to_protocol(omini_core::types::session::AgentsSnapshot {
-        records: omini_core::subagents::list_agent_records(cwd),
-        providers: models.providers,
-        current_provider: models.current_provider,
-        current_model: models.current_model,
-    })
-}
-
-fn agent_record_id(record: &omini_core::subagents::AgentRecord) -> String {
-    record
-        .path
-        .as_ref()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| record.name.clone())
 }
 
 fn session_summaries_with_runtime_states(

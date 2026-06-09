@@ -41,18 +41,7 @@ pub async fn generate_agent_draft_checked_from_settings(
     .await
 }
 
-pub async fn generate_agent_draft(
-    llm_client: &LlmClient,
-    model: &str,
-    thinking_effort: Option<ThinkingEffort>,
-    description: &str,
-) -> Result<GeneratedAgentDraft, String> {
-    generate_agent_draft_checked(llm_client, model, thinking_effort, description)
-        .await
-        .map_err(|error| error.to_string())
-}
-
-pub async fn generate_agent_draft_checked(
+async fn generate_agent_draft_checked(
     llm_client: &LlmClient,
     model: &str,
     thinking_effort: Option<ThinkingEffort>,
