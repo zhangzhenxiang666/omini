@@ -169,10 +169,15 @@ impl AgentRuntime {
             &skill_registry.injected_summaries(),
             active_profile,
         ));
-        let permission_engine = Arc::new(PermissionEngine::load(
+        let permission_sources = omini_config::permissions::load_permission_sources(
+            &settings.cwd,
+            dirs::home_dir().as_deref(),
+            settings.permissions.clone(),
+        );
+        let permission_engine = Arc::new(PermissionEngine::from_sources(
             settings.cwd.clone(),
             dirs::home_dir(),
-            settings.permissions.clone(),
+            permission_sources,
         ));
 
         for diagnostic in &subagent_registry.diagnostics {
