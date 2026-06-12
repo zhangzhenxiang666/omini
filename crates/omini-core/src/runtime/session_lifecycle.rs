@@ -170,9 +170,8 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::project::{ProjectDir, ProjectsDir};
-    use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
-    use crate::types::config::Settings;
+    use omini_config::project::{ProjectDir, ProjectsDir};
+    use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
     use omini_domain::events::{LoadedSession, SessionUsageSnapshot};
     use omini_runtime_api::RuntimeToServerEvent;

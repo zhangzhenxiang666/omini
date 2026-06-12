@@ -1,11 +1,28 @@
+//! `PermissionEngine`:runtime 权限决策层。
+//!
+//! 该模块负责把来自 `omini_config::permissions::PermissionSources` 的原始
+//! 权限配置解析成 `CompiledPermissions`,并根据 `PermissionPreview`、active
+//! profile 和内建 bash 风险策略做 allow / ask / deny 决策。
+//!
+//! **配置文件加载不在这里**:读 `~/.omini/config.toml [permissions]`、
+//! `<cwd>/.omini/permissions.toml` 兼容入口、扫描 `~/.omini/rules/*.rules`
+//! 与 `<cwd>/.omini/rules/*.rules` 全部由
+//! [`omini_config::permissions::load_permission_sources`] 完成;本模块只
+//! 消费 `PermissionSources`、做规则 DSL 解析(`prefix_rule(...)` 语法、
+//! `Read(**/...)` 路径 specifier)与最终决策。这样划界让 `omini-config`
+//! 不越界成"通用规则引擎",将来若独立 `omini-permissions` crate 也只需
+//! 迁出本模块,config 层接口保持稳定。
+//!
+//! [`omini_config::permissions::load_permission_sources`]: ../../../omini_config/permissions/fn.load_permission_sources.html
+
+use omini_config::permissions::PermissionSources;
 use omini_domain::events::{
     ActiveProfile, BashPermissionPreview, PermissionPreview, PermissionSource,
 };
 use serde_json::Value;
-use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use crate::types::permissions::RawPermissionConfig;
+pub use omini_config::RawPermissionConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
@@ -105,30 +122,27 @@ impl PermissionEngine {
         }
     }
 
-    pub fn load(
+    pub fn from_sources(
         cwd: impl Into<PathBuf>,
         home: Option<PathBuf>,
-        user_permissions: Option<RawPermissionConfig>,
+        sources: PermissionSources,
     ) -> Self {
         let cwd = cwd.into();
         let mut rules = CompiledPermissions::default();
-        let mut diagnostics = Vec::new();
-        if let Some(raw) = user_permissions {
-            let source = user_config_path(home.as_deref());
-            rules.extend_tool_rules(raw, Some(source.display().to_string()), &mut diagnostics);
+        let mut diagnostics = sources.diagnostics().to_vec();
+
+        if let Some((raw, path)) = sources.user_raw {
+            rules.extend_tool_rules(raw, Some(path.display().to_string()), &mut diagnostics);
         }
-        if let Some((raw, source)) = load_project_permissions(&cwd) {
-            rules.extend_tool_rules(raw, Some(source.display().to_string()), &mut diagnostics);
+        if let Some((raw, path)) = sources.project_raw {
+            rules.extend_tool_rules(raw, Some(path.display().to_string()), &mut diagnostics);
         }
-        rules.bash_rules.extend(load_bash_rules(
-            home.as_deref()
-                .map(|home| home.join(".omini").join("rules")),
-            &mut diagnostics,
-        ));
-        rules.bash_rules.extend(load_bash_rules(
-            Some(cwd.join(".omini").join("rules")),
-            &mut diagnostics,
-        ));
+        for file in sources.bash_rule_files {
+            let (parsed, mut warnings) =
+                parse_bash_rules_with_diagnostics(&file.content, &file.path);
+            rules.bash_rules.extend(parsed);
+            diagnostics.append(&mut warnings);
+        }
 
         Self {
             cwd,
@@ -140,17 +154,7 @@ impl PermissionEngine {
 
     #[cfg(test)]
     pub fn for_test(cwd: impl Into<PathBuf>, raw: RawPermissionConfig) -> Self {
-        Self {
-            cwd: cwd.into(),
-            home: None,
-            rules: {
-                let mut rules = CompiledPermissions::default();
-                let mut diagnostics = Vec::new();
-                rules.extend_tool_rules(raw, None, &mut diagnostics);
-                rules
-            },
-            diagnostics: Vec::new(),
-        }
+        Self::from_sources(cwd, None, PermissionSources::from_raw(raw))
     }
 
     pub fn diagnostics(&self) -> &[String] {
@@ -398,13 +402,6 @@ impl PermissionEngine {
     }
 }
 
-fn user_config_path(home: Option<&Path>) -> PathBuf {
-    home.map(Path::to_path_buf)
-        .or_else(dirs::home_dir)
-        .map(|home| home.join(".omini").join("config.toml"))
-        .unwrap_or_else(|| PathBuf::from("~/.omini/config.toml"))
-}
-
 impl CompiledPermissions {
     fn extend_tool_rules(
         &mut self,
@@ -545,44 +542,6 @@ impl PathMatcher {
                 .then(|| self.pattern.replace("/**/", "/"))
                 .is_some_and(|pattern| wildcard_match(&pattern, &text))
     }
-}
-
-fn load_project_permissions(cwd: &Path) -> Option<(RawPermissionConfig, PathBuf)> {
-    let path = cwd.join(".omini").join("permissions.toml");
-    let content = fs::read_to_string(&path).ok()?;
-    toml::from_str(&content).ok().map(|raw| (raw, path))
-}
-
-fn load_bash_rules(dir: Option<PathBuf>, diagnostics: &mut Vec<String>) -> Vec<BashRule> {
-    let Some(dir) = dir else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut paths = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "rules") {
-            paths.push(path);
-        }
-    }
-    paths.sort();
-    let mut rules = Vec::new();
-    for path in paths {
-        match fs::read_to_string(&path) {
-            Ok(content) => {
-                let (parsed, mut warnings) = parse_bash_rules_with_diagnostics(&content, &path);
-                rules.extend(parsed);
-                diagnostics.append(&mut warnings);
-            }
-            Err(e) => diagnostics.push(format!(
-                "{}: failed to read rules file: {e}",
-                path.display()
-            )),
-        }
-    }
-    rules
 }
 
 fn parse_tool_rules(
@@ -1683,5 +1642,42 @@ prefix_rule(
         assert!(rules[0].matches(&["git".to_string(), "status".to_string()]));
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics[0].contains("match example does not match pattern"));
+    }
+
+    #[test]
+    fn from_sources_parses_bash_rule_files_and_surfaces_diagnostics() {
+        // 构造一份"故意坏掉 match 示例"的 .rules 文件,
+        // 验证 PermissionSources 喂给 engine 后,
+        // 解析期产生的 diagnostic 能从 engine.diagnostics() 透传出来。
+        let rule_path = PathBuf::from("/repo/.omini/rules/typed.rules");
+        let mut sources =
+            omini_config::permissions::PermissionSources::from_raw(RawPermissionConfig::default());
+        sources
+            .bash_rule_files
+            .push(omini_config::permissions::RawBashRulesFile {
+                path: rule_path.clone(),
+                content: r#"
+prefix_rule(
+ pattern = ["git", "push"],
+ decision = "allow",
+ match = [
+   "git status",
+ ],
+)
+"#
+                .to_string(),
+            });
+
+        let engine =
+            PermissionEngine::from_sources("/repo", Some(PathBuf::from("/home/user")), sources);
+
+        assert!(
+            engine
+                .diagnostics()
+                .iter()
+                .any(|d| d.contains("match example does not match pattern")),
+            "expected bash-rule parse diagnostic, got: {:?}",
+            engine.diagnostics()
+        );
     }
 }

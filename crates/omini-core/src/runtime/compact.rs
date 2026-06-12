@@ -1,8 +1,8 @@
-use crate::config::project::SessionDir;
 use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
-use crate::types::config::{CompactConfig, Settings};
 use crate::types::events::EngineToRuntimeEvent;
+use omini_config::project::SessionDir;
+use omini_config::{CompactConfig, Settings};
 use omini_domain::events::{
     CompactEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
     CompactSummaryFinishedEvent, CompactTrigger,
@@ -1445,7 +1445,7 @@ async fn emit_compact_summary_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::ProviderProfile;
+    use omini_config::ProviderProfile;
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use omini_domain::message::{ContentBlock, ToolUseBlock};
     use std::collections::HashMap;

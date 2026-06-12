@@ -5,10 +5,10 @@
 //! 并把当前运行态投影成 protocol DTO。
 
 use chrono::{DateTime, Utc};
+use omini_config::project::ProjectDir;
+use omini_config::{ConfigError, OminiRoot, Settings, UserConfig};
 use omini_core::AgentCoreSession;
 use omini_core::CoreError;
-use omini_core::config::project::ProjectDir;
-use omini_core::config::settings::{ConfigError, OminiRoot, Settings, UserConfig};
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display::HistoryItem;
 use omini_domain::events::{ActiveProfile, LoadedSession};

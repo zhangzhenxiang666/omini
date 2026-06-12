@@ -1,11 +1,10 @@
-use crate::config::project::ProjectDir;
-use crate::config::project::SessionDir;
 use crate::engine::QueryEngine;
 use crate::mcp::McpManager;
 use crate::permissions::PermissionEngine;
 use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
-use crate::types::config::Settings;
+use omini_config::Settings;
+use omini_config::project::{ProjectDir, SessionDir};
 use omini_domain::display::{DisplayMessage, HistoryItem};
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
@@ -90,7 +89,7 @@ pub struct AgentRuntime {
     pub(super) query_engine: QueryEngine,
     /// 工具注册表，持有所有注册的工具。
     pub(super) tool_registry: Arc<ToolRegistry>,
-    /// 从用户配置加载的 MCP 服务管理器。
+    /// 从有效配置加载的 MCP 服务管理器。
     pub(super) mcp_manager: Arc<McpManager>,
     /// runtime 是否已在 query 前等待过 MCP 启动。
     pub(super) mcp_initialized: bool,
@@ -170,10 +169,15 @@ impl AgentRuntime {
             &skill_registry.injected_summaries(),
             active_profile,
         ));
-        let permission_engine = Arc::new(PermissionEngine::load(
+        let permission_sources = omini_config::permissions::load_permission_sources(
+            &settings.cwd,
+            dirs::home_dir().as_deref(),
+            settings.permissions.clone(),
+        );
+        let permission_engine = Arc::new(PermissionEngine::from_sources(
             settings.cwd.clone(),
             dirs::home_dir(),
-            settings.permissions.clone(),
+            permission_sources,
         ));
 
         for diagnostic in &subagent_registry.diagnostics {
@@ -235,13 +239,12 @@ impl AgentRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::project::ProjectsDir;
-    use crate::config::settings::{ModelEntry, ProviderConfig, UserConfig};
     use crate::engine::ToolPauseResolver;
     use crate::runtime::active_run;
     use crate::runtime::manual_compact::persist_compact_summary_event;
-    use crate::types::config::Settings;
     use crate::types::events::EngineToRuntimeEvent;
+    use omini_config::project::ProjectsDir;
+    use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::display::UserDraft;
     use omini_domain::events::{

@@ -1,6 +1,6 @@
 use super::service::RunStart;
-use crate::config::project::SessionDir;
 use chrono::Utc;
+use omini_config::project::SessionDir;
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use omini_domain::message::{ContentBlock, Message};
 use omini_runtime_api::persistence::RuntimePersistenceEvent;

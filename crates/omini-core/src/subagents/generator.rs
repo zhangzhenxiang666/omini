@@ -1,4 +1,4 @@
-use crate::types::config::Settings;
+use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::subagents::GeneratedAgentDraft;

@@ -1,10 +1,10 @@
-use crate::config::project::{ProjectDir, SessionDir};
 use crate::permissions::{PermissionDecision, PermissionEngine};
 use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
-use crate::types::config::Settings;
 use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;
+use omini_config::Settings;
+use omini_config::project::{ProjectDir, SessionDir};
 use omini_domain::events::{
     ActiveProfile, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
     ToolPauseResponse, UserInputPreview,

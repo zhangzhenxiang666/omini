@@ -1,7 +1,7 @@
 //! `omini-server` 独立进程的启动参数和 daemonize 流程。
 
 use crate::runtime_state;
-use omini_core::config::settings::OminiRoot;
+use omini_config::OminiRoot;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::PathBuf;

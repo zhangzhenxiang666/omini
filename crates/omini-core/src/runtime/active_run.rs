@@ -1,5 +1,5 @@
-use crate::config::project::ProjectDir;
-use crate::types::config::Settings;
+use omini_config::Settings;
+use omini_config::project::ProjectDir;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_provider_api::LlmClient;

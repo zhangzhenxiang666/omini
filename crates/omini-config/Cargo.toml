@@ -1,0 +1,13 @@
+[package]
+name = "omini-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono.workspace = true
+dirs.workspace = true
+omini-domain.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

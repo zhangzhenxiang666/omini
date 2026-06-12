@@ -639,8 +639,7 @@ fn thinking_display_notification(show: bool) -> Notification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::config::settings::Settings;
-    use omini_core::config::settings::{ModelEntry, ProviderConfig, UserConfig};
+    use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
 
     fn test_settings(model: &str) -> Settings {

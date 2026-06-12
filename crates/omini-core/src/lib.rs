@@ -1,4 +1,3 @@
-pub mod config;
 pub mod engine;
 pub mod error;
 pub mod frontmatter;
@@ -12,6 +11,8 @@ pub mod tools;
 pub mod types;
 
 use crate::runtime::AgentRuntime;
+use omini_config::Settings;
+use omini_config::project::ProjectDir;
 use omini_domain::config::ProviderInfo;
 use omini_domain::events::{ActiveProfile, LoadedSession};
 use omini_domain::subagents as subagent_types;
@@ -27,9 +28,7 @@ use tracing::Instrument;
 
 pub use crate::error::CoreError;
 
-pub fn project_agents_snapshot(
-    settings: &crate::types::config::Settings,
-) -> session_types::AgentsSnapshot {
+pub fn project_agents_snapshot(settings: &Settings) -> session_types::AgentsSnapshot {
     let records = project_agent_records(&settings.cwd);
     let models = models_snapshot_from_settings(settings);
     session_types::AgentsSnapshot {
@@ -86,7 +85,7 @@ pub fn delete_project_agent(
 }
 
 pub async fn generate_project_agent_draft(
-    settings: &crate::types::config::Settings,
+    settings: &Settings,
     description: &str,
 ) -> Result<subagent_types::GeneratedAgentDraft, CoreError> {
     let mut parse_error = None;
@@ -129,7 +128,7 @@ pub struct AgentCoreSession {
     // 持久化事件按 server-core 契约广播给 server，由 server 负责事务、replay 裁剪和错误处理。
     persistence_tx: broadcast::Sender<RuntimePersistenceEvent>,
     // HTTP 查询和配置 mutation 需要读取当前会话配置快照；真正执行仍通过 request_tx 进入 runtime。
-    settings: Arc<RwLock<crate::types::config::Settings>>,
+    settings: Arc<RwLock<Settings>>,
     // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前会话实际运行状态。
     mcp_manager: Arc<crate::mcp::McpManager>,
     // 与 runtime 共享同一个能力 store，保证只读状态反映当前 session 实际能力。
@@ -148,24 +147,21 @@ impl AgentCoreSession {
     /// 返回值是 server 唯一需要持有的 core 会话句柄。runtime 本身只消费
     /// `ServerToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转成 broadcast
     /// stream，并把持久化事件转成 broadcast stream。
-    pub fn spawn(
-        settings: crate::types::config::Settings,
-        project: config::project::ProjectDir,
-    ) -> Self {
+    pub fn spawn(settings: Settings, project: ProjectDir) -> Self {
         Self::spawn_with_active_profile(settings, project, ActiveProfile::Main)
     }
 
     pub fn spawn_with_active_profile(
-        settings: crate::types::config::Settings,
-        project: config::project::ProjectDir,
+        settings: Settings,
+        project: ProjectDir,
         active_profile: ActiveProfile,
     ) -> Self {
         Self::spawn_with_session_id(settings, project, None, active_profile)
     }
 
     pub fn spawn_for_session_with_active_profile(
-        settings: crate::types::config::Settings,
-        project: config::project::ProjectDir,
+        settings: Settings,
+        project: ProjectDir,
         session_id: String,
         active_profile: ActiveProfile,
     ) -> Self {
@@ -173,8 +169,8 @@ impl AgentCoreSession {
     }
 
     fn spawn_with_session_id(
-        settings: crate::types::config::Settings,
-        project: config::project::ProjectDir,
+        settings: Settings,
+        project: ProjectDir,
         session_id: Option<String>,
         active_profile: ActiveProfile,
     ) -> Self {
@@ -674,9 +670,7 @@ fn runtime_skill_source_sort(source_kind: session_types::RuntimeSkillSourceKind)
     }
 }
 
-fn models_snapshot_from_settings(
-    settings: &crate::types::config::Settings,
-) -> session_types::ModelsSnapshot {
+fn models_snapshot_from_settings(settings: &Settings) -> session_types::ModelsSnapshot {
     let mut providers = settings
         .providers
         .iter()

@@ -3,11 +3,11 @@ mod instructions;
 mod sections;
 
 use crate::skills::SkillSummary;
-use crate::types::config::Settings;
 use environment::{EnvironmentContext, environment_context_section};
 use instructions::{
     load_global_instructions, load_project_instructions, project_instructions_section,
 };
+use omini_config::Settings;
 use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
 use sections::{
@@ -100,7 +100,7 @@ fn project_context_prompt_for_profile(cwd: &Path, active_profile: ActiveProfile)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::Settings;
+    use omini_config::Settings;
     use omini_domain::config::ProviderEndpointKind;
     use std::collections::HashMap;
     use std::fs;

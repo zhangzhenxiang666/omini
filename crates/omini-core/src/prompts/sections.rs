@@ -1,5 +1,5 @@
 use crate::skills::SkillSummary;
-use crate::types::config::Settings;
+use omini_config::Settings;
 use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
 

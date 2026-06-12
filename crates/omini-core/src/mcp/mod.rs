@@ -1,9 +1,9 @@
 use crate::tools::{Tool, ToolRegistry, ToolResult, tool_metadata};
-use crate::types::config::{
+use async_trait::async_trait;
+use omini_config::{
     McpServerConfig as CoreMcpServerConfig,
     McpServerTransportConfig as CoreMcpServerTransportConfig, Settings,
 };
-use async_trait::async_trait;
 use omini_domain::events::{McpPermissionPreview, PermissionPreview};
 use omini_mcp_client::{
     GetPromptResult, McpCallOutput, McpCatalog, McpClientSet,
@@ -442,7 +442,7 @@ impl Hasher for StableHasher {
 mod tests {
     use super::*;
     use crate::tools::ToolExecutionContext;
-    use crate::types::config::McpServerTransportConfig;
+    use omini_config::McpServerTransportConfig;
     use std::path::PathBuf;
 
     fn server_tool(server_name: &str, server_tool_name: &str) -> McpServerToolSpec {
