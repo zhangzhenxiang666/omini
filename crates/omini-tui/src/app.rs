@@ -75,6 +75,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
         .map(client::thinking_effort_from_protocol);
     state.status_bar.active_provider = attach.active_provider.clone();
     state.status_bar.cwd = cwd.clone();
+    state.status_bar.git_branch = attach.git_branch.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
     state.startup_mcp_server_count = attach.mcp_server_count;
     state.startup_has_project_instructions = attach.has_project_instructions;

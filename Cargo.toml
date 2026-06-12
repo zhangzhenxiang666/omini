@@ -37,7 +37,6 @@ ratatui = "0.30.0"
 reqwest = { version = "0.13.3", features = ["json", "stream"] }
 rmcp = { version = "0.15.0", default-features = false, features = [
     "client",
-    "macros",
     "schemars",
     "server",
     "transport-child-process",

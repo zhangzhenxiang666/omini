@@ -77,6 +77,9 @@ pub struct ProjectAttachResponse {
     pub agents: Vec<AgentSummary>,
     /// attach 时可用于 slash skill 列表的用户可调用 skill 摘要。
     pub skills: Vec<SkillSummary>,
+    /// 项目工作目录的 git 分支；不在 git 仓库中时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
 }
 
 /// 项目级运行配置更新后的快照；用于无活跃 session 的 TUI 状态同步。
@@ -133,6 +136,7 @@ pub enum TypedRuntimeEvent {
     },
     TurnStarted,
     TurnEnded,
+    GitBranchChanged(GitBranchChangedEvent),
     ThinkingDelta(RuntimeDeltaEvent),
     TextDelta(RuntimeDeltaEvent),
     ProposedPlanDelta(RuntimeDeltaEvent),
@@ -174,6 +178,7 @@ impl TypedRuntimeEvent {
             Self::ProposedPlanDelta(_) => "proposed_plan_delta",
             Self::ToolUse(_) => "tool_use",
             Self::ToolResult(_) => "tool_result",
+            Self::GitBranchChanged(_) => "git_branch_changed",
             Self::CompactSummaryStarted(_) => "compact_summary_started",
             Self::CompactSummaryDelta(_) => "compact_summary_delta",
             Self::CompactSummaryFinished(_) => "compact_summary_finished",
@@ -239,6 +244,12 @@ pub struct ActiveProfileChangedEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTitleChangedEvent {
     pub title: Option<String>,
+}
+
+/// 当前 git 分支已变化。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitBranchChangedEvent {
+    pub branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,6 +477,9 @@ pub struct SessionRuntimeStatus {
     /// 当前会话可用的子 agent 能力列表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagent_sessions: Vec<AgentSummary>,
+    /// 当前工作目录的 git 分支；不在 git 仓库中时为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_branch: Option<String>,
 }
 
 /// 项目下多个活跃会话的运行态列表响应。
@@ -1127,6 +1141,7 @@ mod tests {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             subagent_sessions: Vec::new(),
+            git_branch: None,
         };
 
         assert_eq!(
@@ -1161,6 +1176,7 @@ mod tests {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             subagent_sessions: Vec::new(),
+            git_branch: None,
         };
 
         assert_eq!(
@@ -1199,6 +1215,7 @@ mod tests {
                 name: "explorer".to_string(),
                 description: "Read-only exploration agent.".to_string(),
             }],
+            git_branch: None,
         };
 
         let value = serde_json::to_value(status).unwrap();
@@ -1287,6 +1304,7 @@ mod tests {
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
                 subagent_sessions: Vec::new(),
+                git_branch: None,
             },
         };
         let value = serde_json::to_value(envelope).unwrap();

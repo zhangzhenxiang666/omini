@@ -78,6 +78,7 @@ pub(super) struct RuntimeStatusSnapshotContext {
     pub mcp_servers: Vec<RuntimeMcpServerSnapshot>,
     pub subagent_sessions: Vec<protocol::AgentSummary>,
     pub now: DateTime<Utc>,
+    pub git_branch: Option<String>,
 }
 
 impl RuntimeStatusProjection {
@@ -179,6 +180,7 @@ impl RuntimeStatusProjection {
             skills: runtime_skills_to_protocol(context.skills),
             mcp_servers: mcp_servers_to_protocol(context.mcp_servers),
             subagent_sessions: context.subagent_sessions,
+            git_branch: context.git_branch,
         }
     }
 
@@ -572,6 +574,7 @@ mod tests {
                 mcp_servers: Vec::new(),
                 subagent_sessions: Vec::new(),
                 now,
+                git_branch: None,
             },
         )
     }
@@ -833,6 +836,7 @@ mod tests {
                     description: "Read-only exploration agent.".to_string(),
                 }],
                 now,
+                git_branch: None,
             },
         );
 

@@ -187,6 +187,13 @@ fn build_left_status_line(
         ),
         Span::styled("·", Style::default().fg(Color::DarkGray)),
     ];
+    if let Some(branch) = &state.status_bar.git_branch {
+        base_spans.push(Span::styled(
+            format!(" {} ", branch),
+            Style::default().fg(Color::Rgb(0x8f, 0xb3, 0xe3)),
+        ));
+        base_spans.push(Span::styled("·", Style::default().fg(Color::DarkGray)));
+    }
     append_usage_spans(&state.status_bar, &mut base_spans);
 
     #[cfg(debug_assertions)]

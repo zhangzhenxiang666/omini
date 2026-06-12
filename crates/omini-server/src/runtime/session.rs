@@ -1,5 +1,8 @@
 use super::*;
+use crate::git;
 use omini_domain::events::{Notification, SessionUsageSnapshot};
+use omini_protocol::GitBranchChangedEvent;
+use omini_protocol::TypedRuntimeEvent;
 use tracing::Instrument;
 
 /// projection 和 replay buffer。HTTP 路由拿到的 `RuntimeSession` 不直接操作 core 的内部
@@ -25,6 +28,8 @@ pub(crate) struct RuntimeSession {
     pending_tool_pauses: Arc<Mutex<HashSet<String>>>,
     // 从 runtime 事件流派生的轻量状态投影，供 session status API 快速读取。
     status_projection: Arc<Mutex<RuntimeStatusProjection>>,
+    // 当前工作目录的 git 分支缓存；fanout task 在 TurnEnded 后更新，status API 查询用。
+    git_branch: Arc<Mutex<Option<String>>>,
     // 尚未被 snapshot 或持久化覆盖的运行中事件尾部，用于 WebSocket 重连补发。
     replay_buffer: Arc<Mutex<RuntimeReplayBuffer>>,
     // controller 变化广播流；WebSocket 连接用它同步观察者/控制者状态。
@@ -99,7 +104,11 @@ impl RuntimeSession {
         let runtime_event_fanout_tx = runtime_event_tx.clone();
         let runtime_replay_buffer = Arc::clone(&replay_buffer);
         let runtime_status_projection = Arc::clone(&status_projection);
+        let git_branch = Arc::new(Mutex::new(git::detect_git_branch(&settings.cwd)));
+        let git_branch_cache = Arc::clone(&git_branch);
+        let git_branch_cwd = settings.cwd.clone();
         // runtime 事件加上本地 seq 后再广播，WebSocket 层用 seq 处理 replay/订阅交叠。
+        // TurnEnded 时同步检测 git 分支变化，有变化时更新缓存并推送 GitBranchChanged。
         let runtime_event_handle = tokio::spawn(
             async move {
                 let mut next_seq = 1u64;
@@ -111,6 +120,7 @@ impl RuntimeSession {
                                     let Some(event) = runtime_event_from_core_with_fallback(event) else {
                                         continue;
                                     };
+                                    let is_turn_ended = matches!(event.event, TypedRuntimeEvent::TurnEnded);
                                     broadcast_sequenced_runtime_event(
                                         event,
                                         &mut next_seq,
@@ -118,6 +128,24 @@ impl RuntimeSession {
                                         &runtime_status_projection,
                                         &runtime_event_fanout_tx,
                                     );
+                                    if is_turn_ended {
+                                        let branch = git::detect_git_branch(&git_branch_cwd);
+                                        let mut cache = git_branch_cache.lock()
+                                            .expect("git branch cache lock poisoned");
+                                        if branch != *cache {
+                                            *cache = branch.clone();
+                                            drop(cache);
+                                            broadcast_sequenced_runtime_event(
+                                                RuntimeEvent::new(TypedRuntimeEvent::GitBranchChanged(
+                                                    GitBranchChangedEvent { branch },
+                                                )),
+                                                &mut next_seq,
+                                                &runtime_replay_buffer,
+                                                &runtime_status_projection,
+                                                &runtime_event_fanout_tx,
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
                                     tracing::warn!(skipped, "runtime event stream lagged");
@@ -180,6 +208,7 @@ impl RuntimeSession {
             presence: Mutex::new(ClientPresence::default()),
             pending_tool_pauses,
             status_projection,
+            git_branch,
             replay_buffer,
             controller_tx,
             loaded: RuntimeLoadGate::default(),
@@ -188,7 +217,6 @@ impl RuntimeSession {
             _tool_pause_handle: tool_pause_handle,
         }
     }
-
     pub(crate) fn subscribe(&self) -> broadcast::Receiver<SequencedRuntimeEvent> {
         self.runtime_event_tx.subscribe()
     }
@@ -213,6 +241,11 @@ impl RuntimeSession {
         let skills = self.core.runtime_skills();
         let mcp_servers = self.core.runtime_mcp_servers();
         let subagent_sessions = self.core.runtime_subagents();
+        let git_branch = self
+            .git_branch
+            .lock()
+            .expect("git branch cache lock poisoned")
+            .clone();
         self.status_projection
             .lock()
             .expect("status projection lock poisoned")
@@ -226,6 +259,7 @@ impl RuntimeSession {
                     mcp_servers,
                     subagent_sessions,
                     now: Utc::now(),
+                    git_branch,
                 },
             )
     }

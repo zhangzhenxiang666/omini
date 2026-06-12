@@ -103,9 +103,7 @@ mod tests {
     use omini_config::Settings;
     use omini_domain::config::ProviderEndpointKind;
     use std::collections::HashMap;
-    use std::fs;
     use std::path::PathBuf;
-    use uuid::Uuid;
 
     fn test_settings(language: Option<&str>) -> Settings {
         Settings {
@@ -124,12 +122,6 @@ mod tests {
             compact: Default::default(),
             mcp_servers: HashMap::new(),
         }
-    }
-
-    fn temp_prompt_dir() -> PathBuf {
-        let path = std::env::temp_dir().join(format!("omini-prompt-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&path).expect("create temp prompt dir");
-        path
     }
 
     #[test]
@@ -292,34 +284,5 @@ mod tests {
         assert!(auto_prompt.contains("focused implementation work"));
         assert!(!plan_prompt.contains("focused implementation work"));
         assert!(plan_prompt.contains("use subagents only for non-mutating exploration"));
-    }
-
-    #[test]
-    fn environment_context_includes_git_branch_when_available() {
-        let dir = temp_prompt_dir();
-        let git_dir = dir.join(".git");
-        fs::create_dir_all(&git_dir).expect("create .git dir");
-        fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/search\n").expect("write HEAD");
-
-        let env = EnvironmentContext::detect(&dir);
-        let section = environment_context_section(&env);
-
-        assert!(section.contains("- Git repository: `true`"));
-        assert!(section.contains("- Git branch: `feature/search`"));
-        let _ = fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn environment_context_reads_worktree_gitdir_file() {
-        let dir = temp_prompt_dir();
-        let git_dir = dir.join(".git-worktree");
-        fs::create_dir_all(&git_dir).expect("create worktree git dir");
-        fs::write(dir.join(".git"), "gitdir: .git-worktree\n").expect("write .git file");
-        fs::write(git_dir.join("HEAD"), "ref: refs/heads/worktree-branch\n").expect("write HEAD");
-
-        let env = EnvironmentContext::detect(&dir);
-
-        assert_eq!(env.git_branch.as_deref(), Some("worktree-branch"));
-        let _ = fs::remove_dir_all(dir);
     }
 }

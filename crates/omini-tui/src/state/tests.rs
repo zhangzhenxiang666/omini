@@ -93,6 +93,7 @@ fn query_runtime_status(
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         subagent_sessions: Vec::new(),
+        git_branch: None,
     }
 }
 
@@ -115,6 +116,7 @@ fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         subagent_sessions: Vec::new(),
+        git_branch: None,
     }
 }
 
@@ -137,6 +139,7 @@ fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus 
         skills: Vec::new(),
         mcp_servers: Vec::new(),
         subagent_sessions: Vec::new(),
+        git_branch: None,
     }
 }
 

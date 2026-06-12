@@ -313,6 +313,8 @@ pub struct StatusBar {
     pub total_cached_tokens: i64,
     /// 当前模型上下文窗口。
     pub context_window: Option<u32>,
+    /// 当前 git 分支名（detached HEAD 显示 "detached <sha>"，不在仓库中为 None）。
+    pub git_branch: Option<String>,
 }
 
 impl Default for StatusBar {
@@ -328,6 +330,7 @@ impl Default for StatusBar {
             total_tokens: 0,
             total_cached_tokens: 0,
             context_window: None,
+            git_branch: None,
         }
     }
 }
@@ -720,6 +723,7 @@ impl UiState {
             activity,
             state,
             pending_pauses,
+            git_branch,
             ..
         } = status;
 
@@ -728,6 +732,7 @@ impl UiState {
             omini_protocol::ActiveProfile::Auto => ActiveProfile::Auto,
             omini_protocol::ActiveProfile::Plan => ActiveProfile::Plan,
         };
+        self.status_bar.git_branch = git_branch;
         self.mention_autocomplete
             .set_candidates(agent_summaries_to_mention_candidates(subagent_sessions));
         self.update_input_autocomplete();

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 mod app;
+mod git;
 mod history;
 mod logging;
 pub mod process;

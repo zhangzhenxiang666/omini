@@ -1,4 +1,5 @@
 use super::*;
+use crate::git;
 use tracing::Instrument;
 
 /// 项目 attach 入口的错误分类，路由层会映射成协议错误。
@@ -171,6 +172,8 @@ impl SessionManager {
             })
             .collect();
 
+        let git_branch = git::detect_git_branch(&self.cwd);
+
         Ok(protocol::ProjectAttachResponse {
             project_id: project_id.to_string(),
             cwd: settings.cwd.display().to_string(),
@@ -184,6 +187,7 @@ impl SessionManager {
             show_thinking_blocks,
             agents,
             skills,
+            git_branch,
         })
     }
 

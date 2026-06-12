@@ -1,5 +1,5 @@
 use chrono::Local;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const COMMAND_SHELL: &str = "sh -c";
 
@@ -14,13 +14,10 @@ pub(super) struct EnvironmentContext {
     os: Option<String>,
     kernel: Option<String>,
     architecture: String,
-    is_git_repo: bool,
-    pub(super) git_branch: Option<String>,
 }
 
 impl EnvironmentContext {
-    pub(super) fn detect(cwd: &Path) -> Self {
-        let git_metadata_dir = git_metadata_dir(cwd);
+    pub(super) fn detect(cwd: &std::path::Path) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
             command_shell: COMMAND_SHELL.to_string(),
@@ -31,8 +28,6 @@ impl EnvironmentContext {
             os: detect_os_pretty_name(),
             kernel: detect_kernel(),
             architecture: std::env::consts::ARCH.to_string(),
-            is_git_repo: git_metadata_dir.is_some(),
-            git_branch: git_metadata_dir.as_deref().and_then(detect_git_branch),
         }
     }
 }
@@ -62,14 +57,6 @@ pub(super) fn environment_context_section(env: &EnvironmentContext) -> String {
         section.push_str("- Kernel: `unknown`\n");
     }
     section.push_str(&format!("- Architecture: `{}`\n", env.architecture));
-    section.push_str(&format!("- Git repository: `{}`\n", env.is_git_repo));
-    if env.is_git_repo {
-        if let Some(branch) = &env.git_branch {
-            section.push_str(&format!("- Git branch: `{branch}`\n"));
-        } else {
-            section.push_str("- Git branch: `unknown`\n");
-        }
-    }
     section.push_str("\n## Notes\n\n");
     section.push_str("- Paths are local filesystem paths.\n");
     section.push_str("- Commands run relative to the working directory unless stated otherwise.\n");
@@ -130,50 +117,4 @@ fn detect_kernel() -> Option<String> {
         return None;
     }
     Some(format!("{os} {release}"))
-}
-
-fn git_metadata_dir(cwd: &Path) -> Option<PathBuf> {
-    for path in cwd.ancestors() {
-        let dot_git = path.join(".git");
-        if dot_git.is_dir() {
-            return Some(dot_git);
-        }
-        if dot_git.is_file()
-            && let Some(git_dir) = read_gitdir_file(path, &dot_git)
-        {
-            return Some(git_dir);
-        }
-    }
-    None
-}
-
-fn read_gitdir_file(worktree_root: &Path, dot_git: &Path) -> Option<PathBuf> {
-    let content = std::fs::read_to_string(dot_git).ok()?;
-    let gitdir = content.trim().strip_prefix("gitdir:")?.trim();
-    if gitdir.is_empty() {
-        return None;
-    }
-    let gitdir = PathBuf::from(gitdir);
-    Some(if gitdir.is_absolute() {
-        gitdir
-    } else {
-        worktree_root.join(gitdir)
-    })
-}
-
-fn detect_git_branch(git_dir: &Path) -> Option<String> {
-    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-    if let Some(reference) = head.strip_prefix("ref: ") {
-        return Some(
-            reference
-                .strip_prefix("refs/heads/")
-                .unwrap_or(reference)
-                .to_string(),
-        );
-    }
-    if head.len() >= 7 {
-        return Some(format!("detached {}", &head[..7]));
-    }
-    None
 }

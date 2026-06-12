@@ -396,6 +396,9 @@ impl UiState {
                 self.activity_status_title = None;
                 self.agent_status = AgentStatus::Working;
             }
+            RuntimeToUiEvent::GitBranchChanged { branch } => {
+                self.status_bar.git_branch = branch;
+            }
             RuntimeToUiEvent::RunFinished => {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()

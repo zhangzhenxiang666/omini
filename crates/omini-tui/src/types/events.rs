@@ -184,7 +184,9 @@ pub enum RuntimeToUiEvent {
         context_window: Option<u32>,
     },
     /// thinking 块显示偏好已变更。
-    ThinkingDisplayChanged { show: bool },
+    ThinkingDisplayChanged {
+        show: bool,
+    },
     /// 当前会话 token usage 状态已变更。
     UsageChanged(SessionUsageSnapshot),
     /// 当前会话累计 token usage 已变更，但当前 context used 不应同步。
@@ -205,7 +207,9 @@ pub enum RuntimeToUiEvent {
     },
 
     /// 会话标题变更（TUI 头部栏显示用）
-    SessionTitleChanged { title: Option<String> },
+    SessionTitleChanged {
+        title: Option<String>,
+    },
     /// 当前 profile 已变更
     ActiveProfileChanged(#[serde(with = "serde_runtime_event_payload::profile")] ActiveProfile),
     /// 需要 TUI 弹出交互选择页
@@ -216,21 +220,29 @@ pub enum RuntimeToUiEvent {
     /// Runtime 启动时推送命令列表（供自动补全使用）
     CommandList(#[serde(with = "serde_runtime_event_payload::commands")] Vec<CommandSummary>),
     /// Runtime 刷新 `/agents` 面板数据
-    AgentManagementUpdated { records: Vec<AgentRecord> },
+    AgentManagementUpdated {
+        records: Vec<AgentRecord>,
+    },
     /// LLM 已生成 agent 草稿，供 `/agents` 面板预览和保存
     AgentGenerated {
         source_kind: AgentSourceKind,
         draft: AgentDraft,
     },
     /// LLM 生成 agent 失败，供 `/agents` 面板恢复输入态并显示错误。
-    AgentGenerateFailed { message: String },
+    AgentGenerateFailed {
+        message: String,
+    },
 
     /// 新一轮 LLM 调用开始
     TurnStarted,
     /// 当前轮 LLM 调用结束（所有 content block 已收齐）
     TurnEnded,
 
-    /// thinking 块流式增量
+    /// git 分支已变化
+    GitBranchChanged {
+        branch: Option<String>,
+    },
+
     ThinkingDelta(#[serde(with = "serde_runtime_event_payload::delta")] String),
     /// text 块流式增量
     TextDelta(#[serde(with = "serde_runtime_event_payload::delta")] String),

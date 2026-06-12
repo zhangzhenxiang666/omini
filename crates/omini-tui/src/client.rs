@@ -833,6 +833,11 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         }
         protocol::TypedRuntimeEvent::TurnStarted => RuntimeToUiEvent::TurnStarted,
         protocol::TypedRuntimeEvent::TurnEnded => RuntimeToUiEvent::TurnEnded,
+        protocol::TypedRuntimeEvent::GitBranchChanged(event) => {
+            RuntimeToUiEvent::GitBranchChanged {
+                branch: event.branch,
+            }
+        }
         protocol::TypedRuntimeEvent::ThinkingDelta(event) => {
             RuntimeToUiEvent::ThinkingDelta(event.delta)
         }
@@ -1799,6 +1804,7 @@ mod tests {
             skills: Vec::new(),
             mcp_servers: Vec::new(),
             subagent_sessions: Vec::new(),
+            git_branch: None,
         }
     }
 

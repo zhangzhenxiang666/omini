@@ -2691,7 +2691,6 @@ dependencies = [
  "pin-project-lite",
  "process-wrap",
  "reqwest 0.12.28",
- "rmcp-macros",
  "schemars",
  "serde",
  "serde_json",
@@ -2701,19 +2700,6 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "rmcp-macros"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e88ad84b8b6237a934534a62b379a5be6388915663c0cc598ceb9b3292bbbfe"
-dependencies = [
- "darling",
- "proc-macro2",
- "quote",
- "serde_json",
- "syn 2.0.117",
 ]
 
 [[package]]
