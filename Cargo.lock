@@ -1829,6 +1829,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "omini-config"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dirs",
+ "omini-domain",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "omini-core"
 version = "0.1.0"
 dependencies = [
@@ -1836,6 +1849,7 @@ dependencies = [
  "base64",
  "chrono",
  "dirs",
+ "omini-config",
  "omini-domain",
  "omini-mcp-client",
  "omini-provider-api",
@@ -1924,6 +1938,7 @@ dependencies = [
  "daemonize",
  "dirs",
  "futures-util",
+ "omini-config",
  "omini-core",
  "omini-domain",
  "omini-protocol",

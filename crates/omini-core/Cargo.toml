@@ -8,6 +8,7 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 dirs.workspace = true
+omini-config.workspace = true
 omini-domain.workspace = true
 omini-mcp-client.workspace = true
 omini-provider-api.workspace = true

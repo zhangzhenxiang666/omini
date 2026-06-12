@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use crate::types::permissions::RawPermissionConfig;
+pub use omini_config::RawPermissionConfig;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {

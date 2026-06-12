@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/omini-cli",
+    "crates/omini-config",
     "crates/omini-core",
     "crates/omini-domain",
     "crates/omini-mcp-client",
@@ -64,6 +65,7 @@ unicode-width = "0.2"
 uuid = { version = "1.23.1", features = ["v4"] }
 
 omini-core = { path = "crates/omini-core" }
+omini-config = { path = "crates/omini-config" }
 omini-domain = { path = "crates/omini-domain" }
 omini-mcp-client = { path = "crates/omini-mcp-client" }
 omini-provider-api = { path = "crates/omini-provider-api" }

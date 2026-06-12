@@ -5,8 +5,8 @@ use crate::tools::{
     PendingToolPause, PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult,
     ToolRuntimeContext,
 };
-use crate::types::config::Settings;
 use crate::types::events::EngineToRuntimeEvent;
+use omini_config::Settings;
 use omini_domain::events::{ActiveProfile, ToolPauseResponse};
 use omini_domain::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
@@ -1172,7 +1172,7 @@ impl Default for QueryEngine {
 mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
-    use crate::types::config::CompactConfig;
+    use omini_config::CompactConfig;
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::message::ToolUseBlock;
     use std::io::{Read, Write};

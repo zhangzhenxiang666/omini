@@ -1,5 +1,5 @@
-use crate::config::project::ProjectDir;
 use chrono::Utc;
+use omini_config::project::ProjectDir;
 use omini_domain::events::{ActiveProfile, SubmittedPlan};
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::proposed_plan::{

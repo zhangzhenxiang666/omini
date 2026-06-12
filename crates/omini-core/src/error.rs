@@ -1,4 +1,4 @@
-use crate::types::config::ConfigError;
+use omini_config::ConfigError;
 use omini_provider_api::{RequestError, StreamError};
 use std::borrow::Cow;
 use thiserror::Error;
@@ -135,7 +135,7 @@ pub(crate) enum CompactError {
 #[cfg(test)]
 mod tests {
     use crate::error::CoreError;
-    use crate::types::config::ConfigError;
+    use omini_config::ConfigError;
     use std::error::Error as _;
 
     #[test]

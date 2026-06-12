@@ -62,7 +62,7 @@ impl GlobalDaemonManager {
             )));
         }
 
-        let config = load_validated_config(&self.root)
+        let config = load_validated_config(&self.root, &cwd)
             .map_err(|error| ProjectAttachError::Config(error.to_string()))?;
         let project = self
             .root
@@ -411,7 +411,7 @@ impl SessionManager {
     }
 
     fn fresh_settings_with_project_state(&self) -> Result<Settings, CoreError> {
-        let config = load_validated_config(&self.root).map_err(config_core_error)?;
+        let config = load_validated_config(&self.root, &self.cwd).map_err(config_core_error)?;
         let state = self
             .project
             .load_state()
@@ -767,14 +767,17 @@ impl SessionManager {
     }
 }
 
-fn load_validated_config(root: &OminiRoot) -> Result<UserConfig, ConfigError> {
-    let config = root.load_config()?;
+fn load_validated_config(
+    root: &OminiRoot,
+    cwd: &std::path::Path,
+) -> Result<UserConfig, ConfigError> {
+    let config = root.load_config_for_cwd(cwd)?;
     config.validate()?;
     Ok(config)
 }
 
 fn config_core_error(error: ConfigError) -> CoreError {
-    CoreError::config("failed to load user config", error)
+    CoreError::config("failed to load effective config", error)
 }
 
 fn session_summaries_with_runtime_states(
@@ -794,7 +797,7 @@ fn session_summaries_with_runtime_states(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_core::config::project::ProjectDir;
+    use omini_config::project::ProjectDir;
     use std::fs;
     use std::path::Path;
     use std::path::PathBuf;
@@ -860,10 +863,31 @@ thinking = true
         fs::write(root.join("config.toml"), content).expect("config should be written");
     }
 
+    fn write_project_config(cwd: &Path) {
+        let project_config_dir = cwd.join(".omini");
+        fs::create_dir_all(&project_config_dir).expect("project config dir should be created");
+        fs::write(
+            project_config_dir.join("config.toml"),
+            r#"
+[providers.anthropic]
+name = "Anthropic"
+endpoint = "anthropic"
+base_url = "https://project-anthropic.example"
+api_key = "project-anthropic-key"
+
+[providers.anthropic.models.claude-project]
+name = "Claude Project"
+limit = 4000
+thinking = true
+"#,
+        )
+        .expect("project config should be written");
+    }
+
     async fn session_manager_for(root: &Path, cwd: &Path) -> (SessionManager, ProjectDir) {
         write_config(root, false);
         let root = Arc::new(OminiRoot::from_path(root.to_path_buf()));
-        let config = load_validated_config(&root).expect("config should load");
+        let config = load_validated_config(&root, cwd).expect("config should load");
         let project = root
             .init_project(cwd, &config)
             .expect("project should initialize");
@@ -958,6 +982,41 @@ thinking = true
 
         let refreshed = manager.list_models().expect("models should reload");
         assert!(has_provider(&refreshed.providers, "anthropic"));
+    }
+
+    #[tokio::test]
+    async fn project_models_include_project_level_config() {
+        let temp = unique_temp_root("project-level-config");
+        let cwd = temp.path.join("cwd");
+        write_config(&temp.path, false);
+        write_project_config(&cwd);
+
+        let root = Arc::new(OminiRoot::from_path(temp.path.clone()));
+        let config = load_validated_config(&root, &cwd).expect("config should load");
+        let project = root
+            .init_project(&cwd, &config)
+            .expect("project should initialize");
+        let db_path = root.path().join("omini.sqlite");
+        let db = Database::open(&db_path)
+            .await
+            .expect("database should open");
+        let manager = SessionManager::new(root, cwd, project, Arc::new(db));
+
+        let models = manager.list_models().expect("models should load");
+
+        assert!(has_provider(&models.providers, "openai"));
+        assert!(has_provider(&models.providers, "anthropic"));
+        let anthropic = models
+            .providers
+            .iter()
+            .find(|provider| provider.id == "anthropic")
+            .expect("project provider should be listed");
+        assert!(
+            anthropic
+                .models
+                .iter()
+                .any(|model| model.id == "claude-project")
+        );
     }
 
     #[tokio::test]

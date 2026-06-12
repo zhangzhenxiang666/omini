@@ -130,7 +130,7 @@ fn media_type_for_path(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::config::{ProviderProfile, Settings};
+    use omini_config::{ProviderProfile, Settings};
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
 

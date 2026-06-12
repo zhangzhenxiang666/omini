@@ -1,5 +1,5 @@
 use super::*;
-use omini_core::config::settings::Settings;
+use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display as display_types;
 use omini_domain::events as event_types;

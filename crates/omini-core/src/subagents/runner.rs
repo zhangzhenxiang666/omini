@@ -4,9 +4,9 @@ use crate::subagents::AgentSpec;
 use crate::tools::{
     ToolExecutionContext, ToolResult, ToolRuntimeContext, create_subagent_registry_from_parent,
 };
-use crate::types::config::{ProviderProfile, Settings};
 use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
+use omini_config::{ProviderProfile, Settings};
 use omini_domain::events::{
     SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent, SubagentStatus,
     SubagentToolResultEvent, SubagentToolUseEvent,
@@ -485,11 +485,7 @@ fn spawn_subagent_bridge(
     )
 }
 
-fn subagent_system_prompt(
-    parent: &crate::types::config::Settings,
-    spec: &AgentSpec,
-    skills: &[SkillSummary],
-) -> String {
+fn subagent_system_prompt(parent: &Settings, spec: &AgentSpec, skills: &[SkillSummary]) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are running as an isolated subagent for Omini.\n\n");
     if let Some(section) = crate::prompts::language_preference_section(parent) {
@@ -549,7 +545,7 @@ fn extract_final_text(messages: &[Message]) -> String {
 mod tests {
     use super::*;
     use crate::subagents::{AgentModelSpec, AgentSource, AgentToolPolicy};
-    use crate::types::config::{ProviderProfile, Settings};
+    use omini_config::{ProviderProfile, Settings};
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
     use std::path::PathBuf;

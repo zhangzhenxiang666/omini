@@ -16,9 +16,9 @@ use crate::engine::{QueryContext, ToolPauseResolver};
 use crate::skills::SkillRegistry;
 use crate::subagents::AgentRegistry;
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
-use crate::types::config::Settings;
 use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
+use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display::{DisplaySummary, HistoryItem, UserDraft};
 use omini_domain::events::{

@@ -5,7 +5,7 @@
 
 use crate::store::{self, Database};
 use chrono::{DateTime, Utc};
-use omini_core::config::project::ProjectDir;
+use omini_config::project::ProjectDir;
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use omini_domain::events::{SubagentSnapshot, SubagentStatus};
 use omini_domain::message::{ContentBlock, Message, Role};
