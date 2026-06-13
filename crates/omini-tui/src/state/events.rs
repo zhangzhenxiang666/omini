@@ -498,7 +498,6 @@ impl UiState {
                     }
                     NotificationKind::Error => {
                         self.finish_manual_compact();
-                        self.fail_running_subagents();
                         if !self.pending_tool_pauses.is_empty() {
                             self.agent_status = AgentStatus::AwaitingInput;
                         } else if !self.is_run_active() {
@@ -695,14 +694,6 @@ impl UiState {
         } else {
             SubagentStatus::Completed
         };
-    }
-
-    fn fail_running_subagents(&mut self) {
-        for node in self.subagents.values_mut() {
-            if node.status == SubagentStatus::Running {
-                node.status = SubagentStatus::Failed;
-            }
-        }
     }
 
     pub fn apply_session_snapshot(
@@ -1285,6 +1276,31 @@ mod tests {
             [UiMessage::Notification(notification)]
                 if notification.kind == NotificationKind::Error
         ));
+    }
+
+    #[test]
+    fn error_notification_does_not_fail_running_subagents() {
+        use crate::state::SubagentNode;
+
+        let mut state = UiState::new();
+        state.subagents.insert(
+            "sub-1".to_string(),
+            SubagentNode {
+                session_id: "sub-1".to_string(),
+                parent_session_id: "main".to_string(),
+                spawn_tool_use_id: "tool-1".to_string(),
+                agent_label: "worker".to_string(),
+                status: SubagentStatus::Running,
+                messages: Vec::new(),
+            },
+        );
+
+        state.apply_event(RuntimeToUiEvent::error(
+            "Cannot handle this request while a run is active".to_string(),
+        ));
+
+        let sub = state.subagents.get("sub-1").unwrap();
+        assert_eq!(sub.status, SubagentStatus::Running);
     }
 }
 

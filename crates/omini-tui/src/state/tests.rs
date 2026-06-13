@@ -556,16 +556,16 @@ fn subagent_spawn_tool_error_finishes_running_state() {
 }
 
 #[test]
-fn runtime_error_fails_running_subagent_state() {
+fn runtime_error_does_not_fail_running_subagent_state() {
     let mut state = UiState::new();
     start_subagent(&mut state);
 
     state.apply_event(RuntimeToUiEvent::error(
-        "Stream error: Stream ended unexpectedly".to_string(),
+        "Cannot handle this request while a run is active".to_string(),
     ));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, SubagentStatus::Failed);
+    assert_eq!(node.status, SubagentStatus::Running);
 }
 
 #[test]
