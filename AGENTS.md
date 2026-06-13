@@ -30,6 +30,12 @@ Project instructions for coding agents working in this repository.
 - When multiple nested `if let` or `let Some(...)` checks can be expressed clearly as a Rust 2024 `if let` chain, prefer the chain form.
 - Do not rewrite existing imports or nested conditionals solely to satisfy these Rust style rules. Apply them to new code and code already being edited for the task.
 
+## Documentation Maintenance
+
+- When a change involves user-visible features, configuration schema, CLI/TUI behavior, installation layout, permissions, MCP, provider, or model behavior, update the relevant documentation in `docs/` or `README.md` accordingly.
+- If a change does not require documentation updates, note the reason in the PR or commit message (e.g., "internal refactor, no doc update needed").
+- Before merging a PR that affects documentation, verify that the docs reflect the new behavior and that examples still work.
+
 ## Verification
 
 - Prefer focused checks over broad ones when the change is narrow.
