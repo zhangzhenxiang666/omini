@@ -3,14 +3,14 @@ use super::{
     AgentManagerState, AgentManagerView, AgentStatus, InteractionStep, ModelSelectionEntry,
     SubagentNode, UiMessage, UiState, agent_summaries_to_mention_candidates,
 };
-use crate::subagents::AgentSummary;
 use crate::types::config::ThinkingEffort;
-use crate::types::display::{HistoryItem, UserDraft};
 use crate::types::events::{
     CommandKind, CommandSummary, CompactTrigger, InteractionRequest, Notification,
     NotificationKind, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus,
 };
-use crate::types::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_domain::display::{HistoryItem, UserDraft};
+use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_domain::subagents::AgentSummary;
 use std::collections::VecDeque;
 
 const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
@@ -116,7 +116,6 @@ impl UiState {
     }
 
     pub fn open_interaction_request(&mut self, req: &InteractionRequest) {
-        self.show_start_screen = false;
         self.help_drawer = None;
         self.interaction_step = match req {
             InteractionRequest::ModelSelection {
@@ -185,7 +184,6 @@ impl UiState {
     }
 
     pub fn open_help_drawer(&mut self, commands: Vec<CommandSummary>) {
-        self.show_start_screen = false;
         self.autocomplete.visible = false;
         self.mention_autocomplete.visible = false;
         self.help_drawer = Some(super::HelpDrawerState::new(commands));
@@ -490,7 +488,6 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::Notification(notification) => {
-                self.show_start_screen = false;
                 match notification.kind {
                     NotificationKind::Info => {}
                     NotificationKind::Warn => {
@@ -613,9 +610,6 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::ActiveProfileChanged(profile) => {
-                if self.status_bar.active_profile != profile {
-                    self.status_bar.plan_mode_message_sent = false;
-                }
                 self.status_bar.active_profile = profile;
             }
             RuntimeToUiEvent::SessionTitleChanged { title } => {
@@ -754,14 +748,20 @@ fn pending_activity_title(message: &Message) -> Option<String> {
 }
 
 fn extract_first_bold_title(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
+    // 只在第一句中搜索加粗标题
+    let first_sentence = text
+        .find(['。', '.', '？', '?', '！', '!', '\n'])
+        .map(|end| &text[..end])
+        .unwrap_or(text);
+
+    let bytes = first_sentence.as_bytes();
     let mut start = None;
     let mut idx = 0;
 
     while idx + 1 < bytes.len() {
         if bytes[idx] == b'*' && bytes[idx + 1] == b'*' {
             if let Some(start_idx) = start {
-                return normalize_activity_title(&text[start_idx..idx]);
+                return normalize_activity_title(&first_sentence[start_idx..idx]);
             }
             start = Some(idx + 2);
             idx += 2;
@@ -807,11 +807,11 @@ fn compact_summary_failed_text(
 mod tests {
     use super::*;
     use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
-    use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
     use crate::types::events::{
-        ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
+        CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
         CompactSummaryFinishedEvent, CompactTrigger,
     };
+    use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
     use std::collections::HashMap;
 
     fn model_selection_request() -> InteractionRequest {
@@ -849,18 +849,6 @@ mod tests {
                 description: description.to_string(),
             }],
         }
-    }
-
-    #[test]
-    fn entering_plan_mode_resets_plan_message_hint_state() {
-        let mut state = UiState::new();
-        state.status_bar.active_profile = ActiveProfile::Main;
-        state.status_bar.plan_mode_message_sent = true;
-
-        state.apply_event(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan));
-
-        assert_eq!(state.status_bar.active_profile, ActiveProfile::Plan);
-        assert!(!state.status_bar.plan_mode_message_sent);
     }
 
     #[test]
@@ -903,17 +891,6 @@ mod tests {
             panic!("expected model selection interaction");
         };
         assert_eq!(thinking_idx, 5);
-    }
-
-    #[test]
-    fn plan_message_sent_is_recorded_only_in_plan_mode() {
-        let mut state = UiState::new();
-        state.mark_plan_mode_message_sent();
-        assert!(!state.status_bar.plan_mode_message_sent);
-
-        state.apply_event(RuntimeToUiEvent::ActiveProfileChanged(ActiveProfile::Plan));
-        state.mark_plan_mode_message_sent();
-        assert!(state.status_bar.plan_mode_message_sent);
     }
 
     #[test]
@@ -1005,20 +982,33 @@ mod tests {
     }
 
     #[test]
-    fn extracts_activity_title_from_first_closed_bold_text() {
+    fn extracts_activity_title_from_first_sentence_bold_text() {
         assert_eq!(
             extract_first_bold_title("先看看 **分析代码结构** 再行动").as_deref(),
             Some("分析代码结构")
         );
-        assert_eq!(
-            extract_first_bold_title("** 分析   当前\n改动 **").as_deref(),
-            Some("分析 当前 改动")
-        );
+        // 换行符截断第一句，跨行加粗不再匹配
+        assert_eq!(extract_first_bold_title("** 分析   当前\n改动 **"), None);
         assert_eq!(extract_first_bold_title("还没闭合 **分析代码"), None);
         assert_eq!(extract_first_bold_title("空标题 **** 后面"), None);
         assert_eq!(
             extract_first_bold_title("**第一步** 然后 **第二步**").as_deref(),
             Some("第一步")
+        );
+        // 第一句有句号时，只在第一句内搜索
+        assert_eq!(
+            extract_first_bold_title("让我先 **分析代码结构**。然后 **执行修改**。").as_deref(),
+            Some("分析代码结构")
+        );
+        // 加粗在第二句时不匹配
+        assert_eq!(
+            extract_first_bold_title("让我先分析代码结构。然后 **执行修改**。"),
+            None
+        );
+        // 句号分隔：第一句内无加粗
+        assert_eq!(
+            extract_first_bold_title("先想一下。接下来 **分析代码结构**。"),
+            None
         );
     }
 

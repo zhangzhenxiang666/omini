@@ -145,8 +145,6 @@ fn should_render_start_screen(state: &UiState) -> bool {
         && state.messages.is_empty()
         && state.pending_assistant.is_none()
         && state.pending_proposed_plan.is_none()
-        && state.interaction_step.is_none()
-        && state.interaction_request.is_none()
         && state.help_drawer.is_none()
         && state.active_tool_pause().is_none()
         && state.plan_approval.is_none()

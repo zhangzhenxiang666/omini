@@ -7,12 +7,12 @@ use super::selection::{
 };
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
 use crate::client::ClientRequest;
-use crate::types::display::UserDraft;
 use crate::types::events::{
     ActiveProfile, PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent,
     ToolPauseKind,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use omini_domain::display::UserDraft;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -41,12 +41,12 @@ impl UpdateOutcome {
 mod tests {
     use super::*;
     use crate::state::InputMention;
-    use crate::types::display::MentionKind;
     use crate::types::events::{
         ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
+    use omini_domain::display::MentionKind;
     use std::path::PathBuf;
 
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
@@ -866,8 +866,7 @@ async fn handle_command_autocomplete_key(
                     let msg = std::mem::take(&mut state.input);
                     state.cursor_char = 0;
                     if !msg.is_empty() {
-                        state.show_start_screen = false;
-                        let draft = crate::types::display::UserDraft::plain(msg);
+                        let draft = omini_domain::display::UserDraft::plain(msg);
                         if let Some(request) = request_from_command_draft(state, draft) {
                             let _ = request_tx.send(request).await;
                         }
@@ -1085,7 +1084,6 @@ async fn handle_composer_key(
             }
 
             if let Some(draft) = state.take_input_draft() {
-                state.show_start_screen = false;
                 if draft.text.starts_with('/') {
                     if !state.is_run_active() && is_compact_command(&draft.text) {
                         state.begin_manual_compact();
@@ -1094,21 +1092,21 @@ async fn handle_composer_key(
                         let _ = request_tx.send(request).await;
                     }
                 } else if state.is_run_active() && !state.manual_compact_running {
-                    state.mark_plan_mode_message_sent();
                     state.queued_user_inputs.push_back(draft);
                 } else {
                     state.clear_run_dividers();
+                    state.show_start_screen = false;
                     let ui_message = match draft.clone().history_item() {
-                        crate::types::display::HistoryItem::Message(message) => {
+                        omini_domain::display::HistoryItem::Message(message) => {
                             UiMessage::Message(message)
                         }
-                        crate::types::display::HistoryItem::Display(display) => {
+                        omini_domain::display::HistoryItem::Display(display) => {
                             UiMessage::Display(display)
                         }
-                        crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+                        omini_domain::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                             text: plan.markdown,
                         },
-                        crate::types::display::HistoryItem::Summary(summary) => {
+                        omini_domain::display::HistoryItem::Summary(summary) => {
                             UiMessage::CompactSummary {
                                 text: summary.markdown,
                             }
@@ -1116,7 +1114,6 @@ async fn handle_composer_key(
                     };
                     let client_echo_id = uuid::Uuid::new_v4().to_string();
                     state.push_optimistic_echo(ui_message, client_echo_id.clone());
-                    state.mark_plan_mode_message_sent();
                     let _ = request_tx
                         .send(ClientRequest::RunSubmitUserInput {
                             input: protocol::user_input_from_draft(draft),

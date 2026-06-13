@@ -1,4 +1,4 @@
-use crate::types::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;
@@ -35,11 +35,35 @@ pub(super) fn render(
 
     title.push(Span::raw("· "));
     title.push(Span::styled("Search", title_style));
-    let detail = search_summary(query, &path);
+    let dim = Style::default().fg(Color::Rgb(0x6a, 0x6f, 0x78));
+    let prefix = if query.is_empty() { "files" } else { query };
+    // 计算可用宽度并做截断
     let used_width: usize = title.iter().map(|span| span.width()).sum();
-    let detail_width = content_width.saturating_sub(used_width).saturating_sub(1);
-    title.push(Span::raw(" "));
-    title.push(Span::raw(truncate_display_width(&detail, detail_width)));
+    let separator = " ";
+    let full_text = format!("{prefix} in {path}");
+    let max_text_width = content_width
+        .saturating_sub(used_width)
+        .saturating_sub(separator.len());
+    let full_width = UnicodeWidthStr::width(full_text.as_str());
+    if full_width <= max_text_width {
+        title.push(Span::raw(separator));
+        title.push(Span::raw(format!("{prefix} ")));
+        title.push(Span::styled("in", dim));
+        title.push(Span::raw(format!(" {path}")));
+    } else {
+        let truncated = truncate_display_width(&full_text, max_text_width);
+        title.push(Span::raw(separator));
+        // 找到 "in " 的位置来拆分样式
+        let prefix_with_space = format!("{prefix} ");
+        let in_start = prefix_with_space.len();
+        if truncated.len() > in_start + 2 {
+            title.push(Span::raw(truncated[..in_start].to_string()));
+            title.push(Span::styled("in", dim));
+            title.push(Span::raw(truncated[in_start + 2..].to_string()));
+        } else {
+            title.push(Span::raw(truncated));
+        }
+    }
     lines.push(Line::from(title));
 
     if let Some(tr) = result
@@ -56,14 +80,6 @@ pub(super) fn render(
     }
 
     lines
-}
-
-fn search_summary(query: &str, path: &str) -> String {
-    if query.is_empty() {
-        format!("files in {path}")
-    } else {
-        format!("{query} in {path}")
-    }
 }
 
 fn truncate_display_width(s: &str, max_width: usize) -> String {

@@ -1,4 +1,4 @@
-use crate::types::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -37,7 +37,7 @@ pub(super) fn render(
         .trim();
 
     title.push(Span::raw("· "));
-    title.push(Span::styled("Bash", title_style));
+    title.push(Span::styled("Command", title_style));
     if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();
         let parens_width = UnicodeWidthStr::width("()");
@@ -81,8 +81,8 @@ pub(super) fn render(
 
     if !desc.is_empty() {
         push_indented(
-            "  └─ ",
-            "     ",
+            "  └ ",
+            "    ",
             format!("# {desc}"),
             Style::default().fg(dim).add_modifier(Modifier::ITALIC),
         );
@@ -99,7 +99,7 @@ pub(super) fn render(
         && has_output
     {
         let out_style = Style::default().fg(output);
-        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(5).max(1));
+        let wrapped = word_wrap(&tr.content, content_width.saturating_sub(4).max(1));
         let total = wrapped.len();
         let truncated = total > MAX_OUTPUT_LINES;
 
@@ -126,9 +126,9 @@ pub(super) fn render(
             }
             let wl = &wrapped[*line_idx];
             if display_idx == 0 && desc.is_empty() {
-                push_indented("  └─ ", "     ", wl.clone(), out_style);
+                push_indented("  └ ", "    ", wl.clone(), out_style);
             } else {
-                push_indented("     ", "     ", wl.clone(), out_style);
+                push_indented("    ", "    ", wl.clone(), out_style);
             }
         }
     }

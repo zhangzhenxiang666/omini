@@ -8,7 +8,6 @@ mod protocol;
 mod render;
 mod selection;
 mod state;
-mod subagents;
 mod types;
 mod update;
 mod widgets;

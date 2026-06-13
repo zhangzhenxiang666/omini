@@ -1,4 +1,4 @@
-use crate::types::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::{Map, Value};
@@ -184,8 +184,8 @@ fn push_result_lines(
     content_width: usize,
     max_lines: Option<usize>,
 ) {
-    let first_prefix = "  └─ ";
-    let continuation_prefix = "     ";
+    let first_prefix = "  └ ";
+    let continuation_prefix = "    ";
     let wrap_width = content_width.saturating_sub(first_prefix.len()).max(1);
     let wrapped = word_wrap(&content, wrap_width);
     let limit = max_lines.unwrap_or(wrapped.len());

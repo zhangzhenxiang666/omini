@@ -1639,8 +1639,8 @@ fn hint(text: &str) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
     use crate::types::config::ModelConfig;
+    use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
     use std::collections::HashMap;
 
     fn line_text(line: &Line<'static>) -> String {

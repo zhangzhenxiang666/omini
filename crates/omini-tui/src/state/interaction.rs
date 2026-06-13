@@ -1,5 +1,5 @@
-use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use crate::types::config::{ModelConfig, ProviderProfile};
+use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthChar;

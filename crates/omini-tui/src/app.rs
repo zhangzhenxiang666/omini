@@ -87,7 +87,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
         .into_iter()
         .map(client::session_summary_from_protocol)
         .filter(|session| !session.title.trim().is_empty())
-        .take(3)
+        .take(6)
         .collect();
     state.autocomplete.all_commands = crate::command::commands_with_runtime_skills(
         attach

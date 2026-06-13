@@ -1521,8 +1521,8 @@ pub(crate) fn session_summary_from_protocol(
 
 pub(crate) fn agent_summary_from_protocol(
     agent: protocol::AgentSummary,
-) -> crate::subagents::AgentSummary {
-    crate::subagents::AgentSummary {
+) -> omini_domain::subagents::AgentSummary {
+    omini_domain::subagents::AgentSummary {
         name: agent.name,
         description: agent.description,
     }
@@ -1577,7 +1577,7 @@ fn event_types_agent_management(
 
 fn agent_records_from_protocol(
     records: Vec<protocol::AgentRecord>,
-) -> Vec<crate::subagents::AgentRecord> {
+) -> Vec<omini_domain::subagents::AgentRecord> {
     records
         .into_iter()
         .map(agent_record_from_protocol)
@@ -1640,8 +1640,10 @@ fn input_modality_from_protocol(
     }
 }
 
-fn agent_record_from_protocol(record: protocol::AgentRecord) -> crate::subagents::AgentRecord {
-    crate::subagents::AgentRecord {
+fn agent_record_from_protocol(
+    record: protocol::AgentRecord,
+) -> omini_domain::subagents::AgentRecord {
+    omini_domain::subagents::AgentRecord {
         name: record.name,
         description: record.description,
         instructions: record.instructions,
@@ -1656,11 +1658,11 @@ fn agent_record_from_protocol(record: protocol::AgentRecord) -> crate::subagents
 
 fn agent_source_kind_from_protocol(
     source_kind: protocol::AgentSourceKind,
-) -> crate::subagents::AgentSourceKind {
+) -> omini_domain::subagents::AgentSourceKind {
     match source_kind {
-        protocol::AgentSourceKind::BuiltIn => crate::subagents::AgentSourceKind::BuiltIn,
-        protocol::AgentSourceKind::Project => crate::subagents::AgentSourceKind::Project,
-        protocol::AgentSourceKind::User => crate::subagents::AgentSourceKind::User,
+        protocol::AgentSourceKind::BuiltIn => omini_domain::subagents::AgentSourceKind::BuiltIn,
+        protocol::AgentSourceKind::Project => omini_domain::subagents::AgentSourceKind::Project,
+        protocol::AgentSourceKind::User => omini_domain::subagents::AgentSourceKind::User,
     }
 }
 
@@ -1669,8 +1671,8 @@ fn generated_agent_draft_from_protocol(
     tools: Vec<String>,
     disallow_tools: Vec<String>,
     model: Option<String>,
-) -> crate::subagents::AgentDraft {
-    crate::subagents::AgentDraft {
+) -> omini_domain::subagents::AgentDraft {
+    omini_domain::subagents::AgentDraft {
         name: draft.name,
         description: draft.description,
         instructions: draft.instructions,

@@ -1,5 +1,5 @@
-use crate::subagents::AgentSummary;
-use crate::types::display::{DisplayMention, MentionKind};
+use omini_domain::display::{DisplayMention, MentionKind};
+use omini_domain::subagents::AgentSummary;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};

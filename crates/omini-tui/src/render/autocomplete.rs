@@ -157,13 +157,13 @@ fn render_mentions(state: &UiState, frame: &mut ratatui::Frame, input_area: Rect
             let padding =
                 " ".repeat(max_name_width.saturating_sub(UnicodeWidthStr::width(left.as_str())));
             let kind = match candidate.kind {
-                crate::types::display::MentionKind::Subagent => "agent",
-                crate::types::display::MentionKind::Directory => "目录",
-                crate::types::display::MentionKind::File if candidate.description == "image" => {
+                omini_domain::display::MentionKind::Subagent => "agent",
+                omini_domain::display::MentionKind::Directory => "目录",
+                omini_domain::display::MentionKind::File if candidate.description == "image" => {
                     "图片"
                 }
-                crate::types::display::MentionKind::File => "文件",
-                crate::types::display::MentionKind::Command => "命令",
+                omini_domain::display::MentionKind::File => "文件",
+                omini_domain::display::MentionKind::Command => "命令",
             };
             let description = mention_description(candidate.description.as_str());
             let kind_display = pad_display_width(kind, 5);

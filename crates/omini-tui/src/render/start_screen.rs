@@ -1,9 +1,10 @@
 use super::register_and_highlight_lines;
 use super::session_list::relative_time;
+use super::text::truncate_str;
 use crate::state::UiState;
 use crate::types::config::ThinkingEffort;
-use crate::types::display::MentionKind;
 use crate::types::events::CommandKind;
+use omini_domain::display::MentionKind;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -83,17 +84,20 @@ fn full_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
         empty_cell(left_width),
         right_heading("Recent Sessions", right_width),
     ));
-    let right_project_rows = project_overview_rows(state);
-    for (idx, logo) in logo_lines.iter().enumerate() {
+    let right_project_rows = project_overview_rows(state, right_width);
+    let total_rows = logo_lines.len().max(right_project_rows.len());
+    for idx in 0..total_rows {
+        let logo = logo_lines.get(idx);
+        let row = right_project_rows
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(Vec::new);
         lines.push(split_row(
-            centered_cell(logo.clone(), left_width),
-            right_cell(
-                right_project_rows
-                    .get(idx)
-                    .cloned()
-                    .unwrap_or_else(Vec::new),
-                right_width,
+            logo.map_or_else(
+                || empty_cell(left_width),
+                |l| centered_cell(l.clone(), left_width),
             ),
+            right_cell(row, right_width),
         ));
     }
     lines.push(split_row(empty_cell(left_width), empty_cell(right_width)));
@@ -112,44 +116,72 @@ fn full_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn project_overview_rows(state: &UiState) -> Vec<Vec<Span<'static>>> {
+fn project_overview_rows(state: &UiState, right_width: usize) -> Vec<Vec<Span<'static>>> {
+    // right_cell (CellAlign::Left) adds 2 chars of left padding.
+    // Available width for row content:
+    let content_available = right_width.saturating_sub(2);
+
+    // 计算时间列最大显示宽度
+    let max_time_width = state
+        .startup_recent_sessions
+        .iter()
+        .take(6)
+        .map(|s| UnicodeWidthStr::width(relative_time(s.updated_at).as_str()))
+        .max()
+        .unwrap_or(0);
+
+    // 标题可用宽度 = 总可用 - 时间列 - 分隔符("  ")
+    let title_max_width = content_available
+        .saturating_sub(max_time_width)
+        .saturating_sub(2);
+
     let mut rows = state
         .startup_recent_sessions
         .iter()
-        .take(3)
+        .take(6)
         .map(|session| {
+            let time = relative_time(session.updated_at);
+            let time_width = UnicodeWidthStr::width(time.as_str());
+            // 左对齐时间列
+            let time_padded = format!("{}{}", time, " ".repeat(max_time_width - time_width));
+            let title = truncate_str(session.title.trim(), title_max_width);
             vec![
-                Span::styled(relative_time(session.updated_at), label_style()),
+                Span::styled(time_padded, label_style()),
                 Span::styled("  ", muted_value_style()),
-                Span::styled(
-                    session.title.trim().chars().take(80).collect::<String>(),
-                    value_style(),
-                ),
+                Span::styled(title, value_style()),
             ]
         })
         .collect::<Vec<_>>();
 
-    let fallback_rows = [
-        vec![
-            command_span("/sessions"),
-            Span::styled(" 恢复历史会话", muted_value_style()),
-        ],
-        vec![
-            command_span("@文件"),
-            Span::styled(" 或 ", muted_value_style()),
-            command_span("@目录"),
-            Span::styled(" 限定上下文", muted_value_style()),
-        ],
-        vec![
-            command_span("/help"),
-            Span::styled(" 查看命令和输入技巧", muted_value_style()),
-        ],
+    // 帮助信息行，从最左边开始（与时间列左边缘对齐）
+    let help_items: Vec<(&'static str, &'static str)> = vec![
+        ("/sessions", " 恢复历史会话"),
+        ("@文件 或 @目录", " 限定上下文"),
+        ("/help", " 查看命令和输入技巧"),
+        ("/plan", " 进入 plan 模式先规划再行动"),
+        ("/compact", " 压缩上下文保留关键线索"),
+        ("/agents", " 查看和管理可用 subagent"),
     ];
-    for fallback in fallback_rows {
-        if rows.len() >= 3 {
+
+    for (cmd, desc) in &help_items {
+        if rows.len() >= 6 {
             break;
         }
-        rows.push(fallback);
+        let combined = format!("{}{}", cmd, desc);
+        let truncated = truncate_str(&combined, content_available);
+        // 将截断后的文本按命令部分和描述部分拆分，保留高亮样式
+        let cmd_width = UnicodeWidthStr::width(*cmd);
+        if UnicodeWidthStr::width(truncated.as_str()) <= cmd_width {
+            // 整个截断文本都在命令部分内
+            rows.push(vec![command_span_in_text(&truncated, cmd)]);
+        } else {
+            // 命令部分完整显示，截断发生在描述部分
+            let desc_truncated = truncate_str(desc, content_available - cmd_width);
+            rows.push(vec![
+                command_span(cmd),
+                Span::styled(desc_truncated, muted_value_style()),
+            ]);
+        }
     }
 
     rows.push(vec![Span::styled(
@@ -162,24 +194,22 @@ fn project_overview_rows(state: &UiState) -> Vec<Vec<Span<'static>>> {
         ),
         value_style(),
     )]);
-    rows.push(vec![
-        Span::styled("AGENTS.md ", label_style()),
-        Span::styled(
-            if state.startup_has_project_instructions {
-                "已加载"
-            } else {
-                "未找到"
-            },
-            if state.startup_has_project_instructions {
-                accent_style()
-            } else {
-                muted_value_style()
-            },
-        ),
-        Span::styled(" · provider ", muted_value_style()),
-        Span::styled(provider_label(state), value_style()),
-    ]);
     rows
+}
+
+/// 在已截断的文本中查找并高亮命令部分。
+fn command_span_in_text(text: &str, command: &'static str) -> Span<'static> {
+    if text.starts_with(command) {
+        Span::styled(
+            command.to_string(),
+            accent_style().add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            text.to_string(),
+            accent_style().add_modifier(Modifier::BOLD),
+        )
+    }
 }
 
 fn medium_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {

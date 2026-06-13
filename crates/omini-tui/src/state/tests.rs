@@ -1,11 +1,11 @@
 use super::*;
-use crate::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
-use crate::types::display::MentionKind;
 use crate::types::events::{
     PermissionPreview, RuntimeToUiEvent, SubagentStartedEvent, ToolPauseKind, ToolPauseRequest,
 };
-use crate::types::message::ToolResultBlock;
 use chrono::Utc;
+use omini_domain::display::MentionKind;
+use omini_domain::message::ToolResultBlock;
+use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use omini_protocol as protocol;
 use std::time::Duration;
 use tokio::time::Instant;

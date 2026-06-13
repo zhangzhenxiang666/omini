@@ -1,6 +1,6 @@
 use super::INPUT_BG;
 use crate::markdown::build_markdown_lines;
-use crate::types::proposed_plan::{ProposedPlanParser, ProposedPlanSegment};
+use omini_domain::proposed_plan::{ProposedPlanParser, ProposedPlanSegment};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

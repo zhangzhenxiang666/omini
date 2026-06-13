@@ -1,7 +1,7 @@
 use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::UiState;
-use crate::types::display::{DisplayMention, DisplayMessage, MentionKind};
-use crate::types::message::TextBlock;
+use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
+use omini_domain::message::TextBlock;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

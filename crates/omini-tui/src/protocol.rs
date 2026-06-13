@@ -1,7 +1,7 @@
 use crate::types::config as config_types;
-use crate::types::display as display_types;
 use crate::types::events as event_types;
-use crate::types::subagents as subagent_types;
+use omini_domain::display as display_types;
+use omini_domain::subagents as subagent_types;
 
 pub(crate) fn user_input_from_draft(draft: display_types::UserDraft) -> omini_protocol::UserInput {
     let context_refs = draft

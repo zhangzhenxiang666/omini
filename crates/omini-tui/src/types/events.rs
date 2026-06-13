@@ -1,10 +1,10 @@
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
-use crate::types::display::{DisplayMessage, HistoryItem, UserDraft};
-use crate::types::message::{Message, ToolResultBlock, ToolUseBlock};
-use crate::types::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
-use crate::types::usage::Usage;
+use omini_domain::display::{DisplayMessage, HistoryItem, UserDraft};
 pub use omini_domain::events::*;
+use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
+use omini_domain::usage::Usage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -383,8 +383,8 @@ mod serde_runtime_event_payload {
 
 #[cfg(test)]
 mod tests {
-    use crate::types::display::HistoryItem;
     use crate::types::events::{ActiveProfile, CommandKind, CommandSummary, RuntimeToUiEvent};
+    use omini_domain::display::HistoryItem;
     use serde_json::json;
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::types::events::{ToolPauseKind, ToolPauseRequest};
-use crate::types::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Map;
@@ -413,7 +413,7 @@ fn compact_waiting_tool_lines(
             )));
         }
         "bash" => {
-            spans.push(Span::styled("Bash", title_style));
+            spans.push(Span::styled("Command", title_style));
             let command = tool_use
                 .input
                 .get("command")
@@ -494,7 +494,7 @@ fn decorate_paused_tool(
         Style::default().fg(dim)
     };
     lines.push(Line::from(vec![
-        Span::raw("  └─ "),
+        Span::raw("  └ "),
         Span::styled(tool_pause_label(preview), status_style),
     ]));
 }
@@ -677,7 +677,7 @@ mod tests {
         let lines = render_tool(&tool_use, None, Some(&preview), Some(false), 80, None);
 
         assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
-        assert_eq!(plain(&lines[1]), "  └─ Waiting for permission");
+        assert_eq!(plain(&lines[1]), "  └ Waiting for permission");
     }
 
     #[test]
@@ -702,8 +702,8 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert!(plain(&lines[0]).starts_with("· Bash("));
-        assert_eq!(plain(&lines[1]), "  └─ # 创建提交");
+        assert!(plain(&lines[0]).starts_with("· Command("));
+        assert_eq!(plain(&lines[1]), "  └ # 创建提交");
         assert_eq!(plain(&lines[2]), "  Permission denied for tool: bash");
         assert_eq!(
             lines[0].spans[1].style.fg,
@@ -735,7 +735,7 @@ mod tests {
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
         assert_eq!(rendered[0], "· MCP docs/search {\"query\":\"rust\"}");
-        assert_eq!(rendered[1], "  └─ found docs");
+        assert_eq!(rendered[1], "  └ found docs");
     }
 
     #[test]
@@ -831,11 +831,11 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
-        assert_eq!(rendered[0], "· Todo");
-        assert_eq!(rendered[1], "  └─ ✔ Read existing flow");
-        assert_eq!(rendered[2], "     □ Add UpdateTodo widget");
-        assert_eq!(rendered[3], "     □ Run focused tests");
-        assert_eq!(rendered[4], "     ✘ Drop obsolete step");
+        assert_eq!(rendered[0], "· Todo List");
+        assert_eq!(rendered[1], "  └ ✔ Read existing flow");
+        assert_eq!(rendered[2], "    □ Add UpdateTodo widget");
+        assert_eq!(rendered[3], "    □ Run focused tests");
+        assert_eq!(rendered[4], "    ✘ Drop obsolete step");
         assert!(rendered.iter().all(|line| !line.contains("\"todos\"")));
         assert_eq!(
             lines[2].spans[3].style.fg,

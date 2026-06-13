@@ -1,8 +1,8 @@
 use super::truncate_str;
 use crate::state::{SubagentNode, pause_preview_tool_use_id};
 use crate::types::events::{SubagentStatus, ToolPauseKind, ToolPauseRequest};
-use crate::types::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use crate::widgets::{display_path, tool_title_style};
+use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -107,11 +107,11 @@ pub(super) fn render_subagent_tool(
                 .is_some_and(|active| active.tool_use_id == pause.tool_use_id)
         });
         let prefix = if tool_pause_active {
-            "  •  "
+            "  • "
         } else if rendered_tools == 0 {
-            "  └─ "
+            "  └ "
         } else {
-            "     "
+            "    "
         };
         let tool_name = format_tool_label(&child_tool.name);
         let mut spans = vec![
@@ -231,9 +231,10 @@ fn format_subagent_label(label: &str) -> String {
 
 fn format_tool_label(name: &str) -> String {
     match name {
-        "ask_user" => "AskUser".to_string(),
-        "todo_write" => "Todo".to_string(),
+        "ask_user" => "Ask User".to_string(),
+        "todo_write" => "Todo List".to_string(),
         "view_image" => "View Image".to_string(),
+        "bash" => "Command".to_string(),
         other => {
             let words = label_words(other);
             if words.is_empty() {
@@ -241,8 +242,11 @@ fn format_tool_label(name: &str) -> String {
             }
 
             let mut out = String::new();
-            for word in words {
-                push_capitalized(&mut out, &word);
+            for (i, word) in words.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                push_capitalized(&mut out, word);
             }
             out
         }
@@ -368,7 +372,7 @@ mod tests {
     use super::*;
     use crate::render::line_to_plain_text;
     use crate::types::events::{PermissionPreview, ReadPermissionPreview};
-    use crate::types::message::{Message, Role};
+    use omini_domain::message::{Message, Role};
 
     #[test]
     fn rejected_subagent_without_started_event_renders_finished() {
@@ -450,8 +454,8 @@ mod tests {
         let first_read_prefix = rendered[1].split("Read").next().unwrap().width();
         let active_read_prefix = rendered[2].split("Read").next().unwrap().width();
 
-        assert_eq!(rendered[1], "  └─ Read README.md");
-        assert!(rendered[2].starts_with("  •  Read Cargo.toml"));
+        assert_eq!(rendered[1], "  └ Read README.md");
+        assert!(rendered[2].starts_with("  • Read Cargo.toml"));
         assert_eq!(first_read_prefix, active_read_prefix);
     }
 
@@ -487,6 +491,6 @@ mod tests {
         let lines = render_subagent_tool(&tool_use, None, Some(&node), &VecDeque::new(), 80, None);
         let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
 
-        assert_eq!(rendered[1], "  └─ View Image /tmp/image.png");
+        assert_eq!(rendered[1], "  └ View Image /tmp/image.png");
     }
 }

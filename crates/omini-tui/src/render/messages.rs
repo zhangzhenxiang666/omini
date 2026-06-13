@@ -4,13 +4,13 @@ use super::{
     styled_wrapped_display, styled_wrapped_text, truncate_str,
 };
 use crate::state::{UiMessage, UiState, format_run_duration};
-use crate::types::display::DisplayMessage;
 use crate::types::events::{Notification, NotificationKind};
-use crate::types::message::ContentBlock;
 use crate::widgets::{
     build_bordered_lines, build_thinking_lines, render_tool, tool_error_display_text,
     truncate_display_width,
 };
+use omini_domain::display::DisplayMessage;
+use omini_domain::message::ContentBlock;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -96,7 +96,7 @@ fn build_notification_lines(
         .map(|detail| detail.trim())
         .filter(|detail| !detail.is_empty())
     {
-        let detail_prefix = if first_detail { "  └─ " } else { "     " };
+        let detail_prefix = if first_detail { "  └ " } else { "    " };
         first_detail = false;
         let detail_width = content_width.saturating_sub(UnicodeWidthStr::width(detail_prefix));
         lines.push(Line::from(vec![
@@ -148,7 +148,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
 
-    let rendered_messages: Vec<&crate::types::message::Message> = state
+    let rendered_messages: Vec<&omini_domain::message::Message> = state
         .messages
         .iter()
         .filter_map(UiMessage::as_message)
@@ -255,7 +255,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
             let mut block_lines: Vec<Line> = Vec::new();
             match block {
-                ContentBlock::Text(tb) if message.role == crate::types::message::Role::User => {
+                ContentBlock::Text(tb) if message.role == omini_domain::message::Role::User => {
                     let user_bg = INPUT_BG;
                     let bg_style = Style::default().bg(user_bg);
                     block_lines.push(
@@ -588,7 +588,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::message::{ContentBlock, Message, Role};
+    use omini_domain::message::{ContentBlock, Message, Role};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -625,7 +625,7 @@ mod tests {
 
         assert_eq!(
             plain,
-            vec!["· 主消息", "  └─ ok", "     中文ab...", "     done"]
+            vec!["· 主消息", "  └ ok", "    中文abcdef", "    done"]
         );
         assert!(
             plain

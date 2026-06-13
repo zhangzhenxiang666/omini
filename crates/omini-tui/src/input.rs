@@ -4,9 +4,9 @@ use super::state::{
 };
 use crate::client::ClientRequest;
 use crate::protocol;
-use crate::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use crate::types::events::{ToolPauseKind, ToolPauseResponse};
 use crossterm::event::{KeyCode, KeyModifiers};
+use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use tokio::sync::mpsc;
 
 const AGENT_TOOL_ROW_COUNT: usize = 17;
@@ -879,12 +879,12 @@ pub(super) async fn flush_queued_user_inputs(
         .iter()
         .cloned()
         .map(|draft| match draft.clone().history_item() {
-            crate::types::display::HistoryItem::Message(message) => UiMessage::Message(message),
-            crate::types::display::HistoryItem::Display(display) => UiMessage::Display(display),
-            crate::types::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
+            omini_domain::display::HistoryItem::Message(message) => UiMessage::Message(message),
+            omini_domain::display::HistoryItem::Display(display) => UiMessage::Display(display),
+            omini_domain::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                 text: plan.markdown,
             },
-            crate::types::display::HistoryItem::Summary(summary) => UiMessage::CompactSummary {
+            omini_domain::display::HistoryItem::Summary(summary) => UiMessage::CompactSummary {
                 text: summary.markdown,
             },
         })
@@ -899,7 +899,6 @@ pub(super) async fn flush_queued_user_inputs(
     state.scroll_offset = 0;
     state.auto_scroll = true;
     state.agent_status = AgentStatus::Working;
-    state.mark_plan_mode_message_sent();
     let _ = request_tx
         .send(ClientRequest::RunSubmitUserInput {
             input: protocol::user_input_from_draft(draft),

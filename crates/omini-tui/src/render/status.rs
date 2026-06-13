@@ -272,11 +272,7 @@ fn active_profile_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
     match state.status_bar.active_profile {
         ActiveProfile::Main => None,
         ActiveProfile::Auto => mode_hint(width, "Auto mode", "AUTO", None, auto_mode_hint_style()),
-        ActiveProfile::Plan => {
-            let suffix =
-                (!state.status_bar.plan_mode_message_sent).then_some(" (Shift+Tab 切换模式)");
-            mode_hint(width, "Plan mode", "PLAN", suffix, plan_mode_hint_style())
-        }
+        ActiveProfile::Plan => mode_hint(width, "Plan mode", "PLAN", None, plan_mode_hint_style()),
     }
 }
 
@@ -449,21 +445,7 @@ mod tests {
         let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 40), 40);
 
         let text = line_to_plain_text(&line);
-        assert!(text.ends_with("Plan mode (Shift+Tab 切换模式)"));
-        assert_eq!(UnicodeWidthStr::width(text.as_str()), 40);
-    }
-
-    #[test]
-    fn plan_mode_hint_omits_shortcut_after_message_sent() {
-        let mut state = UiState::new();
-        state.status_bar.active_profile = ActiveProfile::Plan;
-        state.status_bar.plan_mode_message_sent = true;
-
-        let line = compose_footer_line(Line::from("left"), active_profile_hint(&state, 40), 40);
-
-        let text = line_to_plain_text(&line);
         assert!(text.ends_with("Plan mode"));
-        assert!(!text.contains("Shift+Tab"));
         assert_eq!(UnicodeWidthStr::width(text.as_str()), 40);
     }
 

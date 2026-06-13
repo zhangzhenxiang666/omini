@@ -1,10 +1,10 @@
 use crate::types::config::ThinkingEffort;
-use crate::types::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
 use crate::types::events::{
     ActiveProfile, CommandSummary, InteractionRequest, Notification, SessionSummary,
     SubagentSnapshot, SubagentStatus, SubmittedPlan, ToolPauseRequest,
 };
-use crate::types::message::Message;
+use omini_domain::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
+use omini_domain::message::Message;
 use rand::Rng;
 use ratatui::layout::Rect;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -303,8 +303,6 @@ pub struct StatusBar {
     pub cwd: PathBuf,
     /// 当前运行 profile
     pub active_profile: ActiveProfile,
-    /// 当前 Plan 模式周期内是否已经发送过用户消息。
-    pub plan_mode_message_sent: bool,
     /// 最近一次请求的上下文 token 数。
     pub current_context_tokens: i64,
     /// 当前会话历史累计 token 数。
@@ -325,7 +323,6 @@ impl Default for StatusBar {
             active_provider: String::new(),
             cwd: PathBuf::new(),
             active_profile: ActiveProfile::Main,
-            plan_mode_message_sent: false,
             current_context_tokens: 0,
             total_tokens: 0,
             total_cached_tokens: 0,
@@ -618,12 +615,6 @@ impl UiState {
         }
     }
 
-    pub fn mark_plan_mode_message_sent(&mut self) {
-        if self.status_bar.active_profile == ActiveProfile::Plan {
-            self.status_bar.plan_mode_message_sent = true;
-        }
-    }
-
     pub fn open_plan_approval(&mut self, plan: SubmittedPlan) {
         if self
             .plan_approval
@@ -632,7 +623,6 @@ impl UiState {
         {
             return;
         }
-        self.show_start_screen = false;
         self.plan_approval = Some(plan);
         self.plan_approval_selected = 0;
         self.plan_approval_auto = false;
@@ -754,7 +744,6 @@ impl UiState {
             && (state == omini_protocol::SessionRuntimeState::Waiting
                 || !pending_pauses.is_empty());
 
-        self.show_start_screen = false;
         self.manual_compact_running = false;
         self.sync_run_timer(Duration::from_millis(activity.elapsed_ms), paused);
         self.agent_status = agent_status;

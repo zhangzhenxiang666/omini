@@ -1,4 +1,4 @@
-use crate::types::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use serde_json::Value;
@@ -33,7 +33,7 @@ pub(super) fn render(
     let is_pending = result.is_none();
     let title = vec![
         Span::raw("· "),
-        Span::styled("Todo", tool_title_style(accent, is_pending)),
+        Span::styled("Todo List", tool_title_style(accent, is_pending)),
     ];
     lines.push(Line::from(title));
 
@@ -47,7 +47,7 @@ pub(super) fn render(
     let todos = todo_items(tool_use);
     if todos.is_empty() {
         lines.push(Line::from(vec![
-            Span::raw("  └─ "),
+            Span::raw("  └ "),
             Span::styled("No todo items", Style::default().fg(dim)),
         ]));
         return lines;
@@ -133,7 +133,7 @@ fn push_todo_item(
     first: bool,
     content_width: usize,
 ) {
-    let prefix = if first { "  └─ " } else { "     " };
+    let prefix = if first { "  └ " } else { "    " };
     let continuation = "       ";
     let symbol = todo.status.symbol();
     let symbol_style = todo.status.symbol_style();
@@ -168,8 +168,8 @@ fn push_error(lines: &mut Vec<Line<'static>>, content: &str, content_width: usiz
     } else {
         message
     };
-    let prefix = "  └─ ";
-    let continuation = "     ";
+    let prefix = "  └ ";
+    let continuation = "    ";
     let prefix_width = UnicodeWidthStr::width(prefix);
     let wrap_width = content_width.saturating_sub(prefix_width).max(1);
     let style = Style::default().fg(error);

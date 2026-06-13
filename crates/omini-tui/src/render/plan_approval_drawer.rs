@@ -159,8 +159,8 @@ mod tests {
     use super::*;
     use crate::selection::selected_text;
     use crate::state::{SelectionPoint, TextSelection};
-    use crate::types::display::DisplayPlan;
     use chrono::Utc;
+    use omini_domain::display::DisplayPlan;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
