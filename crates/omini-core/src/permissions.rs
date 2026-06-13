@@ -880,6 +880,17 @@ const BASH_DOWNLOAD_OUTPUT_FLAGS: &[&str] = &["-o", "-O", "--output"];
 // 会创建/删除容器或清理本地资源的容器操作。
 const BASH_PROMPT_DOCKER_SUBCOMMANDS: &[&str] = &["run", "rm"];
 
+// GitHub CLI 写入类操作：创建/修改/删除/关闭远端资源，默认询问。
+const BASH_PROMPT_GH_ISSUE_SUBCOMMANDS: &[&str] =
+    &["create", "edit", "close", "reopen", "delete", "comment"];
+const BASH_PROMPT_GH_PR_SUBCOMMANDS: &[&str] =
+    &["create", "edit", "merge", "close", "reopen", "comment"];
+const BASH_PROMPT_GH_RELEASE_SUBCOMMANDS: &[&str] = &["create", "delete", "edit"];
+const BASH_PROMPT_GH_LABEL_SUBCOMMANDS: &[&str] = &["create", "edit", "delete"];
+const BASH_PROMPT_GH_REPO_SUBCOMMANDS: &[&str] = &["create", "delete"];
+const BASH_PROMPT_GH_WORKFLOW_SUBCOMMANDS: &[&str] = &["run"];
+const BASH_PROMPT_GH_RUN_SUBCOMMANDS: &[&str] = &["cancel", "rerun"];
+
 // 数据库或 schema 迁移工具可能修改持久化状态。
 const BASH_MIGRATION_COMMANDS: &[&str] = &["diesel", "sqlx", "prisma", "sea-orm-cli"];
 const BASH_MIGRATION_MARKERS: &[&str] = &["migrate", "migration"];
@@ -1027,6 +1038,7 @@ fn bash_args_need_prompt(args: &[String]) -> bool {
         cmd if BASH_DOWNLOAD_COMMANDS.contains(&cmd) => args
             .iter()
             .any(|arg| BASH_DOWNLOAD_OUTPUT_FLAGS.contains(&arg.as_str())),
+        "gh" => gh_args_need_prompt(args),
         "docker" => args.get(1).is_some_and(|sub| {
             BASH_PROMPT_DOCKER_SUBCOMMANDS.contains(&sub.as_str())
                 || args.windows(2).any(|w| w == ["system", "prune"])
@@ -1048,6 +1060,25 @@ fn uv_args_need_prompt(args: &[String]) -> bool {
             .is_some_and(|pip_sub| BASH_PROMPT_UV_PIP_SUBCOMMANDS.contains(&pip_sub.as_str()));
     }
     BASH_PROMPT_UV_SUBCOMMANDS.contains(&sub)
+}
+
+fn gh_args_need_prompt(args: &[String]) -> bool {
+    let Some(resource) = args.get(1).map(|a| a.as_str()) else {
+        return false;
+    };
+    let Some(action) = args.get(2).map(|a| a.as_str()) else {
+        return false;
+    };
+    match resource {
+        "issue" => BASH_PROMPT_GH_ISSUE_SUBCOMMANDS.contains(&action),
+        "pr" => BASH_PROMPT_GH_PR_SUBCOMMANDS.contains(&action),
+        "release" => BASH_PROMPT_GH_RELEASE_SUBCOMMANDS.contains(&action),
+        "label" => BASH_PROMPT_GH_LABEL_SUBCOMMANDS.contains(&action),
+        "repo" => BASH_PROMPT_GH_REPO_SUBCOMMANDS.contains(&action),
+        "workflow" => BASH_PROMPT_GH_WORKFLOW_SUBCOMMANDS.contains(&action),
+        "run" => BASH_PROMPT_GH_RUN_SUBCOMMANDS.contains(&action),
+        _ => false,
+    }
 }
 
 fn split_shell_commands(command: &str) -> Vec<String> {
