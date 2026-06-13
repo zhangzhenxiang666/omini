@@ -431,12 +431,8 @@ impl McpServerClient for RealMcpServerClient {
         server_tool_name: &str,
         arguments: Map<String, Value>,
     ) -> Result<McpCallOutput, String> {
-        let params = CallToolRequestParams {
-            meta: None,
-            name: server_tool_name.to_string().into(),
-            arguments: Some(arguments),
-            task: None,
-        };
+        let params =
+            CallToolRequestParams::new(server_tool_name.to_string()).with_arguments(arguments);
         let result = tokio::time::timeout(self.tool_timeout, self.service.peer().call_tool(params))
             .await
             .map_err(|_| {
@@ -490,10 +486,7 @@ impl McpServerClient for RealMcpServerClient {
     }
 
     async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, String> {
-        let params = ReadResourceRequestParams {
-            meta: None,
-            uri: uri.to_string(),
-        };
+        let params = ReadResourceRequestParams::new(uri);
         tokio::time::timeout(self.tool_timeout, self.service.peer().read_resource(params))
             .await
             .map_err(|_| {
@@ -527,11 +520,11 @@ impl McpServerClient for RealMcpServerClient {
         name: &str,
         arguments: Option<Map<String, Value>>,
     ) -> Result<GetPromptResult, String> {
-        let params = GetPromptRequestParams {
-            meta: None,
-            name: name.to_string(),
-            arguments,
-        };
+        let mut params = GetPromptRequestParams::new(name);
+        if let Some(arguments) = arguments {
+            params = params.with_arguments(arguments);
+        }
+
         tokio::time::timeout(self.tool_timeout, self.service.peer().get_prompt(params))
             .await
             .map_err(|_| {
@@ -717,7 +710,7 @@ async fn connect_streamable_http(
     }
 
     let headers = build_header_map(http_headers)?;
-    let http_client = rmcp_reqwest::Client::builder()
+    let http_client = reqwest::Client::builder()
         .default_headers(headers)
         .build()
         .map_err(|error| format!("failed to build MCP HTTP client for `{server_name}`: {error}"))?;
@@ -741,15 +734,15 @@ fn client_info() -> ClientInfo {
 
 fn build_header_map(
     headers: Option<&HashMap<String, String>>,
-) -> Result<rmcp_reqwest::header::HeaderMap, String> {
-    let mut map = rmcp_reqwest::header::HeaderMap::new();
+) -> Result<reqwest::header::HeaderMap, String> {
+    let mut map = reqwest::header::HeaderMap::new();
     let Some(headers) = headers else {
         return Ok(map);
     };
     for (name, value) in headers {
-        let name = rmcp_reqwest::header::HeaderName::from_bytes(name.as_bytes())
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
             .map_err(|error| format!("invalid MCP HTTP header name `{name}`: {error}"))?;
-        let value = rmcp_reqwest::header::HeaderValue::from_str(value)
+        let value = reqwest::header::HeaderValue::from_str(value)
             .map_err(|error| format!("invalid MCP HTTP header value for `{name}`: {error}"))?;
         map.insert(name, value);
     }
@@ -825,7 +818,7 @@ fn sanitize_tool_schema(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::{Annotated, RawResource, RawResourceTemplate};
+    use rmcp::model::{Annotated, RawResource, RawResourceTemplate, ResourceContents};
 
     fn server_tool(server_name: &str, server_tool_name: &str) -> McpServerToolSpec {
         McpServerToolSpec {
@@ -992,9 +985,10 @@ mod tests {
         }
 
         async fn read_resource(&self, uri: &str) -> Result<ReadResourceResult, String> {
-            Ok(ReadResourceResult {
-                contents: vec![rmcp::model::ResourceContents::text("content", uri)],
-            })
+            Ok(ReadResourceResult::new(vec![ResourceContents::text(
+                "content",
+                uri.to_string(),
+            )]))
         }
 
         async fn list_prompts(&self) -> Result<Vec<Prompt>, String> {
@@ -1006,10 +1000,7 @@ mod tests {
             _name: &str,
             _arguments: Option<Map<String, Value>>,
         ) -> Result<GetPromptResult, String> {
-            Ok(GetPromptResult {
-                description: None,
-                messages: Vec::new(),
-            })
+            Ok(GetPromptResult::new(vec![]))
         }
     }
 
@@ -1203,12 +1194,7 @@ mod tests {
 
     #[test]
     fn call_output_marks_mcp_error_results_as_tool_errors() {
-        let result = CallToolResult {
-            content: Vec::new(),
-            structured_content: Some(serde_json::json!({"message": "failed"})),
-            is_error: Some(true),
-            meta: None,
-        };
+        let result = CallToolResult::structured_error(serde_json::json!({"message": "failed"}));
 
         let output = call_output_from_result(result);
 

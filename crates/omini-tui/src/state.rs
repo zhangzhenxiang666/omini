@@ -801,14 +801,14 @@ impl UiState {
 }
 
 fn pick_input_placeholder() -> String {
-    let mut rng = rand::rng();
-    let idx = rng.random_range(0..INPUT_PLACEHOLDERS.len());
+    let mut rng = rand::thread_rng();
+    let idx = rng.gen_range(0..INPUT_PLACEHOLDERS.len());
     INPUT_PLACEHOLDERS[idx].to_string()
 }
 
 fn pick_start_screen_tip() -> String {
-    let mut rng = rand::rng();
-    let idx = rng.random_range(0..START_SCREEN_TIPS.len());
+    let mut rng = rand::thread_rng();
+    let idx = rng.gen_range(0..START_SCREEN_TIPS.len());
     START_SCREEN_TIPS[idx].to_string()
 }
 
