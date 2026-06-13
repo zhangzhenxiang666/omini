@@ -685,6 +685,8 @@ mod tests {
                     limit: Some(1000),
                     thinking: Some(false),
                     input_modalities: None,
+                    headers: None,
+                    body: None,
                 },
             ),
             (
@@ -694,6 +696,8 @@ mod tests {
                     limit: Some(2000),
                     thinking: Some(true),
                     input_modalities: None,
+                    headers: None,
+                    body: None,
                 },
             ),
         ]);

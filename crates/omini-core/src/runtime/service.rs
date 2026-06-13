@@ -295,6 +295,8 @@ mod tests {
                 limit: Some(256000),
                 thinking: Some(true),
                 input_modalities: None,
+                headers: None,
+                body: None,
             },
         );
 

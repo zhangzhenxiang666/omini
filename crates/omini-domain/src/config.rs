@@ -1,5 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -78,6 +80,10 @@ pub struct ModelInfo {
     pub thinking: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_modalities: Option<Vec<InputModality>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_body: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -140,5 +146,53 @@ mod tests {
             serde_json::to_value(ThinkingEffort::Max).unwrap(),
             json!("max")
         );
+    }
+
+    #[test]
+    fn model_info_extra_headers_and_body_default_to_none() {
+        let model: ModelInfo = serde_json::from_value(json!({
+            "id": "gpt-test",
+            "name": null,
+            "limit": 256000,
+            "thinking": false
+        }))
+        .unwrap();
+
+        assert_eq!(model.extra_headers, None);
+        assert_eq!(model.extra_body, None);
+    }
+
+    #[test]
+    fn model_info_extra_headers_parse() {
+        let model: ModelInfo = serde_json::from_value(json!({
+            "id": "gpt-test",
+            "name": null,
+            "limit": 256000,
+            "thinking": false,
+            "extra_headers": {"x-custom": "value", "x-another": "test"}
+        }))
+        .unwrap();
+
+        let mut expected = HashMap::new();
+        expected.insert("x-custom".to_string(), "value".to_string());
+        expected.insert("x-another".to_string(), "test".to_string());
+        assert_eq!(model.extra_headers, Some(expected));
+    }
+
+    #[test]
+    fn model_info_extra_body_parse() {
+        let model: ModelInfo = serde_json::from_value(json!({
+            "id": "gpt-test",
+            "name": null,
+            "limit": 256000,
+            "thinking": false,
+            "extra_body": {"option": true, "count": 42}
+        }))
+        .unwrap();
+
+        assert!(model.extra_body.is_some());
+        let body = model.extra_body.unwrap();
+        assert_eq!(body.get("option"), Some(&json!(true)));
+        assert_eq!(body.get("count"), Some(&json!(42)));
     }
 }

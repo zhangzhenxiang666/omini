@@ -390,6 +390,8 @@ mod tests {
                 limit: 1000,
                 thinking,
                 input_modalities: None,
+                extra_body: None,
+                extra_headers: None,
             },
         }
     }
@@ -438,6 +440,8 @@ mod tests {
             limit: 1_000_000,
             thinking: true,
             input_modalities: None,
+            extra_body: None,
+            extra_headers: None,
         };
 
         assert_eq!(
@@ -454,6 +458,8 @@ mod tests {
             limit: 1_000_000,
             thinking: false,
             input_modalities: None,
+            extra_body: None,
+            extra_headers: None,
         };
 
         assert_eq!(model_meta_text(&model, "gpt-5.4-mini"), "1m 上下文");

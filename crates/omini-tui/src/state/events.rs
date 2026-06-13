@@ -828,6 +828,8 @@ mod tests {
                         limit: 1000,
                         thinking: true,
                         input_modalities: None,
+                        extra_body: None,
+                        extra_headers: None,
                     }],
                 },
             )]),

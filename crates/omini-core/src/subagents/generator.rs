@@ -64,6 +64,8 @@ async fn generate_agent_draft_checked(
         max_tokens: Some(8192),
         temperature: Some(0.2),
         thinking_effort,
+        extra_headers: None,
+        extra_body: None,
     };
     let mut stream = llm_client
         .invoke(request)

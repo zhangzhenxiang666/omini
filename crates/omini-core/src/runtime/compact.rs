@@ -827,6 +827,14 @@ async fn invoke_summary(
         max_tokens: Some(max_tokens as u64),
         temperature: None,
         thinking_effort: None,
+        extra_headers: ctx
+            .settings
+            .current_model_config()
+            .and_then(|m| m.extra_headers.as_ref()),
+        extra_body: ctx
+            .settings
+            .current_model_config()
+            .and_then(|m| m.extra_body.as_ref()),
     };
     let mut stream = ctx
         .llm_client
@@ -1485,6 +1493,8 @@ mod tests {
                     limit,
                     thinking: false,
                     input_modalities: None,
+                    extra_body: None,
+                    extra_headers: None,
                 }],
             },
         );

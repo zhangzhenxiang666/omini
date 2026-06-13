@@ -64,6 +64,13 @@ pub(super) async fn invoke_openai(
         map.insert("tools".to_string(), Value::Array(tools_value));
     }
 
+    // 合并 per-model extra body 字段
+    if let Some(extra_body) = request.extra_body {
+        for (key, value) in extra_body {
+            map.insert(key.clone(), value.clone());
+        }
+    }
+
     let body = Value::Object(map);
     let url = format!("{}/chat/completions", base_url);
 
@@ -72,6 +79,18 @@ pub(super) async fn invoke_openai(
         http::header::AUTHORIZATION,
         format!("Bearer {}", api_key).parse().unwrap(),
     );
+
+    // 合并 per-model extra headers
+    if let Some(extra_headers) = request.extra_headers {
+        for (key, value) in extra_headers {
+            if let (Ok(name), Ok(val)) = (
+                http::HeaderName::from_bytes(key.as_bytes()),
+                http::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+    }
 
     let response =
         send_with_retry(|| http_client.post(&url).headers(headers.clone()).json(&body)).await?;

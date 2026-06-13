@@ -350,6 +350,14 @@ impl QueryEngine {
                 max_tokens: None,
                 temperature: None,
                 thinking_effort: ctx.settings.thinking_effort,
+                extra_headers: ctx
+                    .settings
+                    .current_model_config()
+                    .and_then(|m| m.extra_headers.as_ref()),
+                extra_body: ctx
+                    .settings
+                    .current_model_config()
+                    .and_then(|m| m.extra_body.as_ref()),
             };
 
             // TODO: 需要优化api的错误处理, 对于因上下文过长的输入而失败的请求要尝试收缩上下文然后再调研llm摘要

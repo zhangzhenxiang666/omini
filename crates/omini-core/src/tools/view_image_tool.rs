@@ -151,6 +151,8 @@ mod tests {
                     limit: 256000,
                     thinking: false,
                     input_modalities: Some(vec![InputModality::Text, InputModality::Image]),
+                    extra_body: None,
+                    extra_headers: None,
                 }],
             },
         );

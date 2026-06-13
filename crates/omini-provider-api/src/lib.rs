@@ -82,6 +82,11 @@ pub struct ApiRequest<'a> {
     pub max_tokens: Option<u64>,
     pub temperature: Option<f64>,
     pub thinking_effort: Option<ThinkingEffort>,
+    // TODO: 未验证 per-model extra headers/body 的合法性——headers 可能覆盖认证信息
+    // （如 Authorization、x-api-key），body 可能覆盖关键字段（如 messages、model）。
+    // 当前信任用户配置，不做过滤或拦截。
+    pub extra_headers: Option<&'a std::collections::HashMap<String, String>>,
+    pub extra_body: Option<&'a serde_json::Map<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone)]

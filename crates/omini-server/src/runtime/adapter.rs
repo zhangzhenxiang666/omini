@@ -312,6 +312,8 @@ pub(super) fn models_response_from_settings(settings: &Settings) -> protocol::Mo
                     limit: model.limit,
                     thinking: model.thinking,
                     input_modalities: model.input_modalities.clone(),
+                    extra_headers: model.extra_headers.clone(),
+                    extra_body: model.extra_body.clone(),
                 })
                 .collect(),
         })

@@ -1628,6 +1628,8 @@ fn model_config_from_protocol(model: protocol::ModelInfo) -> crate::types::confi
                 .map(input_modality_from_protocol)
                 .collect()
         }),
+        extra_headers: model.extra_headers,
+        extra_body: model.extra_body,
     }
 }
 

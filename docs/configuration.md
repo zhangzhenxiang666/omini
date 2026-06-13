@@ -127,6 +127,32 @@ http_headers = { "X-Custom" = "value" }
 | `limit` | `u32` | ❌ | `256000` | 上下文窗口大小（token） |
 | `thinking` | `bool` | ❌ | `false` | 是否支持 thinking（扩展推理） |
 | `input_modalities` | `Vec<String>` | ❌ | — | 支持的输入类型：`"text"` \| `"image"` |
+| `headers` | `HashMap<String, String>` | ❌ | — | 该模型专属的额外 HTTP 请求头 |
+| `body` | `HashMap<String, Value>` | ❌ | — | 该模型专属的额外请求体字段 |
+
+#### 模型专属 headers 和 body
+
+某些 API 兼容服务要求特定模型携带额外的 HTTP header 或请求体参数。可以通过 `headers` 和 `body` 字段为单个模型配置：
+
+```toml
+[providers.example.models."some-model"]
+name = "Some Model"
+limit = 128000
+thinking = false
+
+[providers.example.models."some-model".headers]
+"x-provider-feature" = "enabled"
+
+[providers.example.models."some-model".body]
+some_option = true
+routing_mode = "fast"
+```
+
+**注意事项：**
+
+- 未配置 `headers` / `body` 时，现有行为保持不变。
+- 仅当选中该模型时，请求才会附带这些额外参数；同 provider 下的其他模型不受影响。
+- extra headers 会覆盖默认 headers（如 `Authorization`），extra body 字段会覆盖请求体中的同名字段（如 `messages`、`model`）。当前未对此进行拦截，请谨慎配置。
 
 ### Thinking（扩展推理）
 

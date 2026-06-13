@@ -1,5 +1,6 @@
 use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind, ThinkingEffort};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -351,6 +352,10 @@ pub struct ModelEntry {
     pub limit: Option<u32>,
     pub thinking: Option<bool>,
     pub input_modalities: Option<Vec<InputModality>>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub body: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -381,6 +386,10 @@ pub struct PartialModelEntry {
     pub limit: Option<u32>,
     pub thinking: Option<bool>,
     pub input_modalities: Option<Vec<InputModality>>,
+    #[serde(default)]
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub body: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -461,6 +470,8 @@ impl UserConfig {
                             limit: entry.limit.unwrap_or(256000),
                             thinking: entry.thinking.unwrap_or(false),
                             input_modalities: entry.input_modalities.clone(),
+                            extra_headers: entry.headers.clone(),
+                            extra_body: entry.body.clone(),
                         })
                         .collect()
                 })
@@ -603,6 +614,12 @@ impl PartialModelEntry {
         if let Some(input_modalities) = self.input_modalities {
             base.input_modalities = Some(input_modalities);
         }
+        if let Some(headers) = self.headers {
+            base.headers = Some(headers);
+        }
+        if let Some(body) = self.body {
+            base.body = Some(body);
+        }
     }
 
     fn into_model_entry(self) -> ModelEntry {
@@ -611,6 +628,8 @@ impl PartialModelEntry {
             limit: self.limit,
             thinking: self.thinking,
             input_modalities: self.input_modalities,
+            headers: self.headers,
+            body: self.body,
         }
     }
 }

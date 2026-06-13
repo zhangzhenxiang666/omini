@@ -576,6 +576,8 @@ mod tests {
                     limit: 256000,
                     thinking: true,
                     input_modalities: None,
+                    extra_body: None,
+                    extra_headers: None,
                 }],
             },
         );
@@ -592,6 +594,8 @@ mod tests {
                     limit: 200000,
                     thinking: false,
                     input_modalities: None,
+                    extra_body: None,
+                    extra_headers: None,
                 }],
             },
         );
