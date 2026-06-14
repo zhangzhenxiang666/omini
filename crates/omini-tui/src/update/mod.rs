@@ -43,6 +43,7 @@ mod tests {
     use crate::state::InputMention;
     use crate::types::events::{
         ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
+        UserInputOption, UserInputPreview, UserInputQuestion,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -92,6 +93,38 @@ mod tests {
         state
     }
 
+    fn user_input_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "ask_user".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(UserInputPreview {
+                questions: vec![UserInputQuestion {
+                    id: "q1".to_string(),
+                    header: "header".to_string(),
+                    question: "Pick one".to_string(),
+                    options: (0..3)
+                        .map(|i| UserInputOption {
+                            label: format!("opt{i}"),
+                            description: String::new(),
+                        })
+                        .collect(),
+                }],
+            }),
+        }
+    }
+
+    fn state_with_user_input_pause() -> UiState {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(user_input_pause(
+            "tool_1",
+        )));
+        state
+    }
+
     fn submitted_plan() -> SubmittedPlan {
         SubmittedPlan {
             id: "20260521T000000Z-plan".to_string(),
@@ -121,6 +154,94 @@ mod tests {
         assert!(state.user_input_note_mode);
         assert_eq!(state.permission_selected, 1);
         assert_eq!(state.current_user_input_note(), "");
+    }
+
+    // 修复 Bug 1 的回归测试:ask_user 暂停进入 note 模式后,`j` / `k`
+    // 必须是普通字符插入,不能被 vim 风格方向键别名吞掉。
+    #[tokio::test]
+    async fn user_input_note_mode_inserts_jk_as_text() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Tab 切换到 note 模式
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+        let initial_selected = state.current_user_input_selected();
+
+        for c in "skip、kick this off".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+
+        assert_eq!(state.current_user_input_note(), "skip、kick this off");
+        assert_eq!(state.current_user_input_selected(), initial_selected);
+    }
+
+    // 修复 Bug 1 的回归测试:note 模式下方向键 `↑` / `↓` 仍要能切选项。
+    // 仅验证"切换选项"语义,saturate 边界(max_selected 取 options.len()
+    // 而非 len-1 导致的 off-by-one)与本 issue 无关,不在此测试覆盖。
+    #[tokio::test]
+    async fn user_input_note_mode_arrows_still_navigate_options() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+        assert_eq!(state.current_user_input_selected(), 0);
+
+        handle_tool_pause_key(&mut state, KeyCode::Down, &tx).await;
+        assert_eq!(state.current_user_input_selected(), 1);
+        handle_tool_pause_key(&mut state, KeyCode::Up, &tx).await;
+        assert_eq!(state.current_user_input_selected(), 0);
+    }
+
+    // Permission 暂停的 note 模式回归基线:`j` / `k` 原本就能插入,
+    // 此处固定当前行为,防止后续改动破坏非 ask_user 路径。
+    #[tokio::test]
+    async fn permission_note_mode_inserts_jk_as_text() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        for c in "jk".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+
+        assert_eq!(state.current_user_input_note(), "jk");
+    }
+
+    // 修复 Bug 2 的回归测试:note 模式期间 `Event::Paste` 走
+    // `handle_input_event` 中独立的 note 分支,把每个字符塞进 note。
+    // 之前主输入框分支的 `active_tool_pause().is_none()` 守卫把整条
+    // bracketed paste 路径吞掉,note 模式无处可粘。
+    #[tokio::test]
+    async fn user_input_note_mode_paste_inserts_chars() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        let outcome =
+            handle_input_event(&mut state, Event::Paste("pasted note".to_string()), &tx).await;
+        assert!(outcome.redraw);
+
+        assert_eq!(state.current_user_input_note(), "pasted note");
+    }
+
+    #[tokio::test]
+    async fn permission_note_mode_paste_inserts_chars() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        let outcome = handle_input_event(&mut state, Event::Paste("hi".to_string()), &tx).await;
+        assert!(outcome.redraw);
+
+        assert_eq!(state.current_user_input_note(), "hi");
     }
 
     #[tokio::test]
@@ -486,6 +607,16 @@ pub(super) async fn handle_input_event(
                 UpdateOutcome::exit()
             }
         }
+        Event::Paste(text) if state.user_input_note_mode => {
+            // note 模式期间放行终端 bracketed paste(Shift+Insert 等),
+            // 逐字符塞进 note。修复 Bug 2 的一部分:此前主输入框分支的
+            // `active_tool_pause().is_none()` 守卫把 tool pause 期间的
+            // `Event::Paste` 整体吞掉,note 模式无处可粘。
+            for c in text.chars() {
+                state.insert_note_char(c);
+            }
+            UpdateOutcome::redraw()
+        }
         Event::Paste(text)
             if state.interaction_step.is_none()
                 && state.active_tool_pause().is_none()
@@ -756,10 +887,13 @@ async fn handle_tool_pause_key(
             }
             KeyCode::Backspace => state.delete_note_before(),
             KeyCode::Delete => state.delete_note_after(),
-            KeyCode::Up | KeyCode::Char('k') if is_user_input_pause => {
-                state.permission_select_prev()
-            }
-            KeyCode::Down | KeyCode::Char('j') if is_user_input_pause => {
+            // note 模式是纯文本输入,`j` / `k` 不再被当成方向键别名,
+            // 必须能作为普通字符插入;方向键导航仍由 `Up` / `Down` 负责。
+            // 修复 Bug 1:之前 `KeyCode::Char('k')` / `KeyCode::Char('j')`
+            // 在 `if is_user_input_pause` 守卫下吞掉了 ask_user note 模式
+            // 中的 `j` / `k` 字符。
+            KeyCode::Up if is_user_input_pause => state.permission_select_prev(),
+            KeyCode::Down if is_user_input_pause => {
                 state.permission_select_next_with_max(user_input_option_max);
             }
             KeyCode::Char(c) => state.insert_note_char(c),
