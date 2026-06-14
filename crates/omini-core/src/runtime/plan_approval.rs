@@ -91,6 +91,7 @@ impl AgentRuntime {
             session_id,
             &blocks_dir,
             message,
+            self.active_profile(),
             &self.persistence_tx,
         )
         .await;

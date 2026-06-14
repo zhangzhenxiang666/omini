@@ -35,6 +35,9 @@ impl AgentRuntime {
             async move {
                 let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
                 while let Some(event) = engine_rx.recv().await {
+                    let active = *active_profile_handle
+                        .read()
+                        .expect("active profile lock poisoned");
                     match event {
                         // ===== 需要持久化的事件 =====
                         EngineToRuntimeEvent::UserMessageProduced {
@@ -46,6 +49,7 @@ impl AgentRuntime {
                                 &session_id,
                                 &blocks_dir,
                                 message.clone(),
+                                active,
                                 &persistence_tx,
                             )
                             .await;
@@ -64,6 +68,7 @@ impl AgentRuntime {
                                 &session_id,
                                 &blocks_dir,
                                 &msg,
+                                active,
                                 &persistence_tx,
                             )
                             .await;
@@ -75,6 +80,7 @@ impl AgentRuntime {
                                 &session_id,
                                 &blocks_dir,
                                 msg,
+                                active,
                                 &persistence_tx,
                             )
                             .await;
@@ -299,6 +305,7 @@ impl AgentRuntime {
                                     &event.session_id,
                                     &subagent_blocks_dir,
                                     event.message.clone(),
+                                    active,
                                     &persistence_tx,
                                 )
                                 .await;
@@ -307,6 +314,7 @@ impl AgentRuntime {
                                     &event.session_id,
                                     &subagent_blocks_dir,
                                     &event.message,
+                                    active,
                                     &persistence_tx,
                                 )
                                 .await;

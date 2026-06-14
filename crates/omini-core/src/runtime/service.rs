@@ -241,6 +241,7 @@ mod tests {
     use super::*;
     use crate::engine::ToolPauseResolver;
     use crate::runtime::active_run;
+    use crate::runtime::history;
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::ProjectsDir;
@@ -769,6 +770,179 @@ mod tests {
             }
         }
         assert!(saw_plan_event);
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_blocks_are_stripped_from_kind_normal_in_plan_mode() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("proposed-plan-strip-normal");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime =
+            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("seed".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let session_dir = runtime
+            .session_dir
+            .as_ref()
+            .expect("session dir should exist")
+            .clone();
+        runtime.set_active_profile(ActiveProfile::Plan);
+
+        let original = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "Intro\n<proposed_plan>\n# Plan\n\n- Step one.\n</proposed_plan>\nOutro"
+                    .to_string(),
+            )],
+        );
+
+        history::persist_one(
+            &session_dir,
+            &session_id,
+            session_dir.path().join("blocks").as_path(),
+            original.clone(),
+            ActiveProfile::Plan,
+            &runtime.persistence_tx,
+        )
+        .await;
+
+        let mut normal_event: Option<RuntimePersistenceEvent> = None;
+        let mut saw_plan_event = false;
+        while let Ok(event) = persistence_rx.try_recv() {
+            match event {
+                RuntimePersistenceEvent::InsertMessage {
+                    role, kind, blocks, ..
+                } if role == "assistant" && kind == "normal" => {
+                    assert!(
+                        normal_event.is_none(),
+                        "exactly one InsertMessage(kind=normal) should arrive"
+                    );
+                    normal_event = Some(RuntimePersistenceEvent::InsertMessage {
+                        session_id: session_id.clone(),
+                        role,
+                        blocks,
+                        kind,
+                        created_at: chrono::Utc::now(),
+                        blocks_dir: std::path::PathBuf::new(),
+                    });
+                }
+                RuntimePersistenceEvent::InsertPlanMessage { .. } => {
+                    saw_plan_event = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            !saw_plan_event,
+            "InsertPlanMessage must not come from persist_one"
+        );
+        let RuntimePersistenceEvent::InsertMessage { blocks, .. } =
+            normal_event.expect("InsertMessage(kind=normal) should arrive")
+        else {
+            unreachable!();
+        };
+        let ContentBlock::Text(text_block) = blocks
+            .first()
+            .expect("stripped message should keep at least one text block")
+        else {
+            panic!("expected first block to be text");
+        };
+        assert_eq!(text_block.text, "Intro\nOutro");
+        assert!(!text_block.text.contains("<proposed_plan>"));
+
+        let history_messages = session_dir
+            .load_history()
+            .expect("failed to load persisted history");
+        assert_eq!(history_messages, vec![original]);
+    }
+
+    #[tokio::test]
+    async fn proposed_plan_blocks_are_preserved_in_non_plan_mode() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("proposed-plan-keep-main");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let mut runtime =
+            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+
+        runtime.messages = vec![Message::from_user_text("seed".to_string())];
+        runtime
+            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
+            .await;
+        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let session_dir = runtime
+            .session_dir
+            .as_ref()
+            .expect("session dir should exist")
+            .clone();
+
+        let original = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text(
+                "Intro\n<proposed_plan>\n# Plan\n\n- Step one.\n</proposed_plan>\nOutro"
+                    .to_string(),
+            )],
+        );
+
+        history::persist_one(
+            &session_dir,
+            &session_id,
+            session_dir.path().join("blocks").as_path(),
+            original.clone(),
+            ActiveProfile::Main,
+            &runtime.persistence_tx,
+        )
+        .await;
+
+        let mut normal_blocks: Option<Vec<ContentBlock>> = None;
+        while let Ok(event) = persistence_rx.try_recv() {
+            if let RuntimePersistenceEvent::InsertMessage {
+                role, kind, blocks, ..
+            } = event
+                && role == "assistant"
+                && kind == "normal"
+            {
+                assert!(
+                    normal_blocks.is_none(),
+                    "exactly one InsertMessage(kind=normal) should arrive"
+                );
+                normal_blocks = Some(blocks);
+            }
+        }
+        let blocks = normal_blocks.expect("InsertMessage(kind=normal) should arrive");
+        let ContentBlock::Text(text_block) = blocks
+            .first()
+            .expect("non-plan message should keep at least one text block")
+        else {
+            panic!("expected first block to be text");
+        };
+        assert_eq!(
+            text_block.text,
+            "Intro\n<proposed_plan>\n# Plan\n\n- Step one.\n</proposed_plan>\nOutro"
+        );
     }
 
     #[tokio::test]

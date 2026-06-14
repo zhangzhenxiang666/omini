@@ -1,16 +1,15 @@
 //! 从 server 持久化记录恢复 core/TUI 使用的历史视图。
 //!
-//! SQLite 中的消息按 kind 存储为不同 JSON 形状；这里把它们重新组装成
-//! `HistoryItem`，并兼容旧版本嵌在 assistant 文本中的 proposed plan。
+//! SQLite 中的消息按 `kind` 字段区分 JSON 形状:display / plan / compact_summary
+//! 等独立形态的记录直接恢复,`kind=normal` 记录按 ContentBlock 顺序恢复成
+//! `Message`。plan 与否的判定完全以 `kind` 字段为准,不再从 assistant 文本中
+//! 反向解析 `<proposed_plan>` 标签。
 
 use crate::store::{self, Database};
-use chrono::{DateTime, Utc};
 use omini_config::project::ProjectDir;
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use omini_domain::events::{SubagentSnapshot, SubagentStatus};
-use omini_domain::message::{ContentBlock, Message, Role};
-use omini_domain::proposed_plan::{extract_proposed_plan_text, strip_proposed_plan_blocks};
-use std::collections::HashSet;
+use omini_domain::message::{Message, Role};
 use std::path::Path;
 
 /// 加载一个会话的消息历史，跳过无法解析的损坏记录以保证会话仍可打开。
@@ -26,14 +25,6 @@ pub(crate) async fn load_messages(
             return Vec::new();
         }
     };
-
-    // 新版计划会单独以 kind=plan 落盘；先收集 markdown，后面拆 legacy 文本块时避免重复展示。
-    let persisted_plan_markdowns = stored
-        .iter()
-        .filter(|sm| sm.kind == "plan")
-        .filter_map(|sm| serde_json::from_str::<DisplayPlan>(&sm.content).ok())
-        .map(|plan| normalized_plan_markdown(&plan.markdown))
-        .collect::<HashSet<_>>();
 
     let mut messages = Vec::with_capacity(stored.len());
     for sm in stored {
@@ -91,18 +82,9 @@ pub(crate) async fn load_messages(
                 continue;
             }
         };
-        let (blocks, legacy_plans) = split_embedded_plan_blocks(
-            blocks,
-            role.clone(),
-            &persisted_plan_markdowns,
-            sm.id,
-            sm.created_at,
-        );
         if !blocks.is_empty() {
             messages.push(HistoryItem::Message(Message::new(role, blocks)));
         }
-        // 旧版本把 proposed plan 混在 assistant 文本块里，加载时拆成独立 Plan 供新 UI 使用。
-        messages.extend(legacy_plans.into_iter().map(HistoryItem::Plan));
     }
     messages
 }
@@ -153,63 +135,4 @@ pub(crate) async fn load_subagents_for_session(
         });
     }
     subagents
-}
-
-/// 把旧版 assistant 文本中的 `<proposed_plan>` 块拆成独立计划项。
-fn split_embedded_plan_blocks(
-    blocks: Vec<ContentBlock>,
-    role: Role,
-    persisted_plan_markdowns: &HashSet<String>,
-    message_id: i64,
-    message_created_at: DateTime<Utc>,
-) -> (Vec<ContentBlock>, Vec<DisplayPlan>) {
-    if role != Role::Assistant {
-        return (blocks, Vec::new());
-    }
-
-    // 只对 assistant 文本块做 legacy plan 拆分，工具块和结构化内容保持原样。
-    let mut out_blocks = Vec::with_capacity(blocks.len());
-    let mut legacy_plans = Vec::new();
-
-    for block in blocks {
-        let ContentBlock::Text(text_block) = block else {
-            out_blocks.push(block);
-            continue;
-        };
-
-        if let Some(markdown) = extract_proposed_plan_text(&text_block.text) {
-            let markdown = normalized_plan_markdown(&markdown);
-            if !markdown.is_empty() && !persisted_plan_markdowns.contains(&markdown) {
-                let idx = legacy_plans.len() + 1;
-                legacy_plans.push(DisplayPlan {
-                    id: format!("legacy-{message_id}-{idx}"),
-                    title: title_from_markdown(&markdown),
-                    markdown: markdown.clone(),
-                    path: std::path::PathBuf::new(),
-                    created_at: message_created_at,
-                });
-            }
-        }
-
-        let stripped = strip_proposed_plan_blocks(&text_block.text);
-        if !stripped.trim().is_empty() {
-            out_blocks.push(ContentBlock::from_text(stripped));
-        }
-    }
-
-    (out_blocks, legacy_plans)
-}
-
-fn normalized_plan_markdown(markdown: &str) -> String {
-    markdown.trim().to_string()
-}
-
-fn title_from_markdown(markdown: &str) -> String {
-    for line in markdown.lines() {
-        let title = line.trim().trim_start_matches('#').trim();
-        if !title.is_empty() {
-            return title.chars().take(80).collect();
-        }
-    }
-    "Plan".to_string()
 }

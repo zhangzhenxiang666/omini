@@ -1,73 +1,16 @@
 use super::INPUT_BG;
 use crate::markdown::build_markdown_lines;
-use omini_domain::proposed_plan::{ProposedPlanParser, ProposedPlanSegment};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+// assistant 文本只走普通 markdown 渲染;plan 标签不再被解析或特殊展示。
+// plan 样式只通过 `UiMessage::ProposedPlan` (由 plan mode SSE 流填充) 走独立路径。
 pub(super) fn build_assistant_text_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    let mut parser = ProposedPlanParser::new();
-    let mut normal_text = String::new();
-    let mut plan = String::new();
-    let mut collecting_plan = false;
-    let mut lines = Vec::new();
-
-    for segment in parser.push_str(text).into_iter().chain(parser.finish()) {
-        match segment {
-            ProposedPlanSegment::Normal(text) => {
-                normal_text.push_str(&text);
-            }
-            ProposedPlanSegment::ProposedPlanStart => {
-                flush_assistant_markdown(&mut lines, &mut normal_text, content_width);
-                plan.clear();
-                collecting_plan = true;
-            }
-            ProposedPlanSegment::ProposedPlanDelta(delta) => {
-                if collecting_plan {
-                    plan.push_str(&delta);
-                }
-            }
-            ProposedPlanSegment::ProposedPlanEnd => {
-                if collecting_plan && !plan.trim().is_empty() {
-                    append_assistant_lines(
-                        &mut lines,
-                        build_proposed_plan_lines(&plan, content_width),
-                    );
-                }
-                plan.clear();
-                collecting_plan = false;
-            }
-        }
-    }
-
-    flush_assistant_markdown(&mut lines, &mut normal_text, content_width);
-    if collecting_plan && !plan.trim().is_empty() {
-        append_assistant_lines(&mut lines, build_proposed_plan_lines(&plan, content_width));
-    }
-
-    lines
-}
-
-fn flush_assistant_markdown(
-    lines: &mut Vec<Line<'static>>,
-    text: &mut String,
-    content_width: usize,
-) {
     if text.is_empty() {
-        return;
+        return Vec::new();
     }
-    append_assistant_lines(lines, build_markdown_lines(text, content_width));
-    text.clear();
-}
-
-fn append_assistant_lines(lines: &mut Vec<Line<'static>>, segment: Vec<Line<'static>>) {
-    if segment.is_empty() {
-        return;
-    }
-    if !lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    lines.extend(segment);
+    build_markdown_lines(text, content_width)
 }
 
 pub(super) fn build_proposed_plan_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
@@ -463,19 +406,30 @@ mod tests {
     }
 
     #[test]
-    fn assistant_text_renders_embedded_plan_blocks_for_restored_sessions() {
+    fn assistant_text_does_not_special_case_plan_tags() {
+        // assistant 文本不再被 plan parser 扫一遍;`<proposed_plan>` 字符串保持原样,
+        // 不会被提升为 `• Proposed Plan` 面板。plan 样式只走 `UiMessage::ProposedPlan`。
         let lines = build_assistant_text_lines(
             "Intro\n<proposed_plan>\n# Plan\n\n- Run **tests**\n---\n</proposed_plan>\nOutro",
             80,
         );
         let rendered = lines.iter().map(line_to_plain_text).collect::<Vec<_>>();
 
+        assert!(
+            !rendered.iter().any(|line| line.contains("Proposed Plan")),
+            "plan 标签不应触发 Proposed Plan 面板: {rendered:?}"
+        );
+        // `<proposed_plan>` / `</proposed_plan>` 作为普通文本原样保留。
+        assert!(rendered.iter().any(|line| line.contains("<proposed_plan>")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("</proposed_plan>"))
+        );
+        // 标签外的 Intro / Outro 仍按 markdown 渲染。
         assert!(rendered.iter().any(|line| line == "Intro"));
         assert!(rendered.iter().any(|line| line == "Outro"));
-        assert!(rendered.iter().any(|line| line.contains("• Proposed Plan")));
-        assert!(rendered.iter().any(|line| line.contains("  # Plan")));
-        assert!(rendered.iter().any(|line| line.contains("  - Run tests")));
-        assert!(rendered.iter().any(|line| line.contains("  ---")));
+        // 标签内的 `**tests**` 仍按普通 markdown 加粗(说明确实是普通 markdown 路径)。
         assert!(
             lines
                 .iter()
@@ -483,8 +437,6 @@ mod tests {
                 .any(|span| span.content.as_ref() == "tests"
                     && span.style.add_modifier.contains(Modifier::BOLD))
         );
-        assert!(!rendered.iter().any(|line| line.contains("<proposed_plan>")));
-        assert!(!rendered.iter().any(|line| line.contains("**")));
     }
 
     #[test]
