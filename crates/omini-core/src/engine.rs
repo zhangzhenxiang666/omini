@@ -1180,7 +1180,7 @@ impl Default for QueryEngine {
 mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
-    use omini_config::CompactConfig;
+    use omini_config::{CompactConfig, ModelTiers};
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::message::ToolUseBlock;
     use std::io::{Read, Write};
@@ -1240,6 +1240,7 @@ mod tests {
                 ..CompactConfig::default()
             },
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

@@ -819,7 +819,7 @@ fn thinking_display_notification(show: bool) -> Notification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
+    use omini_config::{ModelEntry, ModelTiers, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
 
     fn test_settings(model: &str) -> Settings {
@@ -862,6 +862,7 @@ mod tests {
             permissions: None,
             compact: None,
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         };
         config
             .to_settings(Some("openai"), Some(model), None)

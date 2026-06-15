@@ -133,7 +133,7 @@ pub fn project_context_prompt(cwd: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_config::Settings;
+    use omini_config::{ModelTiers, Settings};
     use omini_domain::config::ProviderEndpointKind;
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -154,6 +154,7 @@ mod tests {
             permissions: None,
             compact: Default::default(),
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

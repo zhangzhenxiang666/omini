@@ -236,7 +236,7 @@ mod tests {
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, SessionDir};
-    use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
+    use omini_config::{ModelEntry, ModelTiers, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::display::{HistoryItem, UserDraft};
     use omini_domain::events::{
@@ -310,6 +310,7 @@ mod tests {
             permissions: None,
             compact: None,
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

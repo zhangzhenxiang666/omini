@@ -545,7 +545,7 @@ fn extract_final_text(messages: &[Message]) -> String {
 mod tests {
     use super::*;
     use crate::subagents::{AgentModelSpec, AgentSource, AgentToolPolicy};
-    use omini_config::{ProviderProfile, Settings};
+    use omini_config::{ModelTiers, ProviderProfile, Settings};
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -615,6 +615,7 @@ mod tests {
             permissions: None,
             compact: Default::default(),
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

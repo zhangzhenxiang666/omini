@@ -102,6 +102,7 @@ http_headers = { "X-Custom" = "value" }
 | `language` | `String` | ❌ | 语言偏好，用于系统提示中的语言指令 |
 | `compact` | `CompactConfig` | ❌ | 对话自动压缩配置 |
 | `mcp_servers` | `HashMap<String, McpServerConfig>` | ❌ | MCP server 配置 |
+| `model_tiers` | `ModelTiers` | ❌ | 抽象模型档位到 `provider + model` 的映射，供辅助任务使用 |
 
 > **注意**：权限配置（`permissions`）已移至 [权限配置](permissions.md) 文档。
 
@@ -185,6 +186,65 @@ routing_mode = "fast"
 | `summary_output_tokens` | `usize` | `20000` | 压缩生成的摘要最大 token 数 |
 | `max_consecutive_failures` | `usize` | `3` | 压缩连续失败的最大次数，超过后停止尝试 |
 
+### `model_tiers` — 模型分级
+
+后台/辅助任务（如未来标题生成、记忆抽取、复杂归纳）通常不需要和主会话使用同一个模型。通过 `model_tiers` 可以把抽象档位映射到任意已配置的 `provider + model`，让用户在保持主会话模型不变的情况下，为辅助任务选择更合适的模型。
+
+Omini 内部使用 provider-neutral 档位名，不会硬编码任何 vendor（Haiku/Sonnet/Opus、mini/nano 等）。
+
+| 档位 | 语义 |
+|------|------|
+| `small` | 轻量、快速、低成本；适合标题生成、简单抽取等高频辅助任务 |
+| `standard` | 质量与成本平衡；适合常规摘要、记忆整理 |
+| `large` | 高能力、复杂推理；适合困难归纳、冲突解决 |
+
+每个档位子表包含：
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `provider` | `String` | ✅ | 已配置 provider 的 key（`providers.<key>`） |
+| `model` | `String` | ✅ | 该 provider 下已声明的 model id |
+| `thinking_effort` | `String` | ❌ | 思考力度，遵循与主会话相同的 `thinking` 模型归一化规则 |
+
+完整示例（主会话使用 OpenAI，`small` 复用 Anthropic Haiku，`large` 升级到 Anthropic Opus）：
+
+```toml
+[model_tiers.small]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+thinking_effort = "low"
+
+[model_tiers.standard]
+provider = "openai"
+model = "gpt-5-mini"
+
+[model_tiers.large]
+provider = "anthropic"
+model = "claude-opus-4-8"
+thinking_effort = "high"
+```
+
+不同 tier 可以指向不同 provider，由用户自行决定。
+
+#### Fallback 行为
+
+通过 `Settings::resolve_tier(tier)` 解析档位时，命中下列任一条件会 fallback 到当前会话活跃 `(provider, model, thinking_effort)`，并通过 `tracing::warn` 记录原因：
+
+| 触发条件 | `reason` 字段 |
+|----------|---------------|
+| 整个 `model_tiers` 块缺失或该 slot 未配置 | `tier_not_configured` |
+| tier.provider 不在当前 `providers` 表里 | `tier_provider_missing` |
+| tier.model 不在该 provider 的 `models` 列表里 | `tier_model_missing` |
+| 目标 model 不支持 thinking（`thinking = false`），但 tier 配置了 `thinking_effort` | 归一化为 `None`，不触发 fallback |
+
+失效的 tier 配置是**软失效**：不会阻止 `config.toml` 加载，也不会影响主对话模型选择。未来消费方应统一通过 `resolve_tier` 入口获取结果，避免直接读取配置表。
+
+#### 隐私与可观测性提示
+
+辅助任务可能使用与主会话不同的 provider，对应的请求内容（标题生成会包含首条用户消息、记忆抽取可能包含会话片段）会被发送到该 provider 的服务。配置时需注意这一隐私边界。后续消费方应在日志中记录实际使用的 provider/model 与 fallback 原因，便于追踪成本、延迟与质量问题。
+
+> **状态**：本节定义了配置接口与解析规则。实际消费方（标题生成、记忆系统等）由后续 issue 单独接入；当前版本中 `model_tiers` 不会影响现有任何运行时行为。
+
 ### `mcp_servers` — MCP Server 配置
 
 每个 MCP server 以 key 作为唯一标识。支持两种传输方式：**stdio**（本地进程）和 **streamable HTTP**（远程服务）。
@@ -245,6 +305,7 @@ bearer_token_env_var = "SEARCH_API_TOKEN"
 | `providers` | 按 provider key 合并：同名 provider 按字段覆盖，模型按 model ID 合并 |
 | `compact` | 按字段覆盖，未设置的字段保留用户级值 |
 | `mcp_servers` | 同名 server 整体替换（不做字段级合并） |
+| `model_tiers` | 子表整体替换：项目级出现的 `small` / `standard` / `large` slot 会替换对应用户级 slot，未出现的 slot 保留用户级值 |
 
 > **注意**：权限配置的合并规则详见 [权限配置](permissions.md)。
 
@@ -277,6 +338,11 @@ enabled = false
 [mcp_servers.project-db]
 command = "docker"
 args = ["run", "-i", "--rm", "mcp/postgres", "postgresql://localhost/projectdb"]
+
+# 项目级覆盖 small 档位，standard/large 保留用户级配置
+[model_tiers.small]
+provider = "openai"
+model = "project-finetuned-v2"
 ```
 
 ## 校验规则

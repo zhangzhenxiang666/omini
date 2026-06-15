@@ -1453,7 +1453,7 @@ async fn emit_compact_summary_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_config::ProviderProfile;
+    use omini_config::{ModelTiers, ProviderProfile};
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use omini_domain::message::{ContentBlock, ToolUseBlock};
     use std::collections::HashMap;
@@ -1514,6 +1514,7 @@ mod tests {
             permissions: None,
             compact: CompactConfig::default(),
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

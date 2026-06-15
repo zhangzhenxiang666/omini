@@ -130,7 +130,7 @@ fn media_type_for_path(path: &Path) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_config::{ProviderProfile, Settings};
+    use omini_config::{ModelTiers, ProviderProfile, Settings};
     use omini_domain::config::{ModelInfo, ProviderEndpointKind};
     use std::collections::HashMap;
 
@@ -171,6 +171,7 @@ mod tests {
             permissions: None,
             compact: Default::default(),
             mcp_servers: HashMap::new(),
+            model_tiers: ModelTiers::default(),
         }
     }
 

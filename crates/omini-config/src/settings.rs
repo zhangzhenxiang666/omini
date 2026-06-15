@@ -4,6 +4,89 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Provider-neutral 抽象模型档位。
+///
+/// 命名刻意不引用任何 vendor(haiku/sonnet/opus/mini/nano)，
+/// 以保持跨 provider 配置可移植。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelTier {
+    Small,
+    Standard,
+    Large,
+}
+
+impl ModelTier {
+    pub const ALL: [ModelTier; 3] = [ModelTier::Small, ModelTier::Standard, ModelTier::Large];
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelTier::Small => "small",
+            ModelTier::Standard => "standard",
+            ModelTier::Large => "large",
+        }
+    }
+}
+
+/// 单个 tier 的配置定义:目标 provider + model + 可选 thinking effort。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTierEntry {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub thinking_effort: Option<ThinkingEffort>,
+}
+
+/// 完整的 `model_tiers` 配置块。
+///
+/// 整块缺失 = 所有 tier 在解析时 fallback 到当前会话模型。
+/// 单独某个 slot 缺失 = 该 slot 解析时 fallback。
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ModelTiers {
+    #[serde(default)]
+    pub small: Option<ModelTierEntry>,
+    #[serde(default)]
+    pub standard: Option<ModelTierEntry>,
+    #[serde(default)]
+    pub large: Option<ModelTierEntry>,
+}
+
+impl ModelTiers {
+    pub fn get(&self, tier: ModelTier) -> Option<&ModelTierEntry> {
+        match tier {
+            ModelTier::Small => self.small.as_ref(),
+            ModelTier::Standard => self.standard.as_ref(),
+            ModelTier::Large => self.large.as_ref(),
+        }
+    }
+}
+
+/// Project overlay 使用的整体替换变体,语义与 `PartialCompactConfig` 一致:
+/// 项目级只声明需要覆盖的 slot,未声明的 slot 保留用户级。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartialModelTiers {
+    pub small: Option<ModelTierEntry>,
+    pub standard: Option<ModelTierEntry>,
+    pub large: Option<ModelTierEntry>,
+}
+
+impl PartialModelTiers {
+    /// 子表整体替换:任意 slot 存在就替换该 slot,其余保留 target 现状。
+    pub fn merge_into(self, target: &mut ModelTiers) {
+        if let Some(v) = self.small {
+            target.small = Some(v);
+        }
+        if let Some(v) = self.standard {
+            target.standard = Some(v);
+        }
+        if let Some(v) = self.large {
+            target.large = Some(v);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawPermissionConfig {
     #[serde(default)]
@@ -41,6 +124,8 @@ pub struct Settings {
     pub permissions: Option<RawPermissionConfig>,
     pub compact: CompactConfig,
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    #[serde(default)]
+    pub model_tiers: ModelTiers,
 }
 
 impl Settings {
@@ -94,6 +179,75 @@ impl Settings {
         self.current_model_config()
             .and_then(|model| model.input_modalities.as_ref())
             .is_some_and(|modalities| modalities.contains(&modality))
+    }
+
+    /// 解析指定档位应使用的 `(provider, model, thinking_effort)`。
+    ///
+    /// 任一前置条件不满足时,fallback 到当前会话活跃 provider/model
+    /// 并保留当前 `thinking_effort`,同时记录 `tracing::warn`:
+    ///   1. `model_tiers` 未配置 / 该 tier slot 未配置;
+    ///   2. tier.provider 不在 `self.providers`;
+    ///   3. tier.model 不在该 provider.models;
+    ///   4. target model 不支持 thinking → effort 归一化为 `None`。
+    ///
+    /// 思考力度按 `effective_thinking_effort_for` 归一化,与主会话模型
+    /// 选择行为一致。
+    pub fn resolve_tier(&self, tier: ModelTier) -> (String, String, Option<ThinkingEffort>) {
+        let entry = match self.model_tiers.get(tier) {
+            Some(e) => e,
+            None => {
+                return self.fallback_for_tier(tier, "tier_not_configured", None, None);
+            }
+        };
+        if !self.providers.contains_key(&entry.provider) {
+            return self.fallback_for_tier(
+                tier,
+                "tier_provider_missing",
+                Some(&entry.provider),
+                None,
+            );
+        }
+        let model_exists = self.providers[&entry.provider]
+            .models
+            .iter()
+            .any(|m| m.id == entry.model);
+        if !model_exists {
+            return self.fallback_for_tier(
+                tier,
+                "tier_model_missing",
+                Some(&entry.provider),
+                Some(&entry.model),
+            );
+        }
+        let effort = self.effective_thinking_effort_for(
+            &entry.provider,
+            &entry.model,
+            entry.thinking_effort,
+        );
+        (entry.provider.clone(), entry.model.clone(), effort)
+    }
+
+    fn fallback_for_tier(
+        &self,
+        tier: ModelTier,
+        reason: &'static str,
+        configured_provider: Option<&str>,
+        configured_model: Option<&str>,
+    ) -> (String, String, Option<ThinkingEffort>) {
+        tracing::warn!(
+            tier = tier.as_str(),
+            reason = reason,
+            configured_provider = configured_provider.unwrap_or("-"),
+            configured_model = configured_model.unwrap_or("-"),
+            active_provider = %self.active_provider,
+            active_model = %self.model,
+            "model tier resolution fell back to current session model",
+        );
+        (
+            self.active_provider.clone(),
+            self.model.clone(),
+            self.thinking_effort,
+        )
     }
 }
 
@@ -334,6 +488,9 @@ pub struct UserConfig {
     pub compact: Option<CompactConfig>,
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    /// 可选模型分级配置;缺失 = 所有 tier fallback 当前会话模型。
+    #[serde(default)]
+    pub model_tiers: ModelTiers,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -367,6 +524,7 @@ pub struct PartialUserConfig {
     pub compact: Option<PartialCompactConfig>,
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
+    pub model_tiers: Option<PartialModelTiers>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -440,6 +598,9 @@ impl UserConfig {
             // 后续可以在引入 trusted project 机制后，再考虑按 transport 字段
             // 拆分合并并输出 diagnostic。
             self.mcp_servers.insert(name, server);
+        }
+        if let Some(partial) = project.model_tiers {
+            partial.merge_into(&mut self.model_tiers);
         }
         Ok(())
     }
@@ -515,6 +676,7 @@ impl UserConfig {
             permissions: self.permissions.clone(),
             compact: self.compact.clone().unwrap_or_default(),
             mcp_servers: self.mcp_servers.clone(),
+            model_tiers: self.model_tiers.clone(),
         };
         settings.normalize_current_thinking_effort();
         Ok(settings)
@@ -772,6 +934,7 @@ where
 mod tests {
     use super::*;
     use std::fs;
+    use std::path::PathBuf;
 
     fn config_from_toml(content: &str) -> UserConfig {
         toml::from_str(content).expect("config should parse")
@@ -1292,6 +1455,621 @@ base_url = "https://project.example"
             config.providers["openai"].base_url,
             "https://project.example"
         );
+        let _ = fs::remove_dir_all(root_path);
+    }
+
+    // ── model_tiers 测试 (issue #19) ─────────────────────────────
+
+    fn two_provider_config_with_tiers(model_tiers_block: &str) -> String {
+        format!(
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "openai-key"
+
+[providers.openai.models]
+fast = {{}}
+reasoner = {{ thinking = true }}
+
+[providers.anthropic]
+endpoint = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+
+[providers.anthropic.models]
+haiku = {{}}
+opus = {{ thinking = true }}
+
+{model_tiers_block}
+"#
+        )
+    }
+
+    // 6.1 Schema 解析
+
+    #[test]
+    fn model_tiers_omitted_defaults_to_all_none() {
+        let config = config_from_toml(&two_provider_config_with_tiers(""));
+
+        assert!(config.model_tiers.small.is_none());
+        assert!(config.model_tiers.standard.is_none());
+        assert!(config.model_tiers.large.is_none());
+
+        let settings = config.to_settings(None, None, None).unwrap();
+        assert!(settings.model_tiers.small.is_none());
+        assert!(settings.model_tiers.standard.is_none());
+        assert!(settings.model_tiers.large.is_none());
+    }
+
+    #[test]
+    fn model_tiers_partial_parses_only_configured_slots() {
+        let config = config_from_toml(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "openai"
+model = "fast"
+"#,
+        ));
+
+        let small = config.model_tiers.small.as_ref().expect("small slot");
+        assert_eq!(small.provider, "openai");
+        assert_eq!(small.model, "fast");
+        assert!(small.thinking_effort.is_none());
+
+        assert!(config.model_tiers.standard.is_none());
+        assert!(config.model_tiers.large.is_none());
+    }
+
+    #[test]
+    fn model_tiers_all_three_slots_parse() {
+        let config = config_from_toml(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "anthropic"
+model = "haiku"
+thinking_effort = "low"
+
+[model_tiers.standard]
+provider = "openai"
+model = "fast"
+
+[model_tiers.large]
+provider = "anthropic"
+model = "opus"
+thinking_effort = "high"
+"#,
+        ));
+
+        let small = config.model_tiers.small.as_ref().unwrap();
+        assert_eq!(small.provider, "anthropic");
+        assert_eq!(small.model, "haiku");
+        assert_eq!(small.thinking_effort, Some(ThinkingEffort::Low));
+
+        let standard = config.model_tiers.standard.as_ref().unwrap();
+        assert_eq!(standard.provider, "openai");
+        assert_eq!(standard.model, "fast");
+        assert_eq!(standard.thinking_effort, None);
+
+        let large = config.model_tiers.large.as_ref().unwrap();
+        assert_eq!(large.provider, "anthropic");
+        assert_eq!(large.model, "opus");
+        assert_eq!(large.thinking_effort, Some(ThinkingEffort::High));
+    }
+
+    #[test]
+    fn model_tiers_rejects_unknown_tier_slot_name() {
+        let error = toml::from_str::<UserConfig>(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.unknown]
+provider = "openai"
+model = "fast"
+"#,
+        ))
+        .expect_err("model_tiers.unknown should be rejected");
+
+        assert!(error.to_string().contains("unknown"));
+    }
+
+    #[test]
+    fn model_tiers_rejects_unknown_field_in_entry() {
+        let error = toml::from_str::<UserConfig>(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "openai"
+model = "fast"
+extra = "x"
+"#,
+        ))
+        .expect_err("unknown field in entry should be rejected");
+
+        assert!(error.to_string().contains("extra"));
+    }
+
+    #[test]
+    fn model_tiers_thinking_effort_accepts_lowercase_strings() {
+        let config = config_from_toml(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "openai"
+model = "fast"
+thinking_effort = "low"
+"#,
+        ));
+
+        assert_eq!(
+            config.model_tiers.small.unwrap().thinking_effort,
+            Some(ThinkingEffort::Low)
+        );
+    }
+
+    // 6.2 Partial / merge
+
+    #[test]
+    fn partial_model_tiers_merge_into_replaces_set_slots() {
+        let mut target = ModelTiers {
+            small: Some(ModelTierEntry {
+                provider: "openai".into(),
+                model: "fast".into(),
+                thinking_effort: None,
+            }),
+            standard: Some(ModelTierEntry {
+                provider: "openai".into(),
+                model: "reasoner".into(),
+                thinking_effort: Some(ThinkingEffort::High),
+            }),
+            large: Some(ModelTierEntry {
+                provider: "anthropic".into(),
+                model: "opus".into(),
+                thinking_effort: Some(ThinkingEffort::Max),
+            }),
+        };
+
+        let partial = PartialModelTiers {
+            small: Some(ModelTierEntry {
+                provider: "anthropic".into(),
+                model: "haiku".into(),
+                thinking_effort: Some(ThinkingEffort::Low),
+            }),
+            standard: None,
+            large: None,
+        };
+
+        partial.merge_into(&mut target);
+
+        let small = target.small.unwrap();
+        assert_eq!(small.provider, "anthropic");
+        assert_eq!(small.model, "haiku");
+
+        let standard = target.standard.unwrap();
+        assert_eq!(standard.provider, "openai");
+        assert_eq!(standard.model, "reasoner");
+        assert_eq!(standard.thinking_effort, Some(ThinkingEffort::High));
+
+        let large = target.large.unwrap();
+        assert_eq!(large.provider, "anthropic");
+        assert_eq!(large.model, "opus");
+        assert_eq!(large.thinking_effort, Some(ThinkingEffort::Max));
+    }
+
+    #[test]
+    fn partial_model_tiers_merge_into_with_no_partial_keeps_target() {
+        let mut target = ModelTiers {
+            small: Some(ModelTierEntry {
+                provider: "openai".into(),
+                model: "fast".into(),
+                thinking_effort: None,
+            }),
+            ..Default::default()
+        };
+
+        PartialModelTiers::default().merge_into(&mut target);
+
+        let small = target.small.unwrap();
+        assert_eq!(small.provider, "openai");
+        assert_eq!(small.model, "fast");
+    }
+
+    #[test]
+    fn user_config_merge_project_config_replaces_model_tiers_subtable() {
+        let mut config = config_from_toml(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "openai"
+model = "fast"
+
+[model_tiers.standard]
+provider = "openai"
+model = "reasoner"
+
+[model_tiers.large]
+provider = "anthropic"
+model = "opus"
+"#,
+        ));
+
+        config
+            .merge_project_config(partial_from_toml(
+                r#"
+[model_tiers.small]
+provider = "anthropic"
+model = "haiku"
+"#,
+            ))
+            .unwrap();
+
+        let small = config.model_tiers.small.unwrap();
+        assert_eq!(small.provider, "anthropic");
+        assert_eq!(small.model, "haiku");
+
+        let standard = config.model_tiers.standard.unwrap();
+        assert_eq!(standard.provider, "openai");
+        assert_eq!(standard.model, "reasoner");
+
+        let large = config.model_tiers.large.unwrap();
+        assert_eq!(large.provider, "anthropic");
+        assert_eq!(large.model, "opus");
+    }
+
+    #[test]
+    fn user_config_merge_project_config_omits_model_tiers_keeps_user() {
+        let mut config = config_from_toml(&two_provider_config_with_tiers(
+            r#"
+[model_tiers.small]
+provider = "openai"
+model = "fast"
+"#,
+        ));
+
+        config
+            .merge_project_config(partial_from_toml(
+                r#"
+language = "English"
+"#,
+            ))
+            .unwrap();
+
+        let small = config.model_tiers.small.unwrap();
+        assert_eq!(small.provider, "openai");
+        assert_eq!(small.model, "fast");
+        assert!(config.model_tiers.standard.is_none());
+        assert!(config.model_tiers.large.is_none());
+    }
+
+    #[test]
+    fn user_config_merge_project_config_adds_model_tiers_when_user_omitted() {
+        let mut config = config_from_toml(&two_provider_config_with_tiers(""));
+
+        config
+            .merge_project_config(partial_from_toml(
+                r#"
+[model_tiers.small]
+provider = "anthropic"
+model = "haiku"
+
+[model_tiers.standard]
+provider = "openai"
+model = "fast"
+
+[model_tiers.large]
+provider = "anthropic"
+model = "opus"
+"#,
+            ))
+            .unwrap();
+
+        let small = config.model_tiers.small.unwrap();
+        assert_eq!(small.provider, "anthropic");
+        assert_eq!(small.model, "haiku");
+
+        let standard = config.model_tiers.standard.unwrap();
+        assert_eq!(standard.provider, "openai");
+        assert_eq!(standard.model, "fast");
+
+        let large = config.model_tiers.large.unwrap();
+        assert_eq!(large.provider, "anthropic");
+        assert_eq!(large.model, "opus");
+    }
+
+    // 6.3 Resolve 行为
+
+    fn settings_with_tiers(
+        active_provider: &str,
+        active_model: &str,
+        active_effort: Option<ThinkingEffort>,
+        model_tiers: ModelTiers,
+    ) -> Settings {
+        let config = config_from_toml(&two_provider_config_with_tiers(""));
+        config
+            .to_settings(Some(active_provider), Some(active_model), active_effort)
+            .map(|mut s| {
+                s.model_tiers = model_tiers;
+                s
+            })
+            .expect("settings should build")
+    }
+
+    fn entry(provider: &str, model: &str, effort: Option<ThinkingEffort>) -> ModelTierEntry {
+        ModelTierEntry {
+            provider: provider.into(),
+            model: model.into(),
+            thinking_effort: effort,
+        }
+    }
+
+    #[test]
+    fn resolve_tier_returns_configured_when_all_valid() {
+        let tiers = ModelTiers {
+            small: Some(entry("openai", "reasoner", Some(ThinkingEffort::Low))),
+            standard: Some(entry("openai", "fast", None)),
+            large: Some(entry("anthropic", "opus", Some(ThinkingEffort::High))),
+        };
+        let settings = settings_with_tiers("openai", "fast", None, tiers);
+
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Small),
+            (
+                "openai".into(),
+                "reasoner".into(),
+                Some(ThinkingEffort::Low)
+            )
+        );
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Standard),
+            ("openai".into(), "fast".into(), None)
+        );
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Large),
+            (
+                "anthropic".into(),
+                "opus".into(),
+                Some(ThinkingEffort::High)
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_tier_falls_back_when_slot_unset() {
+        let settings = settings_with_tiers(
+            "openai",
+            "reasoner",
+            Some(ThinkingEffort::Low),
+            ModelTiers::default(),
+        );
+
+        for tier in ModelTier::ALL {
+            assert_eq!(
+                settings.resolve_tier(tier),
+                (
+                    "openai".into(),
+                    "reasoner".into(),
+                    Some(ThinkingEffort::Low)
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_tier_falls_back_when_provider_missing() {
+        let tiers = ModelTiers {
+            small: Some(entry("ghost", "fast", None)),
+            ..Default::default()
+        };
+        let settings =
+            settings_with_tiers("openai", "reasoner", Some(ThinkingEffort::Medium), tiers);
+
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Small),
+            (
+                "openai".into(),
+                "reasoner".into(),
+                Some(ThinkingEffort::Medium)
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_tier_falls_back_when_model_missing() {
+        let tiers = ModelTiers {
+            standard: Some(entry("openai", "nonexistent", None)),
+            ..Default::default()
+        };
+        let settings = settings_with_tiers("openai", "reasoner", Some(ThinkingEffort::Low), tiers);
+
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Standard),
+            (
+                "openai".into(),
+                "reasoner".into(),
+                Some(ThinkingEffort::Low)
+            )
+        );
+    }
+
+    #[test]
+    fn resolve_tier_normalizes_thinking_effort_to_none_for_non_thinking_model() {
+        let tiers = ModelTiers {
+            small: Some(entry("openai", "fast", Some(ThinkingEffort::High))),
+            ..Default::default()
+        };
+        let settings = settings_with_tiers("openai", "reasoner", Some(ThinkingEffort::High), tiers);
+
+        let (provider, model, effort) = settings.resolve_tier(ModelTier::Small);
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "fast");
+        assert_eq!(effort, None);
+    }
+
+    #[test]
+    fn resolve_tier_normalizes_thinking_effort_to_default_for_thinking_model() {
+        let tiers = ModelTiers {
+            small: Some(entry("openai", "reasoner", None)),
+            ..Default::default()
+        };
+        let settings = settings_with_tiers("openai", "fast", None, tiers);
+
+        let (provider, model, effort) = settings.resolve_tier(ModelTier::Small);
+        assert_eq!(provider, "openai");
+        assert_eq!(model, "reasoner");
+        assert_eq!(effort, Some(ThinkingEffort::Medium));
+    }
+
+    #[test]
+    fn resolve_tier_cross_provider_resolution() {
+        let tiers = ModelTiers {
+            small: Some(entry("anthropic", "opus", None)),
+            standard: Some(entry("anthropic", "opus", Some(ThinkingEffort::High))),
+            large: Some(entry("openai", "reasoner", Some(ThinkingEffort::Low))),
+        };
+        let settings = settings_with_tiers("openai", "fast", None, tiers);
+
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Small).0,
+            "anthropic".to_string()
+        );
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Standard).0,
+            "anthropic".to_string()
+        );
+        assert_eq!(
+            settings.resolve_tier(ModelTier::Large).0,
+            "openai".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_tier_does_not_mutate_settings() {
+        let tiers = ModelTiers {
+            small: Some(entry("openai", "fast", None)),
+            standard: Some(entry("openai", "reasoner", Some(ThinkingEffort::High))),
+            large: Some(entry("anthropic", "haiku", None)),
+        };
+        let settings = settings_with_tiers("openai", "fast", Some(ThinkingEffort::Low), tiers);
+
+        let snapshot = settings.clone();
+        for _ in 0..3 {
+            let _ = settings.resolve_tier(ModelTier::Small);
+            let _ = settings.resolve_tier(ModelTier::Standard);
+            let _ = settings.resolve_tier(ModelTier::Large);
+        }
+
+        assert_eq!(settings.model_tiers, snapshot.model_tiers);
+        assert_eq!(settings.thinking_effort, snapshot.thinking_effort);
+        assert_eq!(settings.model, snapshot.model);
+    }
+
+    // 6.4 端到端加载
+
+    fn temp_root(suffix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "omini-config-{suffix}-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ))
+    }
+
+    #[test]
+    fn load_config_for_cwd_with_model_tiers_passes_through_to_settings() {
+        let root_path = temp_root("model-tiers-pass-through");
+        let cwd = root_path.join("project");
+        fs::create_dir_all(cwd.join(".omini")).unwrap();
+        fs::write(
+            root_path.join("config.toml"),
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "openai-key"
+
+[providers.openai.models]
+fast = {}
+reasoner = { thinking = true }
+
+[providers.anthropic]
+endpoint = "anthropic"
+base_url = "https://anthropic.example"
+api_key = "anthropic-key"
+
+[providers.anthropic.models]
+haiku = {}
+opus = { thinking = true }
+
+[model_tiers.small]
+provider = "anthropic"
+model = "haiku"
+thinking_effort = "low"
+
+[model_tiers.standard]
+provider = "openai"
+model = "fast"
+
+[model_tiers.large]
+provider = "anthropic"
+model = "opus"
+thinking_effort = "high"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            cwd.join(".omini").join("config.toml"),
+            r#"language = "English""#,
+        )
+        .unwrap();
+        let root = OminiRoot::from_path(root_path.clone());
+
+        let config = root.load_config_for_cwd(&cwd).unwrap();
+        let settings = config.to_settings(None, None, None).unwrap();
+
+        let small = settings.model_tiers.small.as_ref().unwrap();
+        assert_eq!(small.provider, "anthropic");
+        assert_eq!(small.model, "haiku");
+        assert_eq!(small.thinking_effort, Some(ThinkingEffort::Low));
+
+        let standard = settings.model_tiers.standard.as_ref().unwrap();
+        assert_eq!(standard.provider, "openai");
+        assert_eq!(standard.model, "fast");
+        assert_eq!(standard.thinking_effort, None);
+
+        let large = settings.model_tiers.large.as_ref().unwrap();
+        assert_eq!(large.provider, "anthropic");
+        assert_eq!(large.model, "opus");
+        assert_eq!(large.thinking_effort, Some(ThinkingEffort::High));
+
+        let _ = fs::remove_dir_all(root_path);
+    }
+
+    #[test]
+    fn load_config_for_cwd_tolerates_invalid_model_tiers_provider() {
+        let root_path = temp_root("model-tiers-ghost");
+        let cwd = root_path.join("project");
+        fs::create_dir_all(cwd.join(".omini")).unwrap();
+        fs::write(
+            root_path.join("config.toml"),
+            r#"
+[providers.openai]
+endpoint = "openai"
+base_url = "https://openai.example"
+api_key = "openai-key"
+
+[providers.openai.models]
+fast = {}
+
+[model_tiers.small]
+provider = "ghost"
+model = "phantom"
+"#,
+        )
+        .unwrap();
+        let root = OminiRoot::from_path(root_path.clone());
+
+        let config = root.load_config_for_cwd(&cwd).unwrap();
+        let settings = config.to_settings(None, None, None).unwrap();
+
+        // 加载不阻断;失效 slot 保留,等 resolve 时才 warn/fallback
+        let small = settings.model_tiers.small.as_ref().unwrap();
+        assert_eq!(small.provider, "ghost");
+        assert_eq!(small.model, "phantom");
+
         let _ = fs::remove_dir_all(root_path);
     }
 }
