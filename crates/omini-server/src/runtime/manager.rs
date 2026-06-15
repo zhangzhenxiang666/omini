@@ -1804,7 +1804,7 @@ thinking = true
                     .await
                     .expect("list should load")
                     .len();
-                if current >= baseline + 1 {
+                if current > baseline {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1863,15 +1863,13 @@ thinking = true
             .expect("session id should be returned");
 
         // 清掉 `create_session` 缓存的 runtime,让 reload 路径真正走 `load_session_snapshot`。
-        manager
+        let runtime = manager
             .sessions
             .lock()
             .expect("sessions lock poisoned")
             .remove(&session_id)
-            .expect("runtime should be cached after create_session")
-            .shutdown()
-            .await
-            .expect("shutdown should succeed");
+            .expect("runtime should be cached after create_session");
+        runtime.shutdown().await.expect("shutdown should succeed");
 
         // 模拟异常退出导致的末尾半行写入:第一条完整,第二条是截断的 JSON。
         let session_dir = project.session(&session_id);

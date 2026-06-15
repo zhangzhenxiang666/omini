@@ -837,6 +837,13 @@ fn compact_summary_failed_text(
     format!("Failed to summarize compacted {subject} context ({trigger}): {message}")
 }
 
+fn command_count(commands: &[CommandSummary], kind: CommandKind) -> usize {
+    commands
+        .iter()
+        .filter(|command| command.kind == kind)
+        .count()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1328,11 +1335,4 @@ mod tests {
         let sub = state.subagents.get("sub-1").unwrap();
         assert_eq!(sub.status, SubagentStatus::Running);
     }
-}
-
-fn command_count(commands: &[CommandSummary], kind: CommandKind) -> usize {
-    commands
-        .iter()
-        .filter(|command| command.kind == kind)
-        .count()
 }

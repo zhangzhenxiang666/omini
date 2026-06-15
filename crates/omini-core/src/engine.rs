@@ -1355,15 +1355,12 @@ mod tests {
         let server_signal = wait_for_server_signal(signal_rx);
         tokio::pin!(server_signal);
 
-        loop {
-            tokio::select! {
-                signal = &mut server_signal => {
-                    signal.expect("test server should receive the request");
-                    break;
-                }
-                result = &mut query => {
-                    panic!("query finished before cancellation: {:?}", result.finish_reason);
-                }
+        tokio::select! {
+            signal = &mut server_signal => {
+                signal.expect("test server should receive the request");
+            }
+            result = &mut query => {
+                panic!("query finished before cancellation: {:?}", result.finish_reason);
             }
         }
 

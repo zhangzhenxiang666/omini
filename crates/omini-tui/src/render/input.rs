@@ -265,42 +265,6 @@ fn command_args_hint(state: &UiState) -> Option<&str> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::events::{CommandKind, CommandSummary};
-
-    fn command(name: &str, has_args: bool, args_description: Option<&str>) -> CommandSummary {
-        CommandSummary {
-            name: name.to_string(),
-            aliases: Vec::new(),
-            description: String::new(),
-            sort_weight: 0,
-            kind: CommandKind::Builtin,
-            has_args,
-            args_description: args_description.map(str::to_string),
-        }
-    }
-
-    #[test]
-    fn command_args_hint_shows_for_selected_arg_command_without_args() {
-        let mut state = UiState::new();
-        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
-        state.input = "/rename ".to_string();
-
-        assert_eq!(command_args_hint(&state), Some("<name>"));
-    }
-
-    #[test]
-    fn command_args_hint_hides_after_user_types_args() {
-        let mut state = UiState::new();
-        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
-        state.input = "/rename title".to_string();
-
-        assert_eq!(command_args_hint(&state), None);
-    }
-}
-
 fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
     let bg_color = Color::Rgb(54, 58, 66);
     let bg = Style::default().bg(bg_color);
@@ -471,4 +435,40 @@ fn ellipsize_width(text: &str, max_width: usize) -> String {
     }
     out.push_str("...");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::events::{CommandKind, CommandSummary};
+
+    fn command(name: &str, has_args: bool, args_description: Option<&str>) -> CommandSummary {
+        CommandSummary {
+            name: name.to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            kind: CommandKind::Builtin,
+            has_args,
+            args_description: args_description.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn command_args_hint_shows_for_selected_arg_command_without_args() {
+        let mut state = UiState::new();
+        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
+        state.input = "/rename ".to_string();
+
+        assert_eq!(command_args_hint(&state), Some("<name>"));
+    }
+
+    #[test]
+    fn command_args_hint_hides_after_user_types_args() {
+        let mut state = UiState::new();
+        state.autocomplete.all_commands = vec![command("rename", true, Some("<name>"))];
+        state.input = "/rename title".to_string();
+
+        assert_eq!(command_args_hint(&state), None);
+    }
 }

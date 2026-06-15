@@ -37,563 +37,6 @@ impl UpdateOutcome {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::state::InputMention;
-    use crate::types::events::{
-        ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
-        UserInputOption, UserInputPreview, UserInputQuestion,
-    };
-    use chrono::Utc;
-    use crossterm::event::KeyEvent;
-    use omini_domain::display::MentionKind;
-    use std::path::PathBuf;
-
-    fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
-        ToolPauseRequest {
-            tool_use_id: tool_use_id.to_string(),
-            preview_tool_use_id: None,
-            tool_name: "bash".to_string(),
-            permission_source: None,
-            source_session_id: None,
-            source_agent_label: None,
-            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
-                tool_name: "bash".to_string(),
-                payload: serde_json::Map::new(),
-            }),
-        }
-    }
-
-    fn edit_permission_pause(tool_use_id: &str) -> ToolPauseRequest {
-        ToolPauseRequest {
-            tool_use_id: tool_use_id.to_string(),
-            preview_tool_use_id: None,
-            tool_name: "edit".to_string(),
-            permission_source: None,
-            source_session_id: None,
-            source_agent_label: None,
-            kind: ToolPauseKind::Permission(PermissionPreview::Edit(EditPermissionPreview {
-                summary: "Edit /tmp/demo.rs".to_string(),
-                path: "/tmp/demo.rs".to_string(),
-                replacement_count: 1,
-                replace_all: false,
-                start_lines: vec![1],
-                added_lines: 1,
-                removed_lines: 1,
-            })),
-        }
-    }
-
-    fn state_with_permission_pause() -> UiState {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
-            "tool_1",
-        )));
-        state
-    }
-
-    fn user_input_pause(tool_use_id: &str) -> ToolPauseRequest {
-        ToolPauseRequest {
-            tool_use_id: tool_use_id.to_string(),
-            preview_tool_use_id: None,
-            tool_name: "ask_user".to_string(),
-            permission_source: None,
-            source_session_id: None,
-            source_agent_label: None,
-            kind: ToolPauseKind::UserInput(UserInputPreview {
-                questions: vec![UserInputQuestion {
-                    id: "q1".to_string(),
-                    header: "header".to_string(),
-                    question: "Pick one".to_string(),
-                    options: (0..3)
-                        .map(|i| UserInputOption {
-                            label: format!("opt{i}"),
-                            description: String::new(),
-                        })
-                        .collect(),
-                }],
-            }),
-        }
-    }
-
-    fn state_with_user_input_pause() -> UiState {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(user_input_pause(
-            "tool_1",
-        )));
-        state
-    }
-
-    fn submitted_plan() -> SubmittedPlan {
-        SubmittedPlan {
-            id: "20260521T000000Z-plan".to_string(),
-            title: "Plan".to_string(),
-            markdown: "# Plan\n\n- Step".to_string(),
-            path: PathBuf::from("/tmp/plan.md"),
-            created_at: Utc::now(),
-        }
-    }
-
-    async fn recv_pause_response(
-        rx: &mut mpsc::Receiver<ClientRequest>,
-    ) -> omini_protocol::ToolPauseResponse {
-        let Some(ClientRequest::ToolPauseResolve { response, .. }) = rx.recv().await else {
-            panic!("expected tool pause response");
-        };
-        response
-    }
-
-    #[tokio::test]
-    async fn tab_starts_permission_deny_note_mode() {
-        let mut state = state_with_permission_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-
-        assert!(state.user_input_note_mode);
-        assert_eq!(state.permission_selected, 1);
-        assert_eq!(state.current_user_input_note(), "");
-    }
-
-    // 修复 Bug 1 的回归测试:ask_user 暂停进入 note 模式后,`j` / `k`
-    // 必须是普通字符插入,不能被 vim 风格方向键别名吞掉。
-    #[tokio::test]
-    async fn user_input_note_mode_inserts_jk_as_text() {
-        let mut state = state_with_user_input_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        // Tab 切换到 note 模式
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        assert!(state.user_input_note_mode);
-        let initial_selected = state.current_user_input_selected();
-
-        for c in "skip、kick this off".chars() {
-            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
-        }
-
-        assert_eq!(state.current_user_input_note(), "skip、kick this off");
-        assert_eq!(state.current_user_input_selected(), initial_selected);
-    }
-
-    // 修复 Bug 1 的回归测试:note 模式下方向键 `↑` / `↓` 仍要能切选项。
-    // 仅验证"切换选项"语义,saturate 边界(max_selected 取 options.len()
-    // 而非 len-1 导致的 off-by-one)与本 issue 无关,不在此测试覆盖。
-    #[tokio::test]
-    async fn user_input_note_mode_arrows_still_navigate_options() {
-        let mut state = state_with_user_input_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        assert!(state.user_input_note_mode);
-        assert_eq!(state.current_user_input_selected(), 0);
-
-        handle_tool_pause_key(&mut state, KeyCode::Down, &tx).await;
-        assert_eq!(state.current_user_input_selected(), 1);
-        handle_tool_pause_key(&mut state, KeyCode::Up, &tx).await;
-        assert_eq!(state.current_user_input_selected(), 0);
-    }
-
-    // Permission 暂停的 note 模式回归基线:`j` / `k` 原本就能插入,
-    // 此处固定当前行为,防止后续改动破坏非 ask_user 路径。
-    #[tokio::test]
-    async fn permission_note_mode_inserts_jk_as_text() {
-        let mut state = state_with_permission_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        assert!(state.user_input_note_mode);
-
-        for c in "jk".chars() {
-            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
-        }
-
-        assert_eq!(state.current_user_input_note(), "jk");
-    }
-
-    // 修复 Bug 2 的回归测试:note 模式期间 `Event::Paste` 走
-    // `handle_input_event` 中独立的 note 分支,把每个字符塞进 note。
-    // 之前主输入框分支的 `active_tool_pause().is_none()` 守卫把整条
-    // bracketed paste 路径吞掉,note 模式无处可粘。
-    #[tokio::test]
-    async fn user_input_note_mode_paste_inserts_chars() {
-        let mut state = state_with_user_input_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        assert!(state.user_input_note_mode);
-
-        let outcome =
-            handle_input_event(&mut state, Event::Paste("pasted note".to_string()), &tx).await;
-        assert!(outcome.redraw);
-
-        assert_eq!(state.current_user_input_note(), "pasted note");
-    }
-
-    #[tokio::test]
-    async fn permission_note_mode_paste_inserts_chars() {
-        let mut state = state_with_permission_pause();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        assert!(state.user_input_note_mode);
-
-        let outcome = handle_input_event(&mut state, Event::Paste("hi".to_string()), &tx).await;
-        assert!(outcome.redraw);
-
-        assert_eq!(state.current_user_input_note(), "hi");
-    }
-
-    #[tokio::test]
-    async fn permission_deny_note_is_sent_on_enter() {
-        let mut state = state_with_permission_pause();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        for c in "Need context".chars() {
-            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
-        }
-        handle_tool_pause_key(&mut state, KeyCode::Enter, &tx).await;
-
-        assert_eq!(
-            recv_pause_response(&mut rx).await,
-            omini_protocol::ToolPauseResponse::Permission {
-                approved: false,
-                note: Some("Need context".to_string()),
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn permission_esc_denies_without_note() {
-        let mut state = state_with_permission_pause();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Esc, &tx).await;
-
-        assert_eq!(
-            recv_pause_response(&mut rx).await,
-            omini_protocol::ToolPauseResponse::Permission {
-                approved: false,
-                note: None,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn permission_approval_ignores_stale_note() {
-        let mut state = state_with_permission_pause();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        for c in "Do not run".chars() {
-            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
-        }
-        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
-        handle_tool_pause_key(&mut state, KeyCode::Char('y'), &tx).await;
-
-        assert_eq!(
-            recv_pause_response(&mut rx).await,
-            omini_protocol::ToolPauseResponse::Permission {
-                approved: true,
-                note: None,
-            }
-        );
-        assert_eq!(state.agent_status, AgentStatus::Working);
-    }
-
-    #[test]
-    fn active_permission_pause_allows_message_text_selection_outside_drawer() {
-        let mut state = state_with_permission_pause();
-        state.register_selectable_screen_line(2, 0, 80, "assistant line".to_string());
-        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
-        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
-
-        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 0);
-
-        assert!(state.is_selecting_text);
-        assert!(state.text_selection.is_some());
-    }
-
-    #[test]
-    fn active_permission_pause_allows_drawer_text_selection() {
-        let mut state = state_with_permission_pause();
-        state.register_selectable_screen_line(12, 3, 74, "drawer line".to_string());
-        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
-        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
-
-        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 12, 3);
-
-        assert!(state.is_selecting_text);
-        assert!(state.text_selection.is_some());
-    }
-
-    #[test]
-    fn scrollable_edit_permission_drawer_captures_mouse_wheel() {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
-            "tool_1",
-        )));
-        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
-        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
-        state.permission_drawer_content_len = 8;
-        state.permission_scroll_offset = 0;
-
-        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 2, 0);
-
-        assert!(state.permission_scroll_offset > 0);
-        assert_eq!(state.scroll_offset, 0);
-        assert!(state.auto_scroll);
-    }
-
-    #[test]
-    fn non_scrollable_or_non_edit_permission_drawer_uses_message_wheel() {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
-            "tool_1",
-        )));
-        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
-        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
-        state.permission_drawer_content_len = 2;
-
-        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
-
-        assert_eq!(state.permission_scroll_offset, usize::MAX);
-        assert!(state.scroll_offset > 0);
-        assert!(!state.auto_scroll);
-
-        let mut state = state_with_permission_pause();
-        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
-        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
-        state.permission_drawer_content_len = 8;
-        state.permission_scroll_offset = 0;
-
-        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
-
-        assert_eq!(state.permission_scroll_offset, 0);
-        assert!(state.scroll_offset > 0);
-        assert!(!state.auto_scroll);
-    }
-
-    #[tokio::test]
-    async fn plan_approval_enter_sends_selected_action() {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
-        state.plan_approval_selected = 1;
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_plan_approval_key(&mut state, KeyCode::Enter, &tx).await;
-
-        let Some(ClientRequest::PlanResolve { plan_id, action }) = rx.recv().await else {
-            panic!("expected plan approval response");
-        };
-        assert_eq!(plan_id, "20260521T000000Z-plan");
-        assert_eq!(
-            action,
-            omini_protocol::PlanApprovalAction::ApproveInNewSession {
-                profile: omini_protocol::PlanExecutionProfile::Main,
-            }
-        );
-        assert!(state.plan_approval.is_none());
-        assert!(!state.plan_approval_auto);
-    }
-
-    #[tokio::test]
-    async fn plan_approval_auto_toggle_sends_auto_profile() {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_plan_approval_key(&mut state, KeyCode::Char('a'), &tx).await;
-        assert!(state.plan_approval_auto);
-        handle_plan_approval_key(&mut state, KeyCode::Char('1'), &tx).await;
-
-        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
-            panic!("expected plan approval response");
-        };
-        assert_eq!(
-            action,
-            omini_protocol::PlanApprovalAction::Approve {
-                profile: omini_protocol::PlanExecutionProfile::Auto,
-            }
-        );
-        assert!(state.plan_approval.is_none());
-        assert!(!state.plan_approval_auto);
-    }
-
-    #[tokio::test]
-    async fn plan_approval_esc_continues_discussion() {
-        let mut state = UiState::new();
-        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
-        state.plan_approval_auto = true;
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_plan_approval_key(&mut state, KeyCode::Esc, &tx).await;
-
-        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
-            panic!("expected plan approval response");
-        };
-        assert_eq!(
-            action,
-            omini_protocol::PlanApprovalAction::ContinueDiscussing
-        );
-        assert!(state.plan_approval.is_none());
-        assert!(!state.plan_approval_auto);
-    }
-
-    #[tokio::test]
-    async fn shift_tab_sends_profile_toggle() {
-        let mut state = UiState::new();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        let handled =
-            handle_key_event(&mut state, KeyCode::BackTab, KeyModifiers::SHIFT, &tx).await;
-
-        assert!(handled);
-        let Some(ClientRequest::ProfileToggle) = rx.recv().await else {
-            panic!("expected profile toggle event");
-        };
-    }
-
-    #[tokio::test]
-    async fn auto_profile_permission_pause_uses_drawer_when_forwarded() {
-        let mut state = UiState::new();
-        state.status_bar.active_profile = ActiveProfile::Auto;
-        let (tx, mut rx) = mpsc::channel(1);
-
-        let outcome = handle_runtime_event(
-            &mut state,
-            RuntimeToUiEvent::ToolPauseRequested(permission_pause("tool_1")),
-            &tx,
-        )
-        .await;
-
-        assert!(outcome.redraw);
-        assert!(state.active_tool_pause().is_some());
-        assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn repeat_key_events_edit_composer() {
-        let mut state = UiState::new();
-        let (tx, _rx) = mpsc::channel(1);
-
-        handle_input_event(
-            &mut state,
-            Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-                KeyEventKind::Press,
-            )),
-            &tx,
-        )
-        .await;
-        handle_input_event(
-            &mut state,
-            Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Char('a'),
-                KeyModifiers::NONE,
-                KeyEventKind::Repeat,
-            )),
-            &tx,
-        )
-        .await;
-        handle_input_event(
-            &mut state,
-            Event::Key(KeyEvent::new_with_kind(
-                KeyCode::Backspace,
-                KeyModifiers::NONE,
-                KeyEventKind::Repeat,
-            )),
-            &tx,
-        )
-        .await;
-
-        assert_eq!(state.input, "a");
-        assert_eq!(state.cursor_char, 1);
-    }
-
-    #[tokio::test]
-    async fn compact_command_sets_manual_compact_working_state() {
-        let mut state = UiState::new();
-        state.input = "/compact".to_string();
-        state.cursor_char = state.input.chars().count();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
-
-        assert_eq!(state.agent_status, AgentStatus::Working);
-        assert!(state.manual_compact_running);
-        assert!(state.run_timer.is_some());
-        let Some(ClientRequest::ContextCompact { instructions }) = rx.recv().await else {
-            panic!("expected compact command");
-        };
-        assert_eq!(instructions, None);
-    }
-
-    #[tokio::test]
-    async fn command_submit_preserves_argument_mentions() {
-        let mut state = UiState::new();
-        state.input = "/commit-message summarize @src/main.rs".to_string();
-        state.cursor_char = state.input.chars().count();
-        state.input_mentions.push(InputMention {
-            start_char: 26,
-            end_char: 38,
-            kind: MentionKind::File,
-            label: "src/main.rs".to_string(),
-            target: "src/main.rs".to_string(),
-            description: "file".to_string(),
-        });
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
-
-        let Some(ClientRequest::ExpandSkillRun {
-            input: Some(command),
-            ..
-        }) = rx.recv().await
-        else {
-            panic!("expected command draft");
-        };
-        assert_eq!(command.text, "/commit-message summarize @src/main.rs");
-        let context_refs = command.context_refs.expect("expected context refs");
-        assert_eq!(context_refs.len(), 1);
-        assert_eq!(context_refs[0].target(), "src/main.rs");
-    }
-
-    #[tokio::test]
-    async fn effort_command_accepts_max() {
-        let mut state = UiState::new();
-        state.input = "/effort max".to_string();
-        state.cursor_char = state.input.chars().count();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
-
-        let Some(ClientRequest::ModelThinkingEffortSet { effort }) = rx.recv().await else {
-            panic!("expected effort request");
-        };
-        assert_eq!(effort, omini_protocol::ThinkingEffort::Max);
-    }
-
-    #[tokio::test]
-    async fn manual_compact_does_not_queue_normal_user_input() {
-        let mut state = UiState::new();
-        state.begin_manual_compact();
-        state.input = "hello".to_string();
-        state.cursor_char = state.input.chars().count();
-        let (tx, mut rx) = mpsc::channel(1);
-
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
-
-        assert!(state.queued_user_inputs.is_empty());
-        let Some(ClientRequest::RunSubmitUserInput { .. }) = rx.recv().await else {
-            panic!("expected user message");
-        };
-    }
-}
-
 pub(super) async fn handle_input_event(
     state: &mut UiState,
     event: Event,
@@ -1399,4 +842,561 @@ fn active_permission_drawer_captures_scroll(state: &UiState) -> bool {
     is_large_file_preview
         && state.permission_drawer_body_area.height > 0
         && state.permission_drawer_content_len > state.permission_drawer_body_area.height as usize
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::InputMention;
+    use crate::types::events::{
+        ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
+        UserInputOption, UserInputPreview, UserInputQuestion,
+    };
+    use chrono::Utc;
+    use crossterm::event::KeyEvent;
+    use omini_domain::display::MentionKind;
+    use std::path::PathBuf;
+
+    fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "bash".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+                tool_name: "bash".to_string(),
+                payload: serde_json::Map::new(),
+            }),
+        }
+    }
+
+    fn edit_permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "edit".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Edit(EditPermissionPreview {
+                summary: "Edit /tmp/demo.rs".to_string(),
+                path: "/tmp/demo.rs".to_string(),
+                replacement_count: 1,
+                replace_all: false,
+                start_lines: vec![1],
+                added_lines: 1,
+                removed_lines: 1,
+            })),
+        }
+    }
+
+    fn state_with_permission_pause() -> UiState {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+            "tool_1",
+        )));
+        state
+    }
+
+    fn user_input_pause(tool_use_id: &str) -> ToolPauseRequest {
+        ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "ask_user".to_string(),
+            permission_source: None,
+            source_session_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::UserInput(UserInputPreview {
+                questions: vec![UserInputQuestion {
+                    id: "q1".to_string(),
+                    header: "header".to_string(),
+                    question: "Pick one".to_string(),
+                    options: (0..3)
+                        .map(|i| UserInputOption {
+                            label: format!("opt{i}"),
+                            description: String::new(),
+                        })
+                        .collect(),
+                }],
+            }),
+        }
+    }
+
+    fn state_with_user_input_pause() -> UiState {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(user_input_pause(
+            "tool_1",
+        )));
+        state
+    }
+
+    fn submitted_plan() -> SubmittedPlan {
+        SubmittedPlan {
+            id: "20260521T000000Z-plan".to_string(),
+            title: "Plan".to_string(),
+            markdown: "# Plan\n\n- Step".to_string(),
+            path: PathBuf::from("/tmp/plan.md"),
+            created_at: Utc::now(),
+        }
+    }
+
+    async fn recv_pause_response(
+        rx: &mut mpsc::Receiver<ClientRequest>,
+    ) -> omini_protocol::ToolPauseResponse {
+        let Some(ClientRequest::ToolPauseResolve { response, .. }) = rx.recv().await else {
+            panic!("expected tool pause response");
+        };
+        response
+    }
+
+    #[tokio::test]
+    async fn tab_starts_permission_deny_note_mode() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+
+        assert!(state.user_input_note_mode);
+        assert_eq!(state.permission_selected, 1);
+        assert_eq!(state.current_user_input_note(), "");
+    }
+
+    // 修复 Bug 1 的回归测试:ask_user 暂停进入 note 模式后,`j` / `k`
+    // 必须是普通字符插入,不能被 vim 风格方向键别名吞掉。
+    #[tokio::test]
+    async fn user_input_note_mode_inserts_jk_as_text() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        // Tab 切换到 note 模式
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+        let initial_selected = state.current_user_input_selected();
+
+        for c in "skip、kick this off".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+
+        assert_eq!(state.current_user_input_note(), "skip、kick this off");
+        assert_eq!(state.current_user_input_selected(), initial_selected);
+    }
+
+    // 修复 Bug 1 的回归测试:note 模式下方向键 `↑` / `↓` 仍要能切选项。
+    // 仅验证"切换选项"语义,saturate 边界(max_selected 取 options.len()
+    // 而非 len-1 导致的 off-by-one)与本 issue 无关,不在此测试覆盖。
+    #[tokio::test]
+    async fn user_input_note_mode_arrows_still_navigate_options() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+        assert_eq!(state.current_user_input_selected(), 0);
+
+        handle_tool_pause_key(&mut state, KeyCode::Down, &tx).await;
+        assert_eq!(state.current_user_input_selected(), 1);
+        handle_tool_pause_key(&mut state, KeyCode::Up, &tx).await;
+        assert_eq!(state.current_user_input_selected(), 0);
+    }
+
+    // Permission 暂停的 note 模式回归基线:`j` / `k` 原本就能插入,
+    // 此处固定当前行为,防止后续改动破坏非 ask_user 路径。
+    #[tokio::test]
+    async fn permission_note_mode_inserts_jk_as_text() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        for c in "jk".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+
+        assert_eq!(state.current_user_input_note(), "jk");
+    }
+
+    // 修复 Bug 2 的回归测试:note 模式期间 `Event::Paste` 走
+    // `handle_input_event` 中独立的 note 分支,把每个字符塞进 note。
+    // 之前主输入框分支的 `active_tool_pause().is_none()` 守卫把整条
+    // bracketed paste 路径吞掉,note 模式无处可粘。
+    #[tokio::test]
+    async fn user_input_note_mode_paste_inserts_chars() {
+        let mut state = state_with_user_input_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        let outcome =
+            handle_input_event(&mut state, Event::Paste("pasted note".to_string()), &tx).await;
+        assert!(outcome.redraw);
+
+        assert_eq!(state.current_user_input_note(), "pasted note");
+    }
+
+    #[tokio::test]
+    async fn permission_note_mode_paste_inserts_chars() {
+        let mut state = state_with_permission_pause();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        assert!(state.user_input_note_mode);
+
+        let outcome = handle_input_event(&mut state, Event::Paste("hi".to_string()), &tx).await;
+        assert!(outcome.redraw);
+
+        assert_eq!(state.current_user_input_note(), "hi");
+    }
+
+    #[tokio::test]
+    async fn permission_deny_note_is_sent_on_enter() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        for c in "Need context".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+        handle_tool_pause_key(&mut state, KeyCode::Enter, &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            omini_protocol::ToolPauseResponse::Permission {
+                approved: false,
+                note: Some("Need context".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_esc_denies_without_note() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Esc, &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            omini_protocol::ToolPauseResponse::Permission {
+                approved: false,
+                note: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_approval_ignores_stale_note() {
+        let mut state = state_with_permission_pause();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        for c in "Do not run".chars() {
+            handle_tool_pause_key(&mut state, KeyCode::Char(c), &tx).await;
+        }
+        handle_tool_pause_key(&mut state, KeyCode::Tab, &tx).await;
+        handle_tool_pause_key(&mut state, KeyCode::Char('y'), &tx).await;
+
+        assert_eq!(
+            recv_pause_response(&mut rx).await,
+            omini_protocol::ToolPauseResponse::Permission {
+                approved: true,
+                note: None,
+            }
+        );
+        assert_eq!(state.agent_status, AgentStatus::Working);
+    }
+
+    #[test]
+    fn active_permission_pause_allows_message_text_selection_outside_drawer() {
+        let mut state = state_with_permission_pause();
+        state.register_selectable_screen_line(2, 0, 80, "assistant line".to_string());
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+
+        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 2, 0);
+
+        assert!(state.is_selecting_text);
+        assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn active_permission_pause_allows_drawer_text_selection() {
+        let mut state = state_with_permission_pause();
+        state.register_selectable_screen_line(12, 3, 74, "drawer line".to_string());
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+
+        handle_mouse_event(&mut state, MouseEventKind::Down(MouseButton::Left), 12, 3);
+
+        assert!(state.is_selecting_text);
+        assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn scrollable_edit_permission_drawer_captures_mouse_wheel() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
+            "tool_1",
+        )));
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 8;
+        state.permission_scroll_offset = 0;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 2, 0);
+
+        assert!(state.permission_scroll_offset > 0);
+        assert_eq!(state.scroll_offset, 0);
+        assert!(state.auto_scroll);
+    }
+
+    #[test]
+    fn non_scrollable_or_non_edit_permission_drawer_uses_message_wheel() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(edit_permission_pause(
+            "tool_1",
+        )));
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 2;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
+
+        assert_eq!(state.permission_scroll_offset, usize::MAX);
+        assert!(state.scroll_offset > 0);
+        assert!(!state.auto_scroll);
+
+        let mut state = state_with_permission_pause();
+        state.permission_drawer_area = ratatui::layout::Rect::new(0, 10, 80, 6);
+        state.permission_drawer_body_area = ratatui::layout::Rect::new(3, 12, 74, 2);
+        state.permission_drawer_content_len = 8;
+        state.permission_scroll_offset = 0;
+
+        handle_mouse_event(&mut state, MouseEventKind::ScrollUp, 12, 3);
+
+        assert_eq!(state.permission_scroll_offset, 0);
+        assert!(state.scroll_offset > 0);
+        assert!(!state.auto_scroll);
+    }
+
+    #[tokio::test]
+    async fn plan_approval_enter_sends_selected_action() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
+        state.plan_approval_selected = 1;
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_plan_approval_key(&mut state, KeyCode::Enter, &tx).await;
+
+        let Some(ClientRequest::PlanResolve { plan_id, action }) = rx.recv().await else {
+            panic!("expected plan approval response");
+        };
+        assert_eq!(plan_id, "20260521T000000Z-plan");
+        assert_eq!(
+            action,
+            omini_protocol::PlanApprovalAction::ApproveInNewSession {
+                profile: omini_protocol::PlanExecutionProfile::Main,
+            }
+        );
+        assert!(state.plan_approval.is_none());
+        assert!(!state.plan_approval_auto);
+    }
+
+    #[tokio::test]
+    async fn plan_approval_auto_toggle_sends_auto_profile() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_plan_approval_key(&mut state, KeyCode::Char('a'), &tx).await;
+        assert!(state.plan_approval_auto);
+        handle_plan_approval_key(&mut state, KeyCode::Char('1'), &tx).await;
+
+        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
+            panic!("expected plan approval response");
+        };
+        assert_eq!(
+            action,
+            omini_protocol::PlanApprovalAction::Approve {
+                profile: omini_protocol::PlanExecutionProfile::Auto,
+            }
+        );
+        assert!(state.plan_approval.is_none());
+        assert!(!state.plan_approval_auto);
+    }
+
+    #[tokio::test]
+    async fn plan_approval_esc_continues_discussion() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan()));
+        state.plan_approval_auto = true;
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_plan_approval_key(&mut state, KeyCode::Esc, &tx).await;
+
+        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
+            panic!("expected plan approval response");
+        };
+        assert_eq!(
+            action,
+            omini_protocol::PlanApprovalAction::ContinueDiscussing
+        );
+        assert!(state.plan_approval.is_none());
+        assert!(!state.plan_approval_auto);
+    }
+
+    #[tokio::test]
+    async fn shift_tab_sends_profile_toggle() {
+        let mut state = UiState::new();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let handled =
+            handle_key_event(&mut state, KeyCode::BackTab, KeyModifiers::SHIFT, &tx).await;
+
+        assert!(handled);
+        let Some(ClientRequest::ProfileToggle) = rx.recv().await else {
+            panic!("expected profile toggle event");
+        };
+    }
+
+    #[tokio::test]
+    async fn auto_profile_permission_pause_uses_drawer_when_forwarded() {
+        let mut state = UiState::new();
+        state.status_bar.active_profile = ActiveProfile::Auto;
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let outcome = handle_runtime_event(
+            &mut state,
+            RuntimeToUiEvent::ToolPauseRequested(permission_pause("tool_1")),
+            &tx,
+        )
+        .await;
+
+        assert!(outcome.redraw);
+        assert!(state.active_tool_pause().is_some());
+        assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn repeat_key_events_edit_composer() {
+        let mut state = UiState::new();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+            &tx,
+        )
+        .await;
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            &tx,
+        )
+        .await;
+        handle_input_event(
+            &mut state,
+            Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Backspace,
+                KeyModifiers::NONE,
+                KeyEventKind::Repeat,
+            )),
+            &tx,
+        )
+        .await;
+
+        assert_eq!(state.input, "a");
+        assert_eq!(state.cursor_char, 1);
+    }
+
+    #[tokio::test]
+    async fn compact_command_sets_manual_compact_working_state() {
+        let mut state = UiState::new();
+        state.input = "/compact".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert_eq!(state.agent_status, AgentStatus::Working);
+        assert!(state.manual_compact_running);
+        assert!(state.run_timer.is_some());
+        let Some(ClientRequest::ContextCompact { instructions }) = rx.recv().await else {
+            panic!("expected compact command");
+        };
+        assert_eq!(instructions, None);
+    }
+
+    #[tokio::test]
+    async fn command_submit_preserves_argument_mentions() {
+        let mut state = UiState::new();
+        state.input = "/commit-message summarize @src/main.rs".to_string();
+        state.cursor_char = state.input.chars().count();
+        state.input_mentions.push(InputMention {
+            start_char: 26,
+            end_char: 38,
+            kind: MentionKind::File,
+            label: "src/main.rs".to_string(),
+            target: "src/main.rs".to_string(),
+            description: "file".to_string(),
+        });
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::ExpandSkillRun {
+            input: Some(command),
+            ..
+        }) = rx.recv().await
+        else {
+            panic!("expected command draft");
+        };
+        assert_eq!(command.text, "/commit-message summarize @src/main.rs");
+        let context_refs = command.context_refs.expect("expected context refs");
+        assert_eq!(context_refs.len(), 1);
+        assert_eq!(context_refs[0].target(), "src/main.rs");
+    }
+
+    #[tokio::test]
+    async fn effort_command_accepts_max() {
+        let mut state = UiState::new();
+        state.input = "/effort max".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::ModelThinkingEffortSet { effort }) = rx.recv().await else {
+            panic!("expected effort request");
+        };
+        assert_eq!(effort, omini_protocol::ThinkingEffort::Max);
+    }
+
+    #[tokio::test]
+    async fn manual_compact_does_not_queue_normal_user_input() {
+        let mut state = UiState::new();
+        state.begin_manual_compact();
+        state.input = "hello".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert!(state.queued_user_inputs.is_empty());
+        let Some(ClientRequest::RunSubmitUserInput { .. }) = rx.recv().await else {
+            panic!("expected user message");
+        };
+    }
 }

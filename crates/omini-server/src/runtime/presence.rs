@@ -93,8 +93,6 @@ fn random_index(len: usize) -> usize {
     value % len
 }
 
-/// 带本地单调序号的 runtime 事件，用于 WebSocket replay 和实时订阅去重。
-
 #[cfg(test)]
 mod tests {
     use super::*;
