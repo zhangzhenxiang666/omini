@@ -4,6 +4,7 @@ use super::usage::{
     record_total_usage_and_notify, record_total_usage_snapshot, record_usage_snapshot,
 };
 use super::*;
+use omini_domain::display::HistoryItem;
 use tracing::Instrument;
 
 impl AgentRuntime {
@@ -15,20 +16,14 @@ impl AgentRuntime {
         active_profile_handle: Arc<RwLock<ActiveProfile>>,
         tool_pause_resolver: ToolPauseResolver,
     ) -> tokio::task::JoinHandle<()> {
-        let session_id = self
-            .session_id
-            .clone()
-            .expect("session must exist before processing events");
-        let session_dir = self
-            .session_dir
-            .clone()
-            .expect("session dir must exist before processing events");
+        let session_id = self.session_id.clone();
+        let session_dir = self.session_dir.clone();
         let event_tx = self.event_tx.clone();
         let persistence_tx = self.persistence_tx.clone();
         let usage_state = Arc::clone(&self.session_usage);
         let project = self.project.clone();
         let blocks_dir = session_dir.path().join("blocks");
-        let context_window = self.current_context_window();
+        let context_window = active_run::current_context_window(&self.settings);
         let span_session_id = session_id.clone();
 
         tokio::spawn(

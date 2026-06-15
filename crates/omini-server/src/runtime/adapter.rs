@@ -353,29 +353,30 @@ pub(super) fn session_snapshot_events(
 ) -> Result<Vec<RuntimeEvent>, CoreError> {
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
+    // snapshot 投影由 server 自己生成,不走 core 内部事件通道 —— title 也用
+    // server-side helper 直接构造,绕开 `RuntimeToServerEvent::SessionTitleChanged`。
+    // `SessionSnapshot` 同样在 server 端直接构造 `protocol::TypedRuntimeEvent`,
+    // core 不再产生这条事件。
     let events = [
-        RuntimeToServerEvent::SessionTitleChanged {
-            title: snapshot.title,
-        },
-        RuntimeToServerEvent::ModelChanged {
+        session_title_changed_event(snapshot.title),
+        runtime_event_from_internal(RuntimeToServerEvent::ModelChanged {
             provider: snapshot.provider,
             model: snapshot.model,
             thinking_effort: snapshot.thinking_effort,
             context_window,
-        },
-        RuntimeToServerEvent::ActiveProfileChanged(active_profile),
-        RuntimeToServerEvent::SessionSnapshot {
-            session_id: Some(snapshot.session_id),
-            messages: snapshot.messages,
-            subagents: snapshot.subagents,
-            usage,
-        },
+        })?,
+        runtime_event_from_internal(RuntimeToServerEvent::ActiveProfileChanged(active_profile))?,
+        RuntimeEvent::new(protocol::TypedRuntimeEvent::SessionSnapshot(
+            protocol::SessionSnapshotEvent {
+                session_id: Some(snapshot.session_id),
+                messages: snapshot.messages,
+                subagents: snapshot.subagents,
+                usage,
+            },
+        )),
     ];
 
-    events
-        .into_iter()
-        .map(runtime_event_from_internal)
-        .collect()
+    Ok(events.to_vec())
 }
 
 /// 把 core 内部 runtime 事件编码成协议 `RuntimeEvent`。
@@ -388,6 +389,14 @@ pub(super) fn runtime_event_from_internal(
 pub(super) fn thinking_display_changed_event(show: bool) -> RuntimeEvent {
     RuntimeEvent::new(protocol::TypedRuntimeEvent::ThinkingDisplayChanged(
         protocol::ThinkingDisplayChangedEvent { show },
+    ))
+}
+
+/// Server 端直接构造的 session title 变更事件。新架构下 title 由 server 编排层
+/// 负责,绕开 core 内部事件通道 —— 这里和 `thinking_display_changed_event` 对称。
+pub(super) fn session_title_changed_event(title: Option<String>) -> RuntimeEvent {
+    RuntimeEvent::new(protocol::TypedRuntimeEvent::SessionTitleChanged(
+        protocol::SessionTitleChangedEvent { title },
     ))
 }
 
@@ -430,22 +439,6 @@ fn typed_runtime_event_from_internal(event: RuntimeToServerEvent) -> protocol::T
             total_tokens,
             total_cached_tokens,
         }),
-        RuntimeToServerEvent::SessionSnapshot {
-            session_id,
-            messages,
-            subagents,
-            usage,
-        } => protocol::TypedRuntimeEvent::SessionSnapshot(protocol::SessionSnapshotEvent {
-            session_id,
-            messages,
-            subagents,
-            usage,
-        }),
-        RuntimeToServerEvent::SessionTitleChanged { title } => {
-            protocol::TypedRuntimeEvent::SessionTitleChanged(protocol::SessionTitleChangedEvent {
-                title,
-            })
-        }
         RuntimeToServerEvent::ActiveProfileChanged(profile) => {
             protocol::TypedRuntimeEvent::ActiveProfileChanged(protocol::ActiveProfileChangedEvent {
                 profile,
@@ -532,6 +525,12 @@ fn typed_runtime_event_from_internal(event: RuntimeToServerEvent) -> protocol::T
         RuntimeToServerEvent::SubagentFinished(event) => {
             protocol::TypedRuntimeEvent::SubagentFinished(event)
         }
+        RuntimeToServerEvent::SessionSwitched { from, to } => {
+            protocol::TypedRuntimeEvent::SessionSwitched(protocol::SessionSwitchedEvent {
+                from,
+                to,
+            })
+        }
     }
 }
 
@@ -563,6 +562,7 @@ mod tests {
     use super::*;
     use omini_domain::events as event_types;
     use omini_domain::events::SessionUsageSnapshot;
+    use omini_protocol::HistoryItem;
 
     #[test]
     fn initial_session_title_from_input_trims_and_limits_text() {

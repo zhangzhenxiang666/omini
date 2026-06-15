@@ -147,6 +147,10 @@ pub enum TypedRuntimeEvent {
     CompactSummaryFinished(CompactSummaryFinishedEvent),
     CompactSummaryFailed(CompactSummaryFailedEvent),
     SessionSnapshot(SessionSnapshotEvent),
+    /// 「在新会话中执行计划」审批通过后,server 在 fork 出新 RuntimeSession 后
+    /// 通过普通 runtime event 通道广播给所有客户端。TUI 收到后应重连到 `to` 的 ws;
+    /// 旧 session 的 runtime 活动自然结束,由 server 的 reclaim 机制回收。
+    SessionSwitched(SessionSwitchedEvent),
     SubagentStarted(SubagentStartedEvent),
     SubagentMessageProduced(SubagentMessageEvent),
     SubagentToolUse(SubagentToolUseEvent),
@@ -184,6 +188,7 @@ impl TypedRuntimeEvent {
             Self::CompactSummaryFinished(_) => "compact_summary_finished",
             Self::CompactSummaryFailed(_) => "compact_summary_failed",
             Self::SessionSnapshot(_) => "session_snapshot",
+            Self::SessionSwitched(_) => "session_switched",
             Self::SubagentStarted(_) => "subagent_started",
             Self::SubagentMessageProduced(_) => "subagent_message_produced",
             Self::SubagentToolUse(_) => "subagent_tool_use",
@@ -191,6 +196,15 @@ impl TypedRuntimeEvent {
             Self::SubagentFinished(_) => "subagent_finished",
         }
     }
+}
+
+/// 「在新会话中执行计划」触发 session 切换时广播的事件。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSwitchedEvent {
+    /// 切换前的 session ID。
+    pub from: String,
+    /// 切换后的 session ID。
+    pub to: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1281,6 +1295,32 @@ mod tests {
                 "controller_id": "client_1"
             })
         );
+    }
+
+    #[test]
+    fn session_switched_typed_event_round_trips() {
+        let event = TypedRuntimeEvent::SessionSwitched(SessionSwitchedEvent {
+            from: "session_old".to_string(),
+            to: "session_new".to_string(),
+        });
+
+        // 事件嵌入 RuntimeEvent 顶层,随 `ServerEnvelope::Event` 走普通 runtime 通道。
+        let runtime_event = RuntimeEvent::new(event.clone());
+        let value = serde_json::to_value(runtime_event).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "event": {
+                    "type": "session_switched",
+                    "from": "session_old",
+                    "to": "session_new"
+                }
+            })
+        );
+
+        // 反向 round-trip:TUI 端 `runtime_event_from_protocol` 依赖 Decode 阶段正确解析 from/to。
+        let decoded: RuntimeEvent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.event, event);
     }
 
     #[test]

@@ -219,8 +219,15 @@ impl PlanExecutionProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PlanApprovalAction {
-    Approve { profile: PlanExecutionProfile },
-    ApproveAndCompact { profile: PlanExecutionProfile },
+    Approve {
+        profile: PlanExecutionProfile,
+    },
+    /// 「在新会话中执行计划」:client 选此 action 时,server 路由层会直接读
+    /// plan 文件并 fork 新 `RuntimeSession`,不进入 core 的审批状态机;
+    /// core 收到此 action 后只发出 resolved 事件关闭抽屉,状态保持。
+    ApproveInNewSession {
+        profile: PlanExecutionProfile,
+    },
     ContinueDiscussing,
 }
 

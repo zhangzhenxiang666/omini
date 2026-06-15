@@ -717,18 +717,25 @@ async fn run_connected_session(
                 let message = message.map_err(|err| format!("read server message: {err}"))?;
                 match message {
                     TungsteniteMessage::Text(text) => {
-                        let saw_runtime_status = handle_server_text(text.as_str(), event_tx).await?;
-                        if saw_runtime_status && !did_calibrate_initial_status {
-                            did_calibrate_initial_status = true;
-                            // WS 初始化 status 先让 UI 立刻恢复；随后只测一次 HTTP status
-                            // 往返，避免把 snapshot/replay/hydrate 时间算进运行耗时。
-                            if let Some(status) =
-                                fetch_calibrated_runtime_status(http, &base).await
-                            {
-                                event_tx
-                                    .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
-                                    .await
-                                    .map_err(|_| "TUI event receiver closed".to_string())?;
+                        match handle_server_text(text.as_str(), event_tx).await? {
+                            HandleOutcome::PassThrough => {}
+                            HandleOutcome::SawRuntimeStatus => {
+                                if !did_calibrate_initial_status {
+                                    did_calibrate_initial_status = true;
+                                    // WS 初始化 status 先让 UI 立刻恢复；随后只测一次 HTTP status
+                                    // 往返，避免把 snapshot/replay/hydrate 时间算进运行耗时。
+                                    if let Some(status) =
+                                        fetch_calibrated_runtime_status(http, &base).await
+                                    {
+                                        event_tx
+                                            .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                                            .await
+                                            .map_err(|_| "TUI event receiver closed".to_string())?;
+                                    }
+                                }
+                            }
+                            HandleOutcome::Switch(next_session_id) => {
+                                return Ok(SessionLoop::Switch(next_session_id));
                             }
                         }
                     }
@@ -753,29 +760,46 @@ async fn run_connected_session(
 async fn handle_server_text(
     text: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
-) -> Result<bool, String> {
+) -> Result<HandleOutcome, String> {
     match serde_json::from_str::<protocol::ServerEnvelope>(text)
         .map_err(|err| format!("decode server envelope: {err}"))?
     {
         protocol::ServerEnvelope::Event { event } => {
+            // 「在新会话中执行计划」:server fork 出新 session 后通过普通 runtime
+            // 事件通道广播 SessionSwitched。复用具名 `Switch` 控制流——主循环
+            // 断开旧 ws 并按新 id 重建,不要把它当作普通 runtime 事件投递给 UI。
+            if let protocol::TypedRuntimeEvent::SessionSwitched(payload) = event.event {
+                return Ok(HandleOutcome::Switch(payload.to));
+            }
             let event = runtime_event_from_protocol(event);
             event_tx
                 .send(event)
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
-            Ok(false)
+            Ok(HandleOutcome::PassThrough)
         }
         protocol::ServerEnvelope::RuntimeStatus { status } => {
             event_tx
                 .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
-            Ok(true)
+            Ok(HandleOutcome::SawRuntimeStatus)
         }
         // controller/role envelope 先作为协议能力保留，当前 TUI 渲染还主要依赖 runtime status。
-        protocol::ServerEnvelope::ControllerChanged { .. } => Ok(false),
-        protocol::ServerEnvelope::ClientRoleChanged { .. } => Ok(false),
+        protocol::ServerEnvelope::ControllerChanged { .. } => Ok(HandleOutcome::PassThrough),
+        protocol::ServerEnvelope::ClientRoleChanged { .. } => Ok(HandleOutcome::PassThrough),
     }
+}
+
+/// ws 文本帧处理的结果,决定下一步动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HandleOutcome {
+    /// 普通事件,继续主循环。
+    PassThrough,
+    /// 收到了 RuntimeStatus,主循环在初始化阶段据此校准一次 HTTP /status 查询。
+    SawRuntimeStatus,
+    /// 收到 SessionSwitched,主循环断开旧 ws 并按新 id 重新连接。
+    Switch(String),
 }
 
 fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEvent {
@@ -902,6 +926,10 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::SubagentFinished(event) => {
             RuntimeToUiEvent::SubagentFinished(event)
         }
+        // SessionSwitched 在 `handle_server_text` 拦截,不会流到这里。
+        protocol::TypedRuntimeEvent::SessionSwitched(_) => unreachable!(
+            "SessionSwitched 事件应被 handle_server_text 提前拦截为 HandleOutcome::Switch"
+        ),
     }
 }
 
@@ -1949,12 +1977,12 @@ mod tests {
     async fn handle_server_text_emits_runtime_status_sync() {
         let (tx, mut rx) = mpsc::channel(4);
 
-        let saw_runtime_status =
+        let outcome =
             handle_server_text(&runtime_status_envelope_text(query_runtime_status()), &tx)
                 .await
                 .expect("runtime status should decode");
 
-        assert!(saw_runtime_status);
+        assert_eq!(outcome, HandleOutcome::SawRuntimeStatus);
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeToUiEvent::RuntimeStatusSynced { status })
@@ -1966,7 +1994,7 @@ mod tests {
     async fn handle_server_text_decodes_session_snapshot_event() {
         let (tx, mut rx) = mpsc::channel(4);
 
-        let saw_runtime_status = handle_server_text(
+        let outcome = handle_server_text(
             &runtime_event_envelope_text(protocol::TypedRuntimeEvent::SessionSnapshot(
                 protocol::SessionSnapshotEvent {
                     session_id: Some("session_1".to_string()),
@@ -1980,10 +2008,34 @@ mod tests {
         .await
         .expect("session changed should decode");
 
-        assert!(!saw_runtime_status);
+        assert_eq!(outcome, HandleOutcome::PassThrough);
         assert!(matches!(
             rx.recv().await,
             Some(RuntimeToUiEvent::SessionSnapshot { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_server_text_emits_session_switched() {
+        let (tx, mut rx) = mpsc::channel(4);
+
+        // SessionSwitched 现在嵌入在 RuntimeEvent 中(由 server 通过普通runtime 通道广播),不是独立的 ServerEnvelope 变体。
+        let envelope = serde_json::to_string(&protocol::ServerEnvelope::Event {
+            event: protocol::RuntimeEvent::new(protocol::TypedRuntimeEvent::SessionSwitched(
+                protocol::SessionSwitchedEvent {
+                    from: "session_old".to_string(),
+                    to: "session_new".to_string(),
+                },
+            )),
+        })
+        .expect("session switched envelope should serialize");
+        let outcome = handle_server_text(&envelope, &tx)
+            .await
+            .expect("session switched should decode");
+
+        // 主循环据此返回 SessionLoop::Switch,触发 ws 重连到新 session。
+        assert_eq!(outcome, HandleOutcome::Switch("session_new".to_string()));
+        // SessionSwitched 不应混入 runtime 事件流。
+        assert!(rx.try_recv().is_err());
     }
 }

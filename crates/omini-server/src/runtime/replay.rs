@@ -177,14 +177,20 @@ impl RuntimeReplayBuffer {
         }
     }
 
-    pub(super) fn record_snapshot(&mut self, snapshot: &LoadedSession) {
+    pub(super) fn record_snapshot(
+        &mut self,
+        snapshot: &LoadedSession,
+        session_messages: &[Message],
+    ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
         self.drop_session_title_in_snapshot(snapshot);
-        if self.current_assistant_tail_is_in_snapshot(snapshot) {
+        // LLM 级去重走 jsonl 路径(`session_messages` 来自
+        // `SessionDir::load_history()`),不再用 DB 加载的 HistoryItem 集合。
+        if self.current_assistant_tail_is_in_snapshot(session_messages) {
             self.drop_current_assistant_tail();
         }
-        if self.current_tool_results_are_in_snapshot(snapshot) {
+        if self.current_tool_results_are_in_snapshot(session_messages) {
             self.drop_persisted_tool_results();
         }
     }
@@ -262,32 +268,20 @@ impl RuntimeReplayBuffer {
         }
     }
 
-    fn current_assistant_tail_is_in_snapshot(&self, snapshot: &LoadedSession) -> bool {
+    fn current_assistant_tail_is_in_snapshot(&self, session_messages: &[Message]) -> bool {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && snapshot.messages.iter().any(|item| {
-                matches!(
-                    item,
-                    HistoryItem::Message(Message {
-                        role: Role::Assistant,
-                        content,
-                    }) if *content == blocks
-                )
-            })
+            && session_messages
+                .iter()
+                .any(|message| message.role == Role::Assistant && message.content == blocks)
     }
 
-    fn current_tool_results_are_in_snapshot(&self, snapshot: &LoadedSession) -> bool {
+    fn current_tool_results_are_in_snapshot(&self, session_messages: &[Message]) -> bool {
         let blocks = tool_result_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && snapshot.messages.iter().any(|item| {
-                matches!(
-                    item,
-                    HistoryItem::Message(Message {
-                        role: Role::User,
-                        content,
-                    }) if *content == blocks
-                )
-            })
+            && session_messages
+                .iter()
+                .any(|message| message.role == Role::User && message.content == blocks)
     }
 }
 
@@ -366,6 +360,7 @@ mod tests {
         CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, SessionUsageSnapshot, SubmittedPlan,
     };
     use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+    use omini_protocol::HistoryItem;
     use omini_runtime_api::RuntimeToServerEvent;
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
@@ -462,6 +457,12 @@ mod tests {
         }
     }
 
+    /// 构造一个已经编码好的 `RuntimeEvent`(协议层),不走 `RuntimeToServerEvent`。
+    /// 适用于测试 server-side 直发的事件(title 变化、git 分支等)。
+    fn sequenced_runtime_event(seq: u64, event: RuntimeEvent) -> SequencedRuntimeEvent {
+        SequencedRuntimeEvent { seq, event }
+    }
+
     fn replay_kinds(buffer: &RuntimeReplayBuffer) -> Vec<String> {
         buffer
             .replay()
@@ -516,11 +517,11 @@ mod tests {
     fn replay_buffer_replays_latest_server_local_state_events() {
         let mut buffer = RuntimeReplayBuffer::default();
 
-        buffer.record(runtime_event(
+        // title 变化现在由 server 走自己的事件通道,replay buffer 收到的是协议层
+        // `TypedRuntimeEvent::SessionTitleChanged`,不再包成 `RuntimeToServerEvent`。
+        buffer.record(sequenced_runtime_event(
             1,
-            RuntimeToServerEvent::SessionTitleChanged {
-                title: Some("old".to_string()),
-            },
+            session_title_changed_event(Some("old".to_string())),
         ));
         buffer.record(SequencedRuntimeEvent {
             seq: 2,
@@ -532,11 +533,9 @@ mod tests {
                 records: Vec::new(),
             },
         ));
-        buffer.record(runtime_event(
+        buffer.record(sequenced_runtime_event(
             4,
-            RuntimeToServerEvent::SessionTitleChanged {
-                title: Some("new".to_string()),
-            },
+            session_title_changed_event(Some("new".to_string())),
         ));
 
         let replay = buffer.replay();
@@ -567,13 +566,14 @@ mod tests {
     fn replay_buffer_drops_session_title_recovered_by_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
 
-        buffer.record(runtime_event(
+        buffer.record(sequenced_runtime_event(
             1,
-            RuntimeToServerEvent::SessionTitleChanged {
-                title: Some("hello".to_string()),
-            },
+            session_title_changed_event(Some("hello".to_string())),
         ));
-        buffer.record_snapshot(&snapshot_with_title(Some("hello".to_string()), Vec::new()));
+        buffer.record_snapshot(
+            &snapshot_with_title(Some("hello".to_string()), Vec::new()),
+            &[],
+        );
 
         assert!(buffer.replay().is_empty());
     }
@@ -651,7 +651,7 @@ mod tests {
         .expect("event should encode");
 
         buffer.record(SequencedRuntimeEvent { seq: 1, event });
-        buffer.record_snapshot(&snapshot(vec![item]));
+        buffer.record_snapshot(&snapshot(vec![item]), &[]);
 
         assert!(buffer.replay().is_empty());
     }
@@ -738,7 +738,8 @@ mod tests {
             .expect("event should encode"),
         });
 
-        buffer.record_snapshot(&snapshot(vec![HistoryItem::Message(assistant)]));
+        // LLM 级去重现在走 jsonl 路径,数据放在新参数 `&[Message]` 里。
+        buffer.record_snapshot(&snapshot(Vec::new()), &[assistant]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
     }
@@ -783,10 +784,9 @@ mod tests {
             event: runtime_event_from_internal(RuntimeToServerEvent::ToolResult(tool_result_event))
                 .expect("event should encode"),
         });
-        buffer.record_snapshot(&snapshot(vec![HistoryItem::Message(Message::new(
-            Role::User,
-            vec![tool_result],
-        ))]));
+        // LLM 级去重现在走 jsonl 路径,数据放在新参数 `&[Message]` 里。
+        let tool_result_message = Message::new(Role::User, vec![tool_result]);
+        buffer.record_snapshot(&snapshot(Vec::new()), &[tool_result_message]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
     }

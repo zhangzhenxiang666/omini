@@ -175,8 +175,9 @@ pub(crate) async fn open_session(
 ) -> ApiResult<protocol::AckResponse> {
     let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_controller(&session, &headers).await?;
-    let target = require_daemon_session(&manager, &project_id, &request.session_id).await?;
-    target.ensure_loaded().await.map_err(core_error)?;
+    // target session 的 runtime 已经在 `require_daemon_session` 阶段被
+    // `manager.session(...)` 同步加载好,这里不再需要额外的 ensure_loaded。
+    let _ = require_daemon_session(&manager, &project_id, &request.session_id).await?;
     Ok(Json(protocol::AckResponse::ok()))
 }
 

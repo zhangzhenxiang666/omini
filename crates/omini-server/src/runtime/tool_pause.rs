@@ -53,9 +53,9 @@ fn tool_pause_update(event: &RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
                 format!("{session_id}:{tool_use_id}"),
             ]))
         }
-        RuntimeToServerEvent::RunStarted
-        | RuntimeToServerEvent::RunFinished
-        | RuntimeToServerEvent::SessionSnapshot { .. } => Some(ToolPauseUpdate::Clear),
+        RuntimeToServerEvent::RunStarted | RuntimeToServerEvent::RunFinished => {
+            Some(ToolPauseUpdate::Clear)
+        }
         _ => None,
     }
 }

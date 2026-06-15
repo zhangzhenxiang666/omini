@@ -2,10 +2,9 @@ use omini_domain::config::ThinkingEffort;
 use omini_domain::display::{HistoryItem, UserDraft};
 use omini_domain::events::{
     ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
-    CompactSummaryFinishedEvent, LoadedSession, Notification, PlanApprovalAction,
-    SessionUsageSnapshot, SubagentFinishedEvent, SubagentMessageEvent, SubagentSnapshot,
-    SubagentStartedEvent, SubagentToolResultEvent, SubagentToolUseEvent, SubmittedPlan,
-    ToolPauseRequest, ToolPauseResponse,
+    CompactSummaryFinishedEvent, Notification, PlanApprovalAction, SessionUsageSnapshot,
+    SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent, SubagentToolResultEvent,
+    SubagentToolUseEvent, SubmittedPlan, ToolPauseRequest, ToolPauseResponse,
 };
 use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
@@ -36,9 +35,6 @@ pub enum ServerToRuntimeEvent {
         provider: String,
         model: String,
         thinking_effort: Option<ThinkingEffort>,
-    },
-    HydrateSessionSnapshot {
-        snapshot: LoadedSession,
     },
     CloseRuntime,
     SubagentRegistryChanged,
@@ -75,15 +71,6 @@ pub enum RuntimeToServerEvent {
         total_tokens: i64,
         total_cached_tokens: i64,
     },
-    SessionSnapshot {
-        session_id: Option<String>,
-        messages: Vec<HistoryItem>,
-        subagents: Vec<SubagentSnapshot>,
-        usage: SessionUsageSnapshot,
-    },
-    SessionTitleChanged {
-        title: Option<String>,
-    },
     ActiveProfileChanged(#[serde(with = "serde_runtime_event_payload::profile")] ActiveProfile),
     AgentManagementUpdated {
         records: Vec<AgentRecord>,
@@ -104,6 +91,13 @@ pub enum RuntimeToServerEvent {
     PlanApprovalResolved {
         plan_id: String,
         action: PlanApprovalAction,
+    },
+    /// server 端 fork 出新 RuntimeSession 后,作为老 session 推送给客户端的
+    /// 切换通知。承载在普通 runtime 通道上,以便 ws 文本帧能直接编码为
+    /// `TypedRuntimeEvent::SessionSwitched`。
+    SessionSwitched {
+        from: String,
+        to: String,
     },
     SubagentStarted(SubagentStartedEvent),
     SubagentMessageProduced(SubagentMessageEvent),

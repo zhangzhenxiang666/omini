@@ -32,26 +32,15 @@ impl AgentRuntime {
                 message: "没有可压缩的会话历史".to_string(),
             });
         }
-        if self.session_id.is_none() || self.session_dir.is_none() {
-            return Err(RuntimeError::InvalidRequest {
-                message: "当前没有已创建的会话，无法压缩历史".to_string(),
-            });
-        }
 
         let subagent_registry = self.capabilities.subagent_registry();
         let skill_registry = self.capabilities.skill_registry();
         let runtime_context = Arc::new(ToolRuntimeContext {
-            session_id: self
-                .session_id
-                .clone()
-                .expect("session id checked before compact"),
+            session_id: self.session_id.clone(),
             run_id: None,
             session_type: "main".to_string(),
             agent_label: None,
-            session_dir: self
-                .session_dir
-                .clone()
-                .expect("session dir checked before compact"),
+            session_dir: self.session_dir.clone(),
             subagent_registry,
             skill_registry,
             subagent_runner: Some(Arc::clone(&self.subagent_runner)),
@@ -61,10 +50,7 @@ impl AgentRuntime {
         let event_tx = self.event_tx.clone();
         let persistence_tx = self.persistence_tx.clone();
         let usage_state = Arc::clone(&self.session_usage);
-        let session_id = self
-            .session_id
-            .clone()
-            .expect("session id checked before compact");
+        let session_id = self.session_id.clone();
         let span_session_id = session_id.clone();
         let forwarder = tokio::spawn(
             async move {

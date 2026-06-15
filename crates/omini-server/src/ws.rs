@@ -9,7 +9,6 @@ use futures_util::{SinkExt, StreamExt};
 use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::time::{Duration, timeout};
 
 /// 处理单个客户端订阅会话事件流的 WebSocket 生命周期。
 pub(crate) async fn handle_socket(
@@ -39,7 +38,8 @@ pub(crate) async fn handle_socket(
     };
     let _ = send_axum_envelope(&mut write, &role_envelope).await;
 
-    // snapshot 来自持久化历史，先发它能让重连客户端立刻恢复一个完整会话视图。
+    // snapshot 来自持久化历史,core 启动时已经把 messages / usage 灌好,这里
+    // 发完 snapshot 后直接进入 replay 阶段,不需要再为 hydrate 等待。
     match session.current_snapshot_events().await {
         Ok(events) => {
             for event in events {
@@ -54,23 +54,6 @@ pub(crate) async fn handle_socket(
         Err(error) => {
             let message = error.message();
             let _ = send_notification(&mut write, "error", message.as_ref()).await;
-        }
-    }
-
-    // snapshot 不要求 core 已完成加载；随后再短暂等待 core hydrate，失败时只通知客户端。
-    match timeout(Duration::from_secs(5), session.ensure_loaded()).await {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => {
-            let message = error.message();
-            let _ = send_notification(&mut write, "error", message.as_ref()).await;
-        }
-        Err(_) => {
-            let _ = send_notification(
-                &mut write,
-                "warn",
-                "Session snapshot was shown, but runtime loading is taking longer than expected",
-            )
-            .await;
         }
     }
 

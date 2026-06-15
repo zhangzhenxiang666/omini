@@ -1,3 +1,4 @@
+use super::capabilities::CapabilityStore;
 use crate::engine::QueryEngine;
 use crate::mcp::McpManager;
 use crate::permissions::PermissionEngine;
@@ -5,7 +6,7 @@ use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, SessionDir};
-use omini_domain::display::{DisplayMessage, HistoryItem};
+use omini_domain::display::DisplayMessage;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
 use omini_provider_api::LlmClient;
@@ -15,8 +16,6 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, mpsc};
-
-use super::capabilities::CapabilityStore;
 
 pub(crate) struct RuntimeCapabilityHandles {
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -32,14 +31,28 @@ impl RuntimeCapabilityHandles {
     }
 }
 
+pub struct AgentRuntimeChannels {
+    pub event_tx: mpsc::Sender<RuntimeToServerEvent>,
+    pub persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+    pub request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
+}
+
+pub struct AgentRuntimeDeps {
+    pub settings: Settings,
+    pub project: ProjectDir,
+    pub session_id: String,
+    pub session_dir: SessionDir,
+    pub messages: Vec<Message>,
+    pub usage: SessionUsageSnapshot,
+    pub active_profile: ActiveProfile,
+}
+
 #[derive(Debug)]
 pub(super) enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
     /// 启动前将最新 runtime 消息写入 JSONL，将 UI-only display 消息写入 SQLite/UI 历史。
     SplitDisplayMessage { display_message: DisplayMessage },
-    /// 基于现有历史继续运行，不新增用户消息。
-    Continue,
 }
 
 impl RunStart {
@@ -47,17 +60,7 @@ impl RunStart {
         match self {
             Self::UserMessage => "user_message",
             Self::SplitDisplayMessage { .. } => "split_display_message",
-            Self::Continue => "continue",
         }
-    }
-}
-
-pub(super) fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
-    match start {
-        RunStart::SplitDisplayMessage { display_message } => {
-            Some(HistoryItem::Display(display_message.clone()))
-        }
-        RunStart::UserMessage | RunStart::Continue => None,
     }
 }
 
@@ -66,11 +69,16 @@ pub(super) fn initial_display_message(start: &RunStart) -> Option<HistoryItem> {
 /// 维护自己的对话历史，通过 channel 与 server/facade 双向通信。
 /// 一次 `ServerToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用和工具执行，
 /// 直到 LLM 自然结束或达到最大轮次。
+///
+/// 自身**不负责**创建会话：调用方（`AgentCoreSession::spawn_for_session_with_active_profile`）
+/// 必须传入一个已存在的 `session_id` 与 `session_dir`，即 server 端已经下好 SQLite 行、建好
+/// 目录之后的句柄。runtime 内部不再生成 session_id，也不再写入 title —— 这些都是 server
+/// 编排层在 `SessionManager` 中做的。
 pub struct AgentRuntime {
-    /// 当前会话 ID，第一次提交时生成。
-    pub(crate) session_id: Option<String>,
-    /// 创建后缓存的会话目录句柄。
-    pub(crate) session_dir: Option<SessionDir>,
+    /// 当前会话 ID，由 server 在 spawn 时提供。
+    pub(crate) session_id: String,
+    /// 与 `session_id` 对应的会话目录句柄。
+    pub(crate) session_dir: SessionDir,
     /// 向 server/facade 发送 runtime 事件。
     pub(super) event_tx: mpsc::Sender<RuntimeToServerEvent>,
     /// 向外部 server 转发展示/SQLite 级持久化事件。
@@ -106,52 +114,35 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub fn new(
-        event_tx: mpsc::Sender<RuntimeToServerEvent>,
-        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
-        settings: Settings,
-        project: ProjectDir,
-    ) -> Self {
-        Self::new_with_active_profile(
-            event_tx,
-            persistence_tx,
-            request_rx,
-            settings,
-            project,
-            ActiveProfile::Main,
-        )
+    pub fn new(channels: AgentRuntimeChannels, mut deps: AgentRuntimeDeps) -> Self {
+        deps.active_profile = ActiveProfile::Main;
+        Self::new_with_active_profile(channels, deps)
     }
 
-    pub fn new_with_active_profile(
-        event_tx: mpsc::Sender<RuntimeToServerEvent>,
-        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
-        settings: Settings,
-        project: ProjectDir,
-        active_profile: ActiveProfile,
-    ) -> Self {
-        let handles = RuntimeCapabilityHandles::load(&settings);
-        Self::with_capability_handles(
-            event_tx,
-            persistence_tx,
-            request_rx,
-            settings,
-            project,
-            handles,
-            active_profile,
-        )
+    pub fn new_with_active_profile(channels: AgentRuntimeChannels, deps: AgentRuntimeDeps) -> Self {
+        let handles = RuntimeCapabilityHandles::load(&deps.settings);
+        Self::with_capability_handles(channels, deps, handles)
     }
 
     pub(crate) fn with_capability_handles(
-        event_tx: mpsc::Sender<RuntimeToServerEvent>,
-        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
-        mut settings: Settings,
-        project: ProjectDir,
+        channels: AgentRuntimeChannels,
+        deps: AgentRuntimeDeps,
         handles: RuntimeCapabilityHandles,
-        active_profile: ActiveProfile,
     ) -> Self {
+        let AgentRuntimeChannels {
+            event_tx,
+            persistence_tx,
+            request_rx,
+        } = channels;
+        let AgentRuntimeDeps {
+            mut settings,
+            project,
+            session_id,
+            session_dir,
+            messages,
+            usage,
+            active_profile,
+        } = deps;
         let llm_client = LlmClient::new(
             settings.endpoint,
             settings.api_key.clone(),
@@ -199,14 +190,14 @@ impl AgentRuntime {
         }
 
         Self {
-            session_id: None,
-            session_dir: None,
+            session_id,
+            session_dir,
             event_tx,
             persistence_tx,
             request_rx,
             settings,
             project,
-            messages: Vec::new(),
+            messages,
             cancelled: Arc::new(AtomicBool::new(false)),
             llm_client,
             tool_registry,
@@ -216,7 +207,7 @@ impl AgentRuntime {
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
             active_profile: Arc::new(RwLock::new(active_profile)),
-            session_usage: Arc::new(Mutex::new(SessionUsageSnapshot::default())),
+            session_usage: Arc::new(Mutex::new(usage)),
         }
     }
 
@@ -244,14 +235,14 @@ mod tests {
     use crate::runtime::history;
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
-    use omini_config::project::ProjectsDir;
+    use omini_config::project::{ProjectsDir, SessionDir};
     use omini_config::{ModelEntry, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::ProviderEndpointKind;
-    use omini_domain::display::UserDraft;
+    use omini_domain::display::{HistoryItem, UserDraft};
     use omini_domain::events::{
-        CompactSummaryFinishedEvent, CompactTrigger, LoadedSession, NotificationKind,
-        PermissionPreview, PlanApprovalAction, PlanExecutionProfile, ToolPauseKind,
-        ToolPauseRequest, ToolPauseResponse,
+        CompactSummaryFinishedEvent, CompactTrigger, NotificationKind, PermissionPreview,
+        PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
+        ToolPauseResponse,
     };
     use omini_domain::message::{ContentBlock, Role};
     use omini_domain::usage::Usage;
@@ -347,6 +338,81 @@ mod tests {
         events
     }
 
+    /// 为测试在 project 下建一个 session,并把 session_id / session_dir 返回出来。
+    ///
+    /// 新架构下 `AgentRuntime` 必须依赖一个已存在的 session,不再自己生成 UUID。
+    /// 测试中用这个 helper 模拟 server 的预创建行为,然后把结果传给 `AgentRuntime::new`。
+    fn create_test_session(project: &ProjectDir) -> (String, SessionDir) {
+        let session_id = Uuid::new_v4().to_string();
+        let session_dir = project
+            .create_session(&session_id)
+            .expect("test session directory should be created");
+        (session_id, session_dir)
+    }
+
+    /// 把 `AgentRuntime::new` 的样板参数(channel 等)收口,只暴露 `settings` / `project`。
+    ///
+    /// 用法示例:
+    /// ```ignore
+    /// let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+    /// ```
+    fn runtime_for_session(
+        settings: Settings,
+        project: ProjectDir,
+    ) -> (AgentRuntime, mpsc::Receiver<RuntimeToServerEvent>) {
+        let (session_id, session_dir) = create_test_session(&project);
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let channels = AgentRuntimeChannels {
+            event_tx,
+            persistence_tx: test_persistence_tx(),
+            request_rx,
+        };
+        let deps = AgentRuntimeDeps {
+            settings,
+            project,
+            session_id,
+            session_dir,
+            messages: Vec::new(),
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let runtime = AgentRuntime::new(channels, deps);
+        (runtime, event_rx)
+    }
+
+    /// 和 `runtime_for_session` 类似,但额外把 `persistence_rx` 暴露给测试,
+    /// 适用于需要断言 `RuntimePersistenceEvent` 的场景。
+    fn runtime_for_session_with_persistence(
+        settings: Settings,
+        project: ProjectDir,
+    ) -> (
+        AgentRuntime,
+        mpsc::Receiver<RuntimeToServerEvent>,
+        mpsc::Receiver<RuntimePersistenceEvent>,
+    ) {
+        let (session_id, session_dir) = create_test_session(&project);
+        let (event_tx, event_rx) = mpsc::channel(32);
+        let (persistence_tx, persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let channels = AgentRuntimeChannels {
+            event_tx,
+            persistence_tx,
+            request_rx,
+        };
+        let deps = AgentRuntimeDeps {
+            settings,
+            project,
+            session_id,
+            session_dir,
+            messages: Vec::new(),
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let runtime = AgentRuntime::new(channels, deps);
+        (runtime, event_rx, persistence_rx)
+    }
+
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
         ToolPauseRequest {
             tool_use_id: tool_use_id.to_string(),
@@ -397,15 +463,7 @@ mod tests {
             .expect("failed to create project dir");
         let mut settings = settings_for_cwd(&config, &cwd);
         settings.max_turns = Some(0);
-        let (event_tx, mut event_rx) = mpsc::channel(32);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
         drain_events(&mut event_rx);
 
         runtime
@@ -446,15 +504,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
 
         assert_eq!(runtime.active_profile(), ActiveProfile::Main);
 
@@ -493,15 +543,25 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
+        // 本测试需要把 event_tx 单独拿出来调 `active_run::toggle_active_profile`。
+        let (session_id, session_dir) = create_test_session(&project);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx.clone(),
-            test_persistence_tx(),
+        let channels = AgentRuntimeChannels {
+            event_tx: event_tx.clone(),
+            persistence_tx: test_persistence_tx(),
             request_rx,
+        };
+        let deps = AgentRuntimeDeps {
             settings,
             project,
-        );
+            session_id,
+            session_dir,
+            messages: Vec::new(),
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let mut runtime = AgentRuntime::new(channels, deps);
         drain_events(&mut event_rx);
 
         let mut active_profile = runtime.active_profile();
@@ -565,15 +625,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
+        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -612,15 +664,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
+        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -677,15 +721,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
+        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -727,22 +763,11 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            persistence_tx,
-            request_rx,
-            settings,
-            project.clone(),
-        );
+        let (mut runtime, _event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project.clone());
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let session_id = runtime.session_id.clone();
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -784,22 +809,12 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime =
-            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+        let (mut runtime, _event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
-        let session_dir = runtime
-            .session_dir
-            .as_ref()
-            .expect("session dir should exist")
-            .clone();
+        let session_id = runtime.session_id.clone();
+        let session_dir = runtime.session_dir.clone();
         runtime.set_active_profile(ActiveProfile::Plan);
 
         let original = Message::new(
@@ -882,22 +897,12 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime =
-            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+        let (mut runtime, _event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
-        let session_dir = runtime
-            .session_dir
-            .as_ref()
-            .expect("session dir should exist")
-            .clone();
+        let session_id = runtime.session_id.clone();
+        let session_dir = runtime.session_dir.clone();
 
         let original = Message::new(
             Role::Assistant,
@@ -957,22 +962,30 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
+        // 测试需要同时拥有 `persistence_tx` 副本(传给 `persist_compact_summary_event`)
+        // 和 `runtime` 内部的那一份,不能直接用 helper。
+        let (session_id, session_dir) = create_test_session(&project);
         let (event_tx, _event_rx) = mpsc::channel(16);
         let (persistence_tx, mut persistence_rx) = test_persistence_channel();
         let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
+        let channels = AgentRuntimeChannels {
             event_tx,
-            persistence_tx.clone(),
+            persistence_tx: persistence_tx.clone(),
             request_rx,
+        };
+        let deps = AgentRuntimeDeps {
             settings,
             project,
-        );
+            session_id,
+            session_dir,
+            messages: Vec::new(),
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let mut runtime = AgentRuntime::new(channels, deps);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let session_id = runtime.session_id.clone();
         let event = CompactSummaryFinishedEvent {
             trigger: CompactTrigger::Manual,
             summary: "# Summary\n\n- Keep this.".to_string(),
@@ -1010,20 +1023,9 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
         let _ = drain_events(&mut event_rx);
 
         runtime
@@ -1055,15 +1057,7 @@ mod tests {
             .expect("failed to create project dir");
         let mut settings = settings_for_cwd(&config, &cwd);
         settings.max_turns = Some(0);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project.clone());
 
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -1071,9 +1065,6 @@ mod tests {
                 "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
             )],
         )];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
 
         runtime
             .resolve_plan_approval(
@@ -1123,15 +1114,7 @@ mod tests {
             .expect("failed to create project dir");
         let mut settings = settings_for_cwd(&config, &cwd);
         settings.max_turns = Some(0);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, _event_rx) = runtime_for_session(settings, project);
 
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -1139,9 +1122,6 @@ mod tests {
                 "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
             )],
         )];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
 
         runtime
             .resolve_plan_approval(
@@ -1167,15 +1147,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
 
         runtime
             .resolve_plan_approval("plan_1", PlanApprovalAction::ContinueDiscussing)
@@ -1193,149 +1165,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_and_compact_creates_new_session_with_plan_as_initial_user_message() {
+    async fn approve_in_new_session_only_resolves_drawer_without_changing_state() {
+        // Server 路由层在收到 ApproveInNewSession 时会自行 fork 新 RuntimeSession,
+        // core 收到此 action 后只能关闭审批抽屉,不能改 active_profile、注入 plan
+        // 消息或启动 run(否则会和 server 的 fork 路径重复执行)。
         ensure_test_persistence().await;
 
-        let root = unique_temp_root("approve-compact");
-        let cwd = root.join("workspace");
-        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
-        let config = test_user_config();
-        let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
-            .expect("failed to create project dir");
-        let mut settings = settings_for_cwd(&config, &cwd);
-        settings.max_turns = Some(0);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
-
-        runtime.messages = vec![Message::from_user_text("old conversation".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let old_session_id = runtime.session_id.clone();
-
-        let plan_id = "plan";
-        let plans_dir = project.path().join("plans");
-        std::fs::create_dir_all(&plans_dir).expect("failed to create plans dir");
-        std::fs::write(
-            plans_dir.join("plan.md"),
-            "# Approved plan\n\n1. Execute it.",
-        )
-        .expect("failed to write plan");
-
-        runtime
-            .resolve_plan_approval(
-                plan_id,
-                PlanApprovalAction::ApproveAndCompact {
-                    profile: PlanExecutionProfile::Main,
-                },
-            )
-            .await;
-
-        let new_session_id = runtime.session_id.clone();
-        assert_ne!(new_session_id, old_session_id);
-        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
-        assert_eq!(runtime.messages.len(), 1);
-        assert_eq!(runtime.messages[0].role, Role::User);
-        assert!(
-            text_content(&runtime.messages[0]).contains("Implement the plan in a fresh context")
-        );
-        assert!(text_content(&runtime.messages[0]).contains("re-read files as needed"));
-        assert!(text_content(&runtime.messages[0]).contains("Approved plan:"));
-        assert!(text_content(&runtime.messages[0]).contains("# Approved plan"));
-
-        let session_dir = runtime
-            .session_dir
-            .as_ref()
-            .expect("new session dir should exist");
-        assert_eq!(
-            session_dir
-                .load_history()
-                .expect("failed to load persisted history"),
-            runtime.messages
-        );
-
-        let mut saw_new_session_event = false;
-        while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToServerEvent::SessionSnapshot {
-                session_id: Some(session_id),
-                messages,
-                ..
-            } = event
-            {
-                if Some(session_id) == new_session_id {
-                    assert_eq!(messages.len(), 1);
-                    saw_new_session_event = true;
-                }
-            }
-        }
-        assert!(saw_new_session_event);
-    }
-
-    #[tokio::test]
-    async fn approve_and_compact_can_start_new_session_in_auto_profile() {
-        ensure_test_persistence().await;
-
-        let root = unique_temp_root("approve-compact-auto");
-        let cwd = root.join("workspace");
-        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
-        let config = test_user_config();
-        let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
-            .expect("failed to create project dir");
-        let mut settings = settings_for_cwd(&config, &cwd);
-        settings.max_turns = Some(0);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project.clone(),
-        );
-
-        runtime.messages = vec![Message::from_user_text("old conversation".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let old_session_id = runtime.session_id.clone();
-
-        let plans_dir = project.path().join("plans");
-        std::fs::create_dir_all(&plans_dir).expect("failed to create plans dir");
-        std::fs::write(
-            plans_dir.join("plan.md"),
-            "# Approved plan\n\n1. Execute it.",
-        )
-        .expect("failed to write plan");
-
-        runtime
-            .resolve_plan_approval(
-                "plan",
-                PlanApprovalAction::ApproveAndCompact {
-                    profile: PlanExecutionProfile::Auto,
-                },
-            )
-            .await;
-
-        assert_ne!(runtime.session_id, old_session_id);
-        assert_eq!(runtime.active_profile(), ActiveProfile::Auto);
-        assert_eq!(runtime.messages.len(), 1);
-        assert!(text_content(&runtime.messages[0]).contains("Approved plan:"));
-    }
-
-    #[tokio::test]
-    async fn hydrate_session_snapshot_resets_active_profile_to_main_and_notifies_ui() {
-        ensure_test_persistence().await;
-
-        let root = unique_temp_root("switch-session-mode");
+        let root = unique_temp_root("approve-in-new-session");
         let cwd = root.join("workspace");
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
@@ -1343,66 +1179,138 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
 
-        runtime.messages = vec![Message::from_user_text("session body".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
-        while event_rx.try_recv().is_ok() {}
+        let original_profile = runtime.active_profile();
+        let original_message_count = runtime.messages.len();
 
-        runtime.set_active_profile(ActiveProfile::Plan);
         runtime
-            .hydrate_session_snapshot(LoadedSession {
-                session_id: session_id.clone(),
-                provider: runtime.settings.active_provider.clone(),
-                model: runtime.settings.model.clone(),
-                thinking_effort: runtime.settings.thinking_effort,
-                active_profile: ActiveProfile::Main,
-                title: Some("session body".to_string()),
-                messages: vec![HistoryItem::Message(runtime.messages[0].clone())],
-                subagents: Vec::new(),
-                usage: SessionUsageSnapshot::default(),
-            })
+            .resolve_plan_approval(
+                "plan_1",
+                PlanApprovalAction::ApproveInNewSession {
+                    profile: PlanExecutionProfile::Main,
+                },
+            )
             .await;
 
-        assert_eq!(runtime.active_profile(), ActiveProfile::Main);
-        assert!(
-            runtime
-                .settings
-                .system_prompt
-                .as_deref()
-                .expect("system prompt should be rebuilt")
-                .contains("<core_behavior>")
-        );
-        assert!(
-            !runtime
-                .settings
-                .system_prompt
-                .as_deref()
-                .expect("system prompt should be rebuilt")
-                .contains("<plan_mode_instructions>")
-        );
+        // 状态保持:active_profile 不变,消息不增加,不应有 user message 注入事件。
+        assert_eq!(runtime.active_profile(), original_profile);
+        assert_eq!(runtime.messages.len(), original_message_count);
 
-        let mut saw_main_mode_event = false;
+        let mut saw_resolved = false;
+        let mut saw_user_message = false;
         while let Ok(event) = event_rx.try_recv() {
-            if matches!(
-                event,
-                RuntimeToServerEvent::ActiveProfileChanged(ActiveProfile::Main)
-            ) {
-                saw_main_mode_event = true;
+            match event {
+                RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => {
+                    assert_eq!(plan_id, "plan_1");
+                    assert!(matches!(
+                        action,
+                        PlanApprovalAction::ApproveInNewSession { .. }
+                    ));
+                    saw_resolved = true;
+                }
+                RuntimeToServerEvent::UserMessageInjected { .. } => {
+                    saw_user_message = true;
+                }
+                _ => {}
             }
         }
-        assert!(saw_main_mode_event);
+        assert!(saw_resolved, "resolved event should be emitted");
+        assert!(
+            !saw_user_message,
+            "approve-in-new-session must not inject plan message into core"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_for_session_with_active_profile_loads_history_from_session_dir() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("spawn-loads-history");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (session_id, session_dir) = create_test_session(&project);
+
+        // 写一条 JSONL 到 session_dir,模拟 server 在 spawn runtime 之前已加载好的
+        // 持久化历史。core 在新架构下不再自己读 jsonl,而是接收 server 传入的
+        // `Vec<Message>`;但仓库内 helper `session_dir.load_history()` 正是 server
+        // 用来读取的入口,验证它返回非空,作为回归 baseline。
+        let seed = Message::from_user_text("seed history".to_string());
+        session_dir
+            .append_history(&seed)
+            .expect("seed jsonl should be written");
+        let loaded = session_dir
+            .load_history()
+            .expect("history should load from session_dir");
+        assert_eq!(loaded, vec![seed.clone()]);
+
+        let messages = loaded;
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (persistence_tx, _persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let channels = AgentRuntimeChannels {
+            event_tx,
+            persistence_tx,
+            request_rx,
+        };
+        let deps = AgentRuntimeDeps {
+            settings,
+            project,
+            session_id,
+            session_dir,
+            messages,
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let runtime = AgentRuntime::new(channels, deps);
+        assert_eq!(runtime.messages, vec![seed]);
+    }
+
+    #[tokio::test]
+    async fn spawn_for_session_with_active_profile_handles_missing_history() {
+        ensure_test_persistence().await;
+
+        let root = unique_temp_root("spawn-missing-history");
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+        let config = test_user_config();
+        let project = ProjectsDir::new(&root)
+            .for_cwd(&cwd, &config)
+            .expect("failed to create project dir");
+        let settings = settings_for_cwd(&config, &cwd);
+        let (session_id, session_dir) = create_test_session(&project);
+
+        // session_dir 存在但 jsonl 不存在时,`load_history()` 必须退化为空,
+        // 避免 server 在调用 spawn 时炸出 IO 错误。
+        let loaded = session_dir
+            .load_history()
+            .expect("missing history should yield empty messages");
+        assert!(loaded.is_empty());
+
+        let (event_tx, _event_rx) = mpsc::channel(16);
+        let (persistence_tx, _persistence_rx) = test_persistence_channel();
+        let (_request_tx, request_rx) = mpsc::channel(1);
+        let channels = AgentRuntimeChannels {
+            event_tx,
+            persistence_tx,
+            request_rx,
+        };
+        let deps = AgentRuntimeDeps {
+            settings,
+            project,
+            session_id,
+            session_dir,
+            messages: loaded,
+            usage: SessionUsageSnapshot::default(),
+            active_profile: ActiveProfile::Main,
+        };
+        let runtime = AgentRuntime::new(channels, deps);
+        assert!(runtime.messages.is_empty());
     }
 
     #[tokio::test]
@@ -1417,15 +1325,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
+        let (mut runtime, _event_rx) = runtime_for_session(settings, project);
 
         assert!(
             !runtime
@@ -1481,16 +1381,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
-        runtime.create_session(None).await;
+        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
         runtime.set_active_profile(ActiveProfile::Auto);
         drain_events(&mut event_rx);
 
@@ -1546,16 +1437,7 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime = AgentRuntime::new(
-            event_tx,
-            test_persistence_tx(),
-            request_rx,
-            settings,
-            project,
-        );
-        runtime.create_session(None).await;
+        let (runtime, mut event_rx) = runtime_for_session(settings, project);
         drain_events(&mut event_rx);
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
@@ -1601,13 +1483,9 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime =
-            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
-        runtime.create_session(None).await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
+        let (runtime, mut event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project);
+        let session_id = runtime.session_id.clone();
         drain_events(&mut event_rx);
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
@@ -1677,17 +1555,10 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime =
-            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
-        runtime.create_session(None).await;
-        let session_id = runtime.session_id.clone().expect("session id should exist");
-        let session_dir = runtime
-            .session_dir
-            .clone()
-            .expect("session dir should exist");
+        let (runtime, _event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project);
+        let session_id = runtime.session_id.clone();
+        let session_dir = runtime.session_dir.clone();
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
@@ -1768,17 +1639,11 @@ mod tests {
             .for_cwd(&cwd, &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (event_tx, mut event_rx) = mpsc::channel(16);
-        let (persistence_tx, mut persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let mut runtime =
-            AgentRuntime::new(event_tx, persistence_tx, request_rx, settings, project);
+        let (mut runtime, mut event_rx, mut persistence_rx) =
+            runtime_for_session_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("session body".to_string())];
-        runtime
-            .create_session(Some(HistoryItem::Message(runtime.messages[0].clone())))
-            .await;
-        let parent_session_id = runtime.session_id.clone().expect("session id should exist");
+        let parent_session_id = runtime.session_id.clone();
         drain_events(&mut event_rx);
         while persistence_rx.try_recv().is_ok() {}
 

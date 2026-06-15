@@ -14,7 +14,8 @@ use crate::runtime::AgentRuntime;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_domain::config::ProviderInfo;
-use omini_domain::events::{ActiveProfile, LoadedSession};
+use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
+use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
 use omini_domain::usage::Usage;
 use omini_runtime_api::project as project_types;
@@ -120,7 +121,8 @@ pub async fn generate_project_agent_draft(
 /// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
 pub struct AgentCoreSession {
     // server 持有的 daemon session id；core facade task 日志用它做稳定关联字段。
-    session_id: Option<String>,
+    // 强制非 Option:runtime 必须绑定到 server 已经预创建好的一个 session。
+    session_id: String,
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
     request_tx: mpsc::Sender<ServerToRuntimeEvent>,
     // runtime 输出事件按 server-core 契约广播给 server。
@@ -144,36 +146,18 @@ pub struct AgentCoreSession {
 impl AgentCoreSession {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
-    /// 返回值是 server 唯一需要持有的 core 会话句柄。runtime 本身只消费
-    /// `ServerToRuntimeEvent`，这里额外启动 fanout 任务把 runtime 输出转成 broadcast
-    /// stream，并把持久化事件转成 broadcast stream。
-    pub fn spawn(settings: Settings, project: ProjectDir) -> Self {
-        Self::spawn_with_active_profile(settings, project, ActiveProfile::Main)
-    }
-
-    pub fn spawn_with_active_profile(
-        settings: Settings,
-        project: ProjectDir,
-        active_profile: ActiveProfile,
-    ) -> Self {
-        Self::spawn_with_session_id(settings, project, None, active_profile)
-    }
-
+    /// 唯一的生产入口 `spawn_for_session_with_active_profile` 强制要求传入一个
+    /// 由 server 端已经预创建好的 `session_id`(对应目录、DB 行都已存在),
+    /// 并把持久化层的 messages / usage 一次性灌进 runtime,启动后 core 即处于
+    /// "已加载"状态 —— 不再需要后续的 hydrate 事件。
     pub fn spawn_for_session_with_active_profile(
         settings: Settings,
         project: ProjectDir,
         session_id: String,
         active_profile: ActiveProfile,
-    ) -> Self {
-        Self::spawn_with_session_id(settings, project, Some(session_id), active_profile)
-    }
-
-    fn spawn_with_session_id(
-        settings: Settings,
-        project: ProjectDir,
-        session_id: Option<String>,
-        active_profile: ActiveProfile,
-    ) -> Self {
+        messages: Vec<Message>,
+        usage: SessionUsageSnapshot,
+    ) -> Result<Self, CoreError> {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
         let (runtime_persistence_tx, mut runtime_persistence_rx) =
@@ -185,20 +169,25 @@ impl AgentCoreSession {
         let mcp_manager = Arc::clone(&handles.mcp_manager);
         let capabilities = Arc::clone(&handles.capabilities);
 
-        let runtime = AgentRuntime::with_capability_handles(
-            runtime_event_tx,
-            runtime_persistence_tx,
+        let session_dir = project.session(&session_id).clone();
+        let channels = crate::runtime::AgentRuntimeChannels {
+            event_tx: runtime_event_tx,
+            persistence_tx: runtime_persistence_tx,
             request_rx,
+        };
+        let deps = crate::runtime::AgentRuntimeDeps {
             settings,
             project,
-            handles,
+            session_id: session_id.clone(),
+            session_dir,
+            messages,
+            usage,
             active_profile,
-        );
+        };
+        let runtime = AgentRuntime::with_capability_handles(channels, deps, handles);
         let runtime_handle = runtime.run();
         let fanout_tx = event_tx.clone();
-        let runtime_fanout_session_id = session_id
-            .clone()
-            .unwrap_or_else(|| "unassigned".to_string());
+        let runtime_fanout_session_id = session_id.clone();
         let fanout_handle = tokio::spawn(
             async move {
                 tracing::debug!("core runtime event fanout started");
@@ -214,9 +203,7 @@ impl AgentCoreSession {
             )),
         );
         let persistence_fanout_tx = persistence_tx.clone();
-        let persistence_fanout_session_id = session_id
-            .clone()
-            .unwrap_or_else(|| "unassigned".to_string());
+        let persistence_fanout_session_id = session_id.clone();
         let persistence_handle = tokio::spawn(
             async move {
                 tracing::debug!("core persistence fanout started");
@@ -242,7 +229,7 @@ impl AgentCoreSession {
             )),
         );
 
-        Self {
+        Ok(Self {
             session_id,
             request_tx,
             event_tx,
@@ -253,7 +240,7 @@ impl AgentCoreSession {
             _runtime_handle: runtime_handle,
             _fanout_handle: fanout_handle,
             _persistence_handle: persistence_handle,
-        }
+        })
     }
 
     /// 订阅 core 内部 runtime 事件流。
@@ -274,11 +261,6 @@ impl AgentCoreSession {
     pub fn list_models(&self) -> session_types::ModelsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
         models_snapshot_from_settings(&settings)
-    }
-
-    pub async fn load_session(&self, snapshot: LoadedSession) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::HydrateSessionSnapshot { snapshot })
-            .await
     }
 
     pub fn list_agents(&self) -> session_types::AgentsSnapshot {
@@ -452,7 +434,7 @@ impl AgentCoreSession {
     /// channel 关闭意味着对应会话的 runtime 已退出，调用方应把它视为 core 会话不可用。
     async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
         tracing::trace!(
-            session_id = %session_log_id(self.session_id.as_deref()),
+            session_id = %self.session_id,
             event_kind = server_to_runtime_event_kind(&event),
             "sending event to runtime"
         );
@@ -461,10 +443,6 @@ impl AgentCoreSession {
             .await
             .map_err(|_| CoreError::RuntimeClosed)
     }
-}
-
-fn session_log_id(session_id: Option<&str>) -> &str {
-    session_id.unwrap_or("unassigned")
 }
 
 fn project_agent_records(cwd: &Path) -> Vec<subagent_types::AgentRecord> {
@@ -526,7 +504,6 @@ fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
         ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",
         ServerToRuntimeEvent::ToggleActiveProfile => "toggle_active_profile",
         ServerToRuntimeEvent::SetActiveProfile(_) => "set_active_profile",
-        ServerToRuntimeEvent::HydrateSessionSnapshot { .. } => "hydrate_session_snapshot",
         ServerToRuntimeEvent::ResolveToolPause { .. } => "resolve_tool_pause",
         ServerToRuntimeEvent::ResolvePlanApproval { .. } => "resolve_plan_approval",
         ServerToRuntimeEvent::SubagentRegistryChanged => "subagent_registry_changed",

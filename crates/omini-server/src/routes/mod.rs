@@ -102,8 +102,10 @@ pub(crate) async fn ensure_controller(
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
     if session.is_controller(client_id).await {
-        // 严格 mutation 只允许当前 controller 执行，并在进入 core 前确保 runtime 已加载。
-        session.ensure_loaded().await.map_err(core_error)
+        // 严格 mutation 只允许当前 controller 执行;新架构下 runtime 启动即
+        // 加载,RuntimeSession 一旦从 manager 拿到就已经持有完整 messages /
+        // usage,不再需要等待 hydrate。
+        Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
@@ -138,8 +140,8 @@ pub(crate) async fn ensure_connected_controller(
             "This client is not connected to the session event stream",
         ));
     }
-    // 已连接客户端可以接管，确保随后 core 发出的事件会被同一个客户端接收。
-    session.ensure_loaded().await.map_err(core_error)
+    // 已连接客户端可以接管;runtime 已就绪,直接通过。
+    Ok(())
 }
 
 pub(crate) fn project_attach_error(error: ProjectAttachError) -> ApiError {

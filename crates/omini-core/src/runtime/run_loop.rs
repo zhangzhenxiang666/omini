@@ -1,4 +1,4 @@
-use super::service::{AgentRuntime, RunStart, initial_display_message};
+use super::service::{AgentRuntime, RunStart};
 use super::*;
 use tracing::Instrument;
 
@@ -25,7 +25,7 @@ impl AgentRuntime {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
-                                    self.session_id.as_deref(),
+                                    Some(&self.session_id),
                                     effort,
                                     &self.event_tx,
                                     &self.persistence_tx,
@@ -67,15 +67,6 @@ impl AgentRuntime {
                                 );
                                 self.switch_model(&provider, &model, thinking_effort).await;
                             }
-                            ServerToRuntimeEvent::HydrateSessionSnapshot { snapshot } => {
-                                tracing::debug!(
-                                    request_kind = "hydrate_session_snapshot",
-                                    session_id = %snapshot.session_id,
-                                    message_count = snapshot.messages.len(),
-                                    "runtime request received"
-                                );
-                                self.hydrate_session_snapshot(snapshot).await;
-                            }
                             ServerToRuntimeEvent::CloseRuntime => {
                                 tracing::debug!(request_kind = "close_runtime", "runtime request received");
                                 break;
@@ -113,7 +104,7 @@ impl AgentRuntime {
             &mut self.settings,
             &mut self.llm_client,
             &self.project,
-            self.session_id.as_deref(),
+            Some(&self.session_id),
             active_run::ModelSelection {
                 provider,
                 model,
@@ -177,25 +168,19 @@ impl AgentRuntime {
     }
 
     /// 处理一次完整的用户请求，可能包含多轮 LLM 调用。
+    ///
+    /// `AgentRuntime` 始终绑定一个已存在的 session，所以这里只需刷新 `updated_at`
+    /// 然后进入 query loop；不再生成 UUID、建目录或写 title —— 这些都交由 server。
     pub(super) async fn process_run(&mut self, start: RunStart) {
         let run_id = Uuid::new_v4().to_string();
-        if self.session_id.is_none() {
-            self.create_session(initial_display_message(&start)).await;
-        } else {
-            // 已有 session，更新 updated_at 时间戳。
-            let id = self.session_id.as_ref().expect("session_id should exist");
-            let _ = self
-                .persistence_tx
-                .send(RuntimePersistenceEvent::UpdateSessionUpdatedAt {
-                    session_id: id.clone(),
-                })
-                .await;
-        }
+        let _ = self
+            .persistence_tx
+            .send(RuntimePersistenceEvent::UpdateSessionUpdatedAt {
+                session_id: self.session_id.clone(),
+            })
+            .await;
 
-        let session_id = self
-            .session_id
-            .clone()
-            .expect("session must exist before processing run");
+        let session_id = self.session_id.clone();
         let run_span = tracing::info_span!(
             "run",
             session_id = %session_id,
@@ -214,8 +199,8 @@ impl AgentRuntime {
     async fn process_run_inner(&mut self, start: RunStart, run_id: String, session_id: String) {
         tracing::info!("agent run started");
         history::persist_initial_user_message(
-            self.session_id.as_deref(),
-            self.session_dir.as_ref(),
+            &self.session_id,
+            &self.session_dir,
             self.messages.last().cloned(),
             start,
             &self.persistence_tx,
@@ -255,17 +240,11 @@ impl AgentRuntime {
                 tool_registry: Arc::clone(&tool_registry),
                 active_profile,
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
-                    session_id: self
-                        .session_id
-                        .clone()
-                        .expect("session must exist before query"),
+                    session_id: self.session_id.clone(),
                     run_id: Some(run_id.clone()),
                     session_type: "main".to_string(),
                     agent_label: None,
-                    session_dir: self
-                        .session_dir
-                        .clone()
-                        .expect("session dir must exist before query"),
+                    session_dir: self.session_dir.clone(),
                     subagent_registry: Arc::clone(&subagent_registry),
                     skill_registry: Arc::clone(&skill_registry),
                     subagent_runner: Some(Arc::clone(&self.subagent_runner)),
@@ -331,7 +310,7 @@ impl AgentRuntime {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
-                                    self.session_id.as_deref(),
+                                    Some(&self.session_id),
                                     effort,
                                     &event_tx,
                                     &self.persistence_tx,
@@ -386,7 +365,7 @@ impl AgentRuntime {
                                     &mut self.settings,
                                     &mut self.llm_client,
                                     &self.project,
-                                    self.session_id.as_deref(),
+                                    Some(&self.session_id),
                                     active_run::ModelSelection {
                                         provider: &provider,
                                         model: &model,
@@ -402,7 +381,6 @@ impl AgentRuntime {
                             }
                             ServerToRuntimeEvent::SendMessage { .. }
                             | ServerToRuntimeEvent::CompactContext { .. }
-                            | ServerToRuntimeEvent::HydrateSessionSnapshot { .. }
                             | ServerToRuntimeEvent::CloseRuntime
                             => {
                                 tracing::debug!("active run request rejected");

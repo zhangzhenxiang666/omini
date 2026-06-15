@@ -1,7 +1,7 @@
 use super::service::RunStart;
 use chrono::Utc;
 use omini_config::project::SessionDir;
-use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
+use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
 use omini_domain::events::ActiveProfile;
 use omini_domain::message::{ContentBlock, Message, Role, TextBlock};
 use omini_domain::proposed_plan::strip_proposed_plan_blocks;
@@ -9,57 +9,13 @@ use omini_runtime_api::persistence::RuntimePersistenceEvent;
 use std::path::Path;
 use tokio::sync::mpsc;
 
-pub(super) fn title_text(
-    initial_display_message: Option<&HistoryItem>,
-    fallback_message: Option<&Message>,
-) -> Option<String> {
-    initial_display_message
-        .and_then(history_item_text)
-        .or_else(|| fallback_message.and_then(message_title_text))
-}
-
-fn history_item_text(item: &HistoryItem) -> Option<String> {
-    match item {
-        HistoryItem::Message(message) => message_title_text(message),
-        HistoryItem::Display(display) => {
-            let text = display.text.trim();
-            (!text.is_empty()).then(|| text.to_string())
-        }
-        HistoryItem::Plan(plan) => {
-            let title = plan.title.trim();
-            (!title.is_empty()).then(|| title.to_string())
-        }
-        HistoryItem::Summary(summary) => {
-            let title = summary.title.trim();
-            (!title.is_empty()).then(|| title.to_string())
-        }
-    }
-}
-
-fn message_title_text(message: &Message) -> Option<String> {
-    message.content.first().and_then(|block| {
-        if let ContentBlock::Text(t) = block {
-            let text = t.text.trim().to_string();
-            if text.is_empty() { None } else { Some(text) }
-        } else {
-            None
-        }
-    })
-}
-
 pub(super) async fn persist_initial_user_message(
-    session_id: Option<&str>,
-    session_dir: Option<&SessionDir>,
+    session_id: &str,
+    session_dir: &SessionDir,
     llm_message: Option<Message>,
     start: RunStart,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
-    let Some(session_id) = session_id else {
-        return;
-    };
-    let Some(session_dir) = session_dir else {
-        return;
-    };
     let Some(llm_message) = llm_message else {
         return;
     };
@@ -89,7 +45,6 @@ pub(super) async fn persist_initial_user_message(
             )
             .await;
         }
-        RunStart::Continue => {}
     }
 }
 

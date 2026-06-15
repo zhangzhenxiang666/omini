@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(plan_id, "20260521T000000Z-plan");
         assert_eq!(
             action,
-            omini_protocol::PlanApprovalAction::ApproveAndCompact {
+            omini_protocol::PlanApprovalAction::ApproveInNewSession {
                 profile: omini_protocol::PlanExecutionProfile::Main,
             }
         );
@@ -838,7 +838,7 @@ async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<Cli
     };
     let action = match state.plan_approval_selected.min(2) {
         0 => PlanApprovalAction::Approve { profile },
-        1 => PlanApprovalAction::ApproveAndCompact { profile },
+        1 => PlanApprovalAction::ApproveInNewSession { profile },
         _ => PlanApprovalAction::ContinueDiscussing,
     };
     state.plan_approval_selected = 0;

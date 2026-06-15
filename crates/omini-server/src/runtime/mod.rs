@@ -7,10 +7,8 @@
 use chrono::{DateTime, Utc};
 use omini_config::project::ProjectDir;
 use omini_config::{ConfigError, OminiRoot, Settings, UserConfig};
-use omini_core::AgentCoreSession;
 use omini_core::CoreError;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::HistoryItem;
 use omini_domain::events::{ActiveProfile, LoadedSession};
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::project::sanitize_project_path as sanitize;
@@ -22,14 +20,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::history;
 use crate::store::{Database, Session};
 
 mod adapter;
-mod load_gate;
 mod manager;
 mod presence;
 mod replay;
@@ -45,7 +42,6 @@ pub(crate) use adapter::{
     set_thinking_effort_command_from_protocol, skill_detail_to_protocol,
     skill_summaries_to_protocol, submit_run_command_from_protocol,
 };
-use load_gate::*;
 use presence::*;
 use replay::*;
 use status::*;

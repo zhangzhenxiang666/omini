@@ -76,7 +76,8 @@ pub(super) fn path(project: &ProjectDir, plan_id: &str) -> std::path::PathBuf {
     }
 }
 
-pub(super) fn compacted_context(plan_content: &str) -> String {
+/// 把已批准 plan 包装成新会话的首条 user message,server 端 fork 时使用。
+pub(crate) fn compacted_context(plan_content: &str) -> String {
     format!(
         "A previous planning pass produced the approved plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.\n\nApproved plan:\n{plan_content}\n\nIntermediate planning discussion and discarded alternatives were intentionally omitted."
     )
