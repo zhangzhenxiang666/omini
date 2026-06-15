@@ -37,7 +37,7 @@ pub(super) fn render(
         .trim();
 
     title.push(Span::raw("· "));
-    title.push(Span::styled("Command", title_style));
+    title.push(Span::styled("Bash", title_style));
     if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();
         let parens_width = UnicodeWidthStr::width("()");

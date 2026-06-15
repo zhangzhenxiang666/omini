@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn plan_approval_drawer_height(area: Rect) -> u16 {
-    area.height.min(8)
+    area.height.min(9)
 }
 
 pub(super) fn render_plan_approval_drawer(
@@ -77,7 +77,7 @@ fn build_panel_lines(selected: usize, auto: bool, height: u16) -> Text<'static> 
     }
 
     lines.extend(build_action_lines(selected));
-    if height >= 8 {
+    if height >= 7 {
         lines.push(Line::from(Span::styled("", bg)));
     }
     lines.truncate(height as usize);

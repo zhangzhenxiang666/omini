@@ -70,12 +70,31 @@ fn render_path_tool(
     let is_pending = result.is_none() && !is_permission_preview;
     let title_style = tool_title_style(read_color, is_pending);
 
+    let params_desc = {
+        let limit = tool_use.input.get("limit").and_then(|v| v.as_u64());
+        let offset = tool_use.input.get("offset").and_then(|v| v.as_u64());
+        let mut s = String::new();
+        if let Some(o) = offset {
+            s.push_str(&format!(" [offset\u{003d}{o}]"));
+        }
+        if let Some(l) = limit {
+            if s.is_empty() {
+                s.push_str(&format!(" [limit\u{003d}{l}]"));
+            } else {
+                let trimmed = s.trim_end_matches(']');
+                s = format!("{trimmed}, limit\u{003d}{l}]");
+            }
+        }
+        s
+    };
+
     main_spans.push(Span::raw("· "));
     if is_permission_preview {
-        main_spans.push(Span::styled(display_file_path, title_style));
+        let display = format!("{display_file_path}{params_desc}");
+        main_spans.push(Span::styled(display, title_style));
     } else {
         main_spans.push(Span::styled(title, title_style));
-        main_spans.push(Span::raw(format!(" {}", display_file_path)));
+        main_spans.push(Span::raw(format!(" {display_file_path}{params_desc}")));
     }
 
     lines.push(Line::from(main_spans));

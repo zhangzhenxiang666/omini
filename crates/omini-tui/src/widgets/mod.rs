@@ -406,14 +406,22 @@ fn compact_waiting_tool_lines(
                 "write" => "Write",
                 _ => unreachable!(),
             };
+            let mut path_text = compact_tool_path(tool_use, project_dir);
+            if tool_use.name.as_str() == "read" {
+                let limit = tool_use.input.get("limit").and_then(|v| v.as_u64());
+                let offset = tool_use.input.get("offset").and_then(|v| v.as_u64());
+                match (limit, offset) {
+                    (Some(l), Some(o)) => path_text.push_str(&format!(" [offset\u{003d}{o}, limit\u{003d}{l}]")),
+                    (Some(l), None) => path_text.push_str(&format!(" [limit\u{003d}{l}]")),
+                    (None, Some(o)) => path_text.push_str(&format!(" [offset\u{003d}{o}]")),
+                    (None, None) => {}
+                }
+            }
             spans.push(Span::styled(title, title_style));
-            spans.push(Span::raw(format!(
-                " {}",
-                compact_tool_path(tool_use, project_dir)
-            )));
+            spans.push(Span::raw(format!(" {path_text}")));
         }
         "bash" => {
-            spans.push(Span::styled("Command", title_style));
+            spans.push(Span::styled("Bash", title_style));
             let command = tool_use
                 .input
                 .get("command")
@@ -702,7 +710,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert!(plain(&lines[0]).starts_with("· Command("));
+        assert!(plain(&lines[0]).starts_with("· Bash("));
         assert_eq!(plain(&lines[1]), "  └ # 创建提交");
         assert_eq!(plain(&lines[2]), "  Permission denied for tool: bash");
         assert_eq!(

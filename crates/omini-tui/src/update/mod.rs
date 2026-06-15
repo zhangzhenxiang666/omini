@@ -835,7 +835,8 @@ fn active_permission_drawer_captures_scroll(state: &UiState) -> bool {
     };
     let is_large_file_preview = matches!(
         &request.kind,
-        ToolPauseKind::Permission(PermissionPreview::Edit(_))
+        ToolPauseKind::Permission(PermissionPreview::Bash(_))
+            | ToolPauseKind::Permission(PermissionPreview::Edit(_))
             | ToolPauseKind::Permission(PermissionPreview::Write(_))
             | ToolPauseKind::Permission(PermissionPreview::Mcp(_))
     );

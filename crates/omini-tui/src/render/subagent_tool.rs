@@ -234,7 +234,7 @@ fn format_tool_label(name: &str) -> String {
         "ask_user" => "Ask User".to_string(),
         "todo_write" => "Todo List".to_string(),
         "view_image" => "View Image".to_string(),
-        "bash" => "Command".to_string(),
+        "bash" => "Bash".to_string(),
         other => {
             let words = label_words(other);
             if words.is_empty() {
