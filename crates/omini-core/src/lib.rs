@@ -7,6 +7,7 @@ pub mod prompts;
 pub mod runtime;
 mod skills;
 mod subagents;
+pub mod title_generation;
 pub mod tools;
 pub mod types;
 
@@ -28,6 +29,8 @@ use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 pub use crate::error::CoreError;
+pub use crate::title_generation::{TitleGenError, generate_session_title};
+pub use omini_domain::title_generation::GeneratedSessionTitle;
 
 pub fn project_agents_snapshot(settings: &Settings) -> session_types::AgentsSnapshot {
     let records = project_agent_records(&settings.cwd);

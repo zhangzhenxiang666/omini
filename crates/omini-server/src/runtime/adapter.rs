@@ -340,7 +340,7 @@ pub(super) fn session_summary_from_store(session: Session) -> protocol::SessionS
 }
 
 /// 从首条用户输入生成默认会话标题。
-pub(super) fn initial_session_title_from_input(input: &protocol::UserInput) -> Option<String> {
+pub(crate) fn initial_session_title_from_input(input: &protocol::UserInput) -> Option<String> {
     let title = input.text.trim();
     (!title.is_empty()).then(|| title.chars().take(300).collect())
 }

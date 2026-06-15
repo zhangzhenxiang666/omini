@@ -36,11 +36,11 @@ mod tool_pause;
 
 use adapter::*;
 pub(crate) use adapter::{
-    agents_snapshot_to_protocol, models_snapshot_to_protocol, resolve_plan_command_from_protocol,
-    resolve_tool_pause_command_from_protocol, run_submitted_to_protocol,
-    set_active_profile_command_from_protocol, set_model_command_from_protocol,
-    set_thinking_effort_command_from_protocol, skill_detail_to_protocol,
-    skill_summaries_to_protocol, submit_run_command_from_protocol,
+    agents_snapshot_to_protocol, initial_session_title_from_input, models_snapshot_to_protocol,
+    resolve_plan_command_from_protocol, resolve_tool_pause_command_from_protocol,
+    run_submitted_to_protocol, set_active_profile_command_from_protocol,
+    set_model_command_from_protocol, set_thinking_effort_command_from_protocol,
+    skill_detail_to_protocol, skill_summaries_to_protocol, submit_run_command_from_protocol,
 };
 use presence::*;
 use replay::*;

@@ -10,8 +10,9 @@ use crate::routes::{
 };
 use crate::runtime::{GlobalDaemonManager, ToolPauseResolutionStart};
 use crate::runtime::{
-    resolve_plan_command_from_protocol, resolve_tool_pause_command_from_protocol,
-    run_submitted_to_protocol, submit_run_command_from_protocol,
+    initial_session_title_from_input, resolve_plan_command_from_protocol,
+    resolve_tool_pause_command_from_protocol, run_submitted_to_protocol,
+    submit_run_command_from_protocol,
 };
 
 /// 向当前会话提交一次新的运行请求。
@@ -24,10 +25,25 @@ pub(crate) async fn submit_run(
     let session = require_daemon_session(&manager, &project_id, &session_id).await?;
     ensure_connected_controller(&session, &headers).await?;
     if request.mode == protocol::RunInputMode::Submit {
-        session
+        // 同步落库 300 字符兜底 title。只有当 title 这次被实际写入
+        // (text 非空 + DB 软写条件命中) 时,才 spawn 后台 LLM 升级任务,
+        // 避免为后续每一次 submit 都创建无用的 tokio 任务。spawn 时把刚
+        // 写入的兜底 title 一并传过去,LLM 跑完后会用它判断"title 仍然
+        // 是我刚写入的兜底"才覆盖,避免覆盖用户的 /rename 或 fork 预设。
+        let title_was_set = session
             .set_initial_title_from_input(&request.input)
             .await
             .map_err(core_error)?;
+        if title_was_set
+            && let Some(fallback_title) = initial_session_title_from_input(&request.input)
+        {
+            session.spawn_background_title_generation(
+                project_id,
+                Arc::clone(&manager),
+                fallback_title,
+                request.input.text.clone(),
+            );
+        }
     }
     session
         .core

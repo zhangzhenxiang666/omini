@@ -613,7 +613,37 @@ impl UiState {
                 self.status_bar.active_profile = profile;
             }
             RuntimeToUiEvent::SessionTitleChanged { title } => {
-                self.current_session_title = title;
+                self.current_session_title = title.clone();
+                // WebSocket 是 session-scoped 的，事件来源 session 就是
+                // TUI 当前的 current_session_id；用它去同步两个 session
+                // 列表缓存里对应条目的 title。
+                let Some(current_session_id) = self.current_session_id.clone() else {
+                    return;
+                };
+                if let Some(title) = title {
+                    for session in self.startup_recent_sessions.iter_mut() {
+                        if session.id == current_session_id {
+                            session.title = title.clone();
+                        }
+                    }
+                    if let Some(InteractionStep::Session {
+                        sessions,
+                        all_sessions,
+                        ..
+                    }) = self.interaction_step.as_mut()
+                    {
+                        for session in sessions.iter_mut() {
+                            if session.id == current_session_id {
+                                session.title = title.clone();
+                            }
+                        }
+                        for session in all_sessions.iter_mut() {
+                            if session.id == current_session_id {
+                                session.title = title.clone();
+                            }
+                        }
+                    }
+                }
             }
             RuntimeToUiEvent::InteractionRequest(req) => {
                 self.interaction_request = Some(req);
@@ -699,6 +729,10 @@ impl UiState {
     ) {
         self.show_start_screen = false;
         self.current_session_id = session_id;
+        if self.current_session_id.is_none() {
+            // 「新建会话」前的 blank 状态：把 title 缓存也清空,避免残留上一个 session 的 title。
+            self.current_session_title = None;
+        }
         self.messages = UiMessage::from_history_items(messages);
         self.pending_client_echoes.clear();
         self.status_bar.current_context_tokens = usage.current_context_tokens;

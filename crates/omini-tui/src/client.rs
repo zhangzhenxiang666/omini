@@ -463,10 +463,6 @@ async fn emit_blank_session(
             },
         })
         .await
-        .map_err(|_| "TUI event receiver closed".to_string())?;
-    event_tx
-        .send(RuntimeToUiEvent::SessionTitleChanged { title: None })
-        .await
         .map_err(|_| "TUI event receiver closed".to_string())
 }
 

@@ -243,7 +243,9 @@ thinking_effort = "high"
 
 辅助任务可能使用与主会话不同的 provider，对应的请求内容（标题生成会包含首条用户消息、记忆抽取可能包含会话片段）会被发送到该 provider 的服务。配置时需注意这一隐私边界。后续消费方应在日志中记录实际使用的 provider/model 与 fallback 原因，便于追踪成本、延迟与质量问题。
 
-> **状态**：本节定义了配置接口与解析规则。实际消费方（标题生成、记忆系统等）由后续 issue 单独接入；当前版本中 `model_tiers` 不会影响现有任何运行时行为。
+`model_tiers.small` 缺失时会 fallback 到当前主会话模型，可能产生与主对话相同的成本。推荐显式配置 `model_tiers.small` 为低成本模型（例如 `gpt-4o-mini` / `claude-haiku-4-5`），把首条消息触发的后台标题生成开销控制在辅助层。
+
+> **状态**：标题生成已通过 #39 接入，默认消费 `model_tiers.small`。其他消费方（记忆系统、复杂归纳等）由后续 issue 单独接入。
 
 ### `mcp_servers` — MCP Server 配置
 

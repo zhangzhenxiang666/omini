@@ -965,4 +965,32 @@ mod tests {
             None
         );
     }
+
+    #[tokio::test]
+    async fn set_initial_session_title_is_idempotent_for_fork_preset_title() {
+        let db = temp_db().await;
+        // fork 路径 (`fork_session_for_plan`) 在 DB insert 时就预设了
+        // "(source) (new from plan)" 形式的非空 title;`set_initial_session_title`
+        // 的 SQL 软写条件必须保证这条预设 title 不会被后台 LLM 调用覆盖。
+        let mut forked = test_session("s1");
+        forked.title = Some("(source) (new from plan)".to_string());
+        db.create_session(&forked)
+            .await
+            .expect("session should insert");
+
+        assert!(
+            !db.set_initial_session_title("s1", "llm_title")
+                .await
+                .expect("title should not update")
+        );
+        assert_eq!(
+            db.get_session("s1")
+                .await
+                .expect("session should load")
+                .expect("session should exist")
+                .title
+                .as_deref(),
+            Some("(source) (new from plan)")
+        );
+    }
 }

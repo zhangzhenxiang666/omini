@@ -5,5 +5,6 @@ pub mod message;
 pub mod project;
 pub mod proposed_plan;
 pub mod subagents;
+pub mod title_generation;
 pub mod tool;
 pub mod usage;

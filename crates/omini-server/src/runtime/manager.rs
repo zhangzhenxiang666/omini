@@ -20,6 +20,7 @@ impl From<CoreError> for ProjectAttachError {
 }
 
 /// daemon 尚未认识某个项目时的查找错误。
+#[derive(Debug)]
 pub(crate) enum ProjectLookupError {
     NotFound,
 }
@@ -107,6 +108,19 @@ impl GlobalDaemonManager {
             .get(project_id)
             .cloned()
             .ok_or(ProjectLookupError::NotFound)
+    }
+
+    /// 给后台任务（如后台 session 标题生成）拉取最新项目 settings。
+    pub(crate) async fn fresh_settings_with_project_state(
+        &self,
+        project_id: &str,
+    ) -> Result<Settings, CoreError> {
+        let project = self.project(project_id).await.map_err(|error| {
+            CoreError::new(format!(
+                "failed to lookup project {project_id} for background settings load: {error:?}"
+            ))
+        })?;
+        project.fresh_settings_with_project_state()
     }
 }
 
@@ -418,7 +432,7 @@ impl SessionManager {
         })
     }
 
-    fn fresh_settings_with_project_state(&self) -> Result<Settings, CoreError> {
+    pub(crate) fn fresh_settings_with_project_state(&self) -> Result<Settings, CoreError> {
         let config = load_validated_config(&self.root, &self.cwd).map_err(config_core_error)?;
         let state = self
             .project
