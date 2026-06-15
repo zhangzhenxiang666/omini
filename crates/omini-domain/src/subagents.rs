@@ -58,4 +58,6 @@ pub struct GeneratedAgentDraft {
 pub struct AgentSummary {
     pub name: String,
     pub description: String,
+    /// 来源位置: 内置 agent 为 `<built-in>`,文件加载的 agent 为绝对路径。
+    pub location: String,
 }

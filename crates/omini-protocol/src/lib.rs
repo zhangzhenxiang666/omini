@@ -1228,6 +1228,7 @@ mod tests {
             subagent_sessions: vec![AgentSummary {
                 name: "explorer".to_string(),
                 description: "Read-only exploration agent.".to_string(),
+                location: "<built-in>".to_string(),
             }],
             git_branch: None,
         };
@@ -1239,7 +1240,8 @@ mod tests {
             value["subagent_sessions"],
             json!([{
                 "name": "explorer",
-                "description": "Read-only exploration agent."
+                "description": "Read-only exploration agent.",
+                "location": "<built-in>",
             }])
         );
     }

@@ -361,10 +361,12 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
         AgentSummary {
             name: "explorer".to_string(),
             description: "Read-only codebase exploration agent.".to_string(),
+            location: "<built-in>".to_string(),
         },
         AgentSummary {
-            name: "worker".to_string(),
-            description: "Implementation agent for focused coding tasks.".to_string(),
+            name: "general".to_string(),
+            description: "General purpose isolated coding agent.".to_string(),
+            location: "<built-in>".to_string(),
         },
     ];
 
@@ -384,15 +386,8 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
             )
         })
         .collect();
-    assert_eq!(
-        candidates,
-        vec![(
-            MentionKind::Subagent,
-            "worker",
-            "worker",
-            "Implementation agent for focused coding tasks."
-        )]
-    );
+    // 过滤条件 "@wo" 命中 "general" 之外不存在的旧名 worker,只剩 explorer / general 都不匹配
+    assert_eq!(candidates, Vec::new());
 }
 
 #[test]

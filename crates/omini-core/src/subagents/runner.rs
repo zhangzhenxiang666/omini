@@ -501,11 +501,14 @@ fn subagent_system_prompt(parent: &Settings, spec: &AgentSpec, skills: &[SkillSu
     prompt.push_str(
         "Return a concise final result for the parent agent. Do not try to spawn subagents.\n\n",
     );
-    prompt.push_str("Agent name: ");
+    prompt.push_str("<subagent>\n");
+    prompt.push_str("  <name>");
     prompt.push_str(&spec.name);
-    prompt.push_str("\nDescription: ");
+    prompt.push_str("</name>\n");
+    prompt.push_str("  <description>");
     prompt.push_str(&spec.description);
-    prompt.push_str("\n\n");
+    prompt.push_str("</description>\n");
+    prompt.push_str("</subagent>\n\n");
     prompt.push_str(&spec.instructions);
     prompt.push_str("\n</subagent_instructions>");
     prompt
@@ -730,10 +733,16 @@ mod tests {
         let prompt = subagent_system_prompt(&parent, &spec, &skills);
 
         assert!(prompt.contains("<skill_instructions>"));
-        assert!(prompt.contains("- `commit-message`: Suggest commit messages"));
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<name>commit-message</name>"));
+        assert!(prompt.contains("<description>Suggest commit messages</description>"));
         assert!(prompt.contains("Use the `skill` tool"));
         assert!(prompt.contains("<subagent_instructions>"));
+        // prompt 中不带 <location> 标签,也不直接泄漏 skill 目录路径
+        assert!(!prompt.contains("<location>"));
         assert!(!prompt.contains("/tmp/skill"));
+        // 不再使用 Markdown 列表行
+        assert!(!prompt.contains("- `commit-message`: Suggest commit messages"));
     }
 
     #[test]
@@ -745,6 +754,32 @@ mod tests {
 
         assert!(!prompt.contains("<skill_instructions>"));
         assert!(prompt.contains("<subagent_instructions>"));
+    }
+
+    #[test]
+    fn subagent_system_prompt_includes_subagent_xml_block() {
+        let parent = test_settings();
+        let spec = AgentSpec {
+            name: "explorer".to_string(),
+            description: "Read-only codebase exploration agent.".to_string(),
+            instructions: "Do the task.".to_string(),
+            tool_policy: AgentToolPolicy::default(),
+            model: None,
+            source: AgentSource::BuiltIn,
+        };
+
+        let prompt = subagent_system_prompt(&parent, &spec, &[]);
+
+        assert!(prompt.contains("<subagent>"));
+        assert!(prompt.contains("<name>explorer</name>"));
+        assert!(
+            prompt.contains("<description>Read-only codebase exploration agent.</description>")
+        );
+        // prompt 中不带 <location> 标签
+        assert!(!prompt.contains("<location>"));
+        // 不再使用旧的 "Agent name: ..." / "Description: ..." 前缀
+        assert!(!prompt.contains("Agent name: "));
+        assert!(!prompt.contains("Description: "));
     }
 
     #[test]

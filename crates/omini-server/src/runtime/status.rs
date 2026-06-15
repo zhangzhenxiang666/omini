@@ -834,6 +834,7 @@ mod tests {
                 subagent_sessions: vec![protocol::AgentSummary {
                     name: "explorer".to_string(),
                     description: "Read-only exploration agent.".to_string(),
+                    location: "<built-in>".to_string(),
                 }],
                 now,
                 git_branch: None,

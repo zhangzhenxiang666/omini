@@ -73,6 +73,7 @@ impl AgentRegistry {
             .map(|agent| AgentSummary {
                 name: agent.name.clone(),
                 description: agent.description.clone(),
+                location: agent.source.display(),
             })
             .collect();
         summaries.sort_by(|a, b| a.name.cmp(&b.name));
@@ -427,43 +428,29 @@ mod tests {
         let explorer = registry.agents.get("explorer").unwrap();
 
         assert!(explorer.instructions.contains("parent agent"));
-        assert!(
-            explorer
-                .instructions
-                .contains("compact, actionable evidence")
-        );
-        assert!(explorer.instructions.contains("Findings:"));
-        assert!(explorer.instructions.contains("Key references:"));
-        assert!(explorer.instructions.contains("Uncertainty:"));
+        // 新版 instructions 用 <analysis>/<results>/<next_steps> 描述输出形态
+        assert!(explorer.instructions.contains("<results>"));
+        assert!(explorer.instructions.contains("<answer>"));
+        assert!(explorer.instructions.contains("<next_steps>"));
     }
 
     #[test]
-    fn built_in_explorer_avoids_broad_project_tours_by_default() {
+    fn built_in_explorer_is_read_only_with_parallel_strategy() {
         let registry = load_agent_registry_from_dirs(std::iter::empty());
         let explorer = registry.agents.get("explorer").unwrap();
 
-        assert!(
-            explorer
-                .instructions
-                .contains("Do not scan the whole repository")
-        );
-        assert!(
-            explorer
-                .instructions
-                .contains("Stop once the parent task can be answered")
-        );
-        assert!(
-            explorer
-                .instructions
-                .contains("Do not output directory trees")
-        );
-        assert!(explorer.instructions.contains("project maps"));
-        assert!(
-            explorer
-                .instructions
-                .contains("exhaustive module inventories")
-        );
-        assert!(explorer.instructions.contains("broad project-tour prose"));
+        // read-only / 禁止写文件约束
+        assert!(explorer.instructions.contains("Read-only"));
+        assert!(explorer.instructions.contains("No file creation"));
+        // 并发首动作约束
+        assert!(explorer.instructions.contains("3+ tools simultaneously"));
+        // 失败清单(相对路径/漏检/无 <results> 等)
+        assert!(explorer.instructions.contains("relative"));
+        assert!(explorer.instructions.contains("`<results>` block"));
+        // 工具策略改写为 search/read/bash
+        assert!(explorer.instructions.contains("`search`"));
+        assert!(explorer.instructions.contains("`read`"));
+        assert!(explorer.instructions.contains("`bash`"));
     }
 
     #[test]
@@ -609,9 +596,9 @@ Handle the task.
         let cwd = temp_project();
         write_agent(
             &cwd,
-            "default.md",
+            "explorer.md",
             r#"---
-name: default
+name: explorer
 description: Conflicts with built-in
 ---
 This should be skipped.
@@ -619,13 +606,13 @@ This should be skipped.
         );
 
         let registry = load_project_agent_registry(&cwd);
-        let agent = registry.agents.get("default").unwrap();
+        let agent = registry.agents.get("explorer").unwrap();
 
-        assert_eq!(agent.description, "General purpose isolated coding agent.");
+        assert_eq!(agent.description, "Read-only codebase exploration agent.");
         assert!(registry.diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message()
-                .contains("duplicate subagent name 'default'")
+                .contains("duplicate subagent name 'explorer'")
         }));
     }
 
@@ -754,7 +741,8 @@ Help in this project.
     #[test]
     fn agent_name_exists_checks_builtins_and_custom_agents() {
         let cwd = temp_project();
-        assert!(agent_name_exists(&cwd, "default", None));
+        assert!(agent_name_exists(&cwd, "explorer", None));
+        assert!(agent_name_exists(&cwd, "general", None));
 
         let draft = AgentDraft {
             name: "local-helper".to_string(),
@@ -768,5 +756,87 @@ Help in this project.
 
         assert!(agent_name_exists(&cwd, "local-helper", None));
         assert!(!agent_name_exists(&cwd, "local-helper", Some(&path)));
+    }
+
+    #[test]
+    fn built_in_general_agent_inherits_main_mode_body_without_task_routing() {
+        let registry = load_agent_registry_from_dirs(std::iter::empty());
+        let general = registry.agents.get("general").unwrap();
+
+        assert_eq!(general.name, "general");
+        assert_eq!(
+            general.description,
+            "General purpose isolated coding agent."
+        );
+        assert_eq!(general.tool_policy.allow, None);
+        assert_eq!(general.tool_policy.deny, None);
+        // general 的 instructions 就是 agents/general.md 的全文
+        let expected = include_str!("agents/general.md");
+        assert_eq!(general.instructions, expected.trim());
+        // Task Routing 段已删除(避免引导 subagent 再去用 explorer)
+        assert!(!general.instructions.contains("## Task Routing"));
+        assert!(
+            !general
+                .instructions
+                .contains("`subagent` tool with the `explorer`")
+        );
+    }
+
+    #[test]
+    fn built_in_explorer_agent_instructions_contain_analysis_and_results_blocks() {
+        let registry = load_agent_registry_from_dirs(std::iter::empty());
+        let explorer = registry.agents.get("explorer").unwrap();
+
+        assert_eq!(explorer.name, "explorer");
+        // 引导"先分析、再并发、最后结构化报告"的新修辞
+        assert!(explorer.instructions.contains("<analysis>"));
+        assert!(explorer.instructions.contains("<results>"));
+        assert!(explorer.instructions.contains("<next_steps>"));
+        assert!(
+            explorer
+                .instructions
+                .contains("Launch **3+ tools simultaneously**")
+        );
+        // 工具策略改写为 search/read/bash 三件套
+        assert!(explorer.instructions.contains("`search`"));
+        assert!(explorer.instructions.contains("`read`"));
+        assert!(explorer.instructions.contains("`bash`"));
+        // 旧版"Findings/Key references/Uncertainty"格式已替换
+        assert!(!explorer.instructions.contains("Findings:"));
+        assert!(!explorer.instructions.contains("Key references:"));
+    }
+
+    #[test]
+    fn summaries_include_location_for_built_in_and_file_agents() {
+        let cwd = temp_project();
+        write_agent(
+            &cwd,
+            "foo.md",
+            r#"---
+name: foo
+description: Foo helper
+---
+Help with foo.
+"#,
+        );
+
+        let registry = load_project_agent_registry(&cwd);
+        let summaries = registry.summaries();
+
+        let explorer = summaries.iter().find(|s| s.name == "explorer").unwrap();
+        assert_eq!(explorer.location, "<built-in>");
+
+        let general = summaries.iter().find(|s| s.name == "general").unwrap();
+        assert_eq!(general.location, "<built-in>");
+
+        let foo = summaries.iter().find(|s| s.name == "foo").unwrap();
+        assert_eq!(
+            foo.location,
+            cwd.join(".omini")
+                .join("agents")
+                .join("foo.md")
+                .display()
+                .to_string()
+        );
     }
 }

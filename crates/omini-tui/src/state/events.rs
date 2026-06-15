@@ -662,6 +662,11 @@ impl UiState {
                             .map(|record| AgentSummary {
                                 name: record.name.clone(),
                                 description: record.description.clone(),
+                                location: record
+                                    .path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| "<built-in>".to_string()),
                             })
                             .collect(),
                     ));

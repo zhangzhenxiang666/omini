@@ -1549,6 +1549,7 @@ pub(crate) fn agent_summary_from_protocol(
     omini_domain::subagents::AgentSummary {
         name: agent.name,
         description: agent.description,
+        location: agent.location,
     }
 }
 

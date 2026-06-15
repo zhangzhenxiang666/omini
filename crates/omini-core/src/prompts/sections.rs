@@ -72,7 +72,7 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
     match active_profile {
         ActiveProfile::Main | ActiveProfile::Auto => {
             section.push_str(
-                "- For focused implementation work that can be separated by file or module ownership, use `worker` subagents; give each worker a bounded scope and explicit files or responsibilities.\n",
+                "- For focused implementation work that can be separated by file or module ownership, use the `general` subagent; give it a bounded scope and explicit files or responsibilities.\n",
             );
         }
         ActiveProfile::Plan => {
@@ -113,9 +113,18 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
         "- Subagents cannot spawn other subagents. Do not ask them to delegate further.\n\n",
     );
     section.push_str("## Available Subagents\n\n");
+    section.push_str("<available_subagents>\n");
     for agent in agents {
-        section.push_str(&format!("- `{}`: {}\n", agent.name, agent.description));
+        section.push_str("  <subagent>\n");
+        section.push_str("    <name>");
+        section.push_str(&agent.name);
+        section.push_str("</name>\n");
+        section.push_str("    <description>");
+        section.push_str(&agent.description);
+        section.push_str("</description>\n");
+        section.push_str("  </subagent>\n");
     }
+    section.push_str("</available_subagents>\n");
     section.push_str("</delegation_instructions>");
     section
 }
@@ -148,15 +157,24 @@ pub(crate) fn skill_section(skills: &[SkillSummary]) -> Option<String> {
         "- Use the `skill` tool when a listed skill is relevant, or when the user explicitly asks to use a skill by name.\n",
     );
     section.push_str(
-        "- The system prompt lists only each skill's name and description. The full skill body and absolute directory path are loaded by the `skill` tool.\n",
+        "- The system prompt lists only each skill's name and description. The full skill body is loaded by the `skill` tool.\n",
     );
     section.push_str(
         "- Only call the `skill` tool for a different skill if that distinct skill is also needed.\n\n",
     );
     section.push_str("## Available Skills\n\n");
+    section.push_str("<available_skills>\n");
     for skill in skills {
-        section.push_str(&format!("- `{}`: {}\n", skill.name, skill.description));
+        section.push_str("  <skill>\n");
+        section.push_str("    <name>");
+        section.push_str(&skill.name);
+        section.push_str("</name>\n");
+        section.push_str("    <description>");
+        section.push_str(&skill.description);
+        section.push_str("</description>\n");
+        section.push_str("  </skill>\n");
     }
+    section.push_str("</available_skills>\n");
     section.push_str("</skill_instructions>");
     Some(section)
 }

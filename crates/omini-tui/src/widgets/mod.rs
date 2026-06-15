@@ -411,7 +411,9 @@ fn compact_waiting_tool_lines(
                 let limit = tool_use.input.get("limit").and_then(|v| v.as_u64());
                 let offset = tool_use.input.get("offset").and_then(|v| v.as_u64());
                 match (limit, offset) {
-                    (Some(l), Some(o)) => path_text.push_str(&format!(" [offset\u{003d}{o}, limit\u{003d}{l}]")),
+                    (Some(l), Some(o)) => {
+                        path_text.push_str(&format!(" [offset\u{003d}{o}, limit\u{003d}{l}]"))
+                    }
                     (Some(l), None) => path_text.push_str(&format!(" [limit\u{003d}{l}]")),
                     (None, Some(o)) => path_text.push_str(&format!(" [offset\u{003d}{o}]")),
                     (None, None) => {}

@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_section_includes_descriptions_without_paths() {
+    fn skill_section_emits_xml_skills_with_name_and_description() {
         let settings = test_settings(None);
         let skill_dir = PathBuf::from("/tmp/omini-skill-test/writer");
         let skills = vec![SkillSummary {
@@ -216,9 +216,15 @@ mod tests {
             build_system_prompt_with_capabilities(&settings, &[], &skills, ActiveProfile::Main);
 
         assert!(prompt.contains("<skill_instructions>"));
-        assert!(prompt.contains("- `writer`: Write carefully"));
-        assert!(prompt.contains("loaded by the `skill` tool"));
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<skill>"));
+        assert!(prompt.contains("<name>writer</name>"));
+        assert!(prompt.contains("<description>Write carefully</description>"));
+        // prompt 中不带 <location> 标签(目录路径仅在运行时 `skill` 工具中可见)
+        assert!(!prompt.contains("<location>"));
         assert!(!prompt.contains(skill_dir.to_str().unwrap()));
+        // 没有 Markdown 列表形式的 skill 行
+        assert!(!prompt.contains("- `writer`: Write carefully"));
     }
 
     #[test]
@@ -469,11 +475,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_mode_delegation_instructions_avoid_worker_execution_guidance() {
+    fn plan_mode_delegation_instructions_avoid_general_execution_guidance() {
         let settings = test_settings(None);
         let agents = vec![AgentSummary {
-            name: "worker".to_string(),
-            description: "Implementation agent for focused coding tasks.".to_string(),
+            name: "general".to_string(),
+            description: "General purpose isolated coding agent.".to_string(),
+            location: "<built-in>".to_string(),
         }];
 
         let plan_prompt =
@@ -487,5 +494,103 @@ mod tests {
         assert!(auto_prompt.contains("focused implementation work"));
         assert!(!plan_prompt.contains("focused implementation work"));
         assert!(plan_prompt.contains("use subagents only for non-mutating exploration"));
+        assert!(plan_prompt.contains("<available_subagents>"));
+    }
+
+    #[test]
+    fn subagent_section_emits_xml_subagents_with_location() {
+        let settings = test_settings(None);
+        let agents = vec![
+            AgentSummary {
+                name: "explorer".to_string(),
+                description: "Read-only codebase exploration agent.".to_string(),
+                location: "<built-in>".to_string(),
+            },
+            AgentSummary {
+                name: "general".to_string(),
+                description: "General purpose isolated coding agent.".to_string(),
+                location: "<built-in>".to_string(),
+            },
+        ];
+
+        let prompt =
+            build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
+
+        assert!(prompt.contains("<delegation_instructions>"));
+        assert!(prompt.contains("<available_subagents>"));
+        assert!(prompt.contains("<subagent>"));
+        assert!(prompt.contains("<name>explorer</name>"));
+        assert!(
+            prompt.contains("<description>Read-only codebase exploration agent.</description>")
+        );
+        assert!(prompt.contains("<name>general</name>"));
+        assert!(
+            prompt.contains("<description>General purpose isolated coding agent.</description>")
+        );
+        // prompt 中不带 <location> 标签
+        assert!(!prompt.contains("<location>"));
+        // 没有 Markdown 列表形式的 subagent 行
+        assert!(!prompt.contains("- `explorer`: "));
+        assert!(!prompt.contains("- `general`: "));
+    }
+
+    #[test]
+    fn subagent_section_includes_general_for_main_mode() {
+        let settings = test_settings(None);
+        let agents = vec![AgentSummary {
+            name: "general".to_string(),
+            description: "General purpose isolated coding agent.".to_string(),
+            location: "<built-in>".to_string(),
+        }];
+
+        let main_prompt =
+            build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
+
+        assert!(main_prompt.contains("use the `general` subagent"));
+        assert!(main_prompt.contains("bounded scope"));
+    }
+
+    #[test]
+    fn main_system_prompt_uses_xml_skill_block_not_markdown_list() {
+        let settings = test_settings(None);
+        let skills = vec![SkillSummary {
+            name: "commit-message".to_string(),
+            description: "Suggest commit messages".to_string(),
+            directory: PathBuf::from("/tmp/commit-message"),
+        }];
+
+        let prompt =
+            build_system_prompt_with_capabilities(&settings, &[], &skills, ActiveProfile::Main);
+
+        let skill_block_start = prompt.find("<skill_instructions>").unwrap();
+        let skill_block_end =
+            prompt.find("</skill_instructions>").unwrap() + "</skill_instructions>".len();
+        let skill_block = &prompt[skill_block_start..skill_block_end];
+
+        assert!(skill_block.contains("<available_skills>"));
+        assert!(skill_block.contains("<name>commit-message</name>"));
+        assert!(!skill_block.contains("- `commit-message`:"));
+    }
+
+    #[test]
+    fn main_system_prompt_uses_xml_subagent_block_not_markdown_list() {
+        let settings = test_settings(None);
+        let agents = vec![AgentSummary {
+            name: "explorer".to_string(),
+            description: "Read-only codebase exploration agent.".to_string(),
+            location: "<built-in>".to_string(),
+        }];
+
+        let prompt =
+            build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
+
+        let delegation_block_start = prompt.find("<delegation_instructions>").unwrap();
+        let delegation_block_end =
+            prompt.find("</delegation_instructions>").unwrap() + "</delegation_instructions>".len();
+        let delegation_block = &prompt[delegation_block_start..delegation_block_end];
+
+        assert!(delegation_block.contains("<available_subagents>"));
+        assert!(delegation_block.contains("<name>explorer</name>"));
+        assert!(!delegation_block.contains("- `explorer`: "));
     }
 }
