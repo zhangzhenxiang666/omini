@@ -1345,7 +1345,7 @@ fn rewrite_runtime_history(runtime_context: Option<&ToolRuntimeContext>, message
         return;
     };
     if let Err(error) = rewrite_history(&runtime_context.session_dir, messages) {
-        tracing::warn!(msg = "failed to rewrite compacted history", error = %error);
+        tracing::error!(msg = "failed to rewrite compacted history", error = %error);
     }
 }
 

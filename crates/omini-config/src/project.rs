@@ -4,7 +4,7 @@ use omini_domain::config::ThinkingEffort;
 use omini_domain::message::Message;
 use omini_domain::project::sanitize_project_path as sanitize;
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -164,13 +164,24 @@ impl SessionDir {
         Ok(dir)
     }
 
+    fn write_history_line(file: &mut File, msg: &Message) -> Result<(), ConfigError> {
+        // 拼好 `line + \n` 后一次性 `write_all`,保证 1 次 `write(2)` syscall,
+        // 避免 `file.write_all(line.as_bytes())?; file.write_all(b"\n")?;`
+        // 那种两段写法带来的 2 次 syscall 退化。
+        let mut bytes = serde_json::to_string(msg)?.into_bytes();
+        bytes.push(b'\n');
+        file.write_all(&bytes)?;
+        Ok(())
+    }
+
     pub fn append_history(&self, msg: &Message) -> Result<(), ConfigError> {
-        let line = serde_json::to_string(msg)?;
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(self.history_path())?;
-        writeln!(file, "{}", line)?;
+        Self::write_history_line(&mut file, msg)?;
+        // 强制 OS 把 page cache 落盘,避免进程在 panic/SIGKILL/断电 时丢末尾半行。
+        file.sync_all()?;
         Ok(())
     }
 
@@ -182,9 +193,10 @@ impl SessionDir {
             .truncate(true)
             .open(self.history_path())?;
         for msg in messages {
-            let line = serde_json::to_string(msg)?;
-            writeln!(file, "{}", line)?;
+            Self::write_history_line(&mut file, msg)?;
         }
+        // 整文件覆盖,循环结束一次性 sync;崩溃时最多丢未 sync 的最后几行。
+        file.sync_all()?;
         Ok(())
     }
 
@@ -220,4 +232,91 @@ pub struct ProjectState {
 
 fn default_show_thinking_blocks() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omini_domain::message::{Message, Role, TextBlock};
+
+    /// 临时目录,Drop 时清理。避免引入 `tempfile` 依赖。
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new() -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("omini-config-test-{nanos}"));
+            fs::create_dir_all(&path).expect("create temp dir");
+            Self { path }
+        }
+
+        fn session_dir(&self) -> SessionDir {
+            let path = self.path.join("sessions").join("s1");
+            fs::create_dir_all(&path).expect("create session dir");
+            SessionDir { path }
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn user_message(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![omini_domain::message::ContentBlock::Text(TextBlock {
+                text: text.to_string(),
+            })],
+        }
+    }
+
+    #[test]
+    fn append_history_writes_bytes_to_disk() {
+        let tmp = TempDir::new();
+        let dir = tmp.session_dir();
+        let m1 = user_message("hello");
+        dir.append_history(&m1).expect("first append");
+
+        let m1_bytes = serde_json::to_string(&m1).unwrap();
+        let raw = fs::read(dir.history_path()).expect("read history file");
+        assert_eq!(raw, format!("{m1_bytes}\n").into_bytes());
+
+        let m2 = user_message("world");
+        dir.append_history(&m2).expect("second append");
+        let m2_bytes = serde_json::to_string(&m2).unwrap();
+        let raw = fs::read(dir.history_path()).expect("read history file");
+        assert_eq!(raw, format!("{m1_bytes}\n{m2_bytes}\n").into_bytes());
+    }
+
+    #[test]
+    fn rewrite_history_writes_full_file() {
+        let tmp = TempDir::new();
+        let dir = tmp.session_dir();
+        let m1 = user_message("stale");
+        dir.append_history(&m1).expect("seed");
+
+        let m2 = user_message("two");
+        let m3 = user_message("three");
+        dir.rewrite_history(&[m2.clone(), m3.clone()])
+            .expect("rewrite");
+        let m2_bytes = serde_json::to_string(&m2).unwrap();
+        let m3_bytes = serde_json::to_string(&m3).unwrap();
+        let raw = fs::read(dir.history_path()).expect("read history file");
+        assert_eq!(raw, format!("{m2_bytes}\n{m3_bytes}\n").into_bytes());
+        assert!(!raw.windows(4).any(|w| w == b"stale"));
+
+        dir.rewrite_history(&[]).expect("empty rewrite");
+        let raw = fs::read(dir.history_path()).expect("read history file");
+        assert!(
+            raw.is_empty(),
+            "empty rewrite should leave 0 bytes, got {raw:?}"
+        );
+    }
 }

@@ -56,12 +56,16 @@ pub(super) async fn persist_one(
     active_profile: ActiveProfile,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
-    let _ = session_dir.append_history(&msg);
+    if let Err(error) = session_dir.append_history(&msg) {
+        tracing::warn!(msg = "failed to append history", error = %error);
+    }
     persist_ui_message(session_id, blocks_dir, &msg, active_profile, persistence_tx).await;
 }
 
 pub(super) fn persist_llm_history_only(session_dir: &SessionDir, msg: &Message) {
-    let _ = session_dir.append_history(msg);
+    if let Err(error) = session_dir.append_history(msg) {
+        tracing::warn!(msg = "failed to append history", error = %error);
+    }
 }
 
 async fn persist_split_display_message(
@@ -71,7 +75,9 @@ async fn persist_split_display_message(
     display_msg: DisplayMessage,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
-    let _ = session_dir.append_history(&llm_msg);
+    if let Err(error) = session_dir.append_history(&llm_msg) {
+        tracing::warn!(msg = "failed to append history", error = %error);
+    }
     let _ = persistence_tx
         .send(RuntimePersistenceEvent::InsertDisplayMessage {
             session_id: session_id.to_string(),
