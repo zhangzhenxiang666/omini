@@ -154,11 +154,6 @@ impl AgentRuntime {
                                 .send(RuntimeToServerEvent::ToolPauseRequested(*req))
                                 .await;
                         }
-                        EngineToRuntimeEvent::PlanSubmitted(plan) => {
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::PlanSubmitted(plan))
-                                .await;
-                        }
                         EngineToRuntimeEvent::UsageRecorded(usage) => {
                             tracing::debug!(
                                 prompt_tokens = usage.prompt_tokens,

@@ -433,11 +433,6 @@ fn spawn_subagent_bridge(
                             .send(EngineToRuntimeEvent::ToolPauseRequested(req))
                             .await;
                     }
-                    EngineToRuntimeEvent::PlanSubmitted(plan) => {
-                        let _ = parent_tx
-                            .send(EngineToRuntimeEvent::PlanSubmitted(plan))
-                            .await;
-                    }
                     EngineToRuntimeEvent::UsageRecorded(usage) => {
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentUsageRecorded {

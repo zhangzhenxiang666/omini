@@ -2,7 +2,7 @@ use omini_domain::events::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, SubagentFinishedEvent,
     SubagentMessageEvent, SubagentStartedEvent, SubagentToolResultEvent, SubagentToolUseEvent,
-    SubmittedPlan, ToolPauseRequest,
+    ToolPauseRequest,
 };
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
@@ -48,8 +48,6 @@ pub enum EngineToRuntimeEvent {
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(Box<ToolPauseRequest>),
-    /// 模型提交了计划，runtime 已完成持久化
-    PlanSubmitted(SubmittedPlan),
     /// 当前 engine/session 的一轮 LLM usage。
     UsageRecorded(Usage),
     /// 当前 engine/session 开始快速收缩上下文。
