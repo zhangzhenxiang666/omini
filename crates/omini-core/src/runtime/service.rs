@@ -1399,8 +1399,8 @@ mod tests {
             .await;
 
         engine_tx
-            .send(EngineToRuntimeEvent::ToolPauseRequested(permission_pause(
-                "tool_1",
+            .send(EngineToRuntimeEvent::ToolPauseRequested(Box::new(
+                permission_pause("tool_1"),
             )))
             .await
             .expect("pause event should send");
@@ -1453,8 +1453,8 @@ mod tests {
             .await;
 
         engine_tx
-            .send(EngineToRuntimeEvent::ToolPauseRequested(permission_pause(
-                "tool_1",
+            .send(EngineToRuntimeEvent::ToolPauseRequested(Box::new(
+                permission_pause("tool_1"),
             )))
             .await
             .expect("pause event should send");

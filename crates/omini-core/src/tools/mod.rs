@@ -252,7 +252,7 @@ impl ToolExecutionContext {
 
         if self
             .event_tx
-            .send(EngineToRuntimeEvent::ToolPauseRequested(request))
+            .send(EngineToRuntimeEvent::ToolPauseRequested(Box::new(request)))
             .await
             .is_err()
         {
@@ -301,7 +301,7 @@ impl ToolExecutionContext {
 
         if self
             .event_tx
-            .send(EngineToRuntimeEvent::ToolPauseRequested(request))
+            .send(EngineToRuntimeEvent::ToolPauseRequested(Box::new(request)))
             .await
             .is_err()
         {

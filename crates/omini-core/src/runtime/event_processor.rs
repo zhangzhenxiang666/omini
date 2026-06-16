@@ -151,7 +151,7 @@ impl AgentRuntime {
                                 continue;
                             }
                             let _ = event_tx
-                                .send(RuntimeToServerEvent::ToolPauseRequested(req))
+                                .send(RuntimeToServerEvent::ToolPauseRequested(*req))
                                 .await;
                         }
                         EngineToRuntimeEvent::PlanSubmitted(plan) => {

@@ -110,7 +110,7 @@ pub enum EngineToRuntimeEvent {
     ToolResult(ToolResultBlock),
 
     /// 工具需要暂停等待用户授权或输入
-    ToolPauseRequested(ToolPauseRequest),
+    ToolPauseRequested(Box<ToolPauseRequest>),
     /// 模型提交了计划，runtime 已完成持久化
     PlanSubmitted(SubmittedPlan),
     /// 当前 engine/session 的一轮 LLM usage。

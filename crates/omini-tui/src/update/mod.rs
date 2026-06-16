@@ -885,10 +885,7 @@ mod tests {
                 summary: "Edit /tmp/demo.rs".to_string(),
                 path: "/tmp/demo.rs".to_string(),
                 replacement_count: 1,
-                replace_all: false,
-                start_lines: vec![1],
-                added_lines: 1,
-                removed_lines: 1,
+                diff: String::new(),
             })),
         }
     }

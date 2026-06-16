@@ -10,6 +10,7 @@ mod subagents;
 pub mod title_generation;
 pub mod tools;
 pub mod types;
+pub mod util;
 
 use crate::runtime::AgentRuntime;
 use omini_config::Settings;

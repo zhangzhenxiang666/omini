@@ -1,8 +1,10 @@
 use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
+use crate::util::file_lock::FileLockService;
 use async_trait::async_trait;
 use omini_domain::events::{EditPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use similar::TextDiff;
 use std::path::Path;
 use tokio::fs;
 
@@ -81,13 +83,12 @@ impl Tool for WriteTool {
                     serde_json::json!(prepared.preview.clone()),
                 ),
                 ("file_path", serde_json::json!(prepared.input.file_path)),
-                ("added_lines", serde_json::json!(report.added_lines)),
                 ("existed", serde_json::json!(report.existed)),
+                ("diff", serde_json::json!(report.diff)),
             ])),
             Err(e) => ToolResult::error(e).with_metadata(tool_metadata([
                 ("input", serde_json::json!(prepared.input)),
                 ("permission_preview", serde_json::json!(prepared.preview)),
-                ("added_lines", serde_json::json!(0)),
                 ("existed", serde_json::json!(prepared.existed)),
             ])),
         }
@@ -97,8 +98,8 @@ impl Tool for WriteTool {
 #[derive(Debug)]
 struct WriteReport {
     output: String,
-    added_lines: usize,
     existed: bool,
+    diff: String,
 }
 
 async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> {
@@ -108,6 +109,15 @@ async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> 
         .parent()
         .ok_or_else(|| format!("Path has no parent directory: {}", prepared.input.file_path))?;
 
+    let _guard = FileLockService::instance().acquire(path).await;
+
+    // 锁内读取上一版内容,这样算出的 diff 才与本次写入保持一致。
+    let previous = if existed {
+        fs::read_to_string(path).await.unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     fs::create_dir_all(parent).await.map_err(|e| {
         format!(
             "Failed to create parent directory {}: {e}",
@@ -115,16 +125,20 @@ async fn execute_write(prepared: &PreparedWrite) -> Result<WriteReport, String> 
         )
     })?;
 
-    fs::write(&prepared.input.file_path, &prepared.input.content)
+    fs::write(path, &prepared.input.content)
         .await
         .map_err(|e| format!("Failed to write file {}: {e}", prepared.input.file_path))?;
 
     let action = if existed { "Overwrote" } else { "Created" };
-    let added_lines = line_span_count(&prepared.input.content);
+    let diff = unified_diff(
+        &previous,
+        &prepared.input.content,
+        &prepared.input.file_path,
+    );
     Ok(WriteReport {
         output: format!("{action} {}", prepared.input.file_path),
-        added_lines,
         existed,
+        diff,
     })
 }
 
@@ -162,23 +176,72 @@ fn line_span_count(s: &str) -> usize {
     }
 }
 
+fn unified_diff(old: &str, new: &str, file_path: &str) -> String {
+    let diff = TextDiff::from_lines(old, new);
+    let mut formatter = diff.unified_diff();
+    formatter.context_radius(3).missing_newline_hint(false);
+    let file = file_path.rsplit('/').next().unwrap_or(file_path);
+    formatter.header(file, file);
+    let mut out: Vec<u8> = Vec::new();
+    if formatter.to_writer(&mut out).is_err() {
+        return String::new();
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
 fn build_preview(input: &WriteInput, existed: bool) -> EditPermissionPreview {
-    let added_lines = line_span_count(&input.content);
     let action = if existed { "Overwrite" } else { "Create" };
     EditPermissionPreview {
         summary: format!("{action} {}", input.file_path),
         path: input.file_path.clone(),
         replacement_count: 1,
-        replace_all: false,
-        start_lines: vec![1],
-        added_lines,
-        removed_lines: 0,
+        diff: preview_diff_for_write(input, existed),
     }
+}
+
+fn preview_diff_for_write(input: &WriteInput, existed: bool) -> String {
+    if !existed {
+        return preview_diff_new_file(input);
+    }
+    // 已存在时 preview 阶段拿不到旧内容,只能给出"全部为新增"的最佳猜测。
+    preview_diff_added_only(input)
+}
+
+fn preview_diff_new_file(input: &WriteInput) -> String {
+    let mut out = String::from("@@ -0,0 +1,");
+    let count = line_span_count(&input.content);
+    out.push_str(&count.to_string());
+    out.push_str(" @@\n");
+    for line in input.content.split('\n') {
+        if line.is_empty() && !input.content.ends_with('\n') {
+            // 末尾不换行时最后一段空 split 不渲染。
+            continue;
+        }
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn preview_diff_added_only(input: &WriteInput) -> String {
+    let mut out = String::from("@@ -1,");
+    out.push_str(&line_span_count(&input.content).to_string());
+    out.push_str(" +1,");
+    out.push_str(&line_span_count(&input.content).to_string());
+    out.push_str(" @@\n");
+    for line in input.content.split('\n') {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     fn temp_path(name: &str) -> String {
         std::env::temp_dir()
@@ -202,7 +265,6 @@ mod tests {
             content: "one\ntwo\n".to_string(),
         };
         let prepared = WriteTool.prepare(input).await.unwrap();
-        assert_eq!(prepared.preview.added_lines, 3);
         assert!(!prepared.existed);
 
         let result = WriteTool
@@ -276,6 +338,71 @@ mod tests {
         assert!(!result.is_error, "{}", result.output);
         assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\n");
 
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn write_acquires_file_lock_for_concurrent_writes() {
+        let path = temp_path("lock.txt");
+        let _ = fs::remove_file(&path).await;
+
+        // 外部预先拿锁,WriteTool 调用应被阻塞。
+        let _external = FileLockService::instance().acquire(Path::new(&path)).await;
+
+        let path_for_tool = path.clone();
+        let tool_task = tokio::spawn(async move {
+            let input = WriteInput {
+                file_path: path_for_tool,
+                content: "hello\n".to_string(),
+            };
+            let prepared = WriteTool.prepare(input).await.unwrap();
+            WriteTool
+                .execute_prepared(prepared, ToolExecutionContext::test("write"))
+                .await
+        });
+
+        // 此时 WriteTool 还没完成。
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!tool_task.is_finished(), "tool should be blocked by lock");
+
+        // 释放锁,让 tool 跑完。
+        drop(_external);
+        let result = tokio::time::timeout(Duration::from_secs(1), tool_task)
+            .await
+            .expect("tool should finish after lock release")
+            .unwrap();
+        assert!(!result.is_error, "{}", result.output);
+
+        let _ = fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn write_emits_unified_diff_in_metadata() {
+        let path = temp_path("diff.txt");
+        fs::write(&path, "alpha\nbeta\ngamma\n").await.unwrap();
+        let input = WriteInput {
+            file_path: path.clone(),
+            content: "alpha\nBETA\ngamma\ndelta\n".to_string(),
+        };
+        let prepared = WriteTool.prepare(input).await.unwrap();
+        let result = WriteTool
+            .execute_prepared(prepared, ToolExecutionContext::test("write"))
+            .await;
+        assert!(!result.is_error, "{}", result.output);
+        let metadata = result.metadata.expect("metadata should be set");
+        let diff = metadata
+            .get("diff")
+            .and_then(|v| v.as_str())
+            .expect("diff in metadata");
+        let file_name = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap();
+        assert!(diff.contains(&format!("--- {file_name}")));
+        assert!(diff.contains(&format!("+++ {file_name}")));
+        assert!(diff.contains("-beta"));
+        assert!(diff.contains("+BETA"));
+        assert!(diff.contains("+delta"));
         let _ = fs::remove_file(path).await;
     }
 }

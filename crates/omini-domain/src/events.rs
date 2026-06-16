@@ -455,10 +455,9 @@ pub struct EditPermissionPreview {
     pub summary: String,
     pub path: String,
     pub replacement_count: usize,
-    pub replace_all: bool,
-    pub start_lines: Vec<usize>,
-    pub added_lines: usize,
-    pub removed_lines: usize,
+    /// unified diff 文本(由 core 在 prepare / execute 阶段填入,TUI 用它来还原行号并渲染)。
+    /// prepare 和 execute 阶段产出同一份字节,权限弹窗与消息区永远一致。
+    pub diff: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,10 +573,7 @@ mod tests {
                     "summary": "Create file",
                     "path": "/tmp/new.txt",
                     "replacement_count": 0,
-                    "replace_all": false,
-                    "start_lines": [],
-                    "added_lines": 2,
-                    "removed_lines": 0
+                    "diff": ""
                 }
             })
         );
@@ -590,10 +586,7 @@ mod tests {
             "summary": "Create file",
             "path": "/tmp/new.txt",
             "replacement_count": 0,
-            "replace_all": false,
-            "start_lines": [],
-            "added_lines": 2,
-            "removed_lines": 0
+            "diff": ""
         }))
         .unwrap();
 
@@ -608,11 +601,23 @@ mod tests {
             summary: "Create file".to_string(),
             path: "/tmp/new.txt".to_string(),
             replacement_count: 0,
-            replace_all: false,
-            start_lines: Vec::new(),
-            added_lines: 2,
-            removed_lines: 0,
+            diff: String::new(),
         }
+    }
+
+    #[test]
+    fn edit_permission_preview_round_trip_with_diff_field() {
+        let mut preview = edit_preview();
+        preview.diff = "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n".to_string();
+
+        let value = serde_json::to_value(&preview).unwrap();
+        assert_eq!(
+            value["diff"],
+            json!("--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n")
+        );
+
+        let restored: EditPermissionPreview = serde_json::from_value(value).unwrap();
+        assert_eq!(restored, preview);
     }
 
     #[test]
