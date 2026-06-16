@@ -225,10 +225,7 @@ fn starts_heading_marker(rest: &str) -> bool {
     let marker_len = rest.chars().take_while(|ch| *ch == '#').count();
     marker_len > 0
         && marker_len <= 6
-        && rest[marker_len..]
-            .chars()
-            .next()
-            .is_none_or(char::is_whitespace)
+        && rest.chars().nth(marker_len).is_none_or(char::is_whitespace)
 }
 
 fn starts_unordered_list_marker(rest: &str) -> bool {

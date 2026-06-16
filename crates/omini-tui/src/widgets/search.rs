@@ -53,13 +53,13 @@ pub(super) fn render(
     } else {
         let truncated = truncate_display_width(&full_text, max_text_width);
         title.push(Span::raw(separator));
-        // 找到 "in " 的位置来拆分样式
-        let prefix_with_space = format!("{prefix} ");
-        let in_start = prefix_with_space.len();
-        if truncated.len() > in_start + 2 {
-            title.push(Span::raw(truncated[..in_start].to_string()));
+        // 在截断后的文本中安全查找 " in "，避免 byte-index panic
+        let in_marker = " in ";
+        if let Some(in_pos) = truncated.find(in_marker) {
+            // find 返回的永远是 char 边界，split_at 安全
+            title.push(Span::raw(truncated[..in_pos].to_string()));
             title.push(Span::styled("in", dim));
-            title.push(Span::raw(truncated[in_start + 2..].to_string()));
+            title.push(Span::raw(truncated[in_pos + in_marker.len()..].to_string()));
         } else {
             title.push(Span::raw(truncated));
         }

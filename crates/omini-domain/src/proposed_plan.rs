@@ -141,7 +141,7 @@ fn is_closing_fence(line: &str, fence: Fence) -> bool {
         return false;
     }
 
-    trimmed[len..].trim().is_empty()
+    trimmed.chars().skip(len).all(char::is_whitespace)
 }
 
 #[cfg(test)]
