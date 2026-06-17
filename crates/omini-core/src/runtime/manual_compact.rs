@@ -1,36 +1,22 @@
-use super::service::AgentRuntime;
 use super::usage::record_total_usage_and_notify;
 use super::*;
 use crate::error::RuntimeError;
+use crate::runtime::compact::{self, CompactRequestContext};
+use omini_domain::events::CompactTrigger;
+use omini_domain::tool::ToolDefinition;
+use omini_provider_api::LlmClient;
+use std::sync::Arc;
 use tracing::Instrument;
 
 impl AgentRuntime {
-    pub(super) async fn compact_context(&mut self, custom_instructions: Option<&str>) {
-        tracing::debug!(
-            session_id = ?self.session_id,
-            has_custom_instructions = custom_instructions.is_some(),
-            "manual compact requested"
-        );
-        if let Err(error) = self
-            .force_compact_current_session(custom_instructions)
-            .await
-        {
-            tracing::warn!(error = %error, "manual compact failed");
+    /// 处理手动 compact 请求：构建上下文、执行压缩、处理取消和结果。
+    pub(super) async fn handle_compact_context(&mut self, instructions: Option<String>) {
+        if self.messages.is_empty() {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
-                error.to_string(),
+                "没有可压缩的会话历史".to_string(),
             )))
             .await;
-        }
-    }
-
-    pub(crate) async fn force_compact_current_session(
-        &mut self,
-        custom_instructions: Option<&str>,
-    ) -> Result<(), RuntimeError> {
-        if self.messages.is_empty() {
-            return Err(RuntimeError::InvalidRequest {
-                message: "没有可压缩的会话历史".to_string(),
-            });
+            return;
         }
 
         let subagent_registry = self.capabilities.subagent_registry();
@@ -46,121 +32,199 @@ impl AgentRuntime {
             subagent_runner: Some(Arc::clone(&self.subagent_runner)),
             project: self.project.clone(),
         });
-        let (compact_tx, mut compact_rx) = mpsc::channel(16);
+        let tool_definitions = self.tool_registry_snapshot().definitions();
+        let cancelled = Arc::clone(&self.cancelled);
+        let cancel_notify = self.query_engine.cancel_notify_arc();
         let event_tx = self.event_tx.clone();
-        let persistence_tx = self.persistence_tx.clone();
-        let usage_state = Arc::clone(&self.session_usage);
-        let session_id = self.session_id.clone();
-        let span_session_id = session_id.clone();
-        let forwarder = tokio::spawn(
-            async move {
-                while let Some(event) = compact_rx.recv().await {
-                    match event {
-                        EngineToRuntimeEvent::CompactShrinkStarted(_)
-                        | EngineToRuntimeEvent::CompactShrinkFinished(_)
-                        | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
-                            tracing::debug!("manual compact shrink event received");
-                            // TODO(compact): 收缩操作暂不通知 UI，后续再决定是否记录内部状态。
+
+        let input = ManualCompactInput {
+            settings: &self.settings,
+            llm_client: &self.llm_client,
+            tool_definitions: &tool_definitions,
+            custom_instructions: instructions.as_deref(),
+            runtime_context,
+        };
+        let cancel_token = compact::CompactCancelToken::new(&cancelled, cancel_notify.as_ref());
+
+        let compact_fut = execute_manual_compact(
+            &mut self.messages,
+            input,
+            &event_tx,
+            &self.persistence_tx,
+            &self.session_usage,
+            &self.session_id,
+            cancel_token,
+        );
+        tokio::pin!(compact_fut);
+
+        loop {
+            tokio::select! {
+                result = &mut compact_fut => {
+                    match result {
+                        Ok(outcome) => {
+                            tracing::debug!(outcome = ?outcome, "manual compact finished");
+                            if compact_outcome_is_noop(&outcome) {
+                                let _ = event_tx.send(RuntimeToServerEvent::warning(
+                                    "当前会话历史还不需要压缩".to_string(),
+                                )).await;
+                            }
                         }
-                        EngineToRuntimeEvent::CompactSummaryStarted(event) => {
-                            tracing::debug!(
-                                trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
-                                agent_label = ?event.agent_label,
-                                "manual compact summary started"
-                            );
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::CompactSummaryStarted(event))
-                                .await;
+                        Err(error) => {
+                            tracing::warn!(error = %error, "manual compact failed");
+                            let _ = event_tx.send(RuntimeToServerEvent::Notification(
+                                Notification::warning(error.to_string()),
+                            )).await;
                         }
-                        EngineToRuntimeEvent::CompactSummaryDelta(event) => {
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::CompactSummaryDelta(event))
-                                .await;
+                    }
+                    break;
+                }
+                Some(req) = self.request_rx.recv() => {
+                    match req {
+                        ServerToRuntimeEvent::CancelRun => {
+                            tracing::debug!("manual compact cancellation requested");
+                            self.cancelled.store(true, Ordering::Relaxed);
+                            self.query_engine.cancel_current_run();
                         }
-                        EngineToRuntimeEvent::CompactSummaryFinished(event) => {
-                            tracing::debug!(
-                                trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
-                                agent_label = ?event.agent_label,
-                                summary_chars = event.summary.chars().count(),
-                                after_tokens = event.after_tokens,
-                                "manual compact summary finished"
-                            );
-                            persist_compact_summary_event(&session_id, &event, &persistence_tx)
-                                .await;
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::CompactSummaryFinished(event))
-                                .await;
+                        _ => {
+                            tracing::debug!("request ignored during manual compact");
                         }
-                        EngineToRuntimeEvent::CompactSummaryFailed(event) => {
-                            tracing::warn!(
-                                trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
-                                agent_label = ?event.agent_label,
-                                message = %event.message,
-                                "manual compact summary failed"
-                            );
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::CompactSummaryFailed(event))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
-                            tracing::debug!(
-                                prompt_tokens = usage.prompt_tokens,
-                                completion_tokens = usage.completion_tokens,
-                                cached_tokens = usage.cached_tokens,
-                                "manual compact usage recorded"
-                            );
-                            record_total_usage_and_notify(
-                                &session_id,
-                                usage,
-                                &event_tx,
-                                &persistence_tx,
-                                &usage_state,
-                            )
-                            .await;
-                        }
-                        _ => {}
                     }
                 }
             }
-            .instrument(tracing::debug_span!(
-                "compact",
-                session_id = %span_session_id,
-                compact_kind = "manual",
-                task_kind = "manual_compact_forwarder"
-            )),
-        );
-        let tool_definitions = self.tool_registry_snapshot().definitions();
-        let result = compact::force_compact(
-            &mut self.messages,
-            &self.settings,
-            &self.llm_client,
-            &tool_definitions,
-            custom_instructions,
-            Some(runtime_context),
-            &compact_tx,
-        )
-        .await;
-        drop(compact_tx);
-        let _ = forwarder.await;
-
-        match result {
-            Ok(outcome) => {
-                tracing::debug!(outcome = ?outcome, "manual compact finished");
-                if compact_outcome_is_noop(&outcome) {
-                    // 手动 compact 已经让 TUI 进入 working；无可压缩内容也要给一个终止事件。
-                    self.send_event(RuntimeToServerEvent::warning(
-                        "当前会话历史还不需要压缩".to_string(),
-                    ))
-                    .await;
-                }
-                Ok(())
-            }
-            Err(error) => Err(error),
         }
     }
+}
+
+pub(super) struct ManualCompactInput<'a> {
+    pub settings: &'a Settings,
+    pub llm_client: &'a LlmClient,
+    pub tool_definitions: &'a [ToolDefinition],
+    pub custom_instructions: Option<&'a str>,
+    pub runtime_context: Arc<ToolRuntimeContext>,
+}
+
+/// 执行手动 compact，不借用 `&mut AgentRuntime`，
+/// 使调用方可以在 `tokio::select!` 中同时访问 runtime 的其他字段。
+pub(super) async fn execute_manual_compact(
+    messages: &mut Vec<Message>,
+    input: ManualCompactInput<'_>,
+    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
+    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
+    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    session_id: &str,
+    cancel_token: compact::CompactCancelToken<'_>,
+) -> Result<crate::runtime::compact::CompactOutcome, RuntimeError> {
+    if messages.is_empty() {
+        return Err(RuntimeError::InvalidRequest {
+            message: "没有可压缩的会话历史".to_string(),
+        });
+    }
+
+    let (compact_tx, mut compact_rx) = mpsc::channel(16);
+    let forwarder_event_tx = event_tx.clone();
+    let forwarder_persistence_tx = persistence_tx.clone();
+    let forwarder_usage_state = Arc::clone(usage_state);
+    let forwarder_session_id = session_id.to_string();
+    let span_session_id = forwarder_session_id.clone();
+    let forwarder = tokio::spawn(
+        async move {
+            while let Some(event) = compact_rx.recv().await {
+                match event {
+                    EngineToRuntimeEvent::CompactShrinkStarted(_)
+                    | EngineToRuntimeEvent::CompactShrinkFinished(_)
+                    | EngineToRuntimeEvent::CompactShrinkFailed(_) => {
+                        tracing::debug!("manual compact shrink event received");
+                    }
+                    EngineToRuntimeEvent::CompactSummaryStarted(event) => {
+                        tracing::debug!(
+                            trigger = %event.trigger,
+                            compact_session_id = ?event.session_id,
+                            agent_label = ?event.agent_label,
+                            "manual compact summary started"
+                        );
+                        let _ = forwarder_event_tx
+                            .send(RuntimeToServerEvent::CompactSummaryStarted(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryDelta(event) => {
+                        let _ = forwarder_event_tx
+                            .send(RuntimeToServerEvent::CompactSummaryDelta(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFinished(event) => {
+                        tracing::debug!(
+                            trigger = %event.trigger,
+                            compact_session_id = ?event.session_id,
+                            agent_label = ?event.agent_label,
+                            summary_chars = event.summary.chars().count(),
+                            after_tokens = event.after_tokens,
+                            "manual compact summary finished"
+                        );
+                        persist_compact_summary_event(
+                            &forwarder_session_id,
+                            &event,
+                            &forwarder_persistence_tx,
+                        )
+                        .await;
+                        let _ = forwarder_event_tx
+                            .send(RuntimeToServerEvent::CompactSummaryFinished(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryFailed(event) => {
+                        tracing::warn!(
+                            trigger = %event.trigger,
+                            compact_session_id = ?event.session_id,
+                            agent_label = ?event.agent_label,
+                            message = %event.message,
+                            "manual compact summary failed"
+                        );
+                        let _ = forwarder_event_tx
+                            .send(RuntimeToServerEvent::CompactSummaryFailed(event))
+                            .await;
+                    }
+                    EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
+                        tracing::debug!(
+                            prompt_tokens = usage.prompt_tokens,
+                            completion_tokens = usage.completion_tokens,
+                            cached_tokens = usage.cached_tokens,
+                            "manual compact usage recorded"
+                        );
+                        record_total_usage_and_notify(
+                            &forwarder_session_id,
+                            usage,
+                            &forwarder_event_tx,
+                            &forwarder_persistence_tx,
+                            &forwarder_usage_state,
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        .instrument(tracing::debug_span!(
+            "compact",
+            session_id = %span_session_id,
+            compact_kind = "manual",
+            task_kind = "manual_compact_forwarder"
+        )),
+    );
+
+    let compact_ctx = CompactRequestContext {
+        settings: input.settings,
+        llm_client: input.llm_client,
+        tool_definitions: input.tool_definitions,
+        runtime_context: Some(input.runtime_context.as_ref()),
+        event_tx: &compact_tx,
+        trigger: CompactTrigger::Manual,
+        custom_instructions: input.custom_instructions,
+        cancel_token,
+    };
+    let result = compact::force_compact(messages, &compact_ctx).await;
+    drop(compact_tx);
+    let _ = forwarder.await;
+
+    result
 }
 
 pub(super) async fn persist_compact_summary_event(
@@ -177,7 +241,7 @@ pub(super) async fn persist_compact_summary_event(
     history::persist_compact_summary_ui_message(session_id, &summary, persistence_tx).await;
 }
 
-fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {
+pub(super) fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {
     outcome.before_tokens == outcome.after_tokens
         && outcome.before_messages == outcome.after_messages
 }

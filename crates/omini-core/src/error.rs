@@ -130,6 +130,8 @@ pub(crate) enum CompactError {
     Stream(#[source] StreamError),
     #[error("Compaction interrupted before a complete summary was returned.")]
     IncompleteResponse,
+    #[error("Compaction was cancelled by user.")]
+    Cancelled,
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ impl AgentRuntime {
                             }
                             ServerToRuntimeEvent::CompactContext { instructions } => {
                                 tracing::debug!(request_kind = "compact_context", has_instructions = instructions.is_some(), "runtime request received");
-                                self.compact_context(instructions.as_deref()).await;
+                                self.handle_compact_context(instructions).await;
                             }
                             ServerToRuntimeEvent::SetThinkingEffort(effort) => {
                                 tracing::debug!(request_kind = "set_thinking_effort", thinking_effort = ?effort, "runtime request received");
@@ -404,6 +404,7 @@ impl AgentRuntime {
         // 等待事件处理器在 engine_tx drop 后自然退出。
         let _ = processor.await;
 
+        let was_cancelled = self.cancelled.load(Ordering::Relaxed);
         self.cancelled.store(false, Ordering::Relaxed);
         self.send_event(RuntimeToServerEvent::RunFinished).await;
         tracing::info!(
@@ -413,9 +414,12 @@ impl AgentRuntime {
         );
 
         match self.persist_latest_proposed_plan().await {
-            Ok(Some(plan)) => {
+            Ok(Some(plan)) if !was_cancelled => {
                 self.send_event(RuntimeToServerEvent::PlanSubmitted(plan))
                     .await;
+            }
+            Ok(Some(_plan)) => {
+                tracing::info!("PlanSubmitted suppressed: run was cancelled");
             }
             Ok(None) => {}
             Err(error) => {

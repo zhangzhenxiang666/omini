@@ -240,9 +240,8 @@ mod tests {
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::display::{HistoryItem, UserDraft};
     use omini_domain::events::{
-        CompactSummaryFinishedEvent, CompactTrigger, NotificationKind, PermissionPreview,
-        PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
-        ToolPauseResponse,
+        CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview, PlanApprovalAction,
+        PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
     };
     use omini_domain::message::{ContentBlock, Role};
     use omini_domain::usage::Usage;
@@ -1010,39 +1009,6 @@ mod tests {
             }
         }
         assert!(saw_summary_event);
-    }
-
-    #[tokio::test]
-    async fn manual_compact_noop_emits_terminal_warning() {
-        ensure_test_persistence().await;
-
-        let root = unique_temp_root("compact-noop-warning");
-        let cwd = root.join("workspace");
-        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
-        let config = test_user_config();
-        let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
-            .expect("failed to create project dir");
-        let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
-
-        runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let _ = drain_events(&mut event_rx);
-
-        runtime
-            .force_compact_current_session(None)
-            .await
-            .expect("noop compact should succeed");
-
-        let events = drain_events(&mut event_rx);
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                RuntimeToServerEvent::Notification(notification)
-                    if notification.kind == NotificationKind::Warn
-                        && notification.message.contains("还不需要压缩")
-            )
-        }));
     }
 
     #[tokio::test]

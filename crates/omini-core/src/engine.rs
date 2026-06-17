@@ -7,15 +7,12 @@ use crate::tools::{
 };
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
-use omini_domain::events::{ActiveProfile, ToolPauseResponse};
+use omini_domain::events::{ActiveProfile, CompactTrigger, ToolPauseResponse};
 use omini_domain::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
-use omini_provider_api::{
-    ApiEvent, ApiRequest, ApiStream, FinishReason, LlmClient, RequestError, StreamError,
-};
+use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, LlmClient, StreamError};
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -238,6 +235,10 @@ impl QueryEngine {
         self.tool_pause_resolver.clone()
     }
 
+    pub(crate) fn cancel_notify_arc(&self) -> Arc<Notify> {
+        Arc::clone(&self.cancel_notify)
+    }
+
     /// 执行一次完整的查询（可能包含多轮 LLM 调用 + 工具执行）。
     ///
     /// # 参数
@@ -316,24 +317,26 @@ impl QueryEngine {
                     .expect("auto compact state mutex poisoned");
                 std::mem::take(&mut *state)
             };
-            let _ = compact::auto_compact_if_needed(
-                ctx.messages,
-                &ctx.settings,
-                &ctx.llm_client,
-                &tool_definitions,
-                ctx.runtime_context.clone(),
-                &event_tx,
-                &mut compact_state,
-            )
-            .instrument(tracing::debug_span!(
-                "compact",
-                session_id,
-                run_id,
-                session_type,
-                turn_index,
-                compact_kind = "auto"
-            ))
-            .await;
+            let compact_ctx = compact::CompactRequestContext {
+                settings: &ctx.settings,
+                llm_client: &ctx.llm_client,
+                tool_definitions: &tool_definitions,
+                runtime_context: ctx.runtime_context.as_deref(),
+                event_tx: &event_tx,
+                trigger: CompactTrigger::Auto,
+                custom_instructions: None,
+                cancel_token: compact::CompactCancelToken::new(&cancelled, &self.cancel_notify),
+            };
+            let _ = compact::auto_compact_if_needed(ctx.messages, &compact_ctx, &mut compact_state)
+                .instrument(tracing::debug_span!(
+                    "compact",
+                    session_id,
+                    run_id,
+                    session_type,
+                    turn_index,
+                    compact_kind = "auto"
+                ))
+                .await;
             {
                 let mut state = self
                     .auto_compact_state
@@ -381,10 +384,13 @@ impl QueryEngine {
                 message_count = ctx.messages.len(),
                 "llm request started"
             );
-            let mut stream = match self
-                .invoke_or_cancel(ctx.llm_client.invoke(request), &cancelled)
-                .instrument(llm_span)
-                .await
+            let mut stream = match crate::util::cancel::invoke_or_cancel(
+                ctx.llm_client.invoke(request),
+                &cancelled,
+                &self.cancel_notify,
+            )
+            .instrument(llm_span)
+            .await
             {
                 Some(Ok(s)) => {
                     tracing::debug!(turn_index, "llm request accepted stream");
@@ -703,29 +709,6 @@ impl QueryEngine {
             turns,
             finish_reason,
             had_tool_use,
-        }
-    }
-
-    async fn invoke_or_cancel(
-        &self,
-        invoke: impl Future<Output = Result<ApiStream, RequestError>>,
-        cancelled: &Arc<AtomicBool>,
-    ) -> Option<Result<ApiStream, RequestError>> {
-        tokio::pin!(invoke);
-
-        loop {
-            if cancelled.load(Ordering::Relaxed) {
-                return None;
-            }
-
-            tokio::select! {
-                result = &mut invoke => return Some(result),
-                _ = self.cancel_notify.notified() => {
-                    if cancelled.load(Ordering::Relaxed) {
-                        return None;
-                    }
-                }
-            }
         }
     }
 
