@@ -370,6 +370,7 @@ impl UiState {
                     .find_map(UiMessage::as_message_mut)
                 {
                     last.content.push(ContentBlock::ToolResult(tr));
+                    self.invalidate_completed_cache();
                 } else {
                     let mut msg = Message::new(Role::Assistant, Vec::new());
                     msg.content.push(ContentBlock::ToolResult(tr));
@@ -527,6 +528,7 @@ impl UiState {
             }
             RuntimeToUiEvent::ThinkingDisplayChanged { show } => {
                 self.show_thinking_blocks = show;
+                self.invalidate_completed_cache();
             }
             RuntimeToUiEvent::UsageChanged(usage) => {
                 self.status_bar.current_context_tokens = usage.current_context_tokens;
@@ -582,6 +584,7 @@ impl UiState {
                     self.messages
                         .push(UiMessage::CompactSummary { text: summary });
                 }
+                self.invalidate_completed_cache();
                 self.status_bar.current_context_tokens = event.after_tokens as i64;
                 if trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
@@ -740,6 +743,7 @@ impl UiState {
         }
         self.messages = UiMessage::from_history_items(messages);
         self.pending_client_echoes.clear();
+        self.invalidate_completed_cache();
         self.status_bar.current_context_tokens = usage.current_context_tokens;
         self.status_bar.total_tokens = usage.total_tokens;
         self.status_bar.total_cached_tokens = usage.total_cached_tokens;

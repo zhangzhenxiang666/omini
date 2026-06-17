@@ -209,34 +209,3 @@ pub(super) fn register_and_highlight_lines(
         }
     }
 }
-
-pub(super) fn apply_text_selection_highlight(
-    state: &UiState,
-    lines: &mut [Line<'static>],
-    area: Rect,
-    scroll_y: usize,
-    visible_height: usize,
-) {
-    let highlight = Style::default()
-        .fg(Color::Rgb(40, 44, 52))
-        .bg(Color::Rgb(180, 210, 255))
-        .add_modifier(Modifier::BOLD);
-
-    for content_row in scroll_y
-        ..state
-            .selectable_message_lines
-            .len()
-            .min(scroll_y.saturating_add(visible_height))
-    {
-        let Some(text) = state.selectable_message_lines.get(content_row) else {
-            continue;
-        };
-        let screen_row = area.y + (content_row - scroll_y) as u16;
-        if let (Some((start_col, end_col)), Some(line)) = (
-            selected_cols_for_screen_line(state, screen_row, text),
-            lines.get_mut(content_row),
-        ) {
-            *line = highlighted_line(text, start_col, end_col, highlight);
-        }
-    }
-}

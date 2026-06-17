@@ -22,6 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+const STREAMING_TICK_RATE: Duration = Duration::from_millis(100);
+const IDLE_TICK_RATE: Duration = Duration::from_millis(50);
+
 fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
     enable_raw_mode()?;
     execute!(stderr(), EnterAlternateScreen)?;
@@ -139,7 +142,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
 
     terminal.draw(|frame| render::render(&mut state, frame))?;
 
-    let tick_rate = Duration::from_millis(50);
+    let mut tick_rate = IDLE_TICK_RATE;
     let mut last_tick = tokio::time::Instant::now();
 
     let result = loop {
@@ -170,6 +173,11 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
                 }
                 last_tick = tokio::time::Instant::now();
                 terminal.draw(|frame| render::render(&mut state, frame))?;
+                tick_rate = if state.pending_assistant.is_some() {
+                    STREAMING_TICK_RATE
+                } else {
+                    IDLE_TICK_RATE
+                };
             }
         }
     };

@@ -1,9 +1,10 @@
 use super::{
-    INPUT_BG, apply_text_selection_highlight, build_assistant_text_lines, build_llm_summary_lines,
-    build_proposed_plan_lines, line_to_plain_text, line_width, render_subagent_tool,
-    styled_wrapped_display, styled_wrapped_text, truncate_str,
+    INPUT_BG, build_assistant_text_lines, build_llm_summary_lines, build_proposed_plan_lines,
+    line_to_plain_text, line_width, render_subagent_tool, styled_wrapped_display,
+    styled_wrapped_text, truncate_str,
 };
-use crate::state::{UiMessage, UiState, format_run_duration};
+use crate::selection::highlighted_line;
+use crate::state::{SelectionPoint, UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
     build_bordered_lines, build_thinking_lines, render_tool, tool_error_display_text,
@@ -12,9 +13,9 @@ use crate::widgets::{
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::ContentBlock;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::Widget;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
@@ -145,9 +146,280 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
     let content_width = area.width as usize;
     let visible_height = area.height as usize;
+
+    // 1. completed 段：三级缓存验证（全量 / 增量追加 / 命中）
+
+    let dims_match = state.render_cache.completed_content_width == content_width
+        && state.render_cache.completed_show_thinking == state.show_thinking_blocks;
+
+    if state.render_cache.completed_message_count == 0 || !dims_match {
+        // 缓存完全失效或维度变化 → 全量重建
+        let (lines, sel) = render_completed_messages(state, content_width);
+        state.render_cache.completed_lines = lines;
+        state.render_cache.completed_selectable = sel;
+        state.render_cache.completed_message_count = state.messages.len();
+        state.render_cache.completed_content_width = content_width;
+        state.render_cache.completed_show_thinking = state.show_thinking_blocks;
+    } else if state.render_cache.completed_message_count < state.messages.len() {
+        // 有新消息追加 → 增量追加
+        let start_idx = state.render_cache.completed_message_count;
+        let (new_lines, new_sel) = render_message_range(state, content_width, start_idx);
+        if !new_lines.is_empty() && !state.render_cache.completed_lines.is_empty() {
+            state.render_cache.completed_lines.push(Line::from(""));
+            state.render_cache.completed_selectable.push(String::new());
+        }
+        state.render_cache.completed_lines.extend(new_lines);
+        state.render_cache.completed_selectable.extend(new_sel);
+        state.render_cache.completed_message_count = state.messages.len();
+    }
+    // else: 缓存命中，无需操作
+
+    // 2. pending / plan 段：每帧直接重算（量小，不值得缓存）
+
+    let pending_lines = state
+        .pending_assistant
+        .as_ref()
+        .map(|_| render_pending_assistant_lines(state, content_width))
+        .unwrap_or_default();
+
+    let plan_lines = state
+        .pending_proposed_plan
+        .as_ref()
+        .filter(|plan| !plan.trim().is_empty())
+        .map(|plan| render_pending_plan_lines(plan, content_width))
+        .unwrap_or_default();
+
+    // 3. 计算分段布局
+
+    let n_completed = state.render_cache.completed_lines.len();
+    let n_pending = pending_lines.0.len();
+    let n_plan = plan_lines.0.len();
+    let has_sep1 = n_pending > 0 && n_completed > 0;
+    let has_sep2 = n_plan > 0 && (n_completed > 0 || n_pending > 0);
+    let pending_offset = n_completed + has_sep1 as usize;
+    let plan_offset = pending_offset + n_pending + has_sep2 as usize;
+    let total_lines = plan_offset + n_plan;
+
+    // 4. 滚动计算
+
+    let prev_total_lines = state.total_lines;
+    state.total_lines = total_lines;
+    if total_lines == 0 {
+        return;
+    }
+
+    if !state.auto_scroll {
+        let delta = total_lines.saturating_sub(prev_total_lines);
+        state.scroll_offset = state.scroll_offset.saturating_add(delta);
+    }
+
+    let max_scroll = total_lines.saturating_sub(visible_height);
+    let capped_offset = state.scroll_offset.min(max_scroll);
+    state.scroll_offset = capped_offset;
+    let scroll_y = max_scroll.saturating_sub(capped_offset);
+    state.message_scroll_y = scroll_y;
+
+    // 5. 构建 selectable_message_lines
+
+    state.selectable_message_lines.clear();
+    state
+        .selectable_message_lines
+        .extend_from_slice(&state.render_cache.completed_selectable);
+    if has_sep1 {
+        state.selectable_message_lines.push(String::new());
+    }
+    state
+        .selectable_message_lines
+        .extend_from_slice(&pending_lines.1);
+    if has_sep2 {
+        state.selectable_message_lines.push(String::new());
+    }
+    state
+        .selectable_message_lines
+        .extend_from_slice(&plan_lines.1);
+
+    // 6. 注册可选中文本行（用于鼠标拖选反查）
+
+    let visible_selectable_lines = state
+        .selectable_message_lines
+        .iter()
+        .skip(scroll_y)
+        .take(visible_height)
+        .cloned()
+        .collect::<Vec<_>>();
+    for (visible_row, text) in visible_selectable_lines.into_iter().enumerate() {
+        state.register_selectable_screen_line(
+            area.y + visible_row as u16,
+            area.x,
+            area.width,
+            text,
+        );
+    }
+
+    // 7. 逐段直接渲染到 buffer（零拷贝）
+
+    // 预计算选区（避免渲染循环中借用 UiState）
+    let normalized_sel = state.text_selection.as_ref().and_then(|sel| {
+        let (start, end) = if sel.start <= sel.end {
+            (sel.start, sel.end)
+        } else {
+            (sel.end, sel.start)
+        };
+        (start != end).then_some((start, end))
+    });
+
+    let render_ctx = SectionRenderContext {
+        scroll_y,
+        visible_height,
+        area,
+        selectable_message_lines: &state.selectable_message_lines,
+        normalized_sel,
+        highlight: Style::default()
+            .fg(Color::Rgb(40, 44, 52))
+            .bg(Color::Rgb(180, 210, 255))
+            .add_modifier(Modifier::BOLD),
+        user_bg: INPUT_BG,
+        user_line_bg: Style::default().bg(INPUT_BG),
+    };
+
+    let buf = frame.buffer_mut();
+
+    render_cached_section(&state.render_cache.completed_lines, 0, &render_ctx, buf);
+
+    if has_sep1 {
+        render_blank_separator(n_completed, scroll_y, visible_height, area, buf);
+    }
+
+    render_cached_section(&pending_lines.0, pending_offset, &render_ctx, buf);
+
+    if has_sep2 {
+        render_blank_separator(
+            pending_offset + n_pending,
+            scroll_y,
+            visible_height,
+            area,
+            buf,
+        );
+    }
+
+    render_cached_section(&plan_lines.0, plan_offset, &render_ctx, buf);
+}
+
+/// 渲染缓存段所需的上下文参数。
+struct SectionRenderContext<'a> {
+    scroll_y: usize,
+    visible_height: usize,
+    area: Rect,
+    selectable_message_lines: &'a [String],
+    normalized_sel: Option<(SelectionPoint, SelectionPoint)>,
+    highlight: Style,
+    user_bg: Color,
+    user_line_bg: Style,
+}
+
+/// 将一个缓存段直接渲染到 buffer，不拷贝 `Line`。
+/// 仅在有活跃文本选择时，对被选中的行构造高亮覆盖版本。
+fn render_cached_section(
+    lines: &[Line<'static>],
+    section_start: usize,
+    ctx: &SectionRenderContext<'_>,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    for (local_idx, line) in lines.iter().enumerate() {
+        let abs_idx = section_start + local_idx;
+        if abs_idx < ctx.scroll_y {
+            continue;
+        }
+        let visible_row = abs_idx - ctx.scroll_y;
+        if visible_row >= ctx.visible_height {
+            break;
+        }
+        let row_area = Rect::new(
+            ctx.area.x,
+            ctx.area.y + visible_row as u16,
+            ctx.area.width,
+            1,
+        );
+
+        // 有活跃选择时，检查当前行是否被选中并渲染高亮覆盖
+        if let Some((start, end)) = ctx.normalized_sel
+            && let Some(text) = ctx.selectable_message_lines.get(abs_idx)
+            && let Some((start_col, end_col)) =
+                selected_cols_for_row(start, end, ctx.area.y + visible_row as u16, text)
+        {
+            let hl = highlighted_line(text, start_col, end_col, ctx.highlight);
+            hl.render(row_area, buf);
+            continue;
+        }
+
+        line.render(row_area, buf);
+
+        if line.style.bg == Some(ctx.user_bg) {
+            buf.set_style(row_area, ctx.user_line_bg);
+        }
+    }
+}
+
+/// 内联版选区列范围计算，仅需预计算的选区端点，不依赖 UiState。
+fn selected_cols_for_row(
+    start: SelectionPoint,
+    end: SelectionPoint,
+    screen_row: u16,
+    text: &str,
+) -> Option<(usize, usize)> {
+    let row = screen_row as usize;
+    if row < start.row || row > end.row {
+        return None;
+    }
+    let start_col = if row == start.row { start.col } else { 0 };
+    let end_col = if row == end.row {
+        end.col.saturating_add(1)
+    } else {
+        UnicodeWidthStr::width(text)
+    };
+    (start_col < end_col).then_some((start_col, end_col))
+}
+
+/// 渲染分段之间的空行分隔符。
+fn render_blank_separator(
+    abs_idx: usize,
+    scroll_y: usize,
+    visible_height: usize,
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    if abs_idx < scroll_y {
+        return;
+    }
+    let visible_row = abs_idx - scroll_y;
+    if visible_row >= visible_height {
+        return;
+    }
+    let row_area = Rect::new(area.x, area.y + visible_row as u16, area.width, 1);
+    Line::from("").render(row_area, buf);
+}
+
+/// 渲染已完成的消息列表（不含 pending_assistant 和 pending_proposed_plan）。
+fn render_completed_messages(
+    state: &UiState,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    render_message_range(state, content_width, 0)
+}
+
+/// 渲染 `messages[start_idx..]`，返回该范围的渲染结果（不含前导分隔符）。
+///
+/// 用于增量追加缓存：当只有新消息追加时，只渲染 `start_idx` 之后的部分，
+/// 然后将结果追加到已有缓存。
+fn render_message_range(
+    state: &UiState,
+    content_width: usize,
+    start_idx: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
 
+    // 全量扫描构建 tool_result_map（成本低，O(n)）
     let rendered_messages: Vec<&omini_domain::message::Message> = state
         .messages
         .iter()
@@ -165,145 +437,192 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
             }
         }
     }
+
     let mut consumed: HashSet<(usize, usize)> = HashSet::new();
 
-    let mut rendered_msg_idx = 0;
-    for ui_message in &state.messages {
-        if let UiMessage::RunDivider { elapsed } = ui_message {
-            let block_lines = build_run_divider_line(*elapsed, content_width);
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.extend(block_lines);
-            }
-            continue;
-        }
+    // 计算 rendered_msg_offset：messages[..start_idx] 中 UiMessage::Message 变体的数量
+    let rendered_msg_offset = state.messages[..start_idx]
+        .iter()
+        .filter(|m| matches!(m, UiMessage::Message(_)))
+        .count();
 
-        if let UiMessage::Display(display) = ui_message {
-            let block_lines = build_display_message_lines(display, content_width);
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.extend(block_lines);
-            }
-            continue;
-        }
-
-        if let UiMessage::ProposedPlan { text } = ui_message {
-            let block_lines = build_proposed_plan_lines(text, content_width);
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.extend(block_lines);
-            }
-            continue;
-        }
-
-        if let UiMessage::CompactSummary { text } = ui_message {
-            let block_lines = build_llm_summary_lines(text, content_width);
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.extend(block_lines);
-            }
-            continue;
-        }
-
-        let UiMessage::Message(message) = ui_message else {
-            let block_lines = match ui_message {
-                UiMessage::Notification(notification) => {
-                    build_notification_lines(notification, content_width)
-                }
-                UiMessage::RunDivider { .. } => unreachable!(),
-                UiMessage::Display(_) => unreachable!(),
-                UiMessage::ProposedPlan { .. } => unreachable!(),
-                UiMessage::CompactSummary { .. } => unreachable!(),
-                UiMessage::Message(_) => unreachable!(),
-            };
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.extend(block_lines);
-            }
-            continue;
-        };
-
-        let msg_idx = rendered_msg_idx;
-        rendered_msg_idx += 1;
-
-        for (block_idx, block) in message.content.iter().enumerate() {
-            if let ContentBlock::ToolResult(_) = block
-                && consumed.contains(&(msg_idx, block_idx))
-            {
-                continue;
-            }
-
-            let mut block_lines: Vec<Line> = Vec::new();
-            match block {
-                ContentBlock::Text(tb) if message.role == omini_domain::message::Role::User => {
-                    let user_bg = INPUT_BG;
-                    let bg_style = Style::default().bg(user_bg);
-                    block_lines.push(
-                        Line::from(Span::styled(" ".repeat(content_width), bg_style))
-                            .style(bg_style),
-                    );
-
-                    let wrapped = styled_wrapped_text(
-                        tb,
-                        content_width.saturating_sub(2),
-                        Style::default().bg(user_bg),
-                    );
-                    if wrapped.is_empty() {
-                        let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
-                        block_lines.push(Line::from(Span::styled(text, bg_style)).style(bg_style));
-                    } else {
-                        for (idx, wl) in wrapped.into_iter().enumerate() {
-                            let prefix = if idx == 0 { "❯ " } else { "  " };
-                            let text_width = UnicodeWidthStr::width(prefix) + line_width(&wl);
-                            let remaining = content_width.saturating_sub(text_width);
-                            let mut spans = vec![Span::styled(prefix, bg_style)];
-                            spans.extend(wl.spans);
-                            spans.push(Span::styled(" ".repeat(remaining), bg_style));
-                            block_lines.push(Line::from(spans).style(bg_style));
-                        }
+    // 预填充 consumed：扫描 messages[..start_idx] 中的 ToolUse block，
+    // 将其对应的 ToolResult 位置加入 consumed（避免跨消息引用导致重复渲染）
+    let mut pre_rendered_idx = 0;
+    for ui_message in &state.messages[..start_idx] {
+        if let UiMessage::Message(message) = ui_message {
+            let msg_idx = pre_rendered_idx;
+            pre_rendered_idx += 1;
+            for (block_idx, block) in message.content.iter().enumerate() {
+                if let ContentBlock::ToolUse(tu) = block
+                    && let Some(positions) = tool_result_map.get(&tu.id)
+                {
+                    for pos in positions {
+                        consumed.insert(*pos);
                     }
+                }
+                // 同时标记本消息内已被引用的 ToolResult
+                if let ContentBlock::ToolResult(_) = block {
+                    consumed.insert((msg_idx, block_idx));
+                }
+            }
+        }
+    }
 
-                    block_lines.push(
-                        Line::from(Span::styled(" ".repeat(content_width), bg_style))
-                            .style(bg_style),
-                    );
+    // 渲染 messages[start_idx..]
+    let mut rendered_msg_idx = rendered_msg_offset;
+    for ui_message in &state.messages[start_idx..] {
+        let (msg_lines, msg_sel) = render_single_ui_message(
+            ui_message,
+            &mut rendered_msg_idx,
+            &rendered_messages,
+            &tool_result_map,
+            &mut consumed,
+            state,
+            content_width,
+        );
+        if !msg_lines.is_empty() {
+            if !all_lines.is_empty() {
+                all_lines.push(Line::from(""));
+                selectable_lines.push(String::new());
+            }
+            all_lines.extend(msg_lines);
+            selectable_lines.extend(msg_sel);
+        }
+    }
+
+    (all_lines, selectable_lines)
+}
+
+/// 渲染单条 `UiMessage`，返回 `(lines, selectable)`。
+///
+/// 不负责消息间分隔符（由 `render_message_range` 负责），
+/// 只返回该消息自身产出的行（内部 block 间有分隔空行）。
+fn render_single_ui_message(
+    ui_message: &UiMessage,
+    rendered_msg_idx: &mut usize,
+    rendered_messages: &[&omini_domain::message::Message],
+    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    consumed: &mut HashSet<(usize, usize)>,
+    state: &UiState,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let mut all_lines: Vec<Line> = Vec::new();
+    let mut selectable_lines: Vec<String> = Vec::new();
+
+    match ui_message {
+        UiMessage::RunDivider { elapsed } => {
+            let block_lines = build_run_divider_line(*elapsed, content_width);
+            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+            all_lines.extend(block_lines);
+        }
+        UiMessage::Display(display) => {
+            let block_lines = build_display_message_lines(display, content_width);
+            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+            all_lines.extend(block_lines);
+        }
+        UiMessage::ProposedPlan { text } => {
+            let block_lines = build_proposed_plan_lines(text, content_width);
+            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+            all_lines.extend(block_lines);
+        }
+        UiMessage::CompactSummary { text } => {
+            let block_lines = build_llm_summary_lines(text, content_width);
+            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+            all_lines.extend(block_lines);
+        }
+        UiMessage::Notification(notification) => {
+            let block_lines = build_notification_lines(notification, content_width);
+            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+            all_lines.extend(block_lines);
+        }
+        UiMessage::Message(message) => {
+            let msg_idx = *rendered_msg_idx;
+            *rendered_msg_idx += 1;
+
+            for (block_idx, block) in message.content.iter().enumerate() {
+                if let ContentBlock::ToolResult(_) = block
+                    && consumed.contains(&(msg_idx, block_idx))
+                {
+                    continue;
                 }
-                ContentBlock::Text(tb) => {
-                    let mut lines = build_assistant_text_lines(&tb.text, content_width);
-                    block_lines.append(&mut lines);
-                }
-                ContentBlock::Image(_) => {}
-                ContentBlock::ToolUse(tu) => {
-                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                    let tool_pause_active =
-                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                    if tu.name == "subagent" {
-                        let node = state
-                            .subagents_by_tool_use
-                            .get(&tu.id)
-                            .and_then(|session_id| state.subagents.get(session_id));
-                        let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
-                            positions.first().and_then(|(mi, bi)| {
+
+                let mut block_lines: Vec<Line> = Vec::new();
+                match block {
+                    ContentBlock::Text(tb) if message.role == omini_domain::message::Role::User => {
+                        let user_bg = INPUT_BG;
+                        let bg_style = Style::default().bg(user_bg);
+                        block_lines.push(
+                            Line::from(Span::styled(" ".repeat(content_width), bg_style))
+                                .style(bg_style),
+                        );
+
+                        let wrapped = styled_wrapped_text(
+                            tb,
+                            content_width.saturating_sub(2),
+                            Style::default().bg(user_bg),
+                        );
+                        if wrapped.is_empty() {
+                            let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
+                            block_lines
+                                .push(Line::from(Span::styled(text, bg_style)).style(bg_style));
+                        } else {
+                            for (idx, wl) in wrapped.into_iter().enumerate() {
+                                let prefix = if idx == 0 { "❯ " } else { "  " };
+                                let text_width = UnicodeWidthStr::width(prefix) + line_width(&wl);
+                                let remaining = content_width.saturating_sub(text_width);
+                                let mut spans = vec![Span::styled(prefix, bg_style)];
+                                spans.extend(wl.spans);
+                                spans.push(Span::styled(" ".repeat(remaining), bg_style));
+                                block_lines.push(Line::from(spans).style(bg_style));
+                            }
+                        }
+
+                        block_lines.push(
+                            Line::from(Span::styled(" ".repeat(content_width), bg_style))
+                                .style(bg_style),
+                        );
+                    }
+                    ContentBlock::Text(tb) => {
+                        let mut lines = build_assistant_text_lines(&tb.text, content_width);
+                        block_lines.append(&mut lines);
+                    }
+                    ContentBlock::Image(_) => {}
+                    ContentBlock::ToolUse(tu) => {
+                        let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                        let tool_pause_active =
+                            tool_pause.map(|pause| state.is_active_tool_pause(pause));
+                        if tu.name == "subagent" {
+                            let node = state
+                                .subagents_by_tool_use
+                                .get(&tu.id)
+                                .and_then(|session_id| state.subagents.get(session_id));
+                            let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
+                                positions.first().and_then(|(mi, bi)| {
+                                    if let ContentBlock::ToolResult(tr) =
+                                        &rendered_messages[*mi].content[*bi]
+                                    {
+                                        Some(tr.clone())
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                            block_lines.extend(render_subagent_tool(
+                                tu,
+                                tool_result.as_ref(),
+                                node,
+                                &state.pending_tool_pauses,
+                                content_width,
+                                Some(state.status_bar.cwd.as_path()),
+                            ));
+                            if let Some(positions) = tool_result_map.get(&tu.id) {
+                                for pos in positions {
+                                    consumed.insert(*pos);
+                                }
+                            }
+                        } else if let Some(positions) = tool_result_map.get(&tu.id) {
+                            let tool_result = positions.first().and_then(|(mi, bi)| {
                                 if let ContentBlock::ToolResult(tr) =
                                     &rendered_messages[*mi].content[*bi]
                                 {
@@ -311,278 +630,210 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
                                 } else {
                                     None
                                 }
-                            })
-                        });
-                        block_lines.extend(render_subagent_tool(
-                            tu,
-                            tool_result.as_ref(),
-                            node,
-                            &state.pending_tool_pauses,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        ));
-                        if let Some(positions) = tool_result_map.get(&tu.id) {
+                            });
+
+                            let tool_lines = render_tool(
+                                tu,
+                                tool_result.as_ref(),
+                                tool_pause,
+                                tool_pause_active,
+                                content_width,
+                                Some(state.status_bar.cwd.as_path()),
+                            );
+                            block_lines.extend(tool_lines);
+
                             for pos in positions {
                                 consumed.insert(*pos);
                             }
+                        } else {
+                            // 工具结果尚未返回
+                            let tool_lines = render_tool(
+                                tu,
+                                None,
+                                tool_pause,
+                                tool_pause_active,
+                                content_width,
+                                Some(state.status_bar.cwd.as_path()),
+                            );
+                            block_lines.extend(tool_lines);
                         }
-                    } else if let Some(positions) = tool_result_map.get(&tu.id) {
-                        let tool_result = positions.first().and_then(|(mi, bi)| {
-                            if let ContentBlock::ToolResult(tr) =
-                                &rendered_messages[*mi].content[*bi]
-                            {
-                                Some(tr.clone())
-                            } else {
-                                None
-                            }
-                        });
-
-                        let tool_lines = render_tool(
-                            tu,
-                            tool_result.as_ref(),
-                            tool_pause,
-                            tool_pause_active,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        );
-                        block_lines.extend(tool_lines);
-
-                        for pos in positions {
-                            consumed.insert(*pos);
+                    }
+                    ContentBlock::Thinking(tb) => {
+                        if !state.show_thinking_blocks {
+                            continue;
                         }
-                    } else {
-                        // 工具结果尚未返回
-                        let tool_lines = render_tool(
-                            tu,
-                            None,
-                            tool_pause,
-                            tool_pause_active,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        );
-                        block_lines.extend(tool_lines);
+                        let mut lines = build_thinking_lines(&tb.thinking, content_width);
+                        block_lines.append(&mut lines);
+                    }
+                    ContentBlock::ToolResult(tr) => {
+                        let color = if tr.is_error {
+                            Color::Rgb(255, 100, 100)
+                        } else {
+                            Color::Rgb(100, 200, 130)
+                        };
+                        let error_content;
+                        let content_ref = if tr.is_error {
+                            error_content = tool_error_display_text(&tr.content);
+                            &error_content
+                        } else {
+                            &tr.content
+                        };
+                        let mut lines =
+                            build_bordered_lines(content_ref, content_width, color, false, None);
+                        block_lines.append(&mut lines);
                     }
                 }
-                ContentBlock::Thinking(tb) => {
-                    if !state.show_thinking_blocks {
-                        continue;
-                    }
-                    let mut lines = build_thinking_lines(&tb.thinking, content_width);
-                    block_lines.append(&mut lines);
-                }
-                ContentBlock::ToolResult(tr) => {
-                    let color = if tr.is_error {
-                        Color::Rgb(255, 100, 100)
-                    } else {
-                        Color::Rgb(100, 200, 130)
-                    };
-                    let content = if tr.is_error {
-                        tool_error_display_text(&tr.content)
-                    } else {
-                        tr.content.clone()
-                    };
-                    let mut lines =
-                        build_bordered_lines(&content, content_width, color, false, None);
-                    block_lines.append(&mut lines);
-                }
-            }
 
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
+                if !block_lines.is_empty() {
+                    if !all_lines.is_empty() {
+                        all_lines.push(Line::from(""));
+                        selectable_lines.push(String::new());
+                    }
+                    selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+                    all_lines.append(&mut block_lines);
                 }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.append(&mut block_lines);
             }
         }
     }
 
-    // ===== 渲染 pending_assistant（流式增量内容） =====
-    if let Some(pending) = &state.pending_assistant {
-        // 先构建 pending_assistant 内部的 tool_result_map
-        let mut tr_indices: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        for (bi, block) in pending.content.iter().enumerate() {
-            if let ContentBlock::ToolResult(tr) = block {
-                tr_indices.entry(tr.tool_use_id.clone()).or_insert(bi);
-            }
+    (all_lines, selectable_lines)
+}
+
+/// 渲染 pending_assistant（流式增量内容）。
+fn render_pending_assistant_lines(
+    state: &UiState,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let mut all_lines: Vec<Line> = Vec::new();
+    let mut selectable_lines: Vec<String> = Vec::new();
+
+    let Some(pending) = &state.pending_assistant else {
+        return (all_lines, selectable_lines);
+    };
+
+    // 先构建 pending_assistant 内部的 tool_result_map
+    let mut tr_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (bi, block) in pending.content.iter().enumerate() {
+        if let ContentBlock::ToolResult(tr) = block {
+            tr_indices.entry(tr.tool_use_id.clone()).or_insert(bi);
         }
-        let mut consumed_tr: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    }
+    let mut consumed_tr: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
-        for (block_idx, block) in pending.content.iter().enumerate() {
-            if let ContentBlock::ToolResult(_) = block
-                && consumed_tr.contains(&block_idx)
-            {
-                continue;
+    for (block_idx, block) in pending.content.iter().enumerate() {
+        if let ContentBlock::ToolResult(_) = block
+            && consumed_tr.contains(&block_idx)
+        {
+            continue;
+        }
+
+        let mut block_lines: Vec<Line> = Vec::new();
+        match block {
+            ContentBlock::Text(tb) => {
+                let mut lines = build_assistant_text_lines(&tb.text, content_width);
+                block_lines.append(&mut lines);
             }
-
-            let mut block_lines: Vec<Line> = Vec::new();
-            match block {
-                ContentBlock::Text(tb) => {
-                    let mut lines = build_assistant_text_lines(&tb.text, content_width);
-                    block_lines.append(&mut lines);
+            ContentBlock::Image(_) => {}
+            ContentBlock::Thinking(tb) => {
+                if !state.show_thinking_blocks {
+                    continue;
                 }
-                ContentBlock::Image(_) => {}
-                ContentBlock::Thinking(tb) => {
-                    if !state.show_thinking_blocks {
-                        continue;
+                let mut lines = build_thinking_lines(&tb.thinking, content_width);
+                block_lines.append(&mut lines);
+            }
+            ContentBlock::ToolUse(tu) => {
+                let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                let tool_pause_active = tool_pause.map(|pause| state.is_active_tool_pause(pause));
+                if tu.name == "subagent" {
+                    let node = state
+                        .subagents_by_tool_use
+                        .get(&tu.id)
+                        .and_then(|session_id| state.subagents.get(session_id));
+                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                            Some(tr.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    block_lines.extend(render_subagent_tool(
+                        tu,
+                        tr.as_ref(),
+                        node,
+                        &state.pending_tool_pauses,
+                        content_width,
+                        Some(state.status_bar.cwd.as_path()),
+                    ));
+                    if let Some(&bi) = tr_indices.get(&tu.id) {
+                        consumed_tr.insert(bi);
                     }
-                    let mut lines = build_thinking_lines(&tb.thinking, content_width);
-                    block_lines.append(&mut lines);
-                }
-                ContentBlock::ToolUse(tu) => {
-                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                    let tool_pause_active =
-                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                    if tu.name == "subagent" {
-                        let node = state
-                            .subagents_by_tool_use
-                            .get(&tu.id)
-                            .and_then(|session_id| state.subagents.get(session_id));
-                        let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                            if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
-                                Some(tr.clone())
-                            } else {
-                                None
-                            }
-                        });
-                        block_lines.extend(render_subagent_tool(
-                            tu,
-                            tr.as_ref(),
-                            node,
-                            &state.pending_tool_pauses,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        ));
-                        if let Some(&bi) = tr_indices.get(&tu.id) {
+                } else {
+                    // 检查是否有对应的 ToolResult
+                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
                             consumed_tr.insert(bi);
+                            Some(tr.clone())
+                        } else {
+                            None
                         }
-                    } else {
-                        // 检查是否有对应的 ToolResult
-                        let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                            if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
-                                consumed_tr.insert(bi);
-                                Some(tr.clone())
-                            } else {
-                                None
-                            }
-                        });
-                        let tool_lines = render_tool(
-                            tu,
-                            tr.as_ref(),
-                            tool_pause,
-                            tool_pause_active,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        );
-                        block_lines.extend(tool_lines);
-                    }
-                }
-                ContentBlock::ToolResult(tr) => {
-                    // 如果没有对应的 ToolUse 来消费它，单独渲染
-                    let color = if tr.is_error {
-                        Color::Rgb(255, 100, 100)
-                    } else {
-                        Color::Rgb(100, 200, 130)
-                    };
-                    let content = if tr.is_error {
-                        tool_error_display_text(&tr.content)
-                    } else {
-                        tr.content.clone()
-                    };
-                    let mut lines =
-                        build_bordered_lines(&content, content_width, color, false, None);
-                    block_lines.append(&mut lines);
+                    });
+                    let tool_lines = render_tool(
+                        tu,
+                        tr.as_ref(),
+                        tool_pause,
+                        tool_pause_active,
+                        content_width,
+                        Some(state.status_bar.cwd.as_path()),
+                    );
+                    block_lines.extend(tool_lines);
                 }
             }
-
-            if !block_lines.is_empty() {
-                if !all_lines.is_empty() {
-                    all_lines.push(Line::from(""));
-                    selectable_lines.push(String::new());
-                }
-                selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                all_lines.append(&mut block_lines);
+            ContentBlock::ToolResult(tr) => {
+                // 如果没有对应的 ToolUse 来消费它，单独渲染
+                let color = if tr.is_error {
+                    Color::Rgb(255, 100, 100)
+                } else {
+                    Color::Rgb(100, 200, 130)
+                };
+                let error_content;
+                let content_ref = if tr.is_error {
+                    error_content = tool_error_display_text(&tr.content);
+                    &error_content
+                } else {
+                    &tr.content
+                };
+                let mut lines =
+                    build_bordered_lines(content_ref, content_width, color, false, None);
+                block_lines.append(&mut lines);
             }
         }
-    }
 
-    if let Some(plan) = &state.pending_proposed_plan
-        && !plan.trim().is_empty()
-    {
-        let block_lines = build_proposed_plan_lines(plan, content_width);
         if !block_lines.is_empty() {
             if !all_lines.is_empty() {
                 all_lines.push(Line::from(""));
                 selectable_lines.push(String::new());
             }
             selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
+            all_lines.append(&mut block_lines);
         }
     }
 
-    let total_lines = all_lines.len();
-    let prev_total_lines = state.total_lines;
-    state.total_lines = total_lines;
-    if total_lines == 0 {
-        return;
+    (all_lines, selectable_lines)
+}
+
+/// 渲染 pending_proposed_plan。
+fn render_pending_plan_lines(
+    plan_text: &str,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let block_lines = build_proposed_plan_lines(plan_text, content_width);
+    let mut all_lines = Vec::new();
+    let mut selectable_lines = Vec::new();
+    if !block_lines.is_empty() {
+        selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+        all_lines.extend(block_lines);
     }
-
-    if !state.auto_scroll {
-        let delta = total_lines.saturating_sub(prev_total_lines);
-        state.scroll_offset = state.scroll_offset.saturating_add(delta);
-    }
-
-    let max_scroll = total_lines.saturating_sub(visible_height);
-    let capped_offset = state.scroll_offset.min(max_scroll);
-    state.scroll_offset = capped_offset;
-    let scroll_y = max_scroll.saturating_sub(capped_offset);
-    state.selectable_message_lines = selectable_lines;
-    state.message_scroll_y = scroll_y;
-    let visible_selectable_lines = state
-        .selectable_message_lines
-        .iter()
-        .skip(scroll_y)
-        .take(visible_height)
-        .cloned()
-        .collect::<Vec<_>>();
-    for (visible_row, text) in visible_selectable_lines.into_iter().enumerate() {
-        state.register_selectable_screen_line(
-            area.y + visible_row as u16,
-            area.x,
-            area.width,
-            text,
-        );
-    }
-
-    let user_bg = INPUT_BG;
-    let user_line_bg = Style::default().bg(user_bg);
-    let user_line_rows = all_lines
-        .iter()
-        .map(|line| line.style.bg == Some(user_bg))
-        .collect::<Vec<_>>();
-
-    apply_text_selection_highlight(state, &mut all_lines, area, scroll_y, visible_height);
-
-    for (idx, is_user_line) in user_line_rows.iter().copied().enumerate().skip(scroll_y) {
-        if !is_user_line {
-            continue;
-        }
-        let visible_row = idx - scroll_y;
-        if visible_row >= visible_height {
-            break;
-        }
-        frame.buffer_mut().set_style(
-            Rect::new(area.x, area.y + visible_row as u16, area.width, 1),
-            user_line_bg,
-        );
-    }
-
-    let paragraph =
-        Paragraph::new(ratatui::text::Text::from(all_lines)).scroll((scroll_y as u16, 0));
-
-    frame.render_widget(paragraph, area);
+    (all_lines, selectable_lines)
 }
 
 #[cfg(test)]

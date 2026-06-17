@@ -37,8 +37,8 @@ use session_list::render_session_list;
 use start_screen::render_start_screen;
 use subagent_tool::render_subagent_tool;
 use text::{
-    apply_text_selection_highlight, line_to_plain_text, line_width, pad_display_width,
-    register_and_highlight_lines, styled_wrapped_display, styled_wrapped_text, truncate_str,
+    line_to_plain_text, line_width, pad_display_width, register_and_highlight_lines,
+    styled_wrapped_display, styled_wrapped_text, truncate_str,
 };
 use theme::INPUT_BG;
 

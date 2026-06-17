@@ -28,7 +28,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         return;
     }
 
-    // ThinkingEffort is now inlined inside ModelSelection
+    // ThinkingEffort 现已内联在 ModelSelection 中
     let Some(InteractionStep::ModelSelection {
         entries,
         selected,
@@ -49,13 +49,13 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         height: panel_height,
     };
 
-    // Clear only — no background color
+    // 仅清空——不设背景色
     frame.render_widget(Clear, panel_area);
 
-    // ── Header: title + subtitle + thick divider ──
+    // ── 头部：标题 + 副标题 + 粗分隔线 ──
     let accent = Color::Rgb(0x42, 0xd9, 0xe8);
 
-    // Line 0: thick divider above the panel (━ characters, accent color)
+    // 第 0 行：面板上方的粗分隔线（━ 字符，强调色）
     let mut divider_line = Line::from(Span::styled(
         "━".repeat(panel_area.width.saturating_sub(1) as usize),
         Style::default().fg(accent),
@@ -70,7 +70,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
 
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
-    // Line 1: model selection title in accent color, bold
+    // 第 1 行：模型选择标题（强调色加粗）
     if panel_area.height > 1 {
         let mut title_line = Line::from(Span::styled(
             " 选择模型",
@@ -87,7 +87,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         frame.render_widget(Paragraph::new(title_line), title_area);
     }
 
-    // Line 2: Chinese subtitle in gray
+    // 第 2 行：灰色副标题
     if panel_area.height > 2 {
         let mut subtitle_line = Line::from(Span::styled(
             " 切换模型，适用于当前会话和未来会话。",
@@ -108,7 +108,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         frame.render_widget(Paragraph::new(subtitle_line), subtitle_area);
     }
 
-    // Content area below divider
+    // 分隔线下方的内容区域
     let content_area = Rect {
         x: panel_area.x,
         y: panel_area.y + 3,
@@ -134,7 +134,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
 
 fn model_panel_height(entries: &[ModelSelectionEntry], _selected: usize, area_height: u16) -> u16 {
     let has_thinking = model_entries_have_thinking(entries);
-    // title(1) + subtitle(1) + divider(1) + entries + gap(0-1) + thinking(0-1) + hint(1)
+    // 标题(1) + 副标题(1) + 分隔线(1) + 条目 + 间距(0-1) + thinking(0-1) + 提示(1)
     let extra: u16 = if has_thinking { 6 } else { 4 };
     ((entries.len() as u16) + extra)
         .clamp(5, 22)
@@ -161,7 +161,7 @@ fn render_model_panel(
         .get(params.selected)
         .is_some_and(|e| matches!(e, ModelSelectionEntry::Model { model, .. } if model.thinking));
 
-    // Layout: entries list + [thinking row] + hint
+    // 布局：条目列表 + [思考行] + 提示
     let hint_h: u16 = 1;
     let thinking_h: u16 = if has_any_thinking { 1 } else { 0 };
     let gap_h: u16 = if has_any_thinking { 1 } else { 0 };
@@ -176,7 +176,7 @@ fn render_model_panel(
     let thinking_y = area.y + list_h + gap_h;
     let hint_y = area.y + area.height - 1;
 
-    // Render model entries
+    // 渲染模型条目
     let mut model_lines: Vec<ScrollableLine> = Vec::new();
     let mut model_num: usize = 0;
 
@@ -203,7 +203,7 @@ fn render_model_panel(
 
                 let meta = model_meta_text(model, display);
 
-                // Checkmark for non-standard providers (custom models)
+                // 非标准 provider（自定义模型）打勾标记
                 let is_active =
                     provider_key == params.active_provider && model.id == params.active_model;
                 let checkmark = if is_active { " ✔" } else { "" };
@@ -255,7 +255,7 @@ fn render_model_panel(
         frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
     }
 
-    // Thinking effort row
+    // 思考力度行
     if has_any_thinking && thinking_y < area.bottom() {
         const EFFORT_ICONS: &[&str] = &["○", "◔", "◑", "◉", "◆", "★"];
         const EFFORT_LABELS: &[&str] = &["No", "Low", "Medium", "High", "XHigh", "Max"];
@@ -314,7 +314,7 @@ fn render_model_panel(
         frame.render_widget(Paragraph::new(thinking_line), thinking_area);
     }
 
-    // Hint
+    // 提示
     let hint_text = if selected_has_thinking {
         "  ↑↓ 选择  ·  ←→ effort  ·  Enter 确认  ·  Esc 取消"
     } else {

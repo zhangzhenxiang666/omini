@@ -21,7 +21,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
 
     let total = sessions.len();
 
-    // Layout: header(1) + content(fill) + divider(1) + footer(1)
+    // 布局：头部(1) + 内容(fill) + 分隔线(1) + 底部(1)
     let chunks = Layout::vertical([
         Constraint::Length(2),
         Constraint::Min(1),
@@ -38,7 +38,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     let content_w = content_area.width as usize;
     let content_h = content_area.height as usize;
 
-    // ── Header ──
+    // ── 头部 ──
     let header_style = Style::default()
         .fg(Color::Rgb(0xa5, 0xac, 0xb6))
         .add_modifier(Modifier::BOLD);
@@ -54,12 +54,12 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     register_and_highlight_lines(state, header_area, &mut header_lines);
     frame.render_widget(Paragraph::new(header_lines), header_area);
 
-    // ── Content ──
+    // ── 内容 ──
     let mut lines: Vec<Line> = Vec::with_capacity(content_h);
     let mut row_backgrounds: Vec<Option<Color>> = Vec::with_capacity(content_h);
 
     if total == 0 {
-        // Empty state
+        // 空状态
         lines.push(Line::from(Span::styled(
             pad_display_width("没有找到会话", content_w),
             Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
@@ -76,13 +76,13 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         render_session_row_backgrounds(frame, content_area, &row_backgrounds);
         frame.render_widget(Paragraph::new(lines), content_area);
 
-        // Divider (empty)
+        // 分隔线（空）
         let divider_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
         let mut divider_line = Line::from(Span::styled("─".repeat(content_w), divider_style));
         register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
         frame.render_widget(Paragraph::new(divider_line), divider_area);
 
-        // Footer
+        // 底部
         let mut footer_line = Line::from(Span::styled(
             "Esc 返回 · 输入筛选",
             Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
@@ -92,11 +92,11 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         return;
     }
 
-    // Scroll calculation
+    // 滚动计算
     let item_lines = content_h.saturating_sub(2); // reserve top/bottom for indicators
     let mut scroll_off = 0usize;
     if total > item_lines {
-        // Keep selected item visible, prefer centering
+        // 保持选中项可见，优先居中
         let ideal = selected.saturating_sub(item_lines / 2);
         scroll_off = ideal.min(total.saturating_sub(item_lines));
     }
@@ -110,8 +110,8 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     let status_slot_w = 3;
     let max_msg_w = content_w.saturating_sub(prefix_w + time_col_w + separator_w + status_slot_w);
 
-    // ── Build lines ──
-    // Top indicator
+    // ── 构建行 ──
+    // 顶部指示器
     if show_top {
         lines.push(Line::from(Span::styled(
             pad_display_width("↑ 更多", content_w),
@@ -126,7 +126,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         row_backgrounds.push(None);
     }
 
-    // Session items
+    // 会话条目
     for i in 0..max_visible {
         let actual_idx = scroll_off + i;
         let session = &sessions[actual_idx];
@@ -178,7 +178,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         row_backgrounds.push(bg);
     }
 
-    // Fill remaining item lines
+    // 填充剩余条目行
     while lines.len() < content_h - 1 {
         lines.push(Line::from(Span::styled(
             " ".repeat(content_w),
@@ -187,7 +187,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         row_backgrounds.push(None);
     }
 
-    // Bottom indicator
+    // 底部指示器
     if show_bot {
         lines.push(Line::from(Span::styled(
             pad_display_width("↓ 更多", content_w),
@@ -206,7 +206,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     render_session_row_backgrounds(frame, content_area, &row_backgrounds);
     frame.render_widget(Paragraph::new(lines), content_area);
 
-    // ── Divider ──
+    // ── 分隔线 ──
     let current = selected + 1;
     let indicator = format!(" {}/{} ", current, total);
     let dashes_count = content_w.saturating_sub(indicator.len());
@@ -216,7 +216,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
-    // ── Footer ──
+    // ── 底部 ──
     let mut footer_line = session_footer_line(content_w);
     register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
     frame.render_widget(Paragraph::new(footer_line), footer_area);

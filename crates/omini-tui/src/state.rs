@@ -7,6 +7,7 @@ use omini_domain::display::{DisplayImageAttachment, DisplayMessage, HistoryItem,
 use omini_domain::message::Message;
 use rand::Rng;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -96,9 +97,9 @@ pub struct InputVisualLine {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SelectionPoint {
-    /// Absolute terminal row for the selectable rendered line.
+    /// 可选中渲染行的绝对终端行号。
     pub row: usize,
-    /// Display column within the selectable rendered line.
+    /// 可选中渲染行内的显示列号。
     pub col: usize,
 }
 
@@ -361,6 +362,17 @@ impl HelpDrawerState {
     }
 }
 
+/// 渲染管线缓存，避免每帧全量重建。
+#[derive(Debug, Default)]
+pub struct RenderCache {
+    // 已完成消息缓存
+    pub completed_lines: Vec<Line<'static>>,
+    pub completed_selectable: Vec<String>,
+    pub completed_message_count: usize,
+    pub completed_content_width: usize,
+    pub completed_show_thinking: bool,
+}
+
 #[derive(Debug)]
 pub struct UiState {
     pub messages: Vec<UiMessage>,
@@ -473,6 +485,8 @@ pub struct UiState {
     pub help_drawer: Option<HelpDrawerState>,
     /// 是否在消息区展示 thinking 块。
     pub show_thinking_blocks: bool,
+    /// 渲染管线缓存，避免流式期间每帧全量重建。
+    pub render_cache: RenderCache,
     /// 待审批的计划。
     pub plan_approval: Option<SubmittedPlan>,
     /// 计划审批抽屉当前选中的操作。
@@ -553,6 +567,7 @@ impl UiState {
             interaction_step: None,
             help_drawer: None,
             show_thinking_blocks: true,
+            render_cache: RenderCache::default(),
             plan_approval: None,
             plan_approval_selected: 0,
             plan_approval_auto: false,
@@ -677,8 +692,12 @@ impl UiState {
     }
 
     pub fn clear_run_dividers(&mut self) {
+        let before = self.messages.len();
         self.messages
             .retain(|message| !matches!(message, UiMessage::RunDivider { .. }));
+        if self.messages.len() != before {
+            self.invalidate_completed_cache();
+        }
     }
 
     pub fn pause_run_timer(&mut self) {
@@ -786,6 +805,11 @@ impl UiState {
             width,
             text,
         });
+    }
+
+    /// 使已完成消息的渲染缓存失效（消息列表变更、resize、thinking 切换时调用）。
+    pub fn invalidate_completed_cache(&mut self) {
+        self.render_cache.completed_message_count = 0;
     }
 }
 

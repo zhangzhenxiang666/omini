@@ -41,8 +41,8 @@ fn copy_to_tmux_clipboard(text: &str) -> bool {
     if write_to_command_stdin("tmux", &["load-buffer", "-w", "-"], text) {
         true
     } else {
-        // Older or restricted tmux builds may not support -w. This at least
-        // preserves the selection in tmux's paste buffer.
+        // 较老或受限的 tmux 版本可能不支持 -w，但至少
+        // 会在 tmux 粘贴缓冲区中保留选区。
         let _ = write_to_command_stdin("tmux", &["load-buffer", "-"], text);
         false
     }
@@ -104,8 +104,8 @@ fn copy_to_terminal_clipboard(text: &str) {
     let mut stderr = io::stderr();
     let sequence = format!("\x1b]52;c;{}\x07", encoded);
     let bytes = if std::env::var_os("TMUX").is_some() {
-        // tmux only forwards OSC sequences to the outer terminal when wrapped
-        // as a passthrough DCS. ESC bytes inside the payload must be doubled.
+        // tmux 仅在包装为 passthrough DCS 时才将 OSC 序列转发到外部终端，
+        // 负载中的 ESC 字节必须加倍。
         let escaped = sequence.replace('\x1b', "\x1b\x1b");
         format!("\x1bPtmux;{}\x1b\\", escaped)
     } else {
