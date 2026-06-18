@@ -160,11 +160,16 @@ impl UiState {
                 let mut sorted = sessions.clone();
                 sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
                 let all_sessions = sorted.clone();
+                let selected = self
+                    .current_session_id
+                    .as_ref()
+                    .and_then(|id| sorted.iter().position(|s| s.id == *id))
+                    .unwrap_or(0);
                 Some(InteractionStep::Session {
                     sessions: sorted,
                     all_sessions,
                     search: String::new(),
-                    selected: 0,
+                    selected,
                 })
             }
             InteractionRequest::AgentManagement {

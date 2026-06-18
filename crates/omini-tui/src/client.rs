@@ -147,7 +147,7 @@ async fn run_project_client(
             let mut session_initial_requests = std::mem::take(&mut pending_requests);
             let disconnect = match run_connected_session(
                 &http,
-                &connection,
+                &mut connection,
                 &session_id,
                 &event_tx,
                 &mut request_rx,
@@ -636,7 +636,7 @@ fn request_name(request: &ClientRequest) -> &'static str {
 
 async fn run_connected_session(
     http: &reqwest::Client,
-    connection: &ProjectConnection,
+    connection: &mut ProjectConnection,
     session_id: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     request_rx: &mut mpsc::Receiver<ClientRequest>,
@@ -1064,7 +1064,7 @@ fn default_daemon_host() -> String {
 
 async fn handle_local_request(
     http: &reqwest::Client,
-    connection: &ProjectConnection,
+    connection: &mut ProjectConnection,
     session_id: &str,
     base: &str,
     client_id: &str,
@@ -1147,19 +1147,33 @@ async fn handle_local_request(
             model,
             thinking_effort,
         } => {
+            // 1. 更新当前 session runtime
             post_json::<_, protocol::AckResponse>(
                 http,
                 &format!("{base}/model"),
                 client_id,
                 &protocol::SetModelRequest {
-                    provider,
-                    model,
+                    provider: provider.clone(),
+                    model: model.clone(),
                     thinking_effort,
                 },
             )
             .await?;
+
+            // 2. 同步更新本地缓存的运行时配置（不写入 project/state.toml），
+            //    确保 /new 或 /clear 后创建的新 session 沿用本次选择的 model/provider
+            //    以及本地已有的 thinking_effort（若本次未指定则保留原值）。
+            let config = protocol::ProjectRuntimeConfigResponse {
+                active_provider: provider,
+                model,
+                thinking_effort: thinking_effort.or(connection.attach.thinking_effort),
+                context_window: connection.attach.context_window,
+                show_thinking_blocks: connection.attach.show_thinking_blocks,
+            };
+            apply_project_runtime_config(connection, event_tx, config).await?;
         }
         ClientRequest::ModelThinkingEffortSet { effort } => {
+            // 1. 更新当前 session runtime
             post_json::<_, protocol::AckResponse>(
                 http,
                 &format!("{base}/thinking-effort"),
@@ -1167,6 +1181,17 @@ async fn handle_local_request(
                 &protocol::SetThinkingEffortRequest { effort },
             )
             .await?;
+
+            // 2. 同步更新本地缓存的运行时配置（不写入 project/state.toml），
+            //    确保 /new 或 /clear 后创建的新 session 沿用本次选择的 thinking effort。
+            let config = protocol::ProjectRuntimeConfigResponse {
+                active_provider: connection.attach.active_provider.clone(),
+                model: connection.attach.model.clone(),
+                thinking_effort: Some(effort),
+                context_window: connection.attach.context_window,
+                show_thinking_blocks: connection.attach.show_thinking_blocks,
+            };
+            apply_project_runtime_config(connection, event_tx, config).await?;
         }
         ClientRequest::OpenSessionPicker => {
             let sessions: protocol::SessionsResponse =
