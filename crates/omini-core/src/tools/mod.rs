@@ -149,8 +149,9 @@ pub struct ToolExecutionContext {
     pub tool_use_id: String,
     pub pause_id: String,
     pub tool_name: String,
-    pub settings: Option<Arc<Settings>>,
-    pub tool_registry: Option<Arc<ToolRegistry>>,
+    /// 会话配置，包含 session cwd 等信息。在正常运行时一定存在。
+    pub settings: Arc<Settings>,
+    pub tool_registry: Arc<ToolRegistry>,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
     pub pending_tool_pauses: PendingToolPauses,
     pub permission_engine: Arc<PermissionEngine>,
@@ -191,13 +192,59 @@ impl std::fmt::Debug for ToolRuntimeContext {
 impl ToolExecutionContext {
     #[cfg(test)]
     pub fn test(tool_name: &str) -> Self {
+        Self::test_with_cwd(
+            tool_name,
+            std::env::current_dir().unwrap_or_else(|_| ".".into()),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn test_with_cwd(tool_name: &str, cwd: PathBuf) -> Self {
+        use omini_config::{CompactConfig, ModelTiers, ProviderProfile, Settings};
+        use omini_domain::config::{ModelInfo, ProviderEndpointKind};
+
         let (event_tx, _event_rx) = mpsc::channel(1);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "test".to_string(),
+            ProviderProfile {
+                name: "Test".to_string(),
+                endpoint: ProviderEndpointKind::OpenAI,
+                api_key: String::new(),
+                base_url: String::new(),
+                models: vec![ModelInfo {
+                    id: "test-model".to_string(),
+                    name: None,
+                    limit: 256000,
+                    thinking: false,
+                    input_modalities: None,
+                    extra_body: None,
+                    extra_headers: None,
+                }],
+            },
+        );
         Self {
             tool_use_id: format!("test_{tool_name}"),
             pause_id: format!("test_{tool_name}"),
             tool_name: tool_name.to_string(),
-            settings: None,
-            tool_registry: None,
+            settings: Arc::new(Settings {
+                api_key: String::new(),
+                base_url: String::new(),
+                model: "test-model".to_string(),
+                endpoint: ProviderEndpointKind::OpenAI,
+                providers,
+                active_provider: "test".to_string(),
+                system_prompt: None,
+                language: None,
+                max_turns: None,
+                cwd,
+                thinking_effort: None,
+                permissions: None,
+                compact: CompactConfig::default(),
+                mcp_servers: HashMap::new(),
+                model_tiers: ModelTiers::default(),
+            }),
+            tool_registry: Arc::new(ToolRegistry::new()),
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
             permission_engine: Arc::new(PermissionEngine::empty(
@@ -328,7 +375,7 @@ fn preview_tool_use_id(pause_id: &str, tool_use_id: &str) -> Option<String> {
     (pause_id != tool_use_id).then(|| tool_use_id.to_string())
 }
 
-fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
+pub(crate) fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
     match tool_name {
         "bash" => normalize_path_field(raw_input, "workdir", cwd, true),
         "search" => normalize_path_field(raw_input, "path", cwd, true),
@@ -478,9 +525,7 @@ impl RegisteredTool {
                 let tool = Arc::clone(&tool);
                 Box::pin(async move {
                     let mut raw_input = Value::Object(input.clone().into_iter().collect());
-                    if let Some(settings) = ctx.settings.as_deref() {
-                        normalize_tool_paths(tool.name(), &mut raw_input, &settings.cwd);
-                    }
+                    normalize_tool_paths(tool.name(), &mut raw_input, &ctx.settings.cwd);
                     if let Some(check) = ctx
                         .permission_engine
                         .profile_policy(ctx.active_profile, tool.name())

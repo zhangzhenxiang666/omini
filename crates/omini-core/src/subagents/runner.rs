@@ -38,9 +38,7 @@ impl RuntimeSubagentRunner {
         ctx: ToolExecutionContext,
         runtime: Arc<ToolRuntimeContext>,
     ) -> ToolResult {
-        let Some(parent_settings) = ctx.settings.clone() else {
-            return ToolResult::error("subagent requires query settings");
-        };
+        let parent_settings = ctx.settings.clone();
         let name = request.name.trim();
         let Some(spec) = runtime.subagent_registry.get(name).cloned() else {
             let available = runtime.subagent_registry.sorted_names();
@@ -69,11 +67,8 @@ async fn run_subagent(
     runtime: Arc<ToolRuntimeContext>,
     parent_settings: Arc<Settings>,
 ) -> ToolResult {
-    let Some(parent_tool_registry) = ctx.tool_registry.clone() else {
-        return ToolResult::error("subagent requires parent tool registry");
-    };
     let (tool_registry, mut warnings) = match create_subagent_registry_from_parent(
-        &parent_tool_registry,
+        &ctx.tool_registry,
         spec.tool_policy.allow.as_deref(),
         spec.tool_policy.deny.as_deref().unwrap_or(&[]),
     ) {

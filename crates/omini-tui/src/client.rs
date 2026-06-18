@@ -715,6 +715,20 @@ async fn run_connected_session(
                     TungsteniteMessage::Text(text) => {
                         match handle_server_text(text.as_str(), event_tx).await? {
                             HandleOutcome::PassThrough => {}
+                            HandleOutcome::ModelChanged {
+                                provider,
+                                model,
+                                thinking_effort,
+                                context_window,
+                            } => {
+                                // 服务端发来的 ModelChanged 事件（如打开已有 session 时），
+                                // 同步更新 connection.attach 确保 /new 后创建新 session
+                                // 沿用正确的 provider/model/effort。
+                                connection.attach.active_provider = provider;
+                                connection.attach.model = model;
+                                connection.attach.thinking_effort = thinking_effort;
+                                connection.attach.context_window = context_window;
+                            }
                             HandleOutcome::SawRuntimeStatus => {
                                 if !did_calibrate_initial_status {
                                     did_calibrate_initial_status = true;
@@ -767,12 +781,25 @@ async fn handle_server_text(
             if let protocol::TypedRuntimeEvent::SessionSwitched(payload) = event.event {
                 return Ok(HandleOutcome::Switch(payload.to));
             }
+            // ModelChanged 需要同步更新 connection.attach,在转发给 UI 之前先
+            // 记下模型信息,返回非默认 outcome 让主循环同步缓存。
+            let model_changed = match &event.event {
+                protocol::TypedRuntimeEvent::ModelChanged(payload) => {
+                    Some(HandleOutcome::ModelChanged {
+                        provider: payload.provider.clone(),
+                        model: payload.model.clone(),
+                        thinking_effort: payload.thinking_effort,
+                        context_window: payload.context_window,
+                    })
+                }
+                _ => None,
+            };
             let event = runtime_event_from_protocol(event);
             event_tx
                 .send(event)
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
-            Ok(HandleOutcome::PassThrough)
+            Ok(model_changed.unwrap_or(HandleOutcome::PassThrough))
         }
         protocol::ServerEnvelope::RuntimeStatus { status } => {
             event_tx
@@ -796,6 +823,13 @@ enum HandleOutcome {
     SawRuntimeStatus,
     /// 收到 SessionSwitched,主循环断开旧 ws 并按新 id 重新连接。
     Switch(String),
+    /// 收到 ModelChanged,主循环更新 connection.attach 保持与服务端同步。
+    ModelChanged {
+        provider: String,
+        model: String,
+        thinking_effort: Option<omini_protocol::ThinkingEffort>,
+        context_window: Option<u32>,
+    },
 }
 
 fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEvent {

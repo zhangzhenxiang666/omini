@@ -64,13 +64,10 @@ impl Tool for ViewImageTool {
         prepared: Self::Prepared,
         ctx: ToolExecutionContext,
     ) -> ToolResult {
-        let Some(settings) = ctx.settings.as_deref() else {
-            return ToolResult::error("view_image requires query settings");
-        };
-        if !settings.supports_input_modality(InputModality::Image) {
+        if !ctx.settings.supports_input_modality(InputModality::Image) {
             return ToolResult::error(format!(
                 "view_image requires image input, but current model '{}' does not declare support for image input",
-                settings.model
+                ctx.settings.model
             ));
         }
 
@@ -193,7 +190,7 @@ mod tests {
             .await
             .unwrap();
         let mut ctx = ToolExecutionContext::test("view_image");
-        ctx.settings = Some(std::sync::Arc::new(image_settings()));
+        ctx.settings = std::sync::Arc::new(image_settings());
 
         let result = ViewImageTool.execute_prepared(prepared, ctx).await;
 
@@ -238,7 +235,7 @@ mod tests {
         let provider_key = settings.active_provider.clone();
         settings.providers.get_mut(&provider_key).unwrap().models[0].input_modalities = None;
         let mut ctx = ToolExecutionContext::test("view_image");
-        ctx.settings = Some(std::sync::Arc::new(settings));
+        ctx.settings = std::sync::Arc::new(settings);
 
         let result = ViewImageTool.execute_prepared(prepared, ctx).await;
 

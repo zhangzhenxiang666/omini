@@ -1099,8 +1099,8 @@ impl QueryEngine {
                     .map(|runtime| format!("{}:{}", runtime.session_id, tool_use.id))
                     .unwrap_or_else(|| tool_use.id.clone()),
                 tool_name: tool_use.name.clone(),
-                settings: Some(controls.settings),
-                tool_registry: Some(controls.tool_registry),
+                settings: controls.settings,
+                tool_registry: controls.tool_registry,
                 event_tx: event_tx.clone(),
                 pending_tool_pauses: controls.pending_tool_pauses,
                 permission_engine: controls.permission_engine,

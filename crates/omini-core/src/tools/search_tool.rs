@@ -45,9 +45,7 @@ pub struct SearchTool;
 pub struct PreparedSearch {
     mode: SearchMode,
     query: String,
-    cwd: PathBuf,
-    search_path: PathBuf,
-    path_arg: OsString,
+    raw_path: Option<PathBuf>,
     include: Option<String>,
 }
 
@@ -131,6 +129,12 @@ impl Tool for SearchTool {
     }
 
     fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
+        // permission_preview 阶段没有 ctx，先用 raw_path 显示（可能是相对路径或 None）
+        let path_display = prepared
+            .raw_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
         Some(PermissionPreview::Search(SearchPermissionPreview {
             query: prepared.query.clone(),
             mode: match prepared.mode {
@@ -138,16 +142,17 @@ impl Tool for SearchTool {
                 SearchMode::Files => "files",
             }
             .to_string(),
-            path: prepared.search_path.display().to_string(),
+            path: path_display,
         }))
     }
 
     async fn execute_prepared(
         &self,
         prepared: Self::Prepared,
-        _ctx: ToolExecutionContext,
+        ctx: ToolExecutionContext,
     ) -> ToolResult {
-        execute_search(prepared).await
+        let session_cwd = ctx.settings.cwd.clone();
+        execute_search(prepared, session_cwd).await
     }
 }
 
@@ -156,30 +161,17 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
         return Err("query must not be empty in content mode".to_string());
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("Failed to determine current working directory: {e}"))?
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize current working directory: {e}"))?;
-    let requested_path = input.path.as_deref().unwrap_or(".").trim();
-    let requested_path = if requested_path.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(requested_path)
-    };
-    let absolute_path = if requested_path.is_absolute() {
-        requested_path
-    } else {
-        cwd.join(requested_path)
-    };
-    let search_path = absolute_path
-        .canonicalize()
-        .map_err(|e| format!("Failed to canonicalize search path: {e}"))?;
+    // 路径解析推迟到 execute_prepared，因为那里有 ctx.settings.cwd（session cwd），
+    // 而 prepare 阶段只能用 std::env::current_dir()（守护进程下是 /tmp/omini，不对）。
+    let raw_path = input.path.as_deref().and_then(|p| {
+        let trimmed = p.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(trimmed))
+        }
+    });
 
-    if input.mode == SearchMode::Files && !search_path.is_dir() {
-        return Err("files mode requires path to be a directory".to_string());
-    }
-
-    let path_arg = command_path_arg(&cwd, &search_path);
     let include = input
         .include
         .map(|glob| glob.trim().to_string())
@@ -188,30 +180,18 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
     Ok(PreparedSearch {
         mode: input.mode,
         query: input.query,
-        cwd,
-        search_path,
-        path_arg,
+        raw_path,
         include,
     })
 }
 
-fn command_path_arg(cwd: &Path, path: &Path) -> OsString {
-    if let Ok(relative) = path.strip_prefix(cwd) {
-        if relative.as_os_str().is_empty() {
-            return OsString::from(".");
-        }
-        return relative.as_os_str().to_os_string();
-    }
-    path.as_os_str().to_os_string()
-}
-
-async fn execute_search(prepared: PreparedSearch) -> ToolResult {
-    let output = match run_rg(&prepared).await {
+async fn execute_search(prepared: PreparedSearch, session_cwd: PathBuf) -> ToolResult {
+    let output = match run_rg(&prepared, &session_cwd).await {
         Ok(output) => output,
         Err(e) => return ToolResult::error(e),
     };
 
-    let path_display = prepared.search_path.display().to_string();
+    let path_display = session_cwd.display().to_string();
 
     if !output.status.success() {
         if prepared.mode == SearchMode::Content && output.status.code() == Some(1) {
@@ -286,11 +266,24 @@ async fn execute_search(prepared: PreparedSearch) -> ToolResult {
     }
 }
 
-async fn run_rg(prepared: &PreparedSearch) -> Result<std::process::Output, String> {
+async fn run_rg(
+    prepared: &PreparedSearch,
+    session_cwd: &Path,
+) -> Result<std::process::Output, String> {
     let rg_path = bundled_rg_path()?;
     let mut command = Command::new(&rg_path);
-    command.current_dir(&prepared.cwd);
+    // 无条件将 rg 的 cwd 设置为 session cwd。
+    // 守护进程下 process cwd 是 /tmp/omini，不能用。
+    command.current_dir(session_cwd);
     command.kill_on_drop(true);
+
+    // 搜索目标：raw_path 为 None 时搜索 "."（即 session cwd），否则使用用户指定的路径。
+    // rg 会自动处理相对路径（相对于 cwd）和绝对路径。
+    let search_target: OsString = prepared
+        .raw_path
+        .as_ref()
+        .map(|p| p.as_os_str().to_os_string())
+        .unwrap_or_else(|| OsString::from("."));
 
     match prepared.mode {
         SearchMode::Content => {
@@ -310,7 +303,7 @@ async fn run_rg(prepared: &PreparedSearch) -> Result<std::process::Output, Strin
             }
             command.arg("--");
             command.arg(&prepared.query);
-            command.arg(&prepared.path_arg);
+            command.arg(&search_target);
         }
         SearchMode::Files => {
             command.args([
@@ -319,7 +312,7 @@ async fn run_rg(prepared: &PreparedSearch) -> Result<std::process::Output, Strin
             if let Some(glob) = &prepared.include {
                 command.arg("--glob").arg(glob);
             }
-            command.arg(&prepared.path_arg);
+            command.arg(&search_target);
         }
     }
 
@@ -608,7 +601,7 @@ mod tests {
         let preview = SearchTool
             .permission_preview(&prepared)
             .expect("search should provide permission preview");
-        assert_eq!(prepared.search_path, PathBuf::from("/"));
+        assert_eq!(prepared.raw_path, Some(PathBuf::from("/")));
         assert!(matches!(
             preview,
             PermissionPreview::Search(SearchPermissionPreview { path, .. }) if path == "/"
