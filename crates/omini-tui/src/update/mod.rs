@@ -8,8 +8,8 @@ use super::selection::{
 use super::state::{AgentStatus, TextSelection, UiMessage, UiState};
 use crate::client::ClientRequest;
 use crate::types::events::{
-    ActiveProfile, PermissionPreview, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent,
-    ToolPauseKind,
+    ActiveProfile, CommandKind, PermissionPreview, PlanApprovalAction, PlanExecutionProfile,
+    RuntimeToUiEvent, ToolPauseKind,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use omini_domain::display::UserDraft;
@@ -615,11 +615,24 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
                 None
             }
         },
-        skill_name => Some(ClientRequest::ExpandSkillRun {
-            skill_name: skill_name.to_string(),
-            prompt: args,
-            input: Some(protocol::user_input_from_draft(draft)),
-        }),
+        skill_name => {
+            let is_known_skill = state.autocomplete.all_commands.iter().any(|cmd| {
+                cmd.kind == CommandKind::Skill
+                    && (cmd.name == skill_name || cmd.aliases.iter().any(|a| a == skill_name))
+            });
+            if is_known_skill {
+                Some(ClientRequest::ExpandSkillRun {
+                    skill_name: skill_name.to_string(),
+                    prompt: args,
+                    input: Some(protocol::user_input_from_draft(draft)),
+                })
+            } else {
+                Some(ClientRequest::RunSubmitUserInput {
+                    input: protocol::user_input_from_draft(draft),
+                    client_echo_id: None,
+                })
+            }
+        }
     }
 }
 
@@ -850,8 +863,8 @@ mod tests {
     use super::*;
     use crate::state::InputMention;
     use crate::types::events::{
-        ActiveProfile, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
-        UserInputOption, UserInputPreview, UserInputQuestion,
+        ActiveProfile, CommandKind, CommandSummary, EditPermissionPreview, PermissionPreview,
+        SubmittedPlan, ToolPauseRequest, UserInputOption, UserInputPreview, UserInputQuestion,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -1340,6 +1353,15 @@ mod tests {
     #[tokio::test]
     async fn command_submit_preserves_argument_mentions() {
         let mut state = UiState::new();
+        state.autocomplete.all_commands = vec![CommandSummary {
+            name: "commit-message".to_string(),
+            aliases: vec![],
+            description: String::new(),
+            sort_weight: 0,
+            has_args: true,
+            args_description: None,
+            kind: CommandKind::Skill,
+        }];
         state.input = "/commit-message summarize @src/main.rs".to_string();
         state.cursor_char = state.input.chars().count();
         state.input_mentions.push(InputMention {
@@ -1365,6 +1387,21 @@ mod tests {
         let context_refs = command.context_refs.expect("expected context refs");
         assert_eq!(context_refs.len(), 1);
         assert_eq!(context_refs[0].target(), "src/main.rs");
+    }
+
+    #[tokio::test]
+    async fn unknown_slash_command_sends_as_normal_message() {
+        let mut state = UiState::new();
+        state.input = "/nonexistent some text".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::RunSubmitUserInput { input, .. }) = rx.recv().await else {
+            panic!("expected normal user input submission");
+        };
+        assert_eq!(input.text, "/nonexistent some text");
     }
 
     #[tokio::test]

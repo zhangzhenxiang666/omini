@@ -397,6 +397,11 @@ impl RuntimeStatusProjection {
         self.active_profile
     }
 
+    /// 返回当前仍在运行中的子代理 session_id 集合，供 snapshot 恢复真实状态用。
+    pub(super) fn running_subagent_session_ids(&self) -> Vec<String> {
+        self.subagents.keys().cloned().collect()
+    }
+
     fn pending_plan_matches(&self, event: &RuntimeEvent) -> bool {
         let Some(pending) = &self.pending_plan_approval else {
             return false;

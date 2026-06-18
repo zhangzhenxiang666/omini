@@ -2,7 +2,7 @@ use super::*;
 use crate::git;
 use omini_core::AgentCoreSession;
 use omini_domain::display::HistoryItem;
-use omini_domain::events::{Notification, SessionUsageSnapshot};
+use omini_domain::events::{Notification, SessionUsageSnapshot, SubagentStatus};
 use omini_protocol::GitBranchChangedEvent;
 use omini_protocol::TypedRuntimeEvent;
 use std::time::Duration;
@@ -548,8 +548,21 @@ impl RuntimeSession {
         let blocks_dir = session_dir.path().join("blocks");
         // DB → UI 视角:给 TUI 的 SessionSnapshotEvent 渲染 + user_injection 去重。
         let messages = history::load_messages(&self.db, &self.session_id, &blocks_dir).await;
-        let subagents =
+        // 子代理运行态不随 daemon 存活，DB 加载一律为 Completed；
+        // 但当前 daemon 若仍在运行，需要从 runtime 状态投影恢复真实 Running 状态，
+        // 否则中途连接的 TUI 无法为仍在运行的子代理加载正确状态。
+        let mut subagents =
             history::load_subagents_for_session(&self.db, &self.session_id, &self.project).await;
+        let running_subagent_ids = self
+            .status_projection
+            .lock()
+            .expect("status projection lock poisoned")
+            .running_subagent_session_ids();
+        for subagent in &mut subagents {
+            if running_subagent_ids.contains(&subagent.session_id) {
+                subagent.status = SubagentStatus::Running;
+            }
+        }
         let active_profile = self
             .status_projection
             .lock()

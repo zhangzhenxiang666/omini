@@ -382,6 +382,8 @@ pub struct UiState {
     pub pending_assistant: Option<Message>,
     /// 正在流式构建中的 proposed plan markdown。
     pub pending_proposed_plan: Option<String>,
+    /// 正在流式构建中的 compact 摘要（含呼吸动画，不走缓存）
+    pub pending_compact_summary: Option<String>,
     /// 渲染后的消息总行数（用于滚动条计算）
     pub total_lines: usize,
     /// 消息区域的位置和大小
@@ -445,6 +447,18 @@ pub struct UiState {
     pub subagents: HashMap<String, SubagentNode>,
     /// 父 tool_use_id 到子 agent session id 的映射。
     pub subagents_by_tool_use: HashMap<String, String>,
+    /// `messages` 中包含未完成工具（pending tool use）的第一条消息索引；
+    /// 该索引及之后的消息不进缓存，每帧重新渲染（与 pending_assistant 同级），
+    /// 保证呼吸灯动画实时更新。未完成工具包括：运行中的 subagent、
+    /// 尚未收到 ToolResult 的普通工具（bash / read / edit 等）。
+    /// `usize::MAX` 表示无未完成工具，所有已完成消息均可缓存。
+    pub live_message_start: usize,
+    /// 尚未完成的 tool_use_id → 所在消息索引的映射。
+    /// ToolUse 事件到达时暂存于 `pending_assistant`（未入 messages），不在此 map 中；
+    /// 当 `pending_assistant` 在 TurnEnded/RunFinished 提交到 messages 时才写入。
+    /// ToolResult 到达时从 map 中移除。用于 O(1) 定位 pending tool 所在消息，
+    /// 避免每次更新 live 边界时全量扫描消息列表。
+    pub pending_tool_message_map: std::collections::HashMap<String, usize>,
     /// 权限抽屉当前选中的操作：0 = Yes, 1 = No。
     pub permission_selected: usize,
     /// 用户问题抽屉当前题目索引。
@@ -508,6 +522,7 @@ impl UiState {
             pending_client_echoes: HashMap::new(),
             pending_assistant: None,
             pending_proposed_plan: None,
+            pending_compact_summary: None,
             total_lines: 0,
             messages_area: Rect::default(),
             selectable_message_lines: Vec::new(),
@@ -544,6 +559,8 @@ impl UiState {
             pending_tool_pauses: VecDeque::new(),
             subagents: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
+            live_message_start: usize::MAX,
+            pending_tool_message_map: std::collections::HashMap::new(),
             permission_selected: 0,
             user_input_question_index: 0,
             user_input_selected: Vec::new(),
@@ -697,6 +714,8 @@ impl UiState {
             .retain(|message| !matches!(message, UiMessage::RunDivider { .. }));
         if self.messages.len() != before {
             self.invalidate_completed_cache();
+            // RunDivider 被移除后消息索引发生偏移，需要重建 map 和边界
+            self.rebuild_pending_tool_map();
         }
     }
 
@@ -810,6 +829,180 @@ impl UiState {
     /// 使已完成消息的渲染缓存失效（消息列表变更、resize、thinking 切换时调用）。
     pub fn invalidate_completed_cache(&mut self) {
         self.render_cache.completed_message_count = 0;
+    }
+
+    /// 扫描指定消息，将其中的 ToolUse 块注册到 `pending_tool_message_map`。
+    /// 在 `pending_assistant` 提交到 `messages` 时（TurnEnded / RunFinished）调用。
+    fn populate_pending_tool_map_from_message(&mut self, msg_idx: usize) {
+        let Some(message) = self.messages[msg_idx].as_message() else {
+            return;
+        };
+        // 收集该消息中已有的 ToolResult id（同一消息内可能 Text → ToolUse → ToolResult）
+        let mut resolved_ids = std::collections::HashSet::new();
+        for block in &message.content {
+            if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
+                resolved_ids.insert(&tr.tool_use_id);
+            }
+        }
+        for block in &message.content {
+            if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+                && !resolved_ids.contains(&tu.id)
+            {
+                self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
+            }
+        }
+    }
+
+    /// 全量重建 `pending_tool_message_map` 并重算 `live_message_start`。
+    /// 仅在 `apply_session_snapshot`（中途连接 / 切换会话）时调用，O(n)。
+    fn rebuild_pending_tool_map(&mut self) {
+        self.pending_tool_message_map.clear();
+        for (msg_idx, ui_msg) in self.messages.iter().enumerate() {
+            let Some(message) = ui_msg.as_message() else {
+                continue;
+            };
+            let mut resolved_ids = std::collections::HashSet::new();
+            for block in &message.content {
+                if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
+                    resolved_ids.insert(&tr.tool_use_id);
+                }
+            }
+            for block in &message.content {
+                if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+                    && !resolved_ids.contains(&tu.id)
+                {
+                    self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
+                }
+            }
+        }
+        // 重算边界：map 中最小 msg_idx 与首个 running subagent 的较小值
+        let map_min = self
+            .pending_tool_message_map
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(usize::MAX);
+        let subagent_min = self.find_earliest_running_subagent_from(0);
+        self.live_message_start = map_min.min(subagent_min);
+    }
+
+    /// 工具结果到达时的增量更新。
+    ///
+    /// 若该 tool_use 在 map 中（即已提交到 messages），移除后检查该消息是否还有
+    /// 其他 pending tool；若没有，从 `live_message_start` 向后扫到下一个含 pending
+    /// 工具的消息。正常流程中 pending tool 总在尾部，扫描距离 k 极小，O(k)。
+    pub fn on_tool_result(&mut self, tool_use_id: &str) {
+        let Some(msg_idx) = self.pending_tool_message_map.remove(tool_use_id) else {
+            return;
+        };
+        let still_has_pending = self.message_has_pending_tools(msg_idx);
+        if !still_has_pending && msg_idx == self.live_message_start {
+            // 当前边界消息已无 pending tool，向后扫描
+            let mut new_start = usize::MAX;
+            for i in (msg_idx + 1)..self.messages.len() {
+                if self.message_has_pending_tools(i) || self.message_has_running_subagent(i) {
+                    new_start = i;
+                    break;
+                }
+            }
+            // 也检查后面是否有 running subagent（它们不在 map 中）
+            let sub_min = self.find_earliest_running_subagent_from(msg_idx + 1);
+            new_start = new_start.min(sub_min);
+            self.live_message_start = new_start;
+        }
+        // 若该消息仍有 pending tool 或不在边界，边界不变
+    }
+
+    /// 检查指定消息是否仍有 pending tool（在 map 中或有 running subagent）。
+    fn message_has_pending_tools(&self, msg_idx: usize) -> bool {
+        let Some(message) = self.messages[msg_idx].as_message() else {
+            return false;
+        };
+        for block in &message.content {
+            if let omini_domain::message::ContentBlock::ToolUse(tu) = block {
+                if self.pending_tool_message_map.contains_key(&tu.id) {
+                    return true;
+                }
+                if tu.name == "subagent"
+                    && self
+                        .subagents_by_tool_use
+                        .get(&tu.id)
+                        .and_then(|sid| self.subagents.get(sid))
+                        .is_some_and(|node| {
+                            matches!(node.status, crate::types::events::SubagentStatus::Running)
+                        })
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// 检查指定消息是否包含运行中的 subagent。
+    fn message_has_running_subagent(&self, msg_idx: usize) -> bool {
+        let Some(message) = self.messages[msg_idx].as_message() else {
+            return false;
+        };
+        for block in &message.content {
+            if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+                && tu.name == "subagent"
+                && self
+                    .subagents_by_tool_use
+                    .get(&tu.id)
+                    .and_then(|sid| self.subagents.get(sid))
+                    .is_some_and(|node| {
+                        matches!(node.status, crate::types::events::SubagentStatus::Running)
+                    })
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// 从 `start_idx` 开始找第一个含 running subagent 的消息索引。
+    fn find_earliest_running_subagent_from(&self, start_idx: usize) -> usize {
+        let has_running = self
+            .subagents
+            .values()
+            .any(|node| matches!(node.status, crate::types::events::SubagentStatus::Running));
+        if !has_running {
+            return usize::MAX;
+        }
+        for i in start_idx..self.messages.len() {
+            if self.message_has_running_subagent(i) {
+                return i;
+            }
+        }
+        usize::MAX
+    }
+
+    /// 刷新 live 边界，确保缓存尾部不超过新边界。
+    ///
+    /// 主要用于 subagent 状态变化（`SubagentStarted` / `SubagentFinished`）等
+    /// 不影响 `pending_tool_message_map` 的事件；普通工具完成请优先使用 `on_tool_result`。
+    pub fn update_live_boundary(&mut self) {
+        let map_min = self
+            .pending_tool_message_map
+            .values()
+            .copied()
+            .min()
+            .unwrap_or(usize::MAX);
+        let sub_min = self.find_earliest_running_subagent_from(self.live_message_start);
+        let new_start = map_min.min(sub_min);
+        if new_start == self.live_message_start {
+            return;
+        }
+        self.live_message_start = new_start;
+        // 边界前进（new_start < cached）时，缓存尾部超出新边界。
+        // 将 completed_message_count 缩小到 new_start，下次渲染时
+        // completed_message_count == live_start，走缓存命中 + 增量追加分支，
+        // 无需全量重建——messages[..new_start] 的内容未变，缓存仍然有效。
+        let cached = self.render_cache.completed_message_count;
+        if cached > new_start {
+            self.render_cache.completed_message_count = new_start;
+        }
     }
 }
 

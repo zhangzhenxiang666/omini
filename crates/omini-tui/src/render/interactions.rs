@@ -183,6 +183,7 @@ fn render_model_panel(
     for (i, entry) in params.entries.iter().enumerate() {
         match entry {
             ModelSelectionEntry::ProviderHeader { name } => {
+                model_num = 0;
                 model_lines.push(ScrollableLine {
                     selected: false,
                     line: Line::from(Span::styled(

@@ -557,12 +557,14 @@ fn build_agent_model_entries(providers: &HashMap<String, ProviderProfile>) -> Ve
     let mut entries = Vec::new();
     entries.push(AgentModelEntry::Inherit);
     let mut sorted: Vec<_> = providers.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    sorted.sort_by(|a, b| a.1.name.cmp(&b.1.name));
     for (provider_key, profile) in sorted {
         entries.push(AgentModelEntry::ProviderHeader {
             name: profile.name.clone(),
         });
-        for model in &profile.models {
+        let mut sorted_models: Vec<_> = profile.models.iter().collect();
+        sorted_models.sort_by(|a, b| a.id.cmp(&b.id));
+        for model in sorted_models {
             entries.push(AgentModelEntry::Model {
                 provider_key: provider_key.clone(),
                 model: model.clone(),

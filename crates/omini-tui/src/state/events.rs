@@ -36,13 +36,9 @@ impl UiState {
         )
     }
 
-    fn remove_empty_compact_summary_placeholder(&mut self) {
-        if matches!(
-            self.messages.last(),
-            Some(UiMessage::CompactSummary { text }) if text.trim().is_empty()
-        ) {
-            self.messages.pop();
-        }
+    /// 清除正在流式构建中的 compact 摘要占位。
+    fn clear_pending_compact_summary(&mut self) {
+        self.pending_compact_summary = None;
     }
 
     pub fn take_queued_user_draft(&mut self) -> Option<UserDraft> {
@@ -135,12 +131,14 @@ impl UiState {
                     None => 2,
                 };
                 let mut sorted: Vec<_> = providers.clone().into_iter().collect();
-                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                sorted.sort_by(|a, b| a.1.name.cmp(&b.1.name));
                 for (provider_key, profile) in &sorted {
                     entries.push(ModelSelectionEntry::ProviderHeader {
                         name: profile.name.clone(),
                     });
-                    for model in &profile.models {
+                    let mut sorted_models: Vec<_> = profile.models.iter().collect();
+                    sorted_models.sort_by(|a, b| a.id.cmp(&b.id));
+                    for model in sorted_models {
                         if *provider_key == *current_provider && model.id == *current_model {
                             selected = entries.len();
                         }
@@ -276,6 +274,7 @@ impl UiState {
                 self.activity_status_title = None;
                 self.pending_assistant = None;
                 self.pending_proposed_plan = None;
+                self.pending_compact_summary = None;
                 self.clear_run_dividers();
                 // 重连状态同步可能已校准活动计时器，避免被 replay 的 RunStarted 重置。
                 if self.run_timer.is_none() {
@@ -355,6 +354,7 @@ impl UiState {
                 self.agent_status = AgentStatus::Working;
             }
             RuntimeToUiEvent::ToolResult(tr) => {
+                let tool_use_id = tr.tool_use_id.clone();
                 self.activity_status_title = None;
                 self.finish_subagent_for_tool_result(&tr);
                 self.running_tools.remove(&tr.tool_use_id);
@@ -376,12 +376,15 @@ impl UiState {
                     msg.content.push(ContentBlock::ToolResult(tr));
                     self.messages.push(UiMessage::Message(msg));
                 }
+                self.on_tool_result(&tool_use_id);
             }
             RuntimeToUiEvent::TurnEnded => {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
+                    let msg_idx = self.messages.len();
                     self.messages.push(UiMessage::Message(msg));
+                    self.populate_pending_tool_map_from_message(msg_idx);
                 }
                 let (pending_inputs, client_echo_id) = self.take_pending_intervention_ui_messages();
                 if let Some(client_echo_id) = client_echo_id {
@@ -394,6 +397,7 @@ impl UiState {
                 }
                 self.activity_status_title = None;
                 self.agent_status = AgentStatus::Working;
+                self.update_live_boundary();
             }
             RuntimeToUiEvent::GitBranchChanged { branch } => {
                 self.status_bar.git_branch = branch;
@@ -402,7 +406,9 @@ impl UiState {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
+                    let msg_idx = self.messages.len();
                     self.messages.push(UiMessage::Message(msg));
+                    self.populate_pending_tool_map_from_message(msg_idx);
                 }
                 if let Some(plan) = self.pending_proposed_plan.take()
                     && !plan.trim().is_empty()
@@ -421,6 +427,7 @@ impl UiState {
                 self.activity_status_title = None;
                 self.refresh_input_placeholder();
                 self.agent_status = AgentStatus::Idle;
+                self.update_live_boundary();
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {
                 let should_prepare = self.push_tool_pause(req);
@@ -453,6 +460,7 @@ impl UiState {
                 );
                 self.activity_status_title = None;
                 self.agent_status = AgentStatus::Working;
+                self.update_live_boundary();
             }
             RuntimeToUiEvent::SubagentMessageProduced(event) => {
                 if let Some(node) = self.subagents.get_mut(&event.session_id) {
@@ -487,6 +495,7 @@ impl UiState {
                 if let Some(node) = self.subagents.get_mut(&event.session_id) {
                     node.status = event.status;
                 }
+                self.update_live_boundary();
             }
             RuntimeToUiEvent::Notification(notification) => {
                 match notification.kind {
@@ -551,9 +560,7 @@ impl UiState {
                     self.begin_manual_compact();
                 }
                 self.activity_status_title = None;
-                self.messages.push(UiMessage::CompactSummary {
-                    text: String::new(),
-                });
+                self.pending_compact_summary = Some(String::new());
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -563,12 +570,9 @@ impl UiState {
                     self.begin_manual_compact();
                 }
                 self.activity_status_title = None;
-                if let Some(UiMessage::CompactSummary { text }) = self.messages.last_mut() {
-                    text.push_str(&event.delta);
-                } else {
-                    self.messages
-                        .push(UiMessage::CompactSummary { text: event.delta });
-                }
+                self.pending_compact_summary
+                    .get_or_insert_with(String::new)
+                    .push_str(&event.delta);
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -576,15 +580,18 @@ impl UiState {
             RuntimeToUiEvent::CompactSummaryFinished(event) => {
                 let trigger = event.trigger;
                 let summary = event.summary;
-                if summary.trim().is_empty() {
-                    self.remove_empty_compact_summary_placeholder();
-                } else if let Some(UiMessage::CompactSummary { text }) = self.messages.last_mut() {
-                    *text = summary;
+                // 优先使用 pending 中累积的流式文本；Finished 的 summary 为最终权威版本
+                let final_text = if !summary.trim().is_empty() {
+                    summary
                 } else {
+                    self.pending_compact_summary.take().unwrap_or_default()
+                };
+                self.pending_compact_summary = None;
+                if !final_text.trim().is_empty() {
                     self.messages
-                        .push(UiMessage::CompactSummary { text: summary });
+                        .push(UiMessage::CompactSummary { text: final_text });
+                    self.invalidate_completed_cache();
                 }
-                self.invalidate_completed_cache();
                 self.status_bar.current_context_tokens = event.after_tokens as i64;
                 if trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
@@ -595,7 +602,7 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::CompactSummaryFailed(event) => {
-                self.remove_empty_compact_summary_placeholder();
+                self.clear_pending_compact_summary();
                 self.messages
                     .push(UiMessage::Notification(Notification::warning(
                         compact_summary_failed_text(
@@ -758,6 +765,7 @@ impl UiState {
         }
         self.pending_assistant = None;
         self.pending_proposed_plan = None;
+        self.pending_compact_summary = None;
         self.pending_intervention_client_echo_id = None;
         self.activity_status_title = None;
         self.run_timer = None;
@@ -775,6 +783,7 @@ impl UiState {
         self.help_drawer = None;
         self.clear_plan_approval();
         self.scroll_to_bottom();
+        self.rebuild_pending_tool_map();
     }
 }
 
@@ -1125,9 +1134,8 @@ mod tests {
             },
         ));
 
-        assert_eq!(state.messages.len(), 1);
-        let Some(UiMessage::CompactSummary { text }) = state.messages.first() else {
-            panic!("expected compact summary message");
+        let Some(text) = &state.pending_compact_summary else {
+            panic!("expected pending compact summary");
         };
         assert!(text.contains("first second"));
     }
@@ -1153,19 +1161,15 @@ mod tests {
             },
         ));
 
-        assert_eq!(state.messages.len(), 2);
-        let Some(UiMessage::CompactSummary { text }) = state.messages.last() else {
-            panic!("expected compact summary message");
-        };
-        assert_eq!(text, "new");
+        // 历史摘要保留在 messages 中，新的流式内容在 pending 中
+        assert_eq!(state.messages.len(), 1);
+        assert_eq!(state.pending_compact_summary.as_deref(), Some("new"));
     }
 
     #[test]
     fn compact_summary_finished_replaces_streamed_text_and_updates_context_tokens() {
         let mut state = UiState::new();
-        state.messages.push(UiMessage::CompactSummary {
-            text: "partial".to_string(),
-        });
+        state.pending_compact_summary = Some("partial".to_string());
 
         state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
             CompactSummaryFinishedEvent {
@@ -1216,9 +1220,8 @@ mod tests {
     #[test]
     fn empty_compact_summary_finished_removes_loading_placeholder() {
         let mut state = UiState::new();
-        state.messages.push(UiMessage::CompactSummary {
-            text: String::new(),
-        });
+        // 模拟 Started 事件创建的流式占位
+        state.pending_compact_summary = Some(String::new());
 
         state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
             CompactSummaryFinishedEvent {
@@ -1231,15 +1234,14 @@ mod tests {
         ));
 
         assert!(state.messages.is_empty());
+        assert!(state.pending_compact_summary.is_none());
     }
 
     #[test]
     fn auto_compact_summary_finished_does_not_force_idle() {
         let mut state = UiState::new();
         state.agent_status = AgentStatus::Working;
-        state.messages.push(UiMessage::CompactSummary {
-            text: "partial".to_string(),
-        });
+        state.pending_compact_summary = Some("partial".to_string());
 
         state.apply_event(RuntimeToUiEvent::CompactSummaryFinished(
             CompactSummaryFinishedEvent {

@@ -138,6 +138,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     if state.messages.is_empty()
         && state.pending_assistant.is_none()
         && state.pending_proposed_plan.is_none()
+        && state.pending_compact_summary.is_none()
     {
         state.selectable_message_lines.clear();
         state.message_scroll_y = 0;
@@ -147,32 +148,42 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     let content_width = area.width as usize;
     let visible_height = area.height as usize;
 
-    // 1. completed 段：三级缓存验证（全量 / 增量追加 / 命中）
+    // 1. completed 段：缓存仅覆盖 live_message_start 之前的消息。
+    //    含未完成工具（pending tool use）的消息不进入缓存，而是作为 live 段每帧重渲染。
 
+    let live_start = state.live_message_start.min(state.messages.len());
     let dims_match = state.render_cache.completed_content_width == content_width
         && state.render_cache.completed_show_thinking == state.show_thinking_blocks;
 
     if state.render_cache.completed_message_count == 0 || !dims_match {
-        // 缓存完全失效或维度变化 → 全量重建
-        let (lines, sel) = render_completed_messages(state, content_width);
+        // 缓存完全失效或维度变化 → 全量重建到 live 边界
+        let (lines, sel) = render_message_range(state, content_width, 0, Some(live_start));
         state.render_cache.completed_lines = lines;
         state.render_cache.completed_selectable = sel;
-        state.render_cache.completed_message_count = state.messages.len();
+        state.render_cache.completed_message_count = live_start;
         state.render_cache.completed_content_width = content_width;
         state.render_cache.completed_show_thinking = state.show_thinking_blocks;
-    } else if state.render_cache.completed_message_count < state.messages.len() {
-        // 有新消息追加 → 增量追加
+    } else if state.render_cache.completed_message_count < live_start {
+        // 增量追加到 live 边界
         let start_idx = state.render_cache.completed_message_count;
-        let (new_lines, new_sel) = render_message_range(state, content_width, start_idx);
+        let (new_lines, new_sel) =
+            render_message_range(state, content_width, start_idx, Some(live_start));
         if !new_lines.is_empty() && !state.render_cache.completed_lines.is_empty() {
             state.render_cache.completed_lines.push(Line::from(""));
             state.render_cache.completed_selectable.push(String::new());
         }
         state.render_cache.completed_lines.extend(new_lines);
         state.render_cache.completed_selectable.extend(new_sel);
-        state.render_cache.completed_message_count = state.messages.len();
+        state.render_cache.completed_message_count = live_start;
     }
-    // else: 缓存命中，无需操作
+    // else: 缓存命中到 live 边界，无需操作
+
+    // live 段：含运行中 subagent 的消息，每帧重渲染（呼吸灯动画 + 子工具实时更新）
+    let live_lines = if live_start < state.messages.len() {
+        render_message_range(state, content_width, live_start, None)
+    } else {
+        (Vec::new(), Vec::new())
+    };
 
     // 2. pending / plan 段：每帧直接重算（量小，不值得缓存）
 
@@ -189,16 +200,29 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         .map(|plan| render_pending_plan_lines(plan, content_width))
         .unwrap_or_default();
 
+    let compact_lines = state
+        .pending_compact_summary
+        .as_ref()
+        .map(|text| render_pending_compact_lines(text, content_width))
+        .unwrap_or_default();
+
     // 3. 计算分段布局
+    // 布局顺序：completed(缓存) → live(每帧) → pending → plan → compact
 
     let n_completed = state.render_cache.completed_lines.len();
+    let n_live = live_lines.0.len();
     let n_pending = pending_lines.0.len();
     let n_plan = plan_lines.0.len();
-    let has_sep1 = n_pending > 0 && n_completed > 0;
-    let has_sep2 = n_plan > 0 && (n_completed > 0 || n_pending > 0);
-    let pending_offset = n_completed + has_sep1 as usize;
-    let plan_offset = pending_offset + n_pending + has_sep2 as usize;
-    let total_lines = plan_offset + n_plan;
+    let n_compact = compact_lines.0.len();
+    let has_sep1 = n_live > 0 && n_completed > 0;
+    let has_sep2 = n_pending > 0 && (n_completed > 0 || n_live > 0);
+    let has_sep3 = n_plan > 0 && (n_completed > 0 || n_live > 0 || n_pending > 0);
+    let has_sep4 = n_compact > 0 && (n_completed > 0 || n_live > 0 || n_pending > 0 || n_plan > 0);
+    let live_offset = n_completed + has_sep1 as usize;
+    let pending_offset = live_offset + n_live + has_sep2 as usize;
+    let plan_offset = pending_offset + n_pending + has_sep3 as usize;
+    let compact_offset = plan_offset + n_plan + has_sep4 as usize;
+    let total_lines = compact_offset + n_compact;
 
     // 4. 滚动计算
 
@@ -230,13 +254,25 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     }
     state
         .selectable_message_lines
-        .extend_from_slice(&pending_lines.1);
+        .extend_from_slice(&live_lines.1);
     if has_sep2 {
         state.selectable_message_lines.push(String::new());
     }
     state
         .selectable_message_lines
+        .extend_from_slice(&pending_lines.1);
+    if has_sep3 {
+        state.selectable_message_lines.push(String::new());
+    }
+    state
+        .selectable_message_lines
         .extend_from_slice(&plan_lines.1);
+    if has_sep4 {
+        state.selectable_message_lines.push(String::new());
+    }
+    state
+        .selectable_message_lines
+        .extend_from_slice(&compact_lines.1);
 
     // 6. 注册可选中文本行（用于鼠标拖选反查）
 
@@ -290,9 +326,15 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         render_blank_separator(n_completed, scroll_y, visible_height, area, buf);
     }
 
-    render_cached_section(&pending_lines.0, pending_offset, &render_ctx, buf);
+    render_cached_section(&live_lines.0, live_offset, &render_ctx, buf);
 
     if has_sep2 {
+        render_blank_separator(live_offset + n_live, scroll_y, visible_height, area, buf);
+    }
+
+    render_cached_section(&pending_lines.0, pending_offset, &render_ctx, buf);
+
+    if has_sep3 {
         render_blank_separator(
             pending_offset + n_pending,
             scroll_y,
@@ -303,6 +345,12 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     }
 
     render_cached_section(&plan_lines.0, plan_offset, &render_ctx, buf);
+
+    if has_sep4 {
+        render_blank_separator(plan_offset + n_plan, scroll_y, visible_height, area, buf);
+    }
+
+    render_cached_section(&compact_lines.0, compact_offset, &render_ctx, buf);
 }
 
 /// 渲染缓存段所需的上下文参数。
@@ -399,23 +447,18 @@ fn render_blank_separator(
     Line::from("").render(row_area, buf);
 }
 
-/// 渲染已完成的消息列表（不含 pending_assistant 和 pending_proposed_plan）。
-fn render_completed_messages(
-    state: &UiState,
-    content_width: usize,
-) -> (Vec<Line<'static>>, Vec<String>) {
-    render_message_range(state, content_width, 0)
-}
-
-/// 渲染 `messages[start_idx..]`，返回该范围的渲染结果（不含前导分隔符）。
+/// 渲染 `messages[start_idx..end_idx]`，返回该范围的渲染结果（不含前导分隔符）。
 ///
+/// `end_idx` 为 `None` 时渲染到末尾；为 `Some(n)` 时只渲染到 `messages[n]`（不含）。
 /// 用于增量追加缓存：当只有新消息追加时，只渲染 `start_idx` 之后的部分，
 /// 然后将结果追加到已有缓存。
 fn render_message_range(
     state: &UiState,
     content_width: usize,
     start_idx: usize,
+    end_idx: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<String>) {
+    let end_idx = end_idx.unwrap_or(state.messages.len());
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
 
@@ -469,9 +512,9 @@ fn render_message_range(
         }
     }
 
-    // 渲染 messages[start_idx..]
+    // 渲染 messages[start_idx..end_idx]
     let mut rendered_msg_idx = rendered_msg_offset;
-    for ui_message in &state.messages[start_idx..] {
+    for ui_message in &state.messages[start_idx..end_idx] {
         let (msg_lines, msg_sel) = render_single_ui_message(
             ui_message,
             &mut rendered_msg_idx,
@@ -827,6 +870,21 @@ fn render_pending_plan_lines(
     content_width: usize,
 ) -> (Vec<Line<'static>>, Vec<String>) {
     let block_lines = build_proposed_plan_lines(plan_text, content_width);
+    let mut all_lines = Vec::new();
+    let mut selectable_lines = Vec::new();
+    if !block_lines.is_empty() {
+        selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
+        all_lines.extend(block_lines);
+    }
+    (all_lines, selectable_lines)
+}
+
+/// 渲染正在流式构建中的 compact 摘要（不走缓存，每帧重算以驱动呼吸动画）。
+fn render_pending_compact_lines(
+    summary_text: &str,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let block_lines = build_llm_summary_lines(summary_text, content_width);
     let mut all_lines = Vec::new();
     let mut selectable_lines = Vec::new();
     if !block_lines.is_empty() {

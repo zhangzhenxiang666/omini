@@ -608,7 +608,10 @@ This should be skipped.
         let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("explorer").unwrap();
 
-        assert_eq!(agent.description, "Read-only codebase exploration agent.");
+        assert_eq!(
+            agent.description,
+            "Read-only codebase exploration agent. Use for finding files by pattern, searching definitions/symbols, tracing dependencies, and understanding architecture across multiple files. Specify thoroughness: 'quick' (narrow), 'medium', or 'very thorough' (comprehensive cross-file analysis)."
+        );
         assert!(registry.diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message()
@@ -766,7 +769,7 @@ Help in this project.
         assert_eq!(general.name, "general");
         assert_eq!(
             general.description,
-            "General purpose isolated coding agent."
+            "General-purpose coding agent for multi-step implementation and research. Use for writing tests, refactoring modules, making code changes, or complex questions requiring multiple tools. Can parallelize independent subtasks. Unlike explorer, this agent can modify files."
         );
         assert_eq!(general.tool_policy.allow, None);
         assert_eq!(general.tool_policy.deny, None);
