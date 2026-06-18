@@ -32,7 +32,7 @@ pub(super) fn render_agents_panel(
     frame.render_widget(Clear, panel_area);
 
     let accent = Color::Rgb(0x42, 0xd9, 0xe8);
-    let mut divider_line = Line::from(Span::styled(
+    let divider_line = Line::from(Span::styled(
         "━".repeat(panel_area.width.saturating_sub(1) as usize),
         Style::default().fg(accent),
     ));
@@ -42,7 +42,7 @@ pub(super) fn render_agents_panel(
         width: panel_area.width,
         height: 1,
     };
-    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+    register_selectable_lines(state, divider_area, std::slice::from_ref(&divider_line));
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     let content_area = Rect {
@@ -62,15 +62,15 @@ pub(super) fn render_agents_panel(
         content_area.width as usize,
         content_area.height as usize,
     );
-    let mut rendered = lines;
+    let rendered = lines;
     if content_area.width > 0 && content_area.height > 0 && content_area.y < panel_area.bottom() {
-        register_and_highlight_lines(state, content_area, &mut rendered);
+        register_selectable_lines(state, content_area, &rendered);
         frame.render_widget(Paragraph::new(Text::from(rendered)), content_area);
     }
 
-    let mut footer = agents_footer_hint(manager);
+    let footer = agents_footer_hint(manager);
     if footer_area.width > 0 {
-        register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer));
+        register_selectable_lines(state, footer_area, std::slice::from_ref(&footer));
         frame.render_widget(Paragraph::new(footer), footer_area);
     }
 

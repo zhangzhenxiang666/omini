@@ -4,13 +4,17 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
 pub fn copy_to_clipboard(text: &str) {
-    if copy_to_system_clipboard(text) {
-        return;
-    }
-    if std::env::var_os("TMUX").is_some() && copy_to_tmux_clipboard(text) {
-        return;
-    }
-    copy_to_terminal_clipboard(text);
+    // 后台线程执行，避免在 WSL2 等环境下 spawn 外部进程阻塞 TUI 事件循环。
+    let text = text.to_owned();
+    std::thread::spawn(move || {
+        if copy_to_system_clipboard(&text) {
+            return;
+        }
+        if std::env::var_os("TMUX").is_some() && copy_to_tmux_clipboard(&text) {
+            return;
+        }
+        copy_to_terminal_clipboard(&text);
+    });
 }
 
 fn write_to_command_stdin(program: &str, args: &[&str], text: &str) -> bool {

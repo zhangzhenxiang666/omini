@@ -22,6 +22,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     if let Some(InteractionStep::Session { .. }) = &state.interaction_step {
         super::render_session_list(state, frame, area);
+        crate::selection::apply_selection_overlay(state, frame.buffer_mut());
         return;
     }
 
@@ -41,6 +42,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         state.messages_area = chunks[1];
         super::render_messages(state, frame, chunks[1]);
         super::plan_approval_drawer::render_plan_approval_drawer(state, frame, chunks[3]);
+        crate::selection::apply_selection_overlay(state, frame.buffer_mut());
         return;
     }
 
@@ -69,6 +71,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
         super::help_drawer::render_help_drawer(state, frame, area);
         super::permission_drawer::render_permission_drawer(state, frame, chunks[3]);
+        crate::selection::apply_selection_overlay(state, frame.buffer_mut());
         return;
     }
 
@@ -92,6 +95,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         } else if super::interactions::interaction_drawer_height(state, area).is_some() {
             super::interactions::render_interaction(state, frame, chunks[3]);
         }
+        crate::selection::apply_selection_overlay(state, frame.buffer_mut());
         return;
     }
 
@@ -138,6 +142,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
 
     super::help_drawer::render_help_drawer(state, frame, area);
     super::permission_drawer::render_permission_drawer(state, frame, area);
+    crate::selection::apply_selection_overlay(state, frame.buffer_mut());
 }
 
 fn should_render_start_screen(state: &UiState) -> bool {
@@ -205,7 +210,7 @@ fn render_activity(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) 
     }
     spans.push(Span::styled(meta, style));
 
-    let mut line = Line::from(spans);
-    super::register_and_highlight_lines(state, activity_area, std::slice::from_mut(&mut line));
+    let line = Line::from(spans);
+    super::register_selectable_lines(state, activity_area, std::slice::from_ref(&line));
     frame.render_widget(Paragraph::new(line), activity_area);
 }

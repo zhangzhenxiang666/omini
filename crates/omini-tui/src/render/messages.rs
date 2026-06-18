@@ -3,8 +3,7 @@ use super::{
     line_to_plain_text, line_width, render_subagent_tool, styled_wrapped_display,
     styled_wrapped_text, truncate_str,
 };
-use crate::selection::highlighted_line;
-use crate::state::{SelectionPoint, UiMessage, UiState, format_run_duration};
+use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
     build_bordered_lines, build_thinking_lines, render_tool, tool_error_display_text,
@@ -13,7 +12,7 @@ use crate::widgets::{
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::ContentBlock;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::{HashMap, HashSet};
@@ -294,26 +293,10 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
     // 7. 逐段直接渲染到 buffer（零拷贝）
 
-    // 预计算选区（避免渲染循环中借用 UiState）
-    let normalized_sel = state.text_selection.as_ref().and_then(|sel| {
-        let (start, end) = if sel.start <= sel.end {
-            (sel.start, sel.end)
-        } else {
-            (sel.end, sel.start)
-        };
-        (start != end).then_some((start, end))
-    });
-
     let render_ctx = SectionRenderContext {
         scroll_y,
         visible_height,
         area,
-        selectable_message_lines: &state.selectable_message_lines,
-        normalized_sel,
-        highlight: Style::default()
-            .fg(Color::Rgb(40, 44, 52))
-            .bg(Color::Rgb(180, 210, 255))
-            .add_modifier(Modifier::BOLD),
         user_bg: INPUT_BG,
         user_line_bg: Style::default().bg(INPUT_BG),
     };
@@ -354,31 +337,24 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 }
 
 /// 渲染缓存段所需的上下文参数。
-struct SectionRenderContext<'a> {
+struct SectionRenderContext {
     scroll_y: usize,
     visible_height: usize,
     area: Rect,
-    selectable_message_lines: &'a [String],
-    normalized_sel: Option<(SelectionPoint, SelectionPoint)>,
-    highlight: Style,
     user_bg: Color,
     user_line_bg: Style,
 }
 
 /// 将一个缓存段直接渲染到 buffer，不拷贝 `Line`。
-/// 仅在有活跃文本选择时，对被选中的行构造高亮覆盖版本。
 fn render_cached_section(
     lines: &[Line<'static>],
     section_start: usize,
-    ctx: &SectionRenderContext<'_>,
+    ctx: &SectionRenderContext,
     buf: &mut ratatui::buffer::Buffer,
 ) {
-    for (local_idx, line) in lines.iter().enumerate() {
-        let abs_idx = section_start + local_idx;
-        if abs_idx < ctx.scroll_y {
-            continue;
-        }
-        let visible_row = abs_idx - ctx.scroll_y;
+    let skip = ctx.scroll_y.saturating_sub(section_start);
+    for (local_idx, line) in lines.iter().enumerate().skip(skip) {
+        let visible_row = section_start + local_idx - ctx.scroll_y;
         if visible_row >= ctx.visible_height {
             break;
         }
@@ -389,43 +365,12 @@ fn render_cached_section(
             1,
         );
 
-        // 有活跃选择时，检查当前行是否被选中并渲染高亮覆盖
-        if let Some((start, end)) = ctx.normalized_sel
-            && let Some(text) = ctx.selectable_message_lines.get(abs_idx)
-            && let Some((start_col, end_col)) =
-                selected_cols_for_row(start, end, ctx.area.y + visible_row as u16, text)
-        {
-            let hl = highlighted_line(text, start_col, end_col, ctx.highlight);
-            hl.render(row_area, buf);
-            continue;
-        }
-
         line.render(row_area, buf);
 
         if line.style.bg == Some(ctx.user_bg) {
             buf.set_style(row_area, ctx.user_line_bg);
         }
     }
-}
-
-/// 内联版选区列范围计算，仅需预计算的选区端点，不依赖 UiState。
-fn selected_cols_for_row(
-    start: SelectionPoint,
-    end: SelectionPoint,
-    screen_row: u16,
-    text: &str,
-) -> Option<(usize, usize)> {
-    let row = screen_row as usize;
-    if row < start.row || row > end.row {
-        return None;
-    }
-    let start_col = if row == start.row { start.col } else { 0 };
-    let end_col = if row == end.row {
-        end.col.saturating_add(1)
-    } else {
-        UnicodeWidthStr::width(text)
-    };
-    (start_col < end_col).then_some((start_col, end_col))
 }
 
 /// 渲染分段之间的空行分隔符。

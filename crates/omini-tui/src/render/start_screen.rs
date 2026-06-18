@@ -1,4 +1,4 @@
-use super::register_and_highlight_lines;
+use super::register_selectable_lines;
 use super::session_list::relative_time;
 use super::text::truncate_str;
 use crate::state::UiState;
@@ -22,8 +22,8 @@ pub(super) fn render_start_screen(state: &mut UiState, frame: &mut ratatui::Fram
         return;
     }
 
-    let mut lines = start_screen_lines(state, area.width as usize, area.height as usize);
-    register_and_highlight_lines(state, area, &mut lines);
+    let lines = start_screen_lines(state, area.width as usize, area.height as usize);
+    register_selectable_lines(state, area, &lines);
     frame.render_widget(Paragraph::new(lines), area);
 }
 

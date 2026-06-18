@@ -1,4 +1,3 @@
-use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::UiState;
 use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
 use omini_domain::message::TextBlock;
@@ -181,11 +180,7 @@ pub(super) fn line_to_plain_text(line: &Line<'_>) -> String {
         .collect::<String>()
 }
 
-pub(super) fn register_and_highlight_lines(
-    state: &mut UiState,
-    area: Rect,
-    lines: &mut [Line<'static>],
-) {
+pub(super) fn register_selectable_lines(state: &mut UiState, area: Rect, lines: &[Line<'_>]) {
     for (idx, line) in lines.iter().enumerate() {
         state.register_selectable_screen_line(
             area.y + idx as u16,
@@ -193,19 +188,5 @@ pub(super) fn register_and_highlight_lines(
             area.width,
             line_to_plain_text(line),
         );
-    }
-
-    let highlight = Style::default()
-        .fg(Color::Rgb(40, 44, 52))
-        .bg(Color::Rgb(180, 210, 255))
-        .add_modifier(Modifier::BOLD);
-
-    for (idx, line) in lines.iter_mut().enumerate() {
-        let text = line_to_plain_text(line);
-        let screen_row = area.y + idx as u16;
-        if let Some((start_col, end_col)) = selected_cols_for_screen_line(state, screen_row, &text)
-        {
-            *line = highlighted_line(&text, start_col, end_col, highlight);
-        }
     }
 }

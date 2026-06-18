@@ -427,6 +427,14 @@ impl UiState {
                 self.activity_status_title = None;
                 self.refresh_input_placeholder();
                 self.agent_status = AgentStatus::Idle;
+                // Run 结束：将仍然 Running 的 subagent 标记为 Failed（安全网）。
+                // 正常情况下 SubagentFinished 先于 RunFinished 到达，此处仅处理
+                // 事件丢失的边界情况，避免 live_message_start 被永久压低。
+                for node in self.subagents.values_mut() {
+                    if matches!(node.status, crate::types::events::SubagentStatus::Running) {
+                        node.status = crate::types::events::SubagentStatus::Failed;
+                    }
+                }
                 self.update_live_boundary();
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {

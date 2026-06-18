@@ -50,11 +50,11 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
         width: drawer_area.width,
         height: 1,
     };
-    let mut divider_line = Line::from(Span::styled(
+    let divider_line = Line::from(Span::styled(
         "━".repeat(drawer_area.width.saturating_sub(1) as usize),
         Style::default().fg(MAIN_ACCENT),
     ));
-    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+    register_selectable_lines(state, divider_area, std::slice::from_ref(&divider_line));
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     if drawer_area.height > 1 {
@@ -64,8 +64,8 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
             width: drawer_area.width.saturating_sub(6),
             height: 1,
         };
-        let mut tabs = help_tabs(drawer.tab);
-        register_and_highlight_lines(state, tab_area, std::slice::from_mut(&mut tabs));
+        let tabs = help_tabs(drawer.tab);
+        register_selectable_lines(state, tab_area, std::slice::from_ref(&tabs));
         frame.render_widget(Paragraph::new(tabs), tab_area);
     }
 
@@ -76,7 +76,7 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
         height: drawer_area.height.saturating_sub(5),
     };
     let content_width = body_area.width as usize;
-    let mut body = match drawer.tab {
+    let body = match drawer.tab {
         HelpTab::General => general_lines(
             content_width,
             drawer.general_selected,
@@ -104,7 +104,7 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
         }),
     };
     if body_area.height > 0 && body_area.width > 0 && body_area.y < drawer_area.bottom() {
-        register_and_highlight_lines(state, body_area, &mut body);
+        register_selectable_lines(state, body_area, &body);
         frame.render_widget(Paragraph::new(Text::from(body)), body_area);
     }
 
@@ -115,7 +115,7 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
         height: 1,
     };
     if hint_area.width > 0 {
-        let mut hint = Line::from(vec![
+        let hint = Line::from(vec![
             Span::styled("Esc ", Style::default().fg(MAIN_ACCENT)),
             Span::styled("关闭", Style::default().fg(Color::Rgb(140, 145, 155))),
             Span::raw("  "),
@@ -125,7 +125,7 @@ pub(super) fn render_help_drawer(state: &mut UiState, frame: &mut ratatui::Frame
             Span::styled("↑/↓ ", Style::default().fg(MAIN_ACCENT)),
             Span::styled("浏览列表", Style::default().fg(Color::Rgb(140, 145, 155))),
         ]);
-        register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
+        register_selectable_lines(state, hint_area, std::slice::from_ref(&hint));
         frame.render_widget(Paragraph::new(hint), hint_area);
     }
 }

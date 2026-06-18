@@ -1,7 +1,11 @@
 use crate::state::{SelectionPoint, UiState};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
+use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+pub(super) const SELECTION_HIGHLIGHT: Style = Style::new()
+    .fg(Color::Rgb(40, 44, 52))
+    .bg(Color::Rgb(180, 210, 255))
+    .add_modifier(Modifier::BOLD);
 
 pub fn selection_point_from_mouse(
     state: &UiState,
@@ -67,42 +71,47 @@ pub fn selected_text(state: &UiState) -> Option<String> {
     }
 }
 
-pub(super) fn selected_cols_for_screen_line(
-    state: &UiState,
-    screen_row: u16,
-    text: &str,
-) -> Option<(usize, usize)> {
-    let (start, end) = normalized_selection(state)?;
-    if start == end {
-        return None;
-    }
-
-    let row = screen_row as usize;
-    if row < start.row || row > end.row {
-        return None;
-    }
-
-    let start_col = if row == start.row { start.col } else { 0 };
-    let end_col = if row == end.row {
-        end.col.saturating_add(1)
-    } else {
-        UnicodeWidthStr::width(text)
+pub(super) fn apply_selection_overlay(state: &UiState, buf: &mut ratatui::buffer::Buffer) {
+    let Some((start, end)) = normalized_selection(state) else {
+        return;
     };
-    (start_col < end_col).then_some((start_col, end_col))
-}
+    if start == end {
+        return;
+    }
 
-pub(super) fn highlighted_line(
-    text: &str,
-    start_col: usize,
-    end_col: usize,
-    highlight: Style,
-) -> Line<'static> {
-    let (before, selected, after) = split_by_display_cols(text, start_col, end_col);
-    Line::from(vec![
-        Span::raw(before),
-        Span::styled(selected, highlight),
-        Span::raw(after),
-    ])
+    for line in &state.selectable_screen_lines {
+        let row = line.row as usize;
+        if row < start.row || row > end.row {
+            continue;
+        }
+
+        let start_col = if row == start.row { start.col } else { 0 };
+        let end_col = if row == end.row {
+            end.col.saturating_add(1)
+        } else {
+            UnicodeWidthStr::width(line.text.as_str())
+        };
+        if start_col >= end_col {
+            continue;
+        }
+
+        let mut col = 0usize;
+        for ch in line.text.chars() {
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if width == 0 {
+                continue;
+            }
+            let next_col = col + width;
+            if next_col > start_col && col < end_col {
+                let buf_x = line.col + col as u16;
+                let buf_y = line.row;
+                if let Some(cell) = buf.cell_mut((buf_x, buf_y)) {
+                    cell.set_style(SELECTION_HIGHLIGHT);
+                }
+            }
+            col = next_col;
+        }
+    }
 }
 
 fn normalized_selection(state: &UiState) -> Option<(SelectionPoint, SelectionPoint)> {
@@ -112,28 +121,6 @@ fn normalized_selection(state: &UiState) -> Option<(SelectionPoint, SelectionPoi
     } else {
         Some((selection.end, selection.start))
     }
-}
-
-fn split_by_display_cols(text: &str, start_col: usize, end_col: usize) -> (String, String, String) {
-    let mut before = String::new();
-    let mut selected = String::new();
-    let mut after = String::new();
-    let mut col = 0;
-
-    for ch in text.chars() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        let next_col = col + width;
-        if next_col <= start_col {
-            before.push(ch);
-        } else if col >= end_col {
-            after.push(ch);
-        } else {
-            selected.push(ch);
-        }
-        col = next_col;
-    }
-
-    (before, selected, after)
 }
 
 fn slice_display_cols(text: &str, start_col: usize, end_col: usize) -> String {

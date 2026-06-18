@@ -1,4 +1,3 @@
-use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::UiState;
 use omini_domain::display::UserDraft;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -54,7 +53,7 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
         .bg(Color::Rgb(65, 69, 76))
         .add_modifier(Modifier::DIM);
 
-    let mut lines = if state.input.is_empty() {
+    let lines = if state.input.is_empty() {
         vec![Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
             Span::styled(state.input_placeholder.clone(), placeholder_style),
@@ -64,7 +63,6 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
     };
     if !state.input.is_empty() {
         register_input_lines(state, input_body, &lines);
-        apply_selection_highlight(state, input_body, &mut lines);
     }
     let paragraph = Paragraph::new(lines).style(bg);
     frame.render_widget(paragraph, input_body);
@@ -303,7 +301,7 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
     } else {
         " - 当前运行结束后发送"
     };
-    let mut title_line = Line::from(vec![
+    let title_line = Line::from(vec![
         Span::styled(" ", bg),
         Span::styled(title, title_style),
         Span::styled(title_meta, meta_style),
@@ -314,7 +312,6 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
         chunks[0].width,
         line_to_plain_text(&title_line),
     );
-    apply_selection_highlight(state, chunks[0], std::slice::from_mut(&mut title_line));
     frame.render_widget(Paragraph::new(title_line).style(bg), chunks[0]);
 
     let visible = chunks[1].height as usize;
@@ -325,7 +322,7 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
         .bg(bg_color);
     let text_style = Style::default().fg(Color::Rgb(205, 210, 218)).bg(bg_color);
 
-    let mut lines: Vec<Line> = input_texts
+    let lines: Vec<Line> = input_texts
         .iter()
         .skip(skip)
         .map(|text| {
@@ -346,11 +343,10 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
             line_to_plain_text(line),
         );
     }
-    apply_selection_highlight(state, chunks[1], &mut lines);
     frame.render_widget(Paragraph::new(lines).style(bg), chunks[1]);
 
     let hint_style = Style::default().fg(Color::Rgb(255, 204, 163)).bg(bg_color);
-    let mut footer = if is_pending {
+    let footer = if is_pending {
         Line::from(vec![
             Span::styled(" ", bg),
             Span::styled("输入队列已锁定，等待插入完成", meta_style),
@@ -368,7 +364,6 @@ fn render_queued_user_inputs(state: &mut UiState, frame: &mut ratatui::Frame, ar
         chunks[2].width,
         line_to_plain_text(&footer),
     );
-    apply_selection_highlight(state, chunks[2], std::slice::from_mut(&mut footer));
     frame.render_widget(Paragraph::new(footer).style(bg), chunks[2]);
 }
 
@@ -380,22 +375,6 @@ fn register_input_lines(state: &mut UiState, area: Rect, lines: &[Line<'_>]) {
             area.width,
             line_to_plain_text(line),
         );
-    }
-}
-
-fn apply_selection_highlight(state: &UiState, area: Rect, lines: &mut [Line<'static>]) {
-    let highlight = Style::default()
-        .fg(Color::Rgb(40, 44, 52))
-        .bg(Color::Rgb(180, 210, 255))
-        .add_modifier(Modifier::BOLD);
-
-    for (idx, line) in lines.iter_mut().enumerate() {
-        let text = line_to_plain_text(line);
-        let screen_row = area.y + idx as u16;
-        if let Some((start_col, end_col)) = selected_cols_for_screen_line(state, screen_row, &text)
-        {
-            *line = highlighted_line(&text, start_col, end_col, highlight);
-        }
     }
 }
 

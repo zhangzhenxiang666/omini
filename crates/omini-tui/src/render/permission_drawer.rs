@@ -145,7 +145,7 @@ pub(super) fn render_permission_drawer(
         ToolPauseKind::Permission(_) => format!(" {} ", permission_drawer_title(&request)),
     };
     if drawer_area.height > 1 {
-        let mut title_line = Line::from(Span::styled(
+        let title_line = Line::from(Span::styled(
             title,
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
@@ -155,12 +155,12 @@ pub(super) fn render_permission_drawer(
             width: drawer_area.width,
             height: 1,
         };
-        register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
+        register_selectable_lines(state, title_area, std::slice::from_ref(&title_line));
         frame.render_widget(Paragraph::new(title_line), title_area);
     }
 
     if drawer_area.height > 3
-        && let Some(mut header) = fixed_header
+        && let Some(header) = fixed_header
     {
         let header_area = Rect {
             x: drawer_area.x + 3,
@@ -168,13 +168,12 @@ pub(super) fn render_permission_drawer(
             width: drawer_area.width.saturating_sub(6),
             height: 1,
         };
-        register_and_highlight_lines(state, header_area, std::slice::from_mut(&mut header));
+        register_selectable_lines(state, header_area, std::slice::from_ref(&header));
         frame.render_widget(Paragraph::new(header), header_area);
     }
 
     if body_area.width > 0 && body_area.height > 0 && body_area.y < drawer_area.bottom() {
-        let mut visible_lines = visible_lines;
-        register_and_highlight_lines(state, body_area, &mut visible_lines);
+        register_selectable_lines(state, body_area, &visible_lines);
         let paragraph = Paragraph::new(Text::from(visible_lines));
         frame.render_widget(paragraph, body_area);
     }
@@ -192,8 +191,7 @@ pub(super) fn render_permission_drawer(
         height: note_height,
     });
     if let Some(note_area) = note_area {
-        let mut note_lines = note_lines;
-        register_and_highlight_lines(state, note_area, &mut note_lines);
+        register_selectable_lines(state, note_area, &note_lines);
         frame.render_widget(Paragraph::new(Text::from(note_lines)), note_area);
         if state.user_input_note_mode
             && let Some(note_cursor) = note_cursor
@@ -209,7 +207,7 @@ pub(super) fn render_permission_drawer(
         ToolPauseKind::UserInput(preview) => build_user_input_action_lines(state, preview),
     };
     if drawer_area.height > 2 {
-        let mut option_lines = options.lines;
+        let option_lines = options.lines;
         let options_area = Rect {
             x: drawer_area.x + 3,
             y: drawer_area.y
@@ -219,7 +217,7 @@ pub(super) fn render_permission_drawer(
             width: drawer_area.width.saturating_sub(6),
             height: 2.min(drawer_area.height.saturating_sub(2)),
         };
-        register_and_highlight_lines(state, options_area, &mut option_lines);
+        register_selectable_lines(state, options_area, &option_lines);
         frame.render_widget(Paragraph::new(Text::from(option_lines)), options_area);
     }
 }

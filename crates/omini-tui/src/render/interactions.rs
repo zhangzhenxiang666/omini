@@ -56,7 +56,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
     let accent = Color::Rgb(0x42, 0xd9, 0xe8);
 
     // 第 0 行：面板上方的粗分隔线（━ 字符，强调色）
-    let mut divider_line = Line::from(Span::styled(
+    let divider_line = Line::from(Span::styled(
         "━".repeat(panel_area.width.saturating_sub(1) as usize),
         Style::default().fg(accent),
     ));
@@ -66,13 +66,13 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
         width: panel_area.width,
         height: 1,
     };
-    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+    register_selectable_lines(state, divider_area, std::slice::from_ref(&divider_line));
 
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // 第 1 行：模型选择标题（强调色加粗）
     if panel_area.height > 1 {
-        let mut title_line = Line::from(Span::styled(
+        let title_line = Line::from(Span::styled(
             " 选择模型",
             Style::default().fg(accent).add_modifier(Modifier::BOLD),
         ));
@@ -82,14 +82,14 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
             width: panel_area.width,
             height: 1,
         };
-        register_and_highlight_lines(state, title_area, std::slice::from_mut(&mut title_line));
+        register_selectable_lines(state, title_area, std::slice::from_ref(&title_line));
 
         frame.render_widget(Paragraph::new(title_line), title_area);
     }
 
     // 第 2 行：灰色副标题
     if panel_area.height > 2 {
-        let mut subtitle_line = Line::from(Span::styled(
+        let subtitle_line = Line::from(Span::styled(
             " 切换模型，适用于当前会话和未来会话。",
             Style::default().fg(Color::Rgb(140, 145, 155)),
         ));
@@ -99,11 +99,7 @@ pub(super) fn render_interaction(state: &mut UiState, frame: &mut ratatui::Frame
             width: panel_area.width,
             height: 1,
         };
-        register_and_highlight_lines(
-            state,
-            subtitle_area,
-            std::slice::from_mut(&mut subtitle_line),
-        );
+        register_selectable_lines(state, subtitle_area, std::slice::from_ref(&subtitle_line));
 
         frame.render_widget(Paragraph::new(subtitle_line), subtitle_area);
     }
@@ -250,9 +246,9 @@ fn render_model_panel(
         }
     }
 
-    let mut lines = scrollable_lines(model_lines, list_h as usize, "↑ 更多模型", "↓ 更多模型");
+    let lines = scrollable_lines(model_lines, list_h as usize, "↑ 更多模型", "↓ 更多模型");
     if list_area.width > 0 && list_area.height > 0 {
-        register_and_highlight_lines(state, list_area, &mut lines);
+        register_selectable_lines(state, list_area, &lines);
         frame.render_widget(Paragraph::new(Text::from(lines)), list_area);
     }
 
@@ -285,7 +281,7 @@ fn render_model_panel(
                 Modifier::empty()
             });
         let helper_style = Style::default().fg(Color::Rgb(140, 145, 155));
-        let mut thinking_line = if selected_has_thinking {
+        let thinking_line = if selected_has_thinking {
             Line::from(vec![
                 Span::raw("  "),
                 Span::styled(format!("{} {} effort", icon, label), thinking_style),
@@ -306,11 +302,7 @@ fn render_model_panel(
             width: area.width,
             height: 1,
         };
-        register_and_highlight_lines(
-            state,
-            thinking_area,
-            std::slice::from_mut(&mut thinking_line),
-        );
+        register_selectable_lines(state, thinking_area, std::slice::from_ref(&thinking_line));
 
         frame.render_widget(Paragraph::new(thinking_line), thinking_area);
     }
@@ -321,7 +313,7 @@ fn render_model_panel(
     } else {
         "  ↑↓ 选择  ·  Enter 确认  ·  Esc 取消"
     };
-    let mut hint = Line::from(Span::styled(
+    let hint = Line::from(Span::styled(
         hint_text,
         Style::default().fg(Color::Rgb(140, 145, 155)),
     ));
@@ -332,7 +324,7 @@ fn render_model_panel(
         height: 1,
     };
     if hint_area.width > 0 {
-        register_and_highlight_lines(state, hint_area, std::slice::from_mut(&mut hint));
+        register_selectable_lines(state, hint_area, std::slice::from_ref(&hint));
         frame.render_widget(Paragraph::new(hint), hint_area);
     }
 }

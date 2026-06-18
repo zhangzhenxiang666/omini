@@ -28,13 +28,13 @@ pub(super) fn render_plan_approval_drawer(
         let bg = Style::default().bg(INPUT_BG);
         frame.render_widget(Paragraph::new(Line::from("")).style(bg), panel_area);
 
-        let mut lines = build_panel_lines(
+        let lines = build_panel_lines(
             state.plan_approval_selected,
             state.plan_approval_auto,
             panel_area.height,
         )
         .lines;
-        register_and_highlight_lines(state, panel_area, &mut lines);
+        register_selectable_lines(state, panel_area, &lines);
         frame.render_widget(Paragraph::new(lines).style(bg), panel_area);
     }
 
@@ -44,8 +44,8 @@ pub(super) fn render_plan_approval_drawer(
         width: drawer_area.width,
         height: 1,
     };
-    let mut footer = build_footer_line();
-    register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer));
+    let footer = build_footer_line();
+    register_selectable_lines(state, footer_area, std::slice::from_ref(&footer));
     frame.render_widget(Paragraph::new(footer), footer_area);
 }
 

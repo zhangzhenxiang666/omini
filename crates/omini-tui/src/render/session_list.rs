@@ -1,4 +1,4 @@
-use super::{line_width, pad_display_width, register_and_highlight_lines, truncate_str};
+use super::{line_width, pad_display_width, register_selectable_lines, truncate_str};
 use crate::state::{InteractionStep, UiState};
 use crate::types::events::SessionRuntimeState;
 use chrono::{DateTime, Local, Utc};
@@ -43,7 +43,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         .fg(Color::Rgb(0xa5, 0xac, 0xb6))
         .add_modifier(Modifier::BOLD);
     let filter_style = Style::default().fg(Color::Rgb(0x6f, 0x76, 0x83));
-    let mut header_lines: Vec<Line> = vec![
+    let header_lines: Vec<Line> = vec![
         Line::from(Span::styled("会话", header_style)),
         if search.is_empty() {
             Line::from(Span::styled("直接输入关键词筛选会话", filter_style))
@@ -51,7 +51,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
             Line::from(Span::styled(format!("筛选：{}", search), filter_style))
         },
     ];
-    register_and_highlight_lines(state, header_area, &mut header_lines);
+    register_selectable_lines(state, header_area, &header_lines);
     frame.render_widget(Paragraph::new(header_lines), header_area);
 
     // ── 内容 ──
@@ -72,22 +72,22 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
             )));
             row_backgrounds.push(None);
         }
-        register_and_highlight_lines(state, content_area, &mut lines);
+        register_selectable_lines(state, content_area, &lines);
         render_session_row_backgrounds(frame, content_area, &row_backgrounds);
         frame.render_widget(Paragraph::new(lines), content_area);
 
         // 分隔线（空）
         let divider_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
-        let mut divider_line = Line::from(Span::styled("─".repeat(content_w), divider_style));
-        register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+        let divider_line = Line::from(Span::styled("─".repeat(content_w), divider_style));
+        register_selectable_lines(state, divider_area, std::slice::from_ref(&divider_line));
         frame.render_widget(Paragraph::new(divider_line), divider_area);
 
         // 底部
-        let mut footer_line = Line::from(Span::styled(
+        let footer_line = Line::from(Span::styled(
             "Esc 返回 · 输入筛选",
             Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a)),
         ));
-        register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
+        register_selectable_lines(state, footer_area, std::slice::from_ref(&footer_line));
         frame.render_widget(Paragraph::new(footer_line), footer_area);
         return;
     }
@@ -202,7 +202,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         row_backgrounds.push(None);
     }
 
-    register_and_highlight_lines(state, content_area, &mut lines);
+    register_selectable_lines(state, content_area, &lines);
     render_session_row_backgrounds(frame, content_area, &row_backgrounds);
     frame.render_widget(Paragraph::new(lines), content_area);
 
@@ -212,13 +212,13 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     let dashes_count = content_w.saturating_sub(indicator.len());
     let divider_line = format!("{}{}", "─".repeat(dashes_count), indicator);
     let divider_style = Style::default().fg(Color::Rgb(0x5a, 0x66, 0x76));
-    let mut divider_line = Line::from(Span::styled(divider_line, divider_style));
-    register_and_highlight_lines(state, divider_area, std::slice::from_mut(&mut divider_line));
+    let divider_line = Line::from(Span::styled(divider_line, divider_style));
+    register_selectable_lines(state, divider_area, std::slice::from_ref(&divider_line));
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // ── 底部 ──
-    let mut footer_line = session_footer_line(content_w);
-    register_and_highlight_lines(state, footer_area, std::slice::from_mut(&mut footer_line));
+    let footer_line = session_footer_line(content_w);
+    register_selectable_lines(state, footer_area, std::slice::from_ref(&footer_line));
     frame.render_widget(Paragraph::new(footer_line), footer_area);
 }
 

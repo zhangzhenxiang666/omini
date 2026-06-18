@@ -1,4 +1,3 @@
-use crate::selection::{highlighted_line, selected_cols_for_screen_line};
 use crate::state::{AgentStatus, UiState};
 use crate::types::events::ActiveProfile;
 use ratatui::layout::Rect;
@@ -107,9 +106,8 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
         left_width,
     );
     let left = build_left_status_line(state, &model_thinking, &path_display, debug_style);
-    let mut line = compose_footer_line(left, profile_hint, width);
+    let line = compose_footer_line(left, profile_hint, width);
     state.register_selectable_screen_line(area.y, area.x, area.width, line_to_plain_text(&line));
-    apply_selection_highlight(state, area, &mut line);
 
     let paragraph = Paragraph::new(line).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);
@@ -411,19 +409,6 @@ fn truncate_text_to_width(text: &str, width: usize) -> String {
 
 fn line_width(line: &Line<'_>) -> usize {
     UnicodeWidthStr::width(line_to_plain_text(line).as_str())
-}
-
-fn apply_selection_highlight(state: &UiState, area: Rect, line: &mut Line<'static>) {
-    let text = line_to_plain_text(line);
-    let Some((start_col, end_col)) = selected_cols_for_screen_line(state, area.y, &text) else {
-        return;
-    };
-
-    let highlight = Style::default()
-        .fg(Color::Rgb(40, 44, 52))
-        .bg(Color::Rgb(180, 210, 255))
-        .add_modifier(ratatui::style::Modifier::BOLD);
-    *line = highlighted_line(&text, start_col, end_col, highlight);
 }
 
 fn line_to_plain_text(line: &Line<'_>) -> String {

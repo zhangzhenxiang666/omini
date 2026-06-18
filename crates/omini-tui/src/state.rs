@@ -857,19 +857,26 @@ impl UiState {
     /// 仅在 `apply_session_snapshot`（中途连接 / 切换会话）时调用，O(n)。
     fn rebuild_pending_tool_map(&mut self) {
         self.pending_tool_message_map.clear();
+        // 先收集所有已解析的 ToolResult id（跨消息匹配）。
+        let mut all_resolved_ids = std::collections::HashSet::new();
+        for ui_msg in &self.messages {
+            let Some(message) = ui_msg.as_message() else {
+                continue;
+            };
+            for block in &message.content {
+                if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
+                    all_resolved_ids.insert(&tr.tool_use_id);
+                }
+            }
+        }
+        // 只有全局无对应 ToolResult 的 ToolUse 才是真正 pending。
         for (msg_idx, ui_msg) in self.messages.iter().enumerate() {
             let Some(message) = ui_msg.as_message() else {
                 continue;
             };
-            let mut resolved_ids = std::collections::HashSet::new();
-            for block in &message.content {
-                if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
-                    resolved_ids.insert(&tr.tool_use_id);
-                }
-            }
             for block in &message.content {
                 if let omini_domain::message::ContentBlock::ToolUse(tu) = block
-                    && !resolved_ids.contains(&tu.id)
+                    && !all_resolved_ids.contains(&tu.id)
                 {
                     self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
                 }
