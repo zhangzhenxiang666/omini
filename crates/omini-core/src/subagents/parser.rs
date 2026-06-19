@@ -9,6 +9,7 @@ pub(super) fn parse_agent_file(path: &Path) -> Result<AgentSpec, String> {
 
     let name = frontmatter::required_string(&raw, "name")?;
     let description = frontmatter::required_string(&raw, "description")?;
+    let short_description = frontmatter::optional_string(&raw, "short-description")?;
     let allow = frontmatter::optional_string_list(&raw, "tools")?
         .map(|tools| normalize_allow_tools(&tools))
         .transpose()?;
@@ -27,6 +28,7 @@ pub(super) fn parse_agent_file(path: &Path) -> Result<AgentSpec, String> {
     Ok(AgentSpec {
         name,
         description,
+        short_description,
         instructions,
         tool_policy: AgentToolPolicy { allow, deny },
         model,

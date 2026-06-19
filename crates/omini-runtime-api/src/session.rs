@@ -41,12 +41,14 @@ pub struct AgentsSnapshot {
 pub struct SkillSummarySnapshot {
     pub name: String,
     pub description: String,
+    pub short_description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillDetailSnapshot {
     pub name: String,
     pub description: String,
+    pub short_description: Option<String>,
     pub body: String,
     pub directory: PathBuf,
     pub user_invocable: bool,
@@ -56,10 +58,11 @@ pub struct SkillDetailSnapshot {
 pub struct RuntimeSkillSnapshot {
     pub name: String,
     pub description: String,
+    pub short_description: Option<String>,
     pub source_kind: RuntimeSkillSourceKind,
     pub directory: PathBuf,
     pub status: RuntimeCapabilityStatus,
-    pub inject: bool,
+    pub disable_model_invocation: bool,
     pub user_invocable: bool,
 }
 

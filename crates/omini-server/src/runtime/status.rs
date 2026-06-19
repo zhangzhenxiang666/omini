@@ -820,10 +820,11 @@ mod tests {
                 skills: vec![session_types::RuntimeSkillSnapshot {
                     name: "writer".to_string(),
                     description: "Write carefully".to_string(),
+                    short_description: None,
                     source_kind: session_types::RuntimeSkillSourceKind::Project,
                     directory: "/repo/.omini/skills/writer".into(),
                     status: session_types::RuntimeCapabilityStatus::Available,
-                    inject: true,
+                    disable_model_invocation: false,
                     user_invocable: true,
                 }],
                 mcp_servers: vec![RuntimeMcpServerSnapshot {
@@ -839,6 +840,7 @@ mod tests {
                 subagent_sessions: vec![protocol::AgentSummary {
                     name: "explorer".to_string(),
                     description: "Read-only exploration agent.".to_string(),
+                    short_description: None,
                     location: "<built-in>".to_string(),
                 }],
                 now,

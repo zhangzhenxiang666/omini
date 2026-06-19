@@ -685,6 +685,7 @@ impl UiState {
                             .map(|record| AgentSummary {
                                 name: record.name.clone(),
                                 description: record.description.clone(),
+                                short_description: record.short_description.clone(),
                                 location: record
                                     .path
                                     .as_ref()

@@ -1608,6 +1608,7 @@ pub(crate) fn agent_summary_from_protocol(
     omini_domain::subagents::AgentSummary {
         name: agent.name,
         description: agent.description,
+        short_description: agent.short_description,
         location: agent.location,
     }
 }
@@ -1615,10 +1616,11 @@ pub(crate) fn agent_summary_from_protocol(
 pub(crate) fn skill_command_summary(
     skill: protocol::SkillSummary,
 ) -> crate::types::events::CommandSummary {
+    let description = skill.short_description.clone().unwrap_or(skill.description);
     crate::types::events::CommandSummary {
         name: skill.name,
         aliases: Vec::new(),
-        description: skill.description,
+        description,
         sort_weight: 500,
         kind: crate::types::events::CommandKind::Skill,
         has_args: true,
@@ -1732,6 +1734,7 @@ fn agent_record_from_protocol(
     omini_domain::subagents::AgentRecord {
         name: record.name,
         description: record.description,
+        short_description: record.short_description,
         instructions: record.instructions,
         tools: record.tools,
         disallow_tools: record.disallow_tools,
@@ -1761,6 +1764,7 @@ fn generated_agent_draft_from_protocol(
     omini_domain::subagents::AgentDraft {
         name: draft.name,
         description: draft.description,
+        short_description: draft.short_description,
         instructions: draft.instructions,
         tools,
         disallow_tools,
@@ -1943,6 +1947,7 @@ mod tests {
             protocol::GeneratedAgentDraft {
                 name: "diff-reviewer".to_string(),
                 description: "Use when reviewing diffs.".to_string(),
+                short_description: None,
                 instructions: "Review the diff and report findings.".to_string(),
             },
             vec!["read".to_string()],

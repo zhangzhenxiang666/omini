@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 pub struct SkillSpec {
     pub name: String,
     pub description: String,
+    pub short_description: Option<String>,
+    pub argument_hint: Option<String>,
     pub body: String,
     pub directory: PathBuf,
-    pub inject: bool,
+    pub disable_model_invocation: bool,
     pub user_invocable: bool,
     source: SkillSource,
 }
@@ -56,6 +58,7 @@ impl SkillSource {
 pub(crate) struct SkillSummary {
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) short_description: Option<String>,
     pub(crate) directory: PathBuf,
 }
 
@@ -81,10 +84,11 @@ impl SkillRegistry {
         let mut summaries = self
             .skills
             .values()
-            .filter(|skill| skill.inject)
+            .filter(|skill| !skill.disable_model_invocation)
             .map(|skill| SkillSummary {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
+                short_description: skill.short_description.clone(),
                 directory: skill.directory.clone(),
             })
             .collect::<Vec<_>>();
@@ -254,7 +258,10 @@ fn parse_skill_content(
 
     let name = frontmatter::required_string(&raw, "name")?;
     let description = frontmatter::required_string(&raw, "description")?;
-    let inject = frontmatter::optional_bool_path(&raw, &["inject"])?.unwrap_or(true);
+    let short_description = frontmatter::optional_string(&raw, "short-description")?;
+    let argument_hint = frontmatter::optional_string(&raw, "argument-hint")?;
+    let disable_model_invocation =
+        frontmatter::optional_bool_path(&raw, &["disable-model-invocation"])?.unwrap_or(false);
     let user_invocable =
         frontmatter::optional_bool_path(&raw, &["user-invocable"])?.unwrap_or(true);
     let body = body.trim().to_string();
@@ -265,9 +272,11 @@ fn parse_skill_content(
     Ok(SkillSpec {
         name,
         description,
+        short_description,
+        argument_hint,
         body,
         directory,
-        inject,
+        disable_model_invocation,
         user_invocable,
         source,
     })
@@ -421,7 +430,7 @@ Body
     }
 
     #[test]
-    fn top_level_inject_false_suppresses_prompt_summary() {
+    fn disable_model_invocation_true_suppresses_prompt_summary() {
         let root = temp_root();
         write_skill(
             &root,
@@ -429,7 +438,7 @@ Body
             r#"---
 name: hidden
 description: Hidden skill
-inject: false
+disable-model-invocation: true
 ---
 Body
 "#,
@@ -447,7 +456,7 @@ Body
     }
 
     #[test]
-    fn metadata_inject_is_ignored() {
+    fn metadata_disable_model_invocation_is_ignored() {
         let root = temp_root();
         write_skill(
             &root,
@@ -456,7 +465,7 @@ Body
 name: legacy-hidden
 description: Legacy hidden skill
 metadata:
-  inject: false
+  disable-model-invocation: true
 ---
 Body
 "#,

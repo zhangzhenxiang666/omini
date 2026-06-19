@@ -15,6 +15,7 @@ pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
 pub(crate) struct AgentSpec {
     pub(crate) name: String,
     pub(crate) description: String,
+    pub(crate) short_description: Option<String>,
     pub(crate) instructions: String,
     pub(crate) tool_policy: AgentToolPolicy,
     pub(crate) model: Option<AgentModelSpec>,
@@ -73,6 +74,7 @@ impl AgentRegistry {
             .map(|agent| AgentSummary {
                 name: agent.name.clone(),
                 description: agent.description.clone(),
+                short_description: agent.short_description.clone(),
                 location: agent.source.display(),
             })
             .collect();
@@ -217,6 +219,7 @@ fn record_from_spec(
     AgentRecord {
         name: spec.name.clone(),
         description: spec.description.clone(),
+        short_description: spec.short_description.clone(),
         instructions: spec.instructions.clone(),
         tools,
         disallow_tools,
@@ -273,6 +276,12 @@ fn render_agent_file(draft: &AgentDraft) -> String {
         "description: {}\n",
         quote_scalar(&draft.description)
     ));
+    if let Some(short_description) = &draft.short_description {
+        content.push_str(&format!(
+            "short-description: {}\n",
+            quote_scalar(short_description)
+        ));
+    }
     if !tools.is_empty() {
         content.push_str(&format!("tools: {}\n", quote_scalar(&tools)));
     }
@@ -709,6 +718,7 @@ Help in this project.
         let draft = AgentDraft {
             name: "comment-helper".to_string(),
             description: "Help with comments".to_string(),
+            short_description: None,
             instructions: "Translate comments carefully.".to_string(),
             tools: vec![
                 "read".to_string(),
@@ -750,6 +760,7 @@ Help in this project.
         let draft = AgentDraft {
             name: "local-helper".to_string(),
             description: "Local helper".to_string(),
+            short_description: None,
             instructions: "Help locally.".to_string(),
             tools: vec!["read".to_string()],
             disallow_tools: Vec::new(),

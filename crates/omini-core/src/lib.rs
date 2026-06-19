@@ -289,10 +289,11 @@ impl AgentCoreSession {
             .map(|skill| session_types::RuntimeSkillSnapshot {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
+                short_description: skill.short_description.clone(),
                 source_kind: runtime_skill_source_kind(skill.source_kind()),
                 directory: skill.directory.clone(),
                 status: session_types::RuntimeCapabilityStatus::Available,
-                inject: skill.inject,
+                disable_model_invocation: skill.disable_model_invocation,
                 user_invocable: skill.user_invocable,
             })
             .collect::<Vec<_>>();
@@ -476,6 +477,7 @@ fn user_invocable_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummary
         .map(|skill| session_types::SkillSummarySnapshot {
             name: skill.name.clone(),
             description: skill.description.clone(),
+            short_description: skill.short_description.clone(),
         })
         .collect::<Vec<_>>();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
@@ -492,6 +494,7 @@ fn skill_detail_snapshot(
         .map(|skill| session_types::SkillDetailSnapshot {
             name: skill.name.clone(),
             description: skill.description.clone(),
+            short_description: skill.short_description.clone(),
             body: skill.body.clone(),
             directory: skill.directory.clone(),
             user_invocable: skill.user_invocable,

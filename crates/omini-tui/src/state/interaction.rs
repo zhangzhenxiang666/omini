@@ -373,6 +373,7 @@ impl AgentManagerState {
         AgentDraft {
             name: self.draft.name.trim().to_string(),
             description: self.draft.description.trim().to_string(),
+            short_description: None,
             instructions: self.draft.instructions.trim().to_string(),
             tools: self
                 .draft
@@ -693,6 +694,7 @@ mod tests {
             AgentDraft {
                 name: "git-reviewer".to_string(),
                 description: "Reviews git changes.".to_string(),
+                short_description: None,
                 instructions: "Review the diff.".to_string(),
                 tools: vec!["read".to_string()],
                 disallow_tools: Vec::new(),
@@ -711,6 +713,7 @@ mod tests {
         manager.start_edit(AgentRecord {
             name: "reviewer".to_string(),
             description: "Reviews changes.".to_string(),
+            short_description: None,
             instructions: "Read diffs.".to_string(),
             tools: vec!["read".to_string()],
             disallow_tools: Vec::new(),
@@ -756,6 +759,7 @@ mod tests {
             AgentDraft {
                 name: "git-reviewer".to_string(),
                 description: "Reviews git changes.".to_string(),
+                short_description: None,
                 instructions: "Review the diff.".to_string(),
                 tools: vec!["read".to_string()],
                 disallow_tools: Vec::new(),

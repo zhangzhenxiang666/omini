@@ -957,6 +957,7 @@ mod tests {
         AgentRecord {
             name: "code-review".to_string(),
             description: "Review code changes.".to_string(),
+            short_description: None,
             instructions: "Read the diff carefully.".to_string(),
             tools: vec!["read".to_string()],
             disallow_tools: vec!["write".to_string()],

@@ -361,11 +361,13 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
         AgentSummary {
             name: "explorer".to_string(),
             description: "Read-only codebase exploration agent.".to_string(),
+            short_description: None,
             location: "<built-in>".to_string(),
         },
         AgentSummary {
             name: "general".to_string(),
             description: "General purpose isolated coding agent.".to_string(),
+            short_description: None,
             location: "<built-in>".to_string(),
         },
     ];
@@ -401,6 +403,7 @@ fn agent_management_update_refreshes_subagent_mention_candidates() {
             AgentRecord {
                 name: "explorer".to_string(),
                 description: "Read-only codebase exploration agent.".to_string(),
+                short_description: None,
                 instructions: "Explore.".to_string(),
                 tools: Vec::new(),
                 disallow_tools: Vec::new(),
@@ -412,6 +415,7 @@ fn agent_management_update_refreshes_subagent_mention_candidates() {
             AgentRecord {
                 name: "worker".to_string(),
                 description: "Implementation agent for focused coding tasks.".to_string(),
+                short_description: None,
                 instructions: "Work.".to_string(),
                 tools: Vec::new(),
                 disallow_tools: Vec::new(),

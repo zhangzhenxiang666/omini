@@ -1787,6 +1787,7 @@ mod tests {
             AgentDraft {
                 name: "code-review".to_string(),
                 description: "Reviews code changes.".to_string(),
+                short_description: None,
                 instructions,
                 tools: Vec::new(),
                 disallow_tools: Vec::new(),
@@ -1816,6 +1817,7 @@ mod tests {
         manager.start_edit(AgentRecord {
             name: "code-review".to_string(),
             description: "Reviews code changes.".to_string(),
+            short_description: None,
             instructions,
             tools: Vec::new(),
             disallow_tools: Vec::new(),

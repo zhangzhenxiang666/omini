@@ -1,6 +1,7 @@
 ---
 name: skill-creator
-description: Create or update Omini skills from reusable workflows, prior conversation context, artifacts, or user examples. Use when the user asks to turn a completed process into a skill, create a new skill, update an existing skill, or package domain-specific instructions/resources for future reuse.
+description: Create or update Omini skills from reusable workflows, prior conversation context, artifacts, or user examples. Use when the user asks to turn a completed workflow into a skill, create a new skill, update an existing skill, or package domain-specific instructions/resources for future reuse.
+short-description: "创建或更新 Omini 技能，将可复用工作流打包为 skill"
 ---
 
 # Skill Creator
@@ -28,17 +29,28 @@ Use this skill to create or update an Omini skill. A skill is a directory with a
 4. Write `SKILL.md`.
    - Use YAML frontmatter with required `name` and `description`.
    - Put trigger information in `description`; the body is loaded only after the skill is selected.
-   - Use `inject: false` only when the skill should be available by command/tool but not listed in the system prompt.
+   - Use `short-description` for a brief label shown in the command panel instead of the full `description`.
+   - Use `argument-hint` to indicate the expected argument format (e.g. `[description]`). Currently the client still uses `[prompt]` uniformly.
+   - Use `disable-model-invocation: true` only when the skill should be available by command/tool but not listed in the system prompt.
    - Use `user-invocable: false` for background knowledge that should be hidden from the `/` menu and not called directly by users. Description: 设置为 false 可在 / 菜单中隐藏。用于不应由用户直接调用的后台知识。默认值: true。
    - Keep the body concise and procedural. Do not explain obvious general coding behavior.
+   - Fill `short-description` and `argument-hint` using the user's preferred language when present.
 
-5. Add resources only when they reduce repeated work.
+5. Update an existing skill when the user asks to refine, extend, or fix an existing skill.
+   - Read the existing `SKILL.md` and any resource files under `references/`, `scripts/`, or `assets/` to understand the current state.
+   - Compare the current state with the user's new requirements and decide what to change: frontmatter fields, body instructions, or resource files.
+   - Apply changes directly to the existing files. Do not create a new directory or duplicate content.
+   - If the skill name needs to change, rename the directory and update `name` in frontmatter accordingly.
+   - If resource files are no longer needed, remove them.
+   - Validate the result the same way as a new skill (step 7).
+
+6. Add resources only when they reduce repeated work.
    - `references/`: detailed docs, schemas, policies, API notes, examples.
    - `scripts/`: deterministic repeatable operations; test scripts before relying on them.
    - `assets/`: templates, images, boilerplate, or files used as output material.
    - Do not create README, CHANGELOG, installation guides, or auxiliary docs unless explicitly requested.
 
-6. Validate the result.
+7. Validate the result.
    - Re-read the created `SKILL.md`.
    - Confirm frontmatter parses, name matches the folder, description is trigger-rich, and body is non-empty.
    - For substantial skills, mentally test against one realistic user request and tighten the instructions if the trigger or workflow is vague.

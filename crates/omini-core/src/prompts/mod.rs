@@ -209,6 +209,7 @@ mod tests {
         let skills = vec![SkillSummary {
             name: "writer".to_string(),
             description: "Write carefully".to_string(),
+            short_description: None,
             directory: skill_dir.clone(),
         }];
 
@@ -480,6 +481,7 @@ mod tests {
         let agents = vec![AgentSummary {
             name: "general".to_string(),
             description: "General purpose isolated coding agent.".to_string(),
+            short_description: None,
             location: "<built-in>".to_string(),
         }];
 
@@ -504,11 +506,13 @@ mod tests {
             AgentSummary {
                 name: "explorer".to_string(),
                 description: "Read-only codebase exploration agent.".to_string(),
+                short_description: None,
                 location: "<built-in>".to_string(),
             },
             AgentSummary {
                 name: "general".to_string(),
                 description: "General purpose isolated coding agent.".to_string(),
+                short_description: None,
                 location: "<built-in>".to_string(),
             },
         ];
@@ -540,6 +544,7 @@ mod tests {
         let agents = vec![AgentSummary {
             name: "general".to_string(),
             description: "General purpose isolated coding agent.".to_string(),
+            short_description: None,
             location: "<built-in>".to_string(),
         }];
 
@@ -556,6 +561,7 @@ mod tests {
         let skills = vec![SkillSummary {
             name: "commit-message".to_string(),
             description: "Suggest commit messages".to_string(),
+            short_description: None,
             directory: PathBuf::from("/tmp/commit-message"),
         }];
 
@@ -578,6 +584,7 @@ mod tests {
         let agents = vec![AgentSummary {
             name: "explorer".to_string(),
             description: "Read-only codebase exploration agent.".to_string(),
+            short_description: None,
             location: "<built-in>".to_string(),
         }];
 

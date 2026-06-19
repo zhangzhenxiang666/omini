@@ -90,6 +90,7 @@ pub(crate) fn skill_summaries_to_protocol(
             .map(|skill| protocol::SkillSummary {
                 name: skill.name,
                 description: skill.description,
+                short_description: skill.short_description,
             })
             .collect(),
     }
@@ -102,6 +103,7 @@ pub(crate) fn skill_detail_to_protocol(
         skill: protocol::SkillDetail {
             name: skill.name,
             description: skill.description,
+            short_description: skill.short_description,
             body: skill.body,
             directory: skill.directory.display().to_string(),
             user_invocable: skill.user_invocable,
@@ -117,10 +119,11 @@ pub(crate) fn runtime_skills_to_protocol(
         .map(|skill| protocol::SessionRuntimeSkill {
             name: skill.name,
             description: skill.description,
+            short_description: skill.short_description,
             source_kind: runtime_skill_source_kind_to_protocol(skill.source_kind),
             directory: skill.directory.display().to_string(),
             status: runtime_capability_status_to_protocol(skill.status),
-            inject: skill.inject,
+            disable_model_invocation: skill.disable_model_invocation,
             user_invocable: skill.user_invocable,
         })
         .collect()
@@ -265,6 +268,7 @@ fn agent_record_snapshot_to_protocol(record: AgentRecord) -> protocol::AgentReco
         id,
         name: record.name,
         description: record.description,
+        short_description: record.short_description,
         instructions: record.instructions,
         tools: record.tools,
         disallow_tools: record.disallow_tools,

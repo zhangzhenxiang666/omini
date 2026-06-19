@@ -1308,6 +1308,7 @@ mod tests {
             &omini_domain::subagents::AgentDraft {
                 name: "cache-helper".to_string(),
                 description: "Use when checking cache-sensitive changes.".to_string(),
+                short_description: None,
                 instructions: "Inspect cache-sensitive changes and report findings.".to_string(),
                 tools: Vec::new(),
                 disallow_tools: Vec::new(),

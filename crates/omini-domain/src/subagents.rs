@@ -23,6 +23,8 @@ impl AgentSourceKind {
 pub struct AgentRecord {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     pub instructions: String,
     pub tools: Vec<String>,
     pub disallow_tools: Vec<String>,
@@ -38,6 +40,8 @@ pub struct AgentRecord {
 pub struct AgentDraft {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
@@ -51,6 +55,8 @@ pub struct AgentDraft {
 pub struct GeneratedAgentDraft {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     pub instructions: String,
 }
 
@@ -58,6 +64,8 @@ pub struct GeneratedAgentDraft {
 pub struct AgentSummary {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     /// 来源位置: 内置 agent 为 `<built-in>`,文件加载的 agent 为绝对路径。
     pub location: String,
 }

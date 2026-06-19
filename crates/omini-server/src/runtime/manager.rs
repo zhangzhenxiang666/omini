@@ -180,6 +180,7 @@ impl SessionManager {
             .map(|agent| protocol::AgentSummary {
                 name: agent.name,
                 description: agent.description,
+                short_description: agent.short_description,
                 location: agent
                     .path
                     .map(|path| path.display().to_string())
@@ -191,6 +192,7 @@ impl SessionManager {
             .map(|skill| protocol::SkillSummary {
                 name: skill.name,
                 description: skill.description,
+                short_description: skill.short_description,
             })
             .collect();
 
@@ -1212,6 +1214,7 @@ thinking = true
                     draft: protocol::AgentDraft {
                         name: "cache-helper".to_string(),
                         description: "Use when checking cache-sensitive changes.".to_string(),
+                        short_description: None,
                         instructions: "Inspect cache-sensitive changes.".to_string(),
                         tools: Vec::new(),
                         disallow_tools: Vec::new(),
@@ -1264,6 +1267,7 @@ thinking = true
                     draft: protocol::AgentDraft {
                         name: "target-helper".to_string(),
                         description: "Use when testing target refresh.".to_string(),
+                        short_description: None,
                         instructions: "Refresh me.".to_string(),
                         tools: Vec::new(),
                         disallow_tools: Vec::new(),
@@ -1299,6 +1303,7 @@ thinking = true
                     draft: protocol::AgentDraft {
                         name: "bad".to_string(),
                         description: "Bad built-in write.".to_string(),
+                        short_description: None,
                         instructions: "Do not write.".to_string(),
                         tools: Vec::new(),
                         disallow_tools: Vec::new(),
@@ -1334,6 +1339,7 @@ thinking = true
                     draft: protocol::AgentDraft {
                         name: "deletable".to_string(),
                         description: "Use when testing deletion.".to_string(),
+                        short_description: None,
                         instructions: "Delete me.".to_string(),
                         tools: Vec::new(),
                         disallow_tools: Vec::new(),

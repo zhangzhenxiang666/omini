@@ -403,10 +403,12 @@ pub struct SessionRuntimeTool {
 pub struct SessionRuntimeSkill {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     pub source_kind: SkillSourceKind,
     pub directory: String,
     pub status: SessionRuntimeCapabilityStatus,
-    pub inject: bool,
+    pub disable_model_invocation: bool,
     pub user_invocable: bool,
 }
 
@@ -714,6 +716,8 @@ pub struct AgentRecord {
     pub id: String,
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     pub instructions: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
@@ -766,6 +770,8 @@ pub struct GenerateAgentResponse {
 pub struct SkillSummary {
     pub name: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
 }
 
 /// 单个 skill 的完整内容，用于 TUI 展开 slash skill 调用。
@@ -773,6 +779,9 @@ pub struct SkillSummary {
 pub struct SkillDetail {
     pub name: String,
     pub description: String,
+    /// 短描述，用于在命令面板中显示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
     /// skill markdown 或说明正文。
     pub body: String,
     /// skill 所在目录，用于提示模型理解来源。
@@ -1053,6 +1062,7 @@ mod tests {
             draft: GeneratedAgentDraft {
                 name: "diff-reviewer".to_string(),
                 description: "Use when reviewing code diffs.".to_string(),
+                short_description: None,
                 instructions: "Review the diff and return findings.".to_string(),
             },
         };
@@ -1228,6 +1238,7 @@ mod tests {
             subagent_sessions: vec![AgentSummary {
                 name: "explorer".to_string(),
                 description: "Read-only exploration agent.".to_string(),
+                short_description: None,
                 location: "<built-in>".to_string(),
             }],
             git_branch: None,

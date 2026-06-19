@@ -1,6 +1,7 @@
 ---
 name: commit-message
 description: Suggest git commit messages from current repository changes without staging, committing, or mutating repository state. Use when the user asks for commit message ideas, an atomic commit plan, or help wording commits from staged or unstaged changes.
+short-description: "从当前仓库变更生成 git 提交信息建议"
 ---
 
 # Commit Message

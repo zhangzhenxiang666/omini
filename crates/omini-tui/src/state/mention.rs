@@ -335,11 +335,12 @@ fn fuzzy_subsequence(value: &str, query: &str) -> bool {
 pub fn agent_summaries_to_mention_candidates(agents: Vec<AgentSummary>) -> Vec<MentionCandidate> {
     let mut candidates = Vec::new();
     for agent in agents {
+        let description = agent.short_description.clone().unwrap_or(agent.description);
         candidates.push(MentionCandidate {
             kind: MentionKind::Subagent,
             label: agent.name.clone(),
             target: agent.name,
-            description: agent.description,
+            description,
         });
     }
 

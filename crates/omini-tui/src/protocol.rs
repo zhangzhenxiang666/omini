@@ -134,6 +134,7 @@ pub(crate) fn agent_draft_from_internal(
     omini_protocol::AgentDraft {
         name: draft.name,
         description: draft.description,
+        short_description: draft.short_description,
         instructions: draft.instructions,
         tools: draft.tools,
         disallow_tools: draft.disallow_tools,

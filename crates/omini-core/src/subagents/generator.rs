@@ -94,6 +94,7 @@ fn build_generate_agent_prompt(description: &str) -> String {
          Required JSON fields:\n\
          - name: short kebab-case English identifier, specific to this agent's job.\n\
          - description: one concise sentence explaining when the parent agent should use this subagent.\n\
+         - short_description: a very brief label in the user's language for the command panel, or null.\n\
          - instructions: complete system instructions for the subagent.\n\n\
          A compliant Omini subagent is specialized, bounded, and directly useful to a parent agent.\n\
          The instructions must:\n\
@@ -131,9 +132,15 @@ pub fn parse_generated_agent(raw: &str) -> Result<GeneratedAgentDraft, String> {
             .map(ToOwned::to_owned)
             .ok_or_else(|| format!("生成结果缺少字段: {key}"))
     };
+    let short_description = value
+        .get("short_description")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.trim().to_string());
     Ok(GeneratedAgentDraft {
         name: field("name")?,
         description: field("description")?,
+        short_description,
         instructions: field("instructions")?,
     })
 }
@@ -156,6 +163,7 @@ mod tests {
         assert_eq!(draft.name, "diff-reviewer");
         assert_eq!(draft.description, "Use when reviewing focused code diffs.");
         assert_eq!(draft.instructions, "Review the diff and return findings.");
+        assert_eq!(draft.short_description, None);
     }
 
     #[test]
@@ -172,6 +180,38 @@ mod tests {
         .unwrap();
 
         assert_eq!(draft.name, "test-writer");
+        assert_eq!(draft.short_description, None);
+    }
+
+    #[test]
+    fn parse_generated_agent_with_short_description() {
+        let draft = parse_generated_agent(
+            r#"{
+                "name": "doc-helper",
+                "description": "Use when fixing documentation formatting.",
+                "short_description": "文档助手",
+                "instructions": "Fix documentation formatting."
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(draft.name, "doc-helper");
+        assert_eq!(draft.short_description.as_deref(), Some("文档助手"));
+    }
+
+    #[test]
+    fn parse_generated_agent_short_description_null_is_none() {
+        let draft = parse_generated_agent(
+            r#"{
+                "name": "code-reviewer",
+                "description": "Use when reviewing code changes.",
+                "short_description": null,
+                "instructions": "Review code changes."
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(draft.short_description, None);
     }
 
     #[test]
@@ -193,6 +233,8 @@ mod tests {
 
         assert!(prompt.contains("specialized, bounded"));
         assert!(prompt.contains("when the parent agent should use this subagent"));
+        assert!(prompt.contains("short_description"));
+        assert!(prompt.contains("the user's language"));
         assert!(prompt.contains("tool policy is configured outside"));
         assert!(prompt.contains("Forbid spawning"));
         assert!(prompt.contains("Do not include extra JSON fields"));

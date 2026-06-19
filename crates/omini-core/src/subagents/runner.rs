@@ -547,6 +547,7 @@ mod tests {
         AgentSpec {
             name: "test".to_string(),
             description: "Test agent".to_string(),
+            short_description: None,
             instructions: "Do the task.".to_string(),
             tool_policy: AgentToolPolicy::default(),
             model,
@@ -717,6 +718,7 @@ mod tests {
         let skills = vec![SkillSummary {
             name: "commit-message".to_string(),
             description: "Suggest commit messages".to_string(),
+            short_description: None,
             directory: PathBuf::from("/tmp/skill"),
         }];
 
@@ -752,6 +754,7 @@ mod tests {
         let spec = AgentSpec {
             name: "explorer".to_string(),
             description: "Read-only codebase exploration agent.".to_string(),
+            short_description: None,
             instructions: "Do the task.".to_string(),
             tool_policy: AgentToolPolicy::default(),
             model: None,
