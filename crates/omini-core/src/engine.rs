@@ -1,5 +1,4 @@
 use crate::error::RuntimeError;
-use crate::permissions::PermissionEngine;
 use crate::runtime::compact::{self, AutoCompactState};
 use crate::tools::{
     PendingToolPause, PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult,
@@ -11,6 +10,7 @@ use omini_domain::events::{ActiveProfile, CompactTrigger, ToolPauseResponse};
 use omini_domain::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
+use omini_permissions::PermissionEngine;
 use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, LlmClient, StreamError};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

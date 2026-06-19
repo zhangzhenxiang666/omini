@@ -1862,6 +1862,7 @@ dependencies = [
  "omini-config",
  "omini-domain",
  "omini-mcp-client",
+ "omini-permissions",
  "omini-provider-api",
  "omini-runtime-api",
  "reqwest",
@@ -1900,6 +1901,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "omini-permissions"
+version = "0.1.0"
+dependencies = [
+ "omini-config",
+ "omini-domain",
+ "serde_json",
 ]
 
 [[package]]

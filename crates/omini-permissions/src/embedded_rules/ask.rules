@@ -1,0 +1,200 @@
+# File deletion
+prefix_rule(
+  pattern = ["rm"],
+  decision = "prompt",
+  justification = "File deletion",
+)
+prefix_rule(
+  pattern = ["rmdir"],
+  decision = "prompt",
+  justification = "Directory removal",
+)
+prefix_rule(
+  pattern = ["unlink"],
+  decision = "prompt",
+  justification = "File unlinking",
+)
+prefix_rule(
+  pattern = ["shred"],
+  decision = "prompt",
+  justification = "File shredding",
+)
+prefix_rule(
+  pattern = ["truncate"],
+  decision = "prompt",
+  justification = "File truncation",
+)
+prefix_rule(
+  pattern = ["dd"],
+  decision = "prompt",
+  justification = "Low-level data copy",
+)
+
+# Process management
+prefix_rule(
+  pattern = ["kill"],
+  decision = "prompt",
+  justification = "Process termination",
+)
+prefix_rule(
+  pattern = ["pkill"],
+  decision = "prompt",
+  justification = "Process termination by name",
+)
+prefix_rule(
+  pattern = ["killall"],
+  decision = "prompt",
+  justification = "Process termination by name",
+)
+
+# Remote access
+prefix_rule(
+  pattern = ["ssh"],
+  decision = "prompt",
+  justification = "Remote shell",
+)
+prefix_rule(
+  pattern = ["scp"],
+  decision = "prompt",
+  justification = "Remote file copy",
+)
+prefix_rule(
+  pattern = ["rsync"],
+  decision = "prompt",
+  justification = "Remote file sync",
+)
+
+# Permission changes
+prefix_rule(
+  pattern = ["chmod"],
+  decision = "prompt",
+  justification = "Permission change",
+)
+prefix_rule(
+  pattern = ["chown"],
+  decision = "prompt",
+  justification = "Ownership change",
+)
+prefix_rule(
+  pattern = ["chgrp"],
+  decision = "prompt",
+  justification = "Group change",
+)
+
+# Git mutating operations
+prefix_rule(
+  pattern = ["git", ["commit", "push", "pull", "reset", "rebase", "merge", "checkout", "switch", "clean", "restore"]],
+  decision = "prompt",
+  justification = "Git mutating operation",
+)
+
+# JS package managers
+prefix_rule(
+  pattern = [["npm", "pnpm", "yarn"], ["install", "i", "add", "upgrade", "remove", "uninstall"]],
+  decision = "prompt",
+  justification = "Package manager mutation",
+)
+prefix_rule(
+  pattern = ["bun", ["add", "install", "remove"]],
+  decision = "prompt",
+  justification = "Package manager mutation",
+)
+
+# Rust
+prefix_rule(
+  pattern = ["cargo", ["add", "install"]],
+  decision = "prompt",
+  justification = "Cargo package mutation",
+)
+
+# Python
+prefix_rule(
+  pattern = ["pip", ["install", "add", "remove"]],
+  decision = "prompt",
+  justification = "Pip package mutation",
+)
+prefix_rule(
+  pattern = ["uv", ["add", "remove", "sync", "lock", "run", "tool", "python", "venv", "build", "publish"]],
+  decision = "prompt",
+  justification = "Uv mutation",
+)
+prefix_rule(
+  pattern = ["uv", "pip", ["install", "uninstall", "sync", "compile", "tree", "check"]],
+  decision = "prompt",
+  justification = "Uv pip mutation",
+)
+
+# System package managers
+prefix_rule(
+  pattern = [["apt", "apt-get", "brew", "dnf", "yum", "pacman"]],
+  decision = "prompt",
+  justification = "System package manager",
+)
+
+# Download tools
+prefix_rule(
+  pattern = ["curl"],
+  decision = "prompt",
+  justification = "Network download",
+)
+prefix_rule(
+  pattern = ["wget"],
+  decision = "prompt",
+  justification = "Network download",
+)
+
+# Docker
+prefix_rule(
+  pattern = ["docker", ["run", "rm"]],
+  decision = "prompt",
+  justification = "Docker container mutation",
+)
+prefix_rule(
+  pattern = ["docker", "system", "prune"],
+  decision = "prompt",
+  justification = "Docker resource cleanup",
+)
+
+# GitHub CLI
+prefix_rule(
+  pattern = ["gh", "issue", ["create", "edit", "close", "reopen", "delete", "comment"]],
+  decision = "prompt",
+  justification = "GitHub issue mutation",
+)
+prefix_rule(
+  pattern = ["gh", "pr", ["create", "edit", "merge", "close", "reopen", "comment"]],
+  decision = "prompt",
+  justification = "GitHub PR mutation",
+)
+prefix_rule(
+  pattern = ["gh", "release", ["create", "delete", "edit"]],
+  decision = "prompt",
+  justification = "GitHub release mutation",
+)
+prefix_rule(
+  pattern = ["gh", "label", ["create", "edit", "delete"]],
+  decision = "prompt",
+  justification = "GitHub label mutation",
+)
+prefix_rule(
+  pattern = ["gh", "repo", ["create", "delete"]],
+  decision = "prompt",
+  justification = "GitHub repo mutation",
+)
+prefix_rule(
+  pattern = ["gh", "workflow", "run"],
+  decision = "prompt",
+  justification = "GitHub workflow trigger",
+)
+prefix_rule(
+  pattern = ["gh", "run", ["cancel", "rerun"]],
+  decision = "prompt",
+  justification = "GitHub run mutation",
+)
+
+# Database migrations
+prefix_rule(
+  pattern = [["diesel", "sqlx", "prisma", "sea-orm-cli"], ["migrate", "migration"]],
+  decision = "prompt",
+  justification = "Database migration",
+)

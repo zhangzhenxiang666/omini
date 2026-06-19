@@ -1,0 +1,107 @@
+# File listing/viewing
+prefix_rule(
+  pattern = [["ls", "dir", "tree", "ll", "la"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["cat", "head", "tail", "less", "more", "tac", "rev"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["wc", "sort", "uniq", "cut", "paste", "tr", "column", "fmt", "fold", "expand", "unexpand"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["diff", "comm", "cmp", "sdiff"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["find", "locate", "fd", "fdfind"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["grep", "rg", "ag", "fgrep", "egrep", "ack"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["file", "stat", "du", "df", "lsblk", "blkid"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["basename", "dirname", "realpath", "readlink"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["xxd", "hexdump", "od", "strings"]],
+  decision = "allow",
+)
+
+# Text output
+prefix_rule(
+  pattern = [["echo", "printf"]],
+  decision = "allow",
+)
+
+# System info
+prefix_rule(
+  pattern = [["pwd", "which", "whoami", "date", "time", "uptime", "hostname", "uname"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["env", "printenv"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["id", "groups"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = ["ps"],
+  decision = "allow",
+)
+
+# Cargo safe commands
+prefix_rule(
+  pattern = ["cargo", ["test", "check", "build", "clippy", "fmt", "doc", "tree", "metadata", "locate-project", "verify-project", "search"]],
+  decision = "allow",
+)
+
+# Git read-only
+prefix_rule(
+  pattern = ["git", ["status", "log", "diff", "show", "branch", "tag", "remote", "blame", "stash", "reflog", "shortlog"]],
+  decision = "allow",
+)
+
+# Text processing tools
+prefix_rule(
+  pattern = [["jq", "yq", "sed", "awk", "xargs"]],
+  decision = "allow",
+)
+
+# File operations (common in dev workflows)
+prefix_rule(
+  pattern = [["mkdir", "touch", "cp", "mv", "ln"]],
+  decision = "allow",
+)
+prefix_rule(
+  pattern = [["cd", "popd", "pushd"]],
+  decision = "allow",
+)
+
+# Build tools
+prefix_rule(
+  pattern = [["make", "cmake"]],
+  decision = "allow",
+)
+
+# Shell
+prefix_rule(
+  pattern = [["sh", "bash", "zsh"]],
+  decision = "allow",
+)
+
+# Misc safe commands
+prefix_rule(
+  pattern = [["true", "false", "sleep", "yes", "seq", "range", "exit"]],
+  decision = "allow",
+)

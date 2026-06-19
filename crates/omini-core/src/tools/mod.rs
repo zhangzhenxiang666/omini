@@ -1,4 +1,3 @@
-use crate::permissions::{PermissionDecision, PermissionEngine};
 use crate::skills::SkillRegistry;
 use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::events::EngineToRuntimeEvent;
@@ -11,6 +10,7 @@ use omini_domain::events::{
 };
 use omini_domain::message::{ContentBlock, ToolResultBlock};
 use omini_domain::tool::ToolDefinition;
+use omini_permissions::{PermissionDecision, PermissionEngine};
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;

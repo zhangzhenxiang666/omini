@@ -1,7 +1,6 @@
 use super::capabilities::CapabilityStore;
 use crate::engine::QueryEngine;
 use crate::mcp::McpManager;
-use crate::permissions::PermissionEngine;
 use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
@@ -9,6 +8,7 @@ use omini_config::project::{ProjectDir, SessionDir};
 use omini_domain::display::DisplayMessage;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
+use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
 use omini_runtime_api::persistence::RuntimePersistenceEvent;
 use omini_runtime_api::{RuntimeToServerEvent, ServerToRuntimeEvent};

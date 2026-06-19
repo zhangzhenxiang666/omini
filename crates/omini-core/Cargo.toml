@@ -11,6 +11,7 @@ dirs.workspace = true
 omini-config.workspace = true
 omini-domain.workspace = true
 omini-mcp-client.workspace = true
+omini-permissions.workspace = true
 omini-provider-api.workspace = true
 omini-runtime-api.workspace = true
 schemars.workspace = true

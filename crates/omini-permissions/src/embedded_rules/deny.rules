@@ -1,0 +1,58 @@
+# Privilege escalation
+prefix_rule(
+  pattern = ["sudo"],
+  decision = "forbidden",
+  justification = "Privilege escalation",
+)
+prefix_rule(
+  pattern = ["su"],
+  decision = "forbidden",
+  justification = "User switching",
+)
+prefix_rule(
+  pattern = ["doas"],
+  decision = "forbidden",
+  justification = "Privilege escalation",
+)
+prefix_rule(
+  pattern = ["systemctl"],
+  decision = "forbidden",
+  justification = "System service management",
+)
+prefix_rule(
+  pattern = ["launchctl"],
+  decision = "forbidden",
+  justification = "System service management",
+)
+
+# Disk partitioning
+prefix_rule(
+  pattern = ["fdisk"],
+  decision = "forbidden",
+  justification = "Disk partitioning",
+)
+prefix_rule(
+  pattern = ["parted"],
+  decision = "forbidden",
+  justification = "Disk partitioning",
+)
+prefix_rule(
+  pattern = ["sfdisk"],
+  decision = "forbidden",
+  justification = "Disk partitioning",
+)
+prefix_rule(
+  pattern = ["gdisk"],
+  decision = "forbidden",
+  justification = "Disk partitioning",
+)
+prefix_rule(
+  pattern = ["sgdisk"],
+  decision = "forbidden",
+  justification = "Disk partitioning",
+)
+prefix_rule(
+  pattern = ["wipefs"],
+  decision = "forbidden",
+  justification = "Filesystem signature wiping",
+)

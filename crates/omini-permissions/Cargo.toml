@@ -1,0 +1,9 @@
+[package]
+name = "omini-permissions"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+omini-domain.workspace = true
+omini-config.workspace = true
+serde_json.workspace = true
