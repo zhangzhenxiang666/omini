@@ -30,7 +30,7 @@ Use this skill to create or update an Omini skill. A skill is a directory with a
    - Use YAML frontmatter with required `name` and `description`.
    - Put trigger information in `description`; the body is loaded only after the skill is selected.
    - Use `short-description` for a brief label shown in the command panel instead of the full `description`.
-   - Use `argument-hint` to indicate the expected argument format (e.g. `[description]`). Currently the client still uses `[prompt]` uniformly.
+   - Use `argument-hint` to indicate the expected argument format. It must be a **YAML string** — if it contains brackets or special characters, wrap it in quotes (e.g. `"[description]"` or `"<query>"`). Currently the client still uses `[prompt]` uniformly.
    - Use `disable-model-invocation: true` only when the skill should be available by command/tool but not listed in the system prompt.
    - Use `user-invocable: false` for background knowledge that should be hidden from the `/` menu and not called directly by users. Description: 设置为 false 可在 / 菜单中隐藏。用于不应由用户直接调用的后台知识。默认值: true。
    - Keep the body concise and procedural. Do not explain obvious general coding behavior.
