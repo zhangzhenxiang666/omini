@@ -1,14 +1,14 @@
+use crate::daemon::GlobalDaemonManager;
+use crate::routes::{ApiResult, api_error, client_id_from_headers, require_daemon_session};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use omini_protocol as protocol;
 use std::sync::Arc;
 
-use crate::routes::{ApiResult, api_error, client_id_from_headers, require_daemon_session};
-use crate::runtime::GlobalDaemonManager;
-
 /// 为客户端声明当前会话的控制权。
-pub(crate) async fn claim_controller(
+#[axum::debug_handler]
+pub async fn claim_controller(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
@@ -25,7 +25,8 @@ pub(crate) async fn claim_controller(
 }
 
 /// 释放客户端持有的当前会话控制权。
-pub(crate) async fn release_controller(
+#[axum::debug_handler]
+pub async fn release_controller(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
@@ -37,7 +38,8 @@ pub(crate) async fn release_controller(
 }
 
 /// 强制接管当前会话的控制权。
-pub(crate) async fn takeover_controller(
+#[axum::debug_handler]
+pub async fn takeover_controller(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,

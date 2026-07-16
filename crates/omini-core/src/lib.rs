@@ -19,9 +19,9 @@ use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
 use omini_domain::usage::Usage;
-use omini_runtime_api::project as project_types;
-use omini_runtime_api::session as session_types;
-use omini_runtime_api::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
+use omini_runtime_contract::project as project_types;
+use omini_runtime_contract::session as session_types;
+use omini_runtime_contract::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use tokio::sync::{broadcast, mpsc};
@@ -113,10 +113,10 @@ pub async fn generate_project_agent_draft(
 ///
 /// `omini-server::runtime::RuntimeSession` 为每个 daemon 会话持有一个
 /// `AgentCoreSession`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
-/// 转成 `omini-runtime-api` 的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
+/// 转成 `omini-runtim-contract` 的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
 /// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
 ///
-/// runtime 输出保持 `omini-runtime-api` 的 `RuntimeToServerEvent` 形态，协议层
+/// runtime 输出保持 `omini-runtim-contract` 的 `RuntimeToServerEvent` 形态，协议层
 /// `RuntimeEvent` 编码由 `omini-server` 的 runtime adapter 负责。
 ///
 /// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
@@ -304,7 +304,9 @@ impl AgentCoreSession {
         skills
     }
 
-    pub fn runtime_mcp_servers(&self) -> Vec<omini_runtime_api::mcp::RuntimeMcpServerSnapshot> {
+    pub fn runtime_mcp_servers(
+        &self,
+    ) -> Vec<omini_runtime_contract::mcp::RuntimeMcpServerSnapshot> {
         self.mcp_manager.runtime_snapshots()
     }
 

@@ -6,12 +6,12 @@ use omini_domain::events::{
 };
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
-use omini_runtime_api::persistence::SessionRecord;
+use omini_runtime_contract::persistence::SessionRecord;
 
 /// engine 发往 runtime 的 core 内部事件。
 ///
 /// Runtime 消费这些事件后更新本地状态、增量持久化，并把外部可见更新转换为
-/// `omini_runtime_api::RuntimeToServerEvent`。
+/// `omini_runtime_contract::RuntimeToServerEvent`。
 #[derive(Debug, Clone)]
 pub enum EngineToRuntimeEvent {
     /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。

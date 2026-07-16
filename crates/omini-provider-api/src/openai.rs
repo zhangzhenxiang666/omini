@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio_stream::StreamExt;
 use tracing::Instrument;
 
-pub(super) async fn invoke_openai(
+pub async fn invoke_openai(
     http_client: &reqwest::Client,
     api_key: &str,
     base_url: &str,

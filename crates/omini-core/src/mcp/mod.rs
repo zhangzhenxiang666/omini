@@ -11,7 +11,7 @@ use omini_mcp_client::{
     McpServerTransportConfig as ClientMcpServerTransportConfig, McpServiceSnapshot,
     McpServiceStatus, McpServiceSummary, ReadResourceResult,
 };
-use omini_runtime_api::mcp::{
+use omini_runtime_contract::mcp::{
     RuntimeMcpServerSnapshot, RuntimeMcpServerStatus, RuntimeMcpToolSnapshot,
 };
 use schemars::JsonSchema;

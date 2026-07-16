@@ -128,6 +128,7 @@ pub struct Settings {
     pub model_tiers: ModelTiers,
 }
 
+// TODO: 需要重新审视方法的合理性
 impl Settings {
     pub fn current_model_config(&self) -> Option<&ModelInfo> {
         self.providers

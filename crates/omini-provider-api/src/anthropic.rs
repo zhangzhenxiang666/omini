@@ -17,7 +17,7 @@ static ANTHROPIC_VERSION: (http::HeaderName, http::header::HeaderValue) = (
     http::header::HeaderValue::from_static("2023-06-01"),
 );
 
-pub(super) async fn invoke_anthropic(
+pub async fn invoke_anthropic(
     http_client: &reqwest::Client,
     api_key: &str,
     base_url: &str,

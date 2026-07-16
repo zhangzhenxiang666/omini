@@ -1,25 +1,23 @@
 //! HTTP handler 的共享错误转换、鉴权和会话查找工具。
 
+use crate::daemon::{GlobalDaemonManager, ProjectAttachError, ProjectLookupError};
+use crate::project::{ProjectManager, SessionError};
+use crate::session::SessionRuntime;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use omini_protocol::ProtocolError;
 use std::sync::Arc;
 
-use crate::runtime::{
-    GlobalDaemonManager, ProjectAttachError, ProjectLookupError, RuntimeSession, SessionError,
-    SessionManager,
-};
-
-pub(crate) mod agents;
-pub(crate) mod attachments;
-pub(crate) mod clients;
-pub(crate) mod controllers;
-pub(crate) mod health;
-pub(crate) mod projects;
-pub(crate) mod runs;
-pub(crate) mod sessions;
-pub(crate) mod shutdown;
-pub(crate) mod skills;
+pub mod agents;
+pub mod attachments;
+pub mod clients;
+pub mod controllers;
+pub mod health;
+pub mod projects;
+pub mod runs;
+pub mod sessions;
+pub mod shutdown;
+pub mod skills;
 
 const CLIENT_ID_HEADER: &str = "x-omini-client-id";
 
@@ -52,37 +50,34 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
     api_error(status, error.code(), error.message().into_owned())
 }
 
-pub(crate) async fn require_project(
+pub fn require_project(
     manager: &GlobalDaemonManager,
     project_id: &str,
-) -> Result<Arc<SessionManager>, ApiError> {
-    manager
-        .project(project_id)
-        .await
-        .map_err(project_lookup_error)
+) -> Result<Arc<ProjectManager>, ApiError> {
+    manager.project(project_id).map_err(project_lookup_error)
 }
 
-pub(crate) async fn require_session(
-    manager: &SessionManager,
+pub async fn require_session(
+    manager: &ProjectManager,
     session_id: &str,
-) -> Result<Arc<RuntimeSession>, ApiError> {
+) -> Result<Arc<SessionRuntime>, ApiError> {
     manager
-        .session(session_id)
+        .get_or_load_session(session_id)
         .await
         .map_err(session_lookup_error)
 }
 
-pub(crate) async fn require_daemon_session(
+pub async fn require_daemon_session(
     manager: &GlobalDaemonManager,
     project_id: &str,
     session_id: &str,
-) -> Result<Arc<RuntimeSession>, ApiError> {
+) -> Result<Arc<SessionRuntime>, ApiError> {
     // 大多数 session endpoint 都需要先确认项目已 attach，再确认 session 属于该项目。
-    let project = require_project(manager, project_id).await?;
+    let project = require_project(manager, project_id)?;
     require_session(&project, session_id).await
 }
 
-pub(crate) fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
+pub fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
     headers
         .get(CLIENT_ID_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -96,14 +91,14 @@ pub(crate) fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiErr
         })
 }
 
-pub(crate) async fn ensure_controller(
-    session: &RuntimeSession,
+pub async fn ensure_controller(
+    session: &SessionRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
     if session.is_controller(client_id).await {
         // 严格 mutation 只允许当前 controller 执行;新架构下 runtime 启动即
-        // 加载,RuntimeSession 一旦从 manager 拿到就已经持有完整 messages /
+        // 加载,SessionRuntime 一旦从 manager 拿到就已经持有完整 messages /
         // usage,不再需要等待 hydrate。
         Ok(())
     } else {
@@ -115,8 +110,8 @@ pub(crate) async fn ensure_controller(
     }
 }
 
-pub(crate) async fn ensure_connected_controller(
-    session: &RuntimeSession,
+pub async fn ensure_connected_controller(
+    session: &SessionRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
@@ -144,7 +139,7 @@ pub(crate) async fn ensure_connected_controller(
     Ok(())
 }
 
-pub(crate) fn project_attach_error(error: ProjectAttachError) -> ApiError {
+pub fn project_attach_error(error: ProjectAttachError) -> ApiError {
     match error {
         ProjectAttachError::BadRequest(message) => {
             api_error(StatusCode::BAD_REQUEST, "invalid_project_attach", message)

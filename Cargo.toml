@@ -8,7 +8,7 @@ members = [
     "crates/omini-permissions",
     "crates/omini-provider-api",
     "crates/omini-protocol",
-    "crates/omini-runtime-api",
+    "crates/omini-runtime-contract",
     "crates/omini-server",
     "crates/omini-tui",
 ]
@@ -21,7 +21,7 @@ edition = "2024"
 
 [workspace.dependencies]
 async-trait = "0.1.89"
-axum = { version = "0.8.7", features = ["ws"] }
+axum = { version = "0.8.7", features = ["ws", "macros"] }
 base64 = "0.22.1"
 bytes = "1.11.1"
 chrono = { version = "0.4.44", features = ["serde"] }
@@ -73,6 +73,6 @@ omini-mcp-client = { path = "crates/omini-mcp-client" }
 omini-permissions = { path = "crates/omini-permissions" }
 omini-provider-api = { path = "crates/omini-provider-api" }
 omini-protocol = { path = "crates/omini-protocol" }
-omini-runtime-api = { path = "crates/omini-runtime-api" }
+omini-runtime-contract = { path = "crates/omini-runtime-contract" }
 omini-server = { path = "crates/omini-server" }
 omini-tui = { path = "crates/omini-tui" }

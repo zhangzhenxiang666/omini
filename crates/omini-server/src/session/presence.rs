@@ -1,7 +1,8 @@
-use super::*;
+use std::collections::HashMap;
 
+// TODO: 这里需要明确一个client_id是否真的是可能打开多个websocket
 #[derive(Debug, Default)]
-pub(super) struct ClientPresence {
+pub struct ClientPresence {
     // 同一 client_id 可能打开多个 WebSocket，计数归零才算真正离线。
     pub clients: HashMap<String, usize>,
     // controller 永远只能是在线客户端；释放/断开时会自动转给其它在线客户端。
@@ -9,7 +10,7 @@ pub(super) struct ClientPresence {
 }
 
 impl ClientPresence {
-    pub(super) fn register(&mut self, client_id: String) -> (Option<String>, bool) {
+    pub fn register(&mut self, client_id: String) -> (Option<String>, bool) {
         let before = self.controller_id.clone();
         *self.clients.entry(client_id.clone()).or_insert(0) += 1;
         if self.controller_id.is_none() {
@@ -19,7 +20,7 @@ impl ClientPresence {
         (after.clone(), before != after)
     }
 
-    pub(super) fn unregister(&mut self, client_id: &str) -> (Option<String>, bool) {
+    pub fn unregister(&mut self, client_id: &str) -> (Option<String>, bool) {
         let before = self.controller_id.clone();
         if let Some(count) = self.clients.get_mut(client_id) {
             if *count > 1 {
@@ -36,7 +37,7 @@ impl ClientPresence {
         (after.clone(), before != after)
     }
 
-    pub(super) fn claim(&mut self, client_id: String) -> Option<(Option<String>, bool)> {
+    pub fn claim(&mut self, client_id: String) -> Option<(Option<String>, bool)> {
         if !self.clients.contains_key(&client_id) {
             return None;
         }
@@ -49,7 +50,7 @@ impl ClientPresence {
         Some((after.clone(), before != after))
     }
 
-    pub(super) fn takeover(&mut self, client_id: String) -> Option<(Option<String>, bool)> {
+    pub fn takeover(&mut self, client_id: String) -> Option<(Option<String>, bool)> {
         if !self.clients.contains_key(&client_id) {
             return None;
         }
@@ -60,7 +61,7 @@ impl ClientPresence {
         Some((after.clone(), before != after))
     }
 
-    pub(super) fn release(&mut self, client_id: &str) -> (Option<String>, bool) {
+    pub fn release(&mut self, client_id: &str) -> (Option<String>, bool) {
         let before = self.controller_id.clone();
         if before.as_deref() == Some(client_id) {
             // 释放 controller 后仍保留“有连接就有控制者”的不变量。

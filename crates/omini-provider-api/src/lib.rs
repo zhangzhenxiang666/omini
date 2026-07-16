@@ -15,10 +15,10 @@ pub mod sse;
 
 #[derive(Debug, Clone)]
 pub struct LlmClient {
-    pub(crate) http_client: &'static reqwest::Client,
-    pub(crate) api_key: String,
-    pub(crate) base_url: String,
-    pub(crate) protocol: ProviderType,
+    http_client: &'static reqwest::Client,
+    api_key: String,
+    base_url: String,
+    protocol: ProviderType,
 }
 
 impl LlmClient {

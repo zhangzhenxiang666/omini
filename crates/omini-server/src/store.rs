@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
 use omini_domain::message::ContentBlock;
 use omini_domain::usage::Usage;
-use omini_runtime_api::persistence::{RuntimePersistenceEvent, SessionRecord};
+use omini_runtime_contract::persistence::{RuntimePersistenceEvent, SessionRecord};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{FromRow, SqlitePool};
 use std::path::Path;
@@ -535,7 +535,7 @@ impl Database {
     }
 
     /// 消费 core 发出的持久化事件并映射到具体数据库操作。
-    pub(crate) async fn apply_persistence_event(
+    pub async fn apply_persistence_event(
         &self,
         event: RuntimePersistenceEvent,
     ) -> Result<(), StoreError> {

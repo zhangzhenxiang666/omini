@@ -5,7 +5,7 @@ use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::proposed_plan::{
     ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text,
 };
-use omini_runtime_api::RuntimeToServerEvent;
+use omini_runtime_contract::RuntimeToServerEvent;
 use tokio::sync::mpsc;
 
 const CURRENT_PLAN_ID: &str = "plan";

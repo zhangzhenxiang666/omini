@@ -3,7 +3,7 @@
 //! 这个模块负责把持久化 snapshot、运行中 replay、runtime fanout 和 controller 状态变化
 //! 统一编码成 `ServerEnvelope` 发给单个客户端连接。
 
-use crate::runtime::{RuntimeSession, SessionManager};
+use crate::{project::ProjectManager, session::SessionRuntime};
 use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
@@ -11,10 +11,10 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// 处理单个客户端订阅会话事件流的 WebSocket 生命周期。
-pub(crate) async fn handle_socket(
+pub async fn handle_socket(
     socket: WebSocket,
-    manager: Arc<SessionManager>,
-    session: Arc<RuntimeSession>,
+    manager: Arc<ProjectManager>,
+    session: Arc<SessionRuntime>,
     session_id: String,
     client_id: String,
 ) {
@@ -72,7 +72,7 @@ pub(crate) async fn handle_socket(
     // 持久化 snapshot 只能恢复消息/配置；replay 可能包含 run_started 等生命周期事件，
     // 所以实时状态要在 replay 后同步，作为新连接初始化阶段的最终计时校准。
     let status = ServerEnvelope::RuntimeStatus {
-        status: session.runtime_status().await,
+        status: session.runtime_status(),
     };
     if send_axum_envelope(&mut write, &status).await.is_err() {
         session.unregister_client_connection(&client_id).await;

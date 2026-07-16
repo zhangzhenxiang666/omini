@@ -5,7 +5,7 @@ use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
 use omini_domain::events::ActiveProfile;
 use omini_domain::message::{ContentBlock, Message, Role, TextBlock};
 use omini_domain::proposed_plan::strip_proposed_plan_blocks;
-use omini_runtime_api::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use std::path::Path;
 use tokio::sync::mpsc;
 

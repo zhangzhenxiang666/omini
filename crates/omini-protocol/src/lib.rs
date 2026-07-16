@@ -1,4 +1,4 @@
-//! TUI 和本地 daemon 之间的 HTTP/WebSocket 协议类型。
+//! client 和本地 daemon 之间的 HTTP/WebSocket 协议类型。
 //!
 //! 这个 crate 只描述 wire shape；运行时状态、配置加载和 UI 展示逻辑分别留在
 //! `omini-core`、`omini-server` 和 `omini-tui`。
@@ -669,6 +669,7 @@ pub struct SessionsResponse {
     pub sessions: Vec<SessionSummary>,
 }
 
+/// TODO: 注意这里如果provider为Some但是model为None那么可能会出问题
 /// 创建会话时可覆盖项目默认运行配置。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateSessionRequest {

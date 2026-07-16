@@ -1,7 +1,7 @@
 //! HTTP 路由组装和 daemon 级 shutdown 信号。
 
+use crate::daemon::GlobalDaemonManager;
 use crate::routes;
-use crate::runtime::GlobalDaemonManager;
 use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{delete, get, post, put};
@@ -45,7 +45,7 @@ impl FromRef<AppState> for ShutdownTrigger {
 }
 
 /// 创建供 HTTP handler 触发、serve loop 等待的关闭通道。
-pub(crate) fn shutdown_channel() -> (ShutdownTrigger, oneshot::Receiver<()>) {
+pub fn shutdown_channel() -> (ShutdownTrigger, oneshot::Receiver<()>) {
     let (tx, rx) = oneshot::channel();
     (
         ShutdownTrigger {
@@ -56,7 +56,7 @@ pub(crate) fn shutdown_channel() -> (ShutdownTrigger, oneshot::Receiver<()>) {
 }
 
 /// 构建 daemon 的完整 HTTP 路由树。
-pub(crate) fn router(manager: Arc<GlobalDaemonManager>, shutdown: ShutdownTrigger) -> Router {
+pub fn router(manager: Arc<GlobalDaemonManager>, shutdown: ShutdownTrigger) -> Router {
     let state = AppState { manager, shutdown };
     Router::new().nest("/v1", v1_routes()).with_state(state)
 }

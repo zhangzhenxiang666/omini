@@ -1,5 +1,5 @@
 [package]
-name = "omini-runtime-api"
+name = "omini-runtime-contract"
 version.workspace = true
 edition.workspace = true
 

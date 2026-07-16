@@ -26,8 +26,8 @@ use omini_domain::events::{
 };
 use omini_domain::message::Message;
 use omini_domain::usage::Usage;
-use omini_runtime_api::persistence::RuntimePersistenceEvent;
-use omini_runtime_api::{RuntimeToServerEvent, ServerToRuntimeEvent};
+use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::sync::atomic::Ordering;

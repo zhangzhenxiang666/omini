@@ -1,15 +1,17 @@
-use super::*;
+use omini_domain as domain;
+use omini_protocol as client_proto;
+use omini_runtime_contract as runtime_contract;
 
 #[derive(Clone)]
-pub(crate) struct SequencedRuntimeEvent {
+pub struct SequencedRuntimeEvent {
     // seq 只在单个 RuntimeSession 内单调递增，用来让 WebSocket replay 和订阅流去重。
-    pub(crate) seq: u64,
-    pub(crate) event: RuntimeEvent,
+    pub seq: u64,
+    pub event: client_proto::RuntimeEvent,
 }
 
 /// 保存重连时必须补发、但尚未被 snapshot/status 覆盖的运行中尾部和少量 UI 状态。
 #[derive(Default)]
-pub(super) struct RuntimeReplayBuffer {
+pub struct RuntimeReplayBuffer {
     // run_started 之前的用户注入事件先暂存，确保重连客户端能看到刚提交的输入。
     pending_prefix: Vec<SequencedRuntimeEvent>,
     // run_started 是 replay 的锚点；run 结束或 session snapshot 后会清空。
@@ -28,9 +30,9 @@ pub(super) struct RuntimeReplayBuffer {
 }
 
 impl RuntimeReplayBuffer {
-    pub(super) fn record(&mut self, event: SequencedRuntimeEvent) {
+    pub fn record(&mut self, event: SequencedRuntimeEvent) {
         // replay buffer 只保存“重连后需要补发”的运行中尾部事件，落盘内容交给 snapshot。
-        match runtime_replay_kind(&event.event) {
+        match event.event.kind() {
             "compact_summary_started" => {
                 self.compact_started = Some(event);
                 self.compact_tail.clear();
@@ -65,7 +67,7 @@ impl RuntimeReplayBuffer {
             "agent_management_updated" => {
                 self.latest_agent_management = Some(event);
             }
-            kind if is_session_snapshot_kind(kind) => {
+            "session_snapshot" => {
                 if self.run_started.is_some() || self.compact_started.is_some() {
                     self.clear();
                 } else {
@@ -105,7 +107,7 @@ impl RuntimeReplayBuffer {
         }
     }
 
-    pub(super) fn replay(&self) -> Vec<SequencedRuntimeEvent> {
+    pub fn replay(&self) -> Vec<SequencedRuntimeEvent> {
         let mut replay = Vec::with_capacity(
             self.pending_prefix.len()
                 + usize::from(self.run_started.is_some())
@@ -142,14 +144,14 @@ impl RuntimeReplayBuffer {
         replay
     }
 
-    pub(super) fn record_persistence(
+    pub fn record_persistence(
         &mut self,
         owner_session_id: &str,
-        event: &RuntimePersistenceEvent,
+        event: &runtime_contract::RuntimePersistenceEvent,
     ) {
         // 持久化成功意味着对应 UI 片段下一次会从 snapshot 恢复，应从 replay 中裁掉。
         match event {
-            RuntimePersistenceEvent::InsertMessage {
+            runtime_contract::RuntimePersistenceEvent::InsertMessage {
                 session_id,
                 role,
                 blocks,
@@ -157,30 +159,34 @@ impl RuntimeReplayBuffer {
             } if session_id == owner_session_id => {
                 if role == "assistant" {
                     self.drop_current_assistant_tail();
-                } else if blocks.iter().any(ContentBlock::is_tool_result) {
+                } else if blocks
+                    .iter()
+                    .any(domain::message::ContentBlock::is_tool_result)
+                {
                     self.drop_persisted_tool_results();
                 } else {
                     self.drop_pending_user_injection();
                 }
             }
-            RuntimePersistenceEvent::InsertDisplayMessage { session_id, .. }
-                if session_id == owner_session_id =>
-            {
+            runtime_contract::RuntimePersistenceEvent::InsertDisplayMessage {
+                session_id, ..
+            } if session_id == owner_session_id => {
                 self.drop_pending_user_injection();
             }
-            RuntimePersistenceEvent::InsertCompactSummaryMessage { session_id, .. }
-                if session_id == owner_session_id =>
-            {
+            runtime_contract::RuntimePersistenceEvent::InsertCompactSummaryMessage {
+                session_id,
+                ..
+            } if session_id == owner_session_id => {
                 self.drop_current_compact_summary_tail();
             }
             _ => {}
         }
     }
 
-    pub(super) fn record_snapshot(
+    pub fn record_snapshot(
         &mut self,
-        snapshot: &LoadedSession,
-        session_messages: &[Message],
+        snapshot: &domain::events::LoadedSession,
+        session_messages: &[domain::message::Message],
     ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
@@ -212,26 +218,27 @@ impl RuntimeReplayBuffer {
         let Some(pending) = &self.pending_plan_approval else {
             return false;
         };
-        let Some(pending_plan_id) = plan_submitted_payload(&pending.event).map(|plan| plan.plan_id)
+        let Some(pending_plan_id) =
+            super::status::plan_submitted_payload(&pending.event).map(|plan| plan.plan_id)
         else {
             return true;
         };
-        plan_approval_resolved_plan_id(&event.event)
+        super::status::plan_approval_resolved_plan_id(&event.event)
             .map(|resolved_plan_id| resolved_plan_id == pending_plan_id)
             .unwrap_or(true)
     }
 
     fn drop_pending_user_injection(&mut self) {
         self.pending_prefix
-            .retain(|event| runtime_replay_kind(&event.event) != "user_message_injected");
+            .retain(|event| event.event.kind() != "user_message_injected");
         self.current_tail
-            .retain(|event| runtime_replay_kind(&event.event) != "user_message_injected");
+            .retain(|event| event.event.kind() != "user_message_injected");
     }
 
     fn drop_current_assistant_tail(&mut self) {
         self.current_tail.retain(|event| {
             !matches!(
-                runtime_replay_kind(&event.event),
+                event.event.kind(),
                 "thinking_delta" | "text_delta" | "proposed_plan_delta" | "tool_use"
             )
         });
@@ -239,27 +246,27 @@ impl RuntimeReplayBuffer {
 
     fn drop_persisted_tool_results(&mut self) {
         self.current_tail
-            .retain(|event| runtime_replay_kind(&event.event) != "tool_result");
+            .retain(|event| event.event.kind() != "tool_result");
     }
 
     fn drop_current_compact_summary_tail(&mut self) {
         self.current_tail.retain(|event| {
             !matches!(
-                runtime_replay_kind(&event.event),
+                event.event.kind(),
                 "compact_summary_started" | "compact_summary_delta" | "compact_summary_finished"
             )
         });
         self.clear_compact_tail();
     }
 
-    fn drop_user_injections_in_snapshot(&mut self, snapshot: &LoadedSession) {
+    fn drop_user_injections_in_snapshot(&mut self, snapshot: &domain::events::LoadedSession) {
         self.pending_prefix
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
         self.current_tail
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
     }
 
-    fn drop_session_title_in_snapshot(&mut self, snapshot: &LoadedSession) {
+    fn drop_session_title_in_snapshot(&mut self, snapshot: &domain::events::LoadedSession) {
         let Some(event) = &self.latest_session_title else {
             return;
         };
@@ -268,60 +275,62 @@ impl RuntimeReplayBuffer {
         }
     }
 
-    fn current_assistant_tail_is_in_snapshot(&self, session_messages: &[Message]) -> bool {
+    fn current_assistant_tail_is_in_snapshot(
+        &self,
+        session_messages: &[domain::message::Message],
+    ) -> bool {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && session_messages
-                .iter()
-                .any(|message| message.role == Role::Assistant && message.content == blocks)
+            && session_messages.iter().any(|message| {
+                message.role == domain::message::Role::Assistant && message.content == blocks
+            })
     }
 
-    fn current_tool_results_are_in_snapshot(&self, session_messages: &[Message]) -> bool {
+    fn current_tool_results_are_in_snapshot(
+        &self,
+        session_messages: &[domain::message::Message],
+    ) -> bool {
         let blocks = tool_result_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && session_messages
-                .iter()
-                .any(|message| message.role == Role::User && message.content == blocks)
+            && session_messages.iter().any(|message| {
+                message.role == domain::message::Role::User && message.content == blocks
+            })
     }
-}
-
-pub(super) fn runtime_replay_kind(event: &RuntimeEvent) -> &'static str {
-    event.kind()
-}
-
-pub(super) fn is_session_snapshot_kind(kind: &str) -> bool {
-    kind == "session_snapshot"
 }
 
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
-fn user_injection_is_in_snapshot(event: &SequencedRuntimeEvent, snapshot: &LoadedSession) -> bool {
-    let protocol::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event else {
+fn user_injection_is_in_snapshot(
+    event: &SequencedRuntimeEvent,
+    snapshot: &domain::events::LoadedSession,
+) -> bool {
+    let client_proto::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event
+    else {
         return false;
     };
     snapshot.messages.iter().any(|message| message == item)
 }
 
-fn session_title_payload(event: &RuntimeEvent) -> Option<Option<&String>> {
-    let protocol::TypedRuntimeEvent::SessionTitleChanged(event) = &event.event else {
+fn session_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&String>> {
+    let client_proto::TypedRuntimeEvent::SessionTitleChanged(event) = &event.event else {
         return None;
     };
     Some(event.title.as_ref())
 }
 
 /// 把当前 assistant 流式尾部重组为完整内容块，供 snapshot 去重比较。
-fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> {
+fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::message::ContentBlock> {
     // 增量事件需要还原成完整 ContentBlock，才能和 snapshot 中的 assistant message 比较。
     let mut blocks = Vec::new();
     for event in events {
         match &event.event.event {
-            protocol::TypedRuntimeEvent::ThinkingDelta(event) => {
+            client_proto::TypedRuntimeEvent::ThinkingDelta(event) => {
                 push_delta_block(&mut blocks, &event.delta, true)
             }
-            protocol::TypedRuntimeEvent::TextDelta(event) => {
+            client_proto::TypedRuntimeEvent::TextDelta(event) => {
                 push_delta_block(&mut blocks, &event.delta, false)
             }
-            protocol::TypedRuntimeEvent::ToolUse(tool_use) => {
-                blocks.push(ContentBlock::ToolUse(tool_use.clone()));
+            client_proto::TypedRuntimeEvent::ToolUse(tool_use) => {
+                blocks.push(domain::message::ContentBlock::ToolUse(tool_use.clone()));
             }
             _ => {}
         }
@@ -330,38 +339,42 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> 
 }
 
 /// 收集当前尾部中尚未被 snapshot 覆盖的工具结果块。
-fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<ContentBlock> {
+fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::message::ContentBlock> {
     events
         .iter()
         .filter_map(|event| match &event.event.event {
-            protocol::TypedRuntimeEvent::ToolResult(tool_result) => {
-                Some(ContentBlock::ToolResult(tool_result.clone()))
-            }
+            client_proto::TypedRuntimeEvent::ToolResult(tool_result) => Some(
+                domain::message::ContentBlock::ToolResult(tool_result.clone()),
+            ),
             _ => None,
         })
         .collect()
 }
 
 /// 将连续文本或 thinking delta 合并成可比较的 `ContentBlock`。
-fn push_delta_block(blocks: &mut Vec<ContentBlock>, delta: &str, thinking: bool) {
+fn push_delta_block(blocks: &mut Vec<domain::message::ContentBlock>, delta: &str, thinking: bool) {
     match (thinking, blocks.last_mut()) {
-        (true, Some(ContentBlock::Thinking(block))) => block.thinking.push_str(delta),
-        (false, Some(ContentBlock::Text(block))) => block.text.push_str(delta),
-        (true, _) => blocks.push(ContentBlock::from_thinking(delta.to_string())),
-        (false, _) => blocks.push(ContentBlock::from_text(delta.to_string())),
+        (true, Some(domain::message::ContentBlock::Thinking(block))) => {
+            block.thinking.push_str(delta)
+        }
+        (false, Some(domain::message::ContentBlock::Text(block))) => block.text.push_str(delta),
+        (true, _) => blocks.push(domain::message::ContentBlock::from_thinking(
+            delta.to_string(),
+        )),
+        (false, _) => blocks.push(domain::message::ContentBlock::from_text(delta.to_string())),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
+
     use super::*;
-    use omini_domain::events as event_types;
-    use omini_domain::events::{
-        CompactEvent, CompactSummaryDeltaEvent, CompactTrigger, SessionUsageSnapshot, SubmittedPlan,
+    use crate::event::bridge::{
+        runtime_event_from_runtime_contract_event, session_title_changed_protocol_event,
+        thinking_display_changed_protocol_event,
     };
-    use omini_domain::message::{ToolResultBlock, ToolUseBlock};
-    use omini_protocol::HistoryItem;
-    use omini_runtime_api::RuntimeToServerEvent;
+    use std::{collections::HashMap, path::PathBuf};
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
@@ -373,93 +386,103 @@ mod tests {
     fn delta(seq: u64, kind: &str, text: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: RuntimeEvent::new(match kind {
-                "thinking_delta" => {
-                    protocol::TypedRuntimeEvent::ThinkingDelta(protocol::RuntimeDeltaEvent {
+            event: client_proto::RuntimeEvent::new(match kind {
+                "thinking_delta" => client_proto::TypedRuntimeEvent::ThinkingDelta(
+                    client_proto::RuntimeDeltaEvent {
                         delta: text.to_string(),
-                    })
-                }
+                    },
+                ),
                 "text_delta" => {
-                    protocol::TypedRuntimeEvent::TextDelta(protocol::RuntimeDeltaEvent {
+                    client_proto::TypedRuntimeEvent::TextDelta(client_proto::RuntimeDeltaEvent {
                         delta: text.to_string(),
                     })
                 }
-                "proposed_plan_delta" => {
-                    protocol::TypedRuntimeEvent::ProposedPlanDelta(protocol::RuntimeDeltaEvent {
+                "proposed_plan_delta" => client_proto::TypedRuntimeEvent::ProposedPlanDelta(
+                    client_proto::RuntimeDeltaEvent {
                         delta: text.to_string(),
-                    })
-                }
+                    },
+                ),
                 _ => panic!("unsupported delta test event kind: {kind}"),
             }),
         }
     }
 
-    fn typed_test_event(kind: &str) -> RuntimeEvent {
-        RuntimeEvent::new(match kind {
+    fn typed_test_event(kind: &str) -> client_proto::RuntimeEvent {
+        client_proto::RuntimeEvent::new(match kind {
             "notification" => {
-                protocol::TypedRuntimeEvent::Notification(protocol::NotificationEvent {
-                    level: protocol::NotificationLevel::Info,
+                client_proto::TypedRuntimeEvent::Notification(client_proto::NotificationEvent {
+                    level: client_proto::NotificationLevel::Info,
                     message: "notice".to_string(),
                     details: Vec::new(),
                 })
             }
-            "user_message_injected" => protocol::TypedRuntimeEvent::UserMessageInjected {
-                item: HistoryItem::Message(Message::from_user_text("hello".to_string())),
+            "user_message_injected" => client_proto::TypedRuntimeEvent::UserMessageInjected {
+                item: domain::display::HistoryItem::Message(
+                    domain::message::Message::from_user_text("hello".to_string()),
+                ),
                 client_echo_id: None,
             },
-            "run_started" => protocol::TypedRuntimeEvent::RunStarted,
-            "run_finished" => protocol::TypedRuntimeEvent::RunFinished,
-            "turn_started" => protocol::TypedRuntimeEvent::TurnStarted,
-            "turn_ended" => protocol::TypedRuntimeEvent::TurnEnded,
-            "tool_use" => protocol::TypedRuntimeEvent::ToolUse(ToolUseBlock {
+            "run_started" => client_proto::TypedRuntimeEvent::RunStarted,
+            "run_finished" => client_proto::TypedRuntimeEvent::RunFinished,
+            "turn_started" => client_proto::TypedRuntimeEvent::TurnStarted,
+            "turn_ended" => client_proto::TypedRuntimeEvent::TurnEnded,
+            "tool_use" => client_proto::TypedRuntimeEvent::ToolUse(domain::message::ToolUseBlock {
                 id: "tool_1".to_string(),
                 name: "read".to_string(),
                 input: HashMap::new(),
             }),
-            "tool_result" => protocol::TypedRuntimeEvent::ToolResult(ToolResultBlock {
-                tool_use_id: "tool_1".to_string(),
-                is_error: false,
-                content: "done".to_string(),
-                metadata: None,
-            }),
-            "tool_pause_requested" => {
-                protocol::TypedRuntimeEvent::ToolPauseRequested(event_types::ToolPauseRequest {
+            "tool_result" => {
+                client_proto::TypedRuntimeEvent::ToolResult(domain::message::ToolResultBlock {
+                    tool_use_id: "tool_1".to_string(),
+                    is_error: false,
+                    content: "done".to_string(),
+                    metadata: None,
+                })
+            }
+            "tool_pause_requested" => client_proto::TypedRuntimeEvent::ToolPauseRequested(
+                domain::events::ToolPauseRequest {
                     tool_use_id: "tool_1".to_string(),
                     preview_tool_use_id: None,
                     tool_name: "bash".to_string(),
                     permission_source: None,
                     source_session_id: None,
                     source_agent_label: None,
-                    kind: event_types::ToolPauseKind::Permission(
-                        event_types::PermissionPreview::Custom {
+                    kind: domain::events::ToolPauseKind::Permission(
+                        domain::events::PermissionPreview::Custom {
                             tool_name: "bash".to_string(),
                             payload: serde_json::Map::new(),
                         },
                     ),
-                })
-            }
-            "session_snapshot" => {
-                protocol::TypedRuntimeEvent::SessionSnapshot(protocol::SessionSnapshotEvent {
+                },
+            ),
+            "session_snapshot" => client_proto::TypedRuntimeEvent::SessionSnapshot(
+                client_proto::SessionSnapshotEvent {
                     session_id: Some("s1".to_string()),
                     messages: Vec::new(),
                     subagents: Vec::new(),
-                    usage: SessionUsageSnapshot::default(),
-                })
-            }
+                    usage: domain::events::SessionUsageSnapshot::default(),
+                },
+            ),
             _ => panic!("unsupported test event kind: {kind}"),
         })
     }
 
-    fn runtime_event(seq: u64, event: RuntimeToServerEvent) -> SequencedRuntimeEvent {
+    fn runtime_event(
+        seq: u64,
+        event: runtime_contract::RuntimeToServerEvent,
+    ) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
-            event: runtime_event_from_internal(event).expect("event should encode"),
+            event: runtime_event_from_runtime_contract_event(event).expect("event should encode"),
         }
     }
 
     /// 构造一个已经编码好的 `RuntimeEvent`(协议层),不走 `RuntimeToServerEvent`。
     /// 适用于测试 server-side 直发的事件(title 变化、git 分支等)。
-    fn sequenced_runtime_event(seq: u64, event: RuntimeEvent) -> SequencedRuntimeEvent {
+    fn sequenced_runtime_event(
+        seq: u64,
+        event: client_proto::RuntimeEvent,
+    ) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent { seq, event }
     }
 
@@ -471,30 +494,33 @@ mod tests {
             .collect()
     }
 
-    fn snapshot(messages: Vec<HistoryItem>) -> LoadedSession {
+    fn snapshot(messages: Vec<domain::display::HistoryItem>) -> domain::events::LoadedSession {
         snapshot_with_title(None, messages)
     }
 
-    fn snapshot_with_title(title: Option<String>, messages: Vec<HistoryItem>) -> LoadedSession {
-        LoadedSession {
+    fn snapshot_with_title(
+        title: Option<String>,
+        messages: Vec<domain::display::HistoryItem>,
+    ) -> domain::events::LoadedSession {
+        domain::events::LoadedSession {
             session_id: "s1".to_string(),
             provider: "main".to_string(),
             model: "test-model".to_string(),
             thinking_effort: None,
-            active_profile: ActiveProfile::Main,
+            active_profile: domain::events::ActiveProfile::Main,
             title,
             messages,
             subagents: Vec::new(),
-            usage: SessionUsageSnapshot::default(),
+            usage: domain::events::SessionUsageSnapshot::default(),
         }
     }
 
     fn persisted_message(
         session_id: &str,
         role: &str,
-        blocks: Vec<ContentBlock>,
-    ) -> RuntimePersistenceEvent {
-        RuntimePersistenceEvent::InsertMessage {
+        blocks: Vec<domain::message::ContentBlock>,
+    ) -> runtime_contract::RuntimePersistenceEvent {
+        runtime_contract::RuntimePersistenceEvent::InsertMessage {
             session_id: session_id.to_string(),
             role: role.to_string(),
             blocks,
@@ -521,21 +547,21 @@ mod tests {
         // `TypedRuntimeEvent::SessionTitleChanged`,不再包成 `RuntimeToServerEvent`。
         buffer.record(sequenced_runtime_event(
             1,
-            session_title_changed_event(Some("old".to_string())),
+            session_title_changed_protocol_event(Some("old".to_string())),
         ));
         buffer.record(SequencedRuntimeEvent {
             seq: 2,
-            event: thinking_display_changed_event(false),
+            event: thinking_display_changed_protocol_event(false),
         });
         buffer.record(runtime_event(
             3,
-            RuntimeToServerEvent::AgentManagementUpdated {
+            runtime_contract::RuntimeToServerEvent::AgentManagementUpdated {
                 records: Vec::new(),
             },
         ));
         buffer.record(sequenced_runtime_event(
             4,
-            session_title_changed_event(Some("new".to_string())),
+            session_title_changed_protocol_event(Some("new".to_string())),
         ));
 
         let replay = buffer.replay();
@@ -557,7 +583,7 @@ mod tests {
         );
         assert!(matches!(
             &replay[2].event.event,
-            protocol::TypedRuntimeEvent::SessionTitleChanged(event)
+            client_proto::TypedRuntimeEvent::SessionTitleChanged(event)
                 if event.title.as_deref() == Some("new")
         ));
     }
@@ -568,7 +594,7 @@ mod tests {
 
         buffer.record(sequenced_runtime_event(
             1,
-            session_title_changed_event(Some("hello".to_string())),
+            session_title_changed_protocol_event(Some("hello".to_string())),
         ));
         buffer.record_snapshot(
             &snapshot_with_title(Some("hello".to_string()), Vec::new()),
@@ -604,7 +630,7 @@ mod tests {
 
         buffer.record(runtime_event(
             1,
-            RuntimeToServerEvent::PlanSubmitted(SubmittedPlan {
+            runtime_contract::RuntimeToServerEvent::PlanSubmitted(domain::events::SubmittedPlan {
                 id: "plan_1".to_string(),
                 title: "Plan".to_string(),
                 markdown: "# Plan".to_string(),
@@ -617,9 +643,9 @@ mod tests {
 
         buffer.record(runtime_event(
             2,
-            RuntimeToServerEvent::PlanApprovalResolved {
+            runtime_contract::RuntimeToServerEvent::PlanApprovalResolved {
                 plan_id: "plan_1".to_string(),
-                action: protocol::PlanApprovalAction::ContinueDiscussing,
+                action: client_proto::PlanApprovalAction::ContinueDiscussing,
             },
         ));
 
@@ -643,11 +669,15 @@ mod tests {
     #[test]
     fn replay_buffer_drops_user_injection_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let item = HistoryItem::Message(Message::from_user_text("hello".to_string()));
-        let event = runtime_event_from_internal(RuntimeToServerEvent::UserMessageInjected {
-            item: item.clone(),
-            client_echo_id: Some("echo-1".to_string()),
-        })
+        let item = domain::display::HistoryItem::Message(domain::message::Message::from_user_text(
+            "hello".to_string(),
+        ));
+        let event = runtime_event_from_runtime_contract_event(
+            runtime_contract::RuntimeToServerEvent::UserMessageInjected {
+                item: item.clone(),
+                client_echo_id: Some("echo-1".to_string()),
+            },
+        )
         .expect("event should encode");
 
         buffer.record(SequencedRuntimeEvent { seq: 1, event });
@@ -666,7 +696,9 @@ mod tests {
             &persisted_message(
                 "s1",
                 "user",
-                vec![ContentBlock::from_text("hello".to_string())],
+                vec![domain::message::ContentBlock::from_text(
+                    "hello".to_string(),
+                )],
             ),
         );
 
@@ -690,9 +722,9 @@ mod tests {
                 "s1",
                 "assistant",
                 vec![
-                    ContentBlock::from_thinking("thinking".to_string()),
-                    ContentBlock::from_text("answer".to_string()),
-                    ContentBlock::from_tool_use(
+                    domain::message::ContentBlock::from_thinking("thinking".to_string()),
+                    domain::message::ContentBlock::from_text("answer".to_string()),
+                    domain::message::ContentBlock::from_tool_use(
                         "tool_1".to_string(),
                         "read".to_string(),
                         HashMap::new(),
@@ -710,12 +742,12 @@ mod tests {
     #[test]
     fn replay_buffer_drops_assistant_tail_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let assistant = Message::new(
-            Role::Assistant,
+        let assistant = domain::message::Message::new(
+            domain::message::Role::Assistant,
             vec![
-                ContentBlock::from_thinking("thinking".to_string()),
-                ContentBlock::from_text("answer".to_string()),
-                ContentBlock::from_tool_use(
+                domain::message::ContentBlock::from_thinking("thinking".to_string()),
+                domain::message::ContentBlock::from_text("answer".to_string()),
+                domain::message::ContentBlock::from_tool_use(
                     "tool_1".to_string(),
                     "read".to_string(),
                     HashMap::new(),
@@ -729,12 +761,14 @@ mod tests {
         buffer.record(delta(4, "text_delta", "answer"));
         buffer.record(SequencedRuntimeEvent {
             seq: 5,
-            event: runtime_event_from_internal(RuntimeToServerEvent::ToolUse(
-                match assistant.content[2].clone() {
-                    ContentBlock::ToolUse(tool_use) => tool_use,
-                    _ => unreachable!(),
-                },
-            ))
+            event: runtime_event_from_runtime_contract_event(
+                runtime_contract::RuntimeToServerEvent::ToolUse(
+                    match assistant.content[2].clone() {
+                        domain::message::ContentBlock::ToolUse(tool_use) => tool_use,
+                        _ => unreachable!(),
+                    },
+                ),
+            )
             .expect("event should encode"),
         });
 
@@ -757,7 +791,7 @@ mod tests {
             &persisted_message(
                 "s1",
                 "user",
-                vec![ContentBlock::from_tool_result(
+                vec![domain::message::ContentBlock::from_tool_result(
                     "tool_1".to_string(),
                     false,
                     "done".to_string(),
@@ -771,9 +805,13 @@ mod tests {
     #[test]
     fn replay_buffer_drops_tool_result_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let tool_result =
-            ContentBlock::from_tool_result("tool_1".to_string(), false, "done".to_string());
-        let ContentBlock::ToolResult(tool_result_event) = tool_result.clone() else {
+        let tool_result = domain::message::ContentBlock::from_tool_result(
+            "tool_1".to_string(),
+            false,
+            "done".to_string(),
+        );
+        let domain::message::ContentBlock::ToolResult(tool_result_event) = tool_result.clone()
+        else {
             unreachable!();
         };
 
@@ -781,11 +819,14 @@ mod tests {
         buffer.record(sequenced(2, "turn_started"));
         buffer.record(SequencedRuntimeEvent {
             seq: 3,
-            event: runtime_event_from_internal(RuntimeToServerEvent::ToolResult(tool_result_event))
-                .expect("event should encode"),
+            event: runtime_event_from_runtime_contract_event(
+                runtime_contract::RuntimeToServerEvent::ToolResult(tool_result_event),
+            )
+            .expect("event should encode"),
         });
         // LLM 级去重现在走 jsonl 路径,数据放在新参数 `&[Message]` 里。
-        let tool_result_message = Message::new(Role::User, vec![tool_result]);
+        let tool_result_message =
+            domain::message::Message::new(domain::message::Role::User, vec![tool_result]);
         buffer.record_snapshot(&snapshot(Vec::new()), &[tool_result_message]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
@@ -824,7 +865,7 @@ mod tests {
         );
         assert!(matches!(
             &replay[2].event.event,
-            protocol::TypedRuntimeEvent::TextDelta(event) if event.delta == "second"
+            client_proto::TypedRuntimeEvent::TextDelta(event) if event.delta == "second"
         ));
     }
 
@@ -834,20 +875,24 @@ mod tests {
 
         buffer.record(runtime_event(
             1,
-            RuntimeToServerEvent::CompactSummaryStarted(CompactEvent {
-                trigger: CompactTrigger::Manual,
-                session_id: Some("s1".to_string()),
-                agent_label: None,
-            }),
+            runtime_contract::RuntimeToServerEvent::CompactSummaryStarted(
+                domain::events::CompactEvent {
+                    trigger: domain::events::CompactTrigger::Manual,
+                    session_id: Some("s1".to_string()),
+                    agent_label: None,
+                },
+            ),
         ));
         buffer.record(runtime_event(
             2,
-            RuntimeToServerEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
-                trigger: CompactTrigger::Manual,
-                delta: "partial".to_string(),
-                session_id: Some("s1".to_string()),
-                agent_label: None,
-            }),
+            runtime_contract::RuntimeToServerEvent::CompactSummaryDelta(
+                domain::events::CompactSummaryDeltaEvent {
+                    trigger: domain::events::CompactTrigger::Manual,
+                    delta: "partial".to_string(),
+                    session_id: Some("s1".to_string()),
+                    agent_label: None,
+                },
+            ),
         ));
 
         let replay = buffer.replay();
@@ -860,7 +905,7 @@ mod tests {
         );
         assert!(matches!(
             &replay[1].event.event,
-            protocol::TypedRuntimeEvent::CompactSummaryDelta(event) if event.delta == "partial"
+            client_proto::TypedRuntimeEvent::CompactSummaryDelta(event) if event.delta == "partial"
         ));
     }
 

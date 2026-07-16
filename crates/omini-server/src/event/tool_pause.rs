@@ -1,6 +1,10 @@
-use super::*;
+use omini_runtime_contract as runtime_contract;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
-pub(crate) enum ToolPauseResolutionStart {
+pub enum ToolPauseResolutionStart {
     Started,
     AlreadyResolved,
     ClientNotConnected,
@@ -14,9 +18,9 @@ enum ToolPauseUpdate {
     Clear,
 }
 
-pub(super) fn apply_tool_pause_update(
+pub fn apply_tool_pause_update(
     pending: &Arc<Mutex<HashSet<String>>>,
-    event: &RuntimeToServerEvent,
+    event: &runtime_contract::RuntimeToServerEvent,
 ) {
     let Some(update) = tool_pause_update(event) else {
         return;
@@ -36,15 +40,15 @@ pub(super) fn apply_tool_pause_update(
 }
 
 /// 从 runtime event 提取 pending pause 的增删清空操作。
-fn tool_pause_update(event: &RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
+fn tool_pause_update(event: &runtime_contract::RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
     match event {
-        RuntimeToServerEvent::ToolPauseRequested(request) => {
+        runtime_contract::RuntimeToServerEvent::ToolPauseRequested(request) => {
             Some(ToolPauseUpdate::Add(request.tool_use_id.clone()))
         }
-        RuntimeToServerEvent::ToolResult(result) => {
+        runtime_contract::RuntimeToServerEvent::ToolResult(result) => {
             Some(ToolPauseUpdate::Remove(vec![result.tool_use_id.clone()]))
         }
-        RuntimeToServerEvent::SubagentToolResult(event) => {
+        runtime_contract::RuntimeToServerEvent::SubagentToolResult(event) => {
             let session_id = &event.session_id;
             let tool_use_id = &event.tool_result.tool_use_id;
             // 子代理暂停在 UI 中可能用 session_id:tool_use_id 表示，两个 key 都要清掉。
@@ -53,9 +57,8 @@ fn tool_pause_update(event: &RuntimeToServerEvent) -> Option<ToolPauseUpdate> {
                 format!("{session_id}:{tool_use_id}"),
             ]))
         }
-        RuntimeToServerEvent::RunStarted | RuntimeToServerEvent::RunFinished => {
-            Some(ToolPauseUpdate::Clear)
-        }
+        runtime_contract::RuntimeToServerEvent::RunStarted
+        | runtime_contract::RuntimeToServerEvent::RunFinished => Some(ToolPauseUpdate::Clear),
         _ => None,
     }
 }
@@ -68,7 +71,7 @@ mod tests {
 
     #[test]
     fn tool_pause_requested_event_adds_pending_resolution_id() {
-        let event = RuntimeToServerEvent::ToolPauseRequested(ToolPauseRequest {
+        let event = runtime_contract::RuntimeToServerEvent::ToolPauseRequested(ToolPauseRequest {
             tool_use_id: "pause_1".to_string(),
             preview_tool_use_id: None,
             tool_name: "write".to_string(),
@@ -88,7 +91,7 @@ mod tests {
 
     #[test]
     fn tool_result_event_removes_pending_resolution_id() {
-        let event = RuntimeToServerEvent::ToolResult(ToolResultBlock {
+        let event = runtime_contract::RuntimeToServerEvent::ToolResult(ToolResultBlock {
             tool_use_id: "pause_1".to_string(),
             content: "done".to_string(),
             is_error: false,
