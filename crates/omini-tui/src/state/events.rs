@@ -158,7 +158,7 @@ impl UiState {
             }
             InteractionRequest::SessionSelection { sessions } => {
                 let mut sorted = sessions.clone();
-                sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+                sorted.sort_by_key(|item| item.updated_at);
                 let all_sessions = sorted.clone();
                 let selected = self
                     .current_session_id

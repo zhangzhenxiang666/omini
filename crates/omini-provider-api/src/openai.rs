@@ -547,10 +547,8 @@ fn convert_messages_to_openai(messages: &[Message], system_prompt: Option<&str>)
                             }));
                         }
                         ContentBlock::Thinking(th) => {
-                            // 取第一个 thinking 块作为 reasoning_content
-                            if reasoning_content.is_none() {
-                                reasoning_content = Some(th.thinking.clone());
-                            }
+                            // 只保存第一个 thinking 块
+                            reasoning_content.get_or_insert_with(|| th.thinking.clone());
                         }
                         _ => {}
                     }

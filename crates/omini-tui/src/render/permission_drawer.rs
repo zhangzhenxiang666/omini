@@ -362,11 +362,10 @@ fn render_permission_scrollbar(
     let max_scroll = total_lines.saturating_sub(height);
     let thumb_height = (height.saturating_mul(height) / total_lines).clamp(1, height);
     let thumb_range = height.saturating_sub(thumb_height);
-    let thumb_y = if max_scroll == 0 {
-        0
-    } else {
-        scroll_y.saturating_mul(thumb_range) / max_scroll
-    };
+    let thumb_y = scroll_y
+        .saturating_mul(thumb_range)
+        .checked_div(max_scroll)
+        .unwrap_or(0);
     let x = body_area.x + body_area.width + 1;
     let track_style = Style::default().fg(Color::Rgb(70, 75, 86));
     let thumb_style = Style::default().fg(Color::Rgb(140, 145, 155));

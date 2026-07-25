@@ -877,7 +877,6 @@ pub(super) async fn flush_queued_user_inputs(
     let ui_messages = state
         .queued_user_inputs
         .iter()
-        .cloned()
         .map(|draft| match draft.clone().history_item() {
             omini_domain::display::HistoryItem::Message(message) => UiMessage::Message(message),
             omini_domain::display::HistoryItem::Display(display) => UiMessage::Display(display),

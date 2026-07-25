@@ -51,8 +51,7 @@ impl UiState {
                 full_text: text,
                 full_char_count,
             });
-            self.input_paste_markers
-                .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+            self.input_paste_markers.sort_by_key(|item| item.start_char);
         } else {
             self.insert_text(&text);
         }
@@ -88,8 +87,7 @@ impl UiState {
                 .unwrap_or_default()
                 .to_string(),
         });
-        self.input_images
-            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        self.input_images.sort_by_key(|item| item.start_char);
     }
 
     fn replace_range_with_image_attachment(&mut self, start: usize, end: usize, path: PathBuf) {
@@ -113,8 +111,7 @@ impl UiState {
                 .unwrap_or_default()
                 .to_string(),
         });
-        self.input_images
-            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        self.input_images.sort_by_key(|item| item.start_char);
         self.cursor_char = start + new_len;
     }
 
@@ -352,8 +349,7 @@ impl UiState {
             target: candidate.target,
             description: candidate.description,
         });
-        self.input_mentions
-            .sort_by(|a, b| a.start_char.cmp(&b.start_char));
+        self.input_mentions.sort_by_key(|item| item.start_char);
         self.cursor_char = start + new_len;
         self.ensure_input_cursor_visible();
         self.mention_autocomplete.visible = false;
@@ -711,8 +707,8 @@ fn expand_paste_markers(
         return (text, mentions);
     }
 
-    markers.sort_by(|a, b| a.start_char.cmp(&b.start_char));
-    mentions.sort_by(|a, b| a.start_char.cmp(&b.start_char));
+    markers.sort_by_key(|item| item.start_char);
+    mentions.sort_by_key(|item| item.start_char);
 
     let chars = text.chars().collect::<Vec<_>>();
     let mut expanded = String::new();
