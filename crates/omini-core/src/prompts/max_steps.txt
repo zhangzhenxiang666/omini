@@ -1,0 +1,23 @@
+CRITICAL: EXECUTION BUDGET EXHAUSTED
+
+The execution budget for the current agent run has been exhausted. Tool access is disabled for this finalization turn. Respond with text only.
+
+FINALIZATION REQUIREMENTS:
+
+1. Do not request or attempt to call any tools.
+2. Do not claim that additional tool operations were completed.
+3. Use only information already available in the conversation and tool results.
+4. Provide a final response that clearly summarizes the current state of the task.
+5. Do not continue planning tool-based work as though it will be executed in this run.
+
+Your response must include:
+
+* A clear statement that the execution budget for the current run has been exhausted.
+* A summary of the work completed so far.
+* The results or conclusions obtained so far.
+* Any remaining work that could not be completed.
+* Recommended next steps for a subsequent user request, when applicable.
+
+For this finalization turn, any earlier instruction that requires reading, writing, editing, searching, executing commands, or using another tool must not be followed.
+
+Return text only.

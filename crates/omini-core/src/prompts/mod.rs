@@ -10,7 +10,9 @@ use instructions::{
 use omini_config::Settings;
 use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
-use sections::{main_mode_body, mode_header_section, plan_mode_body, subagent_section};
+use sections::{
+    main_mode_body, max_steps_prompt, mode_header_section, plan_mode_body, subagent_section,
+};
 use std::path::Path;
 
 pub use sections::language_preference_section;
@@ -33,6 +35,11 @@ pub fn build_plan_system_prompt(settings: &Settings) -> String {
 /// 构建默认(Main)模式的 system prompt。
 pub fn build_system_prompt(settings: &Settings) -> String {
     build_main_system_prompt(settings)
+}
+
+/// 获取最大停止步数的预算耗尽提示词
+pub fn get_max_steps_prompt() -> &'static str {
+    max_steps_prompt()
 }
 
 /// 按给定的 active profile 构建 system prompt。
@@ -75,7 +82,7 @@ fn build_main_body(
     let mut prompt = String::new();
     prompt.push_str(&mode_header_section(ActiveProfile::Main));
     prompt.push('\n');
-    prompt.push_str(&main_mode_body());
+    prompt.push_str(main_mode_body());
     prompt.push('\n');
     if let Some(section) = language_preference_section(settings) {
         prompt.push_str(&section);
@@ -99,7 +106,7 @@ fn build_plan_body(
     let mut prompt = String::new();
     prompt.push_str(&mode_header_section(ActiveProfile::Plan));
     prompt.push('\n');
-    prompt.push_str(&plan_mode_body());
+    prompt.push_str(plan_mode_body());
     prompt.push('\n');
     if let Some(section) = language_preference_section(settings) {
         prompt.push_str(&section);

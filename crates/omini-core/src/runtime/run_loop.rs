@@ -55,7 +55,7 @@ impl AgentRuntime {
                             ServerToRuntimeEvent::CancelRun => {
                                 tracing::debug!(request_kind = "cancel_run", "runtime request received");
                                 self.cancelled.store(true, Ordering::Relaxed);
-                                self.query_engine.cancel_current_run();
+                                self.query_engine.notify_cancel_waiters();
                             }
                             ServerToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 tracing::debug!(
@@ -270,7 +270,7 @@ impl AgentRuntime {
                             ServerToRuntimeEvent::CancelRun => {
                                 tracing::debug!("active run cancellation requested");
                                 self.cancelled.store(true, Ordering::Relaxed);
-                                self.query_engine.cancel_current_run();
+                                self.query_engine.notify_cancel_waiters();
                             }
                             ServerToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
                                 tracing::debug!(tool_use_id = %tool_use_id, response = ?response, "resolving tool pause");
@@ -395,7 +395,6 @@ impl AgentRuntime {
                 tracing::info!(
                     turns = result.turns,
                     finish_reason = ?result.finish_reason,
-                    had_tool_use = result.had_tool_use,
                     "query finished"
                 );
             }

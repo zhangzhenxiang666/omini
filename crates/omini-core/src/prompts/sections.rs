@@ -3,8 +3,9 @@ use omini_config::Settings;
 use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
 
-const MAIN_MODE_BODY: &str = include_str!("main_mode.md");
-const PLAN_MODE_BODY: &str = include_str!("plan_mode.md");
+const MAIN_MODE_BODY: &str = include_str!("main_mode.txt");
+const PLAN_MODE_BODY: &str = include_str!("plan_mode.txt");
+const MAX_STEPS_PROMPT: &str = include_str!("max_steps.txt");
 
 /// 当前 profile 的 `<active_mode>` 头部块。
 ///
@@ -44,13 +45,17 @@ pub(super) fn mode_header_section(active_profile: ActiveProfile) -> String {
 }
 
 /// Main 模式静态正文: agent identity + core behavior + tool instructions。
-pub(super) fn main_mode_body() -> String {
-    MAIN_MODE_BODY.trim().to_string()
+pub(super) fn main_mode_body() -> &'static str {
+    MAIN_MODE_BODY.trim()
 }
 
 /// Plan 模式静态正文: 模式规则 + 方法论 + 可用工具清单 + Finalization Rule。
-pub(super) fn plan_mode_body() -> String {
-    PLAN_MODE_BODY.trim().to_string()
+pub(super) fn plan_mode_body() -> &'static str {
+    PLAN_MODE_BODY.trim()
+}
+
+pub(super) fn max_steps_prompt() -> &'static str {
+    MAX_STEPS_PROMPT.trim()
 }
 
 pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) -> String {

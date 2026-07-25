@@ -107,7 +107,7 @@ impl CoreError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum RuntimeError {
+pub enum RuntimeError {
     #[error("LLM request failed: {0}")]
     ProviderRequest(#[source] RequestError),
     #[error("Stream error: {0}")]
@@ -123,7 +123,7 @@ pub(crate) enum RuntimeError {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum CompactError {
+pub enum CompactError {
     #[error("compact summary request failed: {0}")]
     Request(#[source] RequestError),
     #[error("compact summary stream failed: {0}")]

@@ -83,7 +83,7 @@ impl AgentRuntime {
                         ServerToRuntimeEvent::CancelRun => {
                             tracing::debug!("manual compact cancellation requested");
                             self.cancelled.store(true, Ordering::Relaxed);
-                            self.query_engine.cancel_current_run();
+                            self.query_engine.notify_cancel_waiters();
                         }
                         _ => {
                             tracing::debug!("request ignored during manual compact");
