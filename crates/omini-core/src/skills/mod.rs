@@ -283,10 +283,7 @@ fn parse_skill_content(
 }
 
 fn load_built_in_skills(registry: &mut SkillRegistry) {
-    for (name, content) in [
-        ("skill-creator", include_str!("builtins/skill-creator.md")),
-        ("commit-message", include_str!("builtins/commit-message.md")),
-    ] {
+    for (name, content) in [("skill-creator", include_str!("builtins/skill-creator.md"))] {
         let directory = PathBuf::from("<built-in>").join(name);
         match parse_skill_content(content, directory.clone(), SkillSource::BuiltIn(directory)) {
             Ok(spec) => insert_skill(registry, spec),
