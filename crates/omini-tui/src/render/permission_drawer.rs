@@ -1369,6 +1369,10 @@ mod tests {
 
     #[test]
     fn search_permission_renders_query_and_path() {
+        let relative_path = Path::new(".omini").join("skills").join("uumit-agent");
+        let search_path = dirs::home_dir()
+            .expect("home directory should be available")
+            .join(&relative_path);
         let request = ToolPauseRequest {
             tool_use_id: "search-1".to_string(),
             preview_tool_use_id: None,
@@ -1380,7 +1384,7 @@ mod tests {
                 crate::types::events::SearchPermissionPreview {
                     query: "POST /api/v1/skills".to_string(),
                     mode: "content".to_string(),
-                    path: "/home/zzx/.omini/skills/uumit-agent".to_string(),
+                    path: search_path.display().to_string(),
                 },
             )),
         };
@@ -1398,7 +1402,7 @@ mod tests {
         let rendered = drawer.lines.iter().map(line_text).collect::<String>();
 
         assert!(rendered.contains("POST /api/v1/skills"));
-        assert!(rendered.contains("~/.omini/skills/uumit-agent"));
+        assert!(rendered.contains(&format!("~/{}", relative_path.display())));
     }
 
     #[test]
