@@ -18,24 +18,23 @@ use omini_domain::config::ProviderInfo;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
-use omini_domain::usage::Usage;
 use omini_runtime_contract::project as project_types;
-use omini_runtime_contract::session as session_types;
+use omini_runtime_contract::thread as thread_types;
 use omini_runtime_contract::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tracing::Instrument;
 
 pub use crate::error::CoreError;
-pub use crate::title_generation::{TitleGenError, generate_session_title};
+pub use crate::title_generation::{TitleGenError, generate_thread_title};
 pub use omini_domain::title_generation::GeneratedSessionTitle;
 
-pub fn project_agents_snapshot(settings: &Settings) -> session_types::AgentsSnapshot {
+pub fn project_agents_snapshot(settings: &Settings) -> thread_types::AgentsSnapshot {
     let records = project_agent_records(&settings.cwd);
     let models = models_snapshot_from_settings(settings);
-    session_types::AgentsSnapshot {
+    thread_types::AgentsSnapshot {
         records,
         providers: models.providers,
         current_provider: models.current_provider,
@@ -43,7 +42,7 @@ pub fn project_agents_snapshot(settings: &Settings) -> session_types::AgentsSnap
     }
 }
 
-pub fn project_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummarySnapshot> {
+pub fn project_skill_summaries(cwd: &Path) -> Vec<thread_types::SkillSummarySnapshot> {
     user_invocable_skill_summaries(cwd)
 }
 
@@ -109,10 +108,10 @@ pub async fn generate_project_agent_draft(
     ))
 }
 
-/// 会话级 core facade，是 `omini-server` 和真正 agent runtime 之间的通信边界。
+/// Thread-scoped core facade between `omini-server` and the agent runtime.
 ///
-/// `omini-server::runtime::RuntimeSession` 为每个 daemon 会话持有一个
-/// `AgentCoreSession`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
+/// `omini-server::thread::ThreadRuntime` 为每个 daemon thread 持有一个
+/// `AgentCoreThread`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
 /// 转成 `omini-runtim-contract` 的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
 /// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
 ///
@@ -122,16 +121,13 @@ pub async fn generate_project_agent_draft(
 /// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
 /// session registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
 /// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
-pub struct AgentCoreSession {
-    // server 持有的 daemon session id；core facade task 日志用它做稳定关联字段。
-    // 强制非 Option:runtime 必须绑定到 server 已经预创建好的一个 session。
-    session_id: String,
+pub struct AgentCoreThread {
+    thread_id: String,
     // server 接受并鉴权后的用户动作从这里进入 core runtime。
     request_tx: mpsc::Sender<ServerToRuntimeEvent>,
     // runtime 输出事件按 server-core 契约广播给 server。
     event_tx: broadcast::Sender<RuntimeToServerEvent>,
-    // 持久化事件按 server-core 契约广播给 server，由 server 负责事务、replay 裁剪和错误处理。
-    persistence_tx: broadcast::Sender<RuntimePersistenceEvent>,
+    persistence_rx: Mutex<Option<mpsc::Receiver<RuntimePersistenceEvent>>>,
     // HTTP 查询和配置 mutation 需要读取当前会话配置快照；真正执行仍通过 request_tx 进入 runtime。
     settings: Arc<RwLock<Settings>>,
     // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前会话实际运行状态。
@@ -142,37 +138,35 @@ pub struct AgentCoreSession {
     _runtime_handle: JoinHandle<()>,
     // runtime 事件 fanout：把 RuntimeToServerEvent 广播给 server。
     _fanout_handle: JoinHandle<()>,
-    // 持久化事件 fanout：把 core 产生的 RuntimePersistenceEvent 广播给 server 落盘。
-    _persistence_handle: JoinHandle<()>,
 }
 
-impl AgentCoreSession {
+impl AgentCoreThread {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
     /// 唯一的生产入口 `spawn_for_session_with_active_profile` 强制要求传入一个
-    /// 由 server 端已经预创建好的 `session_id`(对应目录、DB 行都已存在),
+    /// 由 server 端已经预创建好的 `thread_id`（对应目录、DB 行都已存在），
     /// 并把持久化层的 messages / usage 一次性灌进 runtime,启动后 core 即处于
     /// "已加载"状态 —— 不再需要后续的 hydrate 事件。
-    pub fn spawn_for_session_with_active_profile(
+    pub fn spawn_for_thread_with_active_profile(
         settings: Settings,
         project: ProjectDir,
-        session_id: String,
+        thread_id: String,
         active_profile: ActiveProfile,
         messages: Vec<Message>,
+        llm_context_version: i64,
         usage: SessionUsageSnapshot,
     ) -> Result<Self, CoreError> {
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
-        let (runtime_persistence_tx, mut runtime_persistence_rx) =
+        let (runtime_persistence_tx, runtime_persistence_rx) =
             mpsc::channel::<RuntimePersistenceEvent>(512);
         let (request_tx, request_rx) = mpsc::channel::<ServerToRuntimeEvent>(512);
         let (event_tx, _) = broadcast::channel::<RuntimeToServerEvent>(512);
-        let (persistence_tx, _) = broadcast::channel::<RuntimePersistenceEvent>(512);
         let handles = crate::runtime::RuntimeCapabilityHandles::load(&settings);
         let mcp_manager = Arc::clone(&handles.mcp_manager);
         let capabilities = Arc::clone(&handles.capabilities);
 
-        let session_dir = project.session(&session_id).clone();
+        let thread_dir = project.thread(&thread_id);
         let channels = crate::runtime::AgentRuntimeChannels {
             event_tx: runtime_event_tx,
             persistence_tx: runtime_persistence_tx,
@@ -181,16 +175,17 @@ impl AgentCoreSession {
         let deps = crate::runtime::AgentRuntimeDeps {
             settings,
             project,
-            session_id: session_id.clone(),
-            session_dir,
+            thread_id: thread_id.clone(),
+            thread_dir,
             messages,
+            llm_context_version,
             usage,
             active_profile,
         };
         let runtime = AgentRuntime::with_capability_handles(channels, deps, handles);
         let runtime_handle = runtime.run();
         let fanout_tx = event_tx.clone();
-        let runtime_fanout_session_id = session_id.clone();
+        let runtime_fanout_thread_id = thread_id.clone();
         let fanout_handle = tokio::spawn(
             async move {
                 tracing::debug!("core runtime event fanout started");
@@ -201,48 +196,21 @@ impl AgentCoreSession {
             }
             .instrument(tracing::debug_span!(
                 "core_fanout",
-                session_id = %runtime_fanout_session_id,
+                thread_id = %runtime_fanout_thread_id,
                 task_kind = "runtime_event_fanout"
-            )),
-        );
-        let persistence_fanout_tx = persistence_tx.clone();
-        let persistence_fanout_session_id = session_id.clone();
-        let persistence_handle = tokio::spawn(
-            async move {
-                tracing::debug!("core persistence fanout started");
-                while let Some(event) = runtime_persistence_rx.recv().await {
-                    let summary = runtime_persistence_event_summary(&event);
-                    tracing::trace!(
-                        event_kind = summary.kind,
-                        session_id = ?summary.session_id,
-                        item_count = ?summary.item_count,
-                        prompt_tokens = ?summary.prompt_tokens,
-                        completion_tokens = ?summary.completion_tokens,
-                        cached_tokens = ?summary.cached_tokens,
-                        "fanout persistence event"
-                    );
-                    let _ = persistence_fanout_tx.send(event);
-                }
-                tracing::debug!("core persistence fanout stopped");
-            }
-            .instrument(tracing::debug_span!(
-                "core_fanout",
-                session_id = %persistence_fanout_session_id,
-                task_kind = "persistence_fanout"
             )),
         );
 
         Ok(Self {
-            session_id,
+            thread_id,
             request_tx,
             event_tx,
-            persistence_tx,
+            persistence_rx: Mutex::new(Some(runtime_persistence_rx)),
             settings: settings_snapshot,
             mcp_manager,
             capabilities,
             _runtime_handle: runtime_handle,
             _fanout_handle: fanout_handle,
-            _persistence_handle: persistence_handle,
         })
     }
 
@@ -257,41 +225,44 @@ impl AgentCoreSession {
     /// 订阅 core 产生的持久化事件。
     ///
     /// core 不直接写 daemon 数据库；server 消费这个 stream 后负责落盘和 replay buffer 裁剪。
-    pub fn subscribe_persistence(&self) -> broadcast::Receiver<RuntimePersistenceEvent> {
-        self.persistence_tx.subscribe()
+    pub fn take_persistence_receiver(&self) -> Option<mpsc::Receiver<RuntimePersistenceEvent>> {
+        self.persistence_rx
+            .lock()
+            .expect("persistence receiver lock poisoned")
+            .take()
     }
 
-    pub fn list_models(&self) -> session_types::ModelsSnapshot {
+    pub fn list_models(&self) -> thread_types::ModelsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
         models_snapshot_from_settings(&settings)
     }
 
-    pub fn list_agents(&self) -> session_types::AgentsSnapshot {
+    pub fn list_agents(&self) -> thread_types::AgentsSnapshot {
         let settings = self.settings.read().expect("core settings lock poisoned");
         project_agents_snapshot(&settings)
     }
 
-    pub fn list_skills(&self) -> Vec<session_types::SkillSummarySnapshot> {
+    pub fn list_skills(&self) -> Vec<thread_types::SkillSummarySnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
         user_invocable_skill_summaries(&settings.cwd)
     }
 
-    pub fn get_skill(&self, skill_name: &str) -> Option<session_types::SkillDetailSnapshot> {
+    pub fn get_skill(&self, skill_name: &str) -> Option<thread_types::SkillDetailSnapshot> {
         let settings = self.settings.read().expect("core settings lock poisoned");
         skill_detail_snapshot(&settings.cwd, skill_name)
     }
 
-    pub fn runtime_skills(&self) -> Vec<session_types::RuntimeSkillSnapshot> {
+    pub fn runtime_skills(&self) -> Vec<thread_types::RuntimeSkillSnapshot> {
         let skill_registry = self.capabilities.skill_registry();
         let mut skills = skill_registry
             .skills()
-            .map(|skill| session_types::RuntimeSkillSnapshot {
+            .map(|skill| thread_types::RuntimeSkillSnapshot {
                 name: skill.name.clone(),
                 description: skill.description.clone(),
                 short_description: skill.short_description.clone(),
                 source_kind: runtime_skill_source_kind(skill.source_kind()),
                 directory: skill.directory.clone(),
-                status: session_types::RuntimeCapabilityStatus::Available,
+                status: thread_types::RuntimeCapabilityStatus::Available,
                 disable_model_invocation: skill.disable_model_invocation,
                 user_invocable: skill.user_invocable,
             })
@@ -316,25 +287,25 @@ impl AgentCoreSession {
 
     pub async fn submit_run(
         &self,
-        command: session_types::SubmitRunCommand,
-    ) -> Result<session_types::RunSubmitted, CoreError> {
-        let session_types::SubmitRunCommand {
+        command: thread_types::SubmitRunCommand,
+    ) -> Result<thread_types::RunSubmitted, CoreError> {
+        let thread_types::SubmitRunCommand {
             draft,
             client_echo_id,
             mode,
         } = command;
         let event = match mode {
-            session_types::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
+            thread_types::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
                 draft,
                 client_echo_id,
             },
-            session_types::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
+            thread_types::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
                 draft,
                 client_echo_id,
             },
         };
         self.send_to_runtime(event).await?;
-        Ok(session_types::RunSubmitted {
+        Ok(thread_types::RunSubmitted {
             run_id: "current".to_string(),
         })
     }
@@ -355,17 +326,14 @@ impl AgentCoreSession {
 
     pub async fn set_active_profile(
         &self,
-        command: session_types::SetActiveProfileCommand,
+        command: thread_types::SetActiveProfileCommand,
     ) -> Result<(), CoreError> {
         self.send_to_runtime(ServerToRuntimeEvent::SetActiveProfile(command.profile))
             .await
     }
 
-    pub async fn set_model(
-        &self,
-        command: session_types::SetModelCommand,
-    ) -> Result<(), CoreError> {
-        let session_types::SetModelCommand {
+    pub async fn set_model(&self, command: thread_types::SetModelCommand) -> Result<(), CoreError> {
+        let thread_types::SetModelCommand {
             provider,
             model,
             thinking_effort: requested_effort,
@@ -389,7 +357,7 @@ impl AgentCoreSession {
 
     pub async fn set_thinking_effort(
         &self,
-        command: session_types::SetThinkingEffortCommand,
+        command: thread_types::SetThinkingEffortCommand,
     ) -> Result<(), CoreError> {
         let requested_effort = command.effort;
         {
@@ -403,9 +371,9 @@ impl AgentCoreSession {
 
     pub async fn resolve_tool_pause(
         &self,
-        command: session_types::ResolveToolPauseCommand,
+        command: thread_types::ResolveToolPauseCommand,
     ) -> Result<(), CoreError> {
-        let session_types::ResolveToolPauseCommand {
+        let thread_types::ResolveToolPauseCommand {
             tool_use_id,
             response,
         } = command;
@@ -418,9 +386,9 @@ impl AgentCoreSession {
 
     pub async fn resolve_plan(
         &self,
-        command: session_types::ResolvePlanCommand,
+        command: thread_types::ResolvePlanCommand,
     ) -> Result<(), CoreError> {
-        let session_types::ResolvePlanCommand { plan_id, action } = command;
+        let thread_types::ResolvePlanCommand { plan_id, action } = command;
         self.send_to_runtime(ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action })
             .await
     }
@@ -440,7 +408,7 @@ impl AgentCoreSession {
     /// channel 关闭意味着对应会话的 runtime 已退出，调用方应把它视为 core 会话不可用。
     async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
         tracing::trace!(
-            session_id = %self.session_id,
+            thread_id = %self.thread_id,
             event_kind = server_to_runtime_event_kind(&event),
             "sending event to runtime"
         );
@@ -471,11 +439,11 @@ fn agent_record_id(record: &subagent_types::AgentRecord) -> String {
         .unwrap_or_else(|| record.name.clone())
 }
 
-fn user_invocable_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummarySnapshot> {
+fn user_invocable_skill_summaries(cwd: &Path) -> Vec<thread_types::SkillSummarySnapshot> {
     let mut skills = crate::skills::load_skill_registry(cwd)
         .skills()
         .filter(|skill| skill.user_invocable)
-        .map(|skill| session_types::SkillSummarySnapshot {
+        .map(|skill| thread_types::SkillSummarySnapshot {
             name: skill.name.clone(),
             description: skill.description.clone(),
             short_description: skill.short_description.clone(),
@@ -488,11 +456,11 @@ fn user_invocable_skill_summaries(cwd: &Path) -> Vec<session_types::SkillSummary
 fn skill_detail_snapshot(
     cwd: &Path,
     skill_name: &str,
-) -> Option<session_types::SkillDetailSnapshot> {
+) -> Option<thread_types::SkillDetailSnapshot> {
     let registry = crate::skills::load_skill_registry(cwd);
     registry
         .get(skill_name)
-        .map(|skill| session_types::SkillDetailSnapshot {
+        .map(|skill| thread_types::SkillDetailSnapshot {
             name: skill.name.clone(),
             description: skill.description.clone(),
             short_description: skill.short_description.clone(),
@@ -519,143 +487,25 @@ fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
     }
 }
 
-struct RuntimePersistenceEventSummary<'a> {
-    kind: &'static str,
-    session_id: Option<&'a str>,
-    item_count: Option<usize>,
-    prompt_tokens: Option<usize>,
-    completion_tokens: Option<usize>,
-    cached_tokens: Option<usize>,
-}
-
-fn runtime_persistence_event_summary(
-    event: &RuntimePersistenceEvent,
-) -> RuntimePersistenceEventSummary<'_> {
-    match event {
-        RuntimePersistenceEvent::CreateSession(session) => RuntimePersistenceEventSummary {
-            kind: "create_session",
-            session_id: Some(&session.id),
-            item_count: None,
-            prompt_tokens: None,
-            completion_tokens: None,
-            cached_tokens: None,
-        },
-        RuntimePersistenceEvent::UpdateSessionUpdatedAt { session_id } => {
-            RuntimePersistenceEventSummary {
-                kind: "update_session_updated_at",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::UpdateSessionConfig { session_id, .. } => {
-            RuntimePersistenceEventSummary {
-                kind: "update_session_config",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::UpdateSessionThinkingEffort { session_id, .. } => {
-            RuntimePersistenceEventSummary {
-                kind: "update_session_thinking_effort",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::InsertMessage {
-            session_id, blocks, ..
-        } => RuntimePersistenceEventSummary {
-            kind: "insert_message",
-            session_id: Some(session_id),
-            item_count: Some(blocks.len()),
-            prompt_tokens: None,
-            completion_tokens: None,
-            cached_tokens: None,
-        },
-        RuntimePersistenceEvent::InsertDisplayMessage { session_id, .. } => {
-            RuntimePersistenceEventSummary {
-                kind: "insert_display_message",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::InsertPlanMessage { session_id, .. } => {
-            RuntimePersistenceEventSummary {
-                kind: "insert_plan_message",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::InsertCompactSummaryMessage { session_id, .. } => {
-            RuntimePersistenceEventSummary {
-                kind: "insert_compact_summary_message",
-                session_id: Some(session_id),
-                item_count: None,
-                prompt_tokens: None,
-                completion_tokens: None,
-                cached_tokens: None,
-            }
-        }
-        RuntimePersistenceEvent::RecordSessionUsage { session_id, usage } => {
-            usage_persistence_summary("record_session_usage", session_id, *usage)
-        }
-        RuntimePersistenceEvent::RecordSessionTotalUsage { session_id, usage } => {
-            usage_persistence_summary("record_session_total_usage", session_id, *usage)
-        }
-        RuntimePersistenceEvent::RecordParentSubagentUsage { session_id, usage } => {
-            usage_persistence_summary("record_parent_subagent_usage", session_id, *usage)
-        }
-    }
-}
-
-fn usage_persistence_summary<'a>(
-    kind: &'static str,
-    session_id: &'a str,
-    usage: Usage,
-) -> RuntimePersistenceEventSummary<'a> {
-    RuntimePersistenceEventSummary {
-        kind,
-        session_id: Some(session_id),
-        item_count: None,
-        prompt_tokens: Some(usage.prompt_tokens),
-        completion_tokens: Some(usage.completion_tokens),
-        cached_tokens: Some(usage.cached_tokens),
-    }
-}
-
 fn runtime_skill_source_kind(
     source_kind: crate::skills::SkillSourceKind,
-) -> session_types::RuntimeSkillSourceKind {
+) -> thread_types::RuntimeSkillSourceKind {
     match source_kind {
-        crate::skills::SkillSourceKind::BuiltIn => session_types::RuntimeSkillSourceKind::BuiltIn,
-        crate::skills::SkillSourceKind::Project => session_types::RuntimeSkillSourceKind::Project,
-        crate::skills::SkillSourceKind::User => session_types::RuntimeSkillSourceKind::User,
+        crate::skills::SkillSourceKind::BuiltIn => thread_types::RuntimeSkillSourceKind::BuiltIn,
+        crate::skills::SkillSourceKind::Project => thread_types::RuntimeSkillSourceKind::Project,
+        crate::skills::SkillSourceKind::User => thread_types::RuntimeSkillSourceKind::User,
     }
 }
 
-fn runtime_skill_source_sort(source_kind: session_types::RuntimeSkillSourceKind) -> u8 {
+fn runtime_skill_source_sort(source_kind: thread_types::RuntimeSkillSourceKind) -> u8 {
     match source_kind {
-        session_types::RuntimeSkillSourceKind::BuiltIn => 0,
-        session_types::RuntimeSkillSourceKind::Project => 1,
-        session_types::RuntimeSkillSourceKind::User => 2,
+        thread_types::RuntimeSkillSourceKind::BuiltIn => 0,
+        thread_types::RuntimeSkillSourceKind::Project => 1,
+        thread_types::RuntimeSkillSourceKind::User => 2,
     }
 }
 
-fn models_snapshot_from_settings(settings: &Settings) -> session_types::ModelsSnapshot {
+fn models_snapshot_from_settings(settings: &Settings) -> thread_types::ModelsSnapshot {
     let mut providers = settings
         .providers
         .iter()
@@ -668,7 +518,7 @@ fn models_snapshot_from_settings(settings: &Settings) -> session_types::ModelsSn
         })
         .collect::<Vec<_>>();
     providers.sort_by(|a, b| a.id.cmp(&b.id));
-    session_types::ModelsSnapshot {
+    thread_types::ModelsSnapshot {
         providers,
         current_provider: settings.active_provider.clone(),
         current_model: settings.model.clone(),

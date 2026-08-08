@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+pub(super) const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
 pub(super) struct TestRoot {
     pub(super) path: PathBuf,
 }
@@ -94,17 +96,38 @@ thinking = true
 
 pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectManager, ProjectDir) {
     write_config(root, false);
+    fs::create_dir_all(cwd).expect("cwd should be created");
     let root = Arc::new(OminiRoot::from_path(root.to_path_buf()));
     let config = load_validated_config(&root, cwd).expect("config should load");
+    let storage_key =
+        omini_config::project::storage_key(cwd, uuid::Uuid::parse_str(TEST_PROJECT_ID).unwrap());
     let project = root
-        .init_project(cwd, &config)
+        .init_project(&storage_key, &config)
         .expect("project should initialize");
     let db_path = root.path().join("omini.sqlite");
     let db = Database::open(&db_path)
         .await
         .expect("database should open");
+    let now = Utc::now();
+    db.create_project(&store_model::Project {
+        id: TEST_PROJECT_ID.to_string(),
+        name: "test project".to_string(),
+        path: cwd.display().to_string(),
+        storage_key,
+        created_at: now,
+        updated_at: now,
+        last_opened_at: None,
+    })
+    .await
+    .expect("project should persist");
     (
-        ProjectManager::new(root, cwd.to_path_buf(), project.clone(), Arc::new(db)),
+        ProjectManager::new(
+            TEST_PROJECT_ID.to_string(),
+            root,
+            cwd.to_path_buf(),
+            project.clone(),
+            Arc::new(db),
+        ),
         project,
     )
 }
@@ -132,14 +155,14 @@ pub(super) async fn recv_runtime_event_kind(
     .expect("expected runtime event should arrive")
 }
 
-pub(super) fn test_session(id: &str) -> store_model::Session {
+pub(super) fn test_thread(id: &str) -> store_model::Thread {
     let now = Utc::now();
-    store_model::Session {
+    store_model::Thread {
         id: id.to_string(),
-        project_path: "/tmp/project".to_string(),
-        parent_session_id: None,
+        project_id: TEST_PROJECT_ID.to_string(),
+        parent_thread_id: None,
         spawn_tool_use_id: None,
-        session_type: "main".to_string(),
+        thread_type: "main".to_string(),
         agent_label: None,
         provider: "openai".to_string(),
         model: "gpt-test".to_string(),
@@ -148,6 +171,7 @@ pub(super) fn test_session(id: &str) -> store_model::Session {
         current_context_tokens: 0,
         total_tokens: 0,
         total_cached_tokens: 0,
+        llm_context_version: 1,
         created_at: now,
         updated_at: now,
     }

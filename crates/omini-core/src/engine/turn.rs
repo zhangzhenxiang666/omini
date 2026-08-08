@@ -268,7 +268,7 @@ impl QueryEngine {
         let stop_after_permission_denial = should_stop_after_denial(
             ctx.runtime_context
                 .as_ref()
-                .map(|runtime| runtime.session_type.as_str()),
+                .map(|runtime| runtime.thread_type.as_str()),
             &results,
         );
         commit_results(ctx.messages, results, event_tx).await;
@@ -362,8 +362,8 @@ fn push_thinking_delta(blocks: &mut Vec<ContentBlock>, delta: &str) {
     }
 }
 
-fn should_stop_after_denial(session_type: Option<&str>, results: &[ToolRunResult]) -> bool {
-    session_type == Some("main")
+fn should_stop_after_denial(thread_type: Option<&str>, results: &[ToolRunResult]) -> bool {
+    thread_type == Some("main")
         && results
             .iter()
             .any(|result| denied_without_note(&result.block))

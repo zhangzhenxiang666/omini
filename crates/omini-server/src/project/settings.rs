@@ -164,14 +164,28 @@ mod tests {
 
         let root = Arc::new(OminiRoot::from_path(temp.path.clone()));
         let config = load_validated_config(&root, &cwd).expect("config should load");
+        let project_id = uuid::Uuid::new_v4();
+        let storage_key = omini_config::project::storage_key(&cwd, project_id);
         let project = root
-            .init_project(&cwd, &config)
+            .init_project(&storage_key, &config)
             .expect("project should initialize");
         let db_path = root.path().join("omini.sqlite");
         let db = Database::open(&db_path)
             .await
             .expect("database should open");
-        let manager = ProjectManager::new(root, cwd, project, Arc::new(db));
+        let now = chrono::Utc::now();
+        db.create_project(&crate::store::Project {
+            id: project_id.to_string(),
+            name: "test project".to_string(),
+            path: cwd.display().to_string(),
+            storage_key,
+            created_at: now,
+            updated_at: now,
+            last_opened_at: None,
+        })
+        .await
+        .expect("project should persist");
+        let manager = ProjectManager::new(project_id.to_string(), root, cwd, project, Arc::new(db));
 
         let models = manager.list_models().expect("models should load");
 

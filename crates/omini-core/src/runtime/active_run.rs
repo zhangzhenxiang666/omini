@@ -81,7 +81,7 @@ pub(super) async fn apply_model_selection(
     settings: &mut Settings,
     llm_client: &mut LlmClient,
     project: &ProjectDir,
-    session_id: Option<&str>,
+    thread_id: Option<&str>,
     selection: ModelSelection<'_>,
     sinks: RuntimeSinks<'_>,
 ) {
@@ -103,12 +103,12 @@ pub(super) async fn apply_model_selection(
             profile.base_url.clone(),
         );
 
-        if let Some(sid) = session_id {
+        if let Some(thread_id) = thread_id {
             let te = thinking_effort.map(|t| t.to_string());
             let _ = sinks
                 .persistence_tx
-                .send(RuntimePersistenceEvent::UpdateSessionConfig {
-                    session_id: sid.to_string(),
+                .send(RuntimePersistenceEvent::UpdateThreadConfig {
+                    thread_id: thread_id.to_string(),
                     provider: provider.to_string(),
                     model: model.to_string(),
                     thinking_effort: te,
@@ -144,7 +144,7 @@ pub(super) async fn apply_model_selection(
 pub(super) async fn apply_thinking_effort(
     settings: &mut Settings,
     project: &ProjectDir,
-    session_id: Option<&str>,
+    thread_id: Option<&str>,
     effort: ThinkingEffort,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
@@ -172,10 +172,10 @@ pub(super) async fn apply_thinking_effort(
     }
 
     let effective_effort = settings.effective_current_thinking_effort(Some(effort));
-    if let Some(sid) = session_id {
+    if let Some(thread_id) = thread_id {
         if persistence_tx
-            .send(RuntimePersistenceEvent::UpdateSessionThinkingEffort {
-                session_id: sid.to_string(),
+            .send(RuntimePersistenceEvent::UpdateThreadThinkingEffort {
+                thread_id: thread_id.to_string(),
                 thinking_effort: effective_effort.map(|effort| effort.to_string()),
             })
             .await

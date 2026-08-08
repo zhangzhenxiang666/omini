@@ -1,6 +1,7 @@
 //! 本地 daemon 的 HTTP/WebSocket transport 层。
 //!
-//! 这个 crate 负责项目 attach、会话路由、控制权管理、事件 fanout 和 SQLite 持久化；
+//! 这个 crate 负责持久化项目注册、按 UUID 懒加载、会话路由、控制权管理、事件 fanout
+//! 和 SQLite 持久化；
 //! agent 执行逻辑仍由 `omini-core` 负责。
 
 use crate::daemon::GlobalDaemonManager;
@@ -19,8 +20,8 @@ pub mod process;
 mod project;
 mod routes;
 mod runtime_state;
-mod session;
 mod store;
+mod thread;
 mod ws;
 
 /// 启动本地 daemon，并把实际监听端口写入运行状态文件供客户端发现。

@@ -4,7 +4,7 @@ use crate::daemon::GlobalDaemonManager;
 use crate::routes;
 use axum::Router;
 use axum::extract::FromRef;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, post};
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
@@ -67,13 +67,23 @@ fn v1_routes() -> Router<AppState> {
         .route("/health", get(routes::health::daemon_health))
         .route("/shutdown", post(routes::shutdown::shutdown_daemon))
         .route("/clients", post(routes::clients::register_client))
+        .route(
+            "/projects",
+            get(routes::projects::list_projects).post(routes::projects::create_project),
+        )
+        .route(
+            "/projects/{project_id}",
+            get(routes::projects::get_project).patch(routes::projects::update_project),
+        )
+        .route(
+            "/projects/{project_id}/open",
+            post(routes::projects::open_project),
+        )
         .nest("/projects/{project_id}", project_routes())
 }
 
 fn project_routes() -> Router<AppState> {
     Router::new()
-        // attach 是 daemon 认识项目的入口；其余项目接口都依赖这个注册关系。
-        .route("/attach", put(routes::projects::attach_project))
         .route("/models", get(routes::projects::list_models))
         .route("/model", post(routes::projects::set_model))
         .route(
@@ -160,7 +170,7 @@ fn session_lifecycle_routes() -> Router<AppState> {
     // 这些操作改变当前会话的打开、创建或展示状态，不直接提交 run。
     Router::new()
         .route("/open", post(routes::sessions::open_session))
-        .route("/rename", post(routes::sessions::rename_session))
+        .route("/rename", post(routes::sessions::rename_thread))
         .route("/compact", post(routes::sessions::compact_context))
 }
 

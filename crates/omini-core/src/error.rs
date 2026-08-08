@@ -7,12 +7,12 @@ use thiserror::Error;
 pub enum CoreError {
     #[error("{message}")]
     Internal { message: String },
-    #[error("runtime session is closed")]
+    #[error("runtime thread is closed")]
     RuntimeClosed,
-    #[error("runtime session loading was interrupted")]
+    #[error("runtime thread loading was interrupted")]
     RuntimeLoadInterrupted,
-    #[error("session does not exist")]
-    SessionNotFound,
+    #[error("thread does not exist")]
+    ThreadNotFound,
     #[error("{message}")]
     InvalidModelSelection { message: String },
     #[error("{context}: {source}")]
@@ -86,7 +86,7 @@ impl CoreError {
             Self::Internal { .. } => "core_error",
             Self::RuntimeClosed => "runtime_closed",
             Self::RuntimeLoadInterrupted => "runtime_load_interrupted",
-            Self::SessionNotFound => "session_not_found",
+            Self::ThreadNotFound => "session_not_found",
             Self::InvalidModelSelection { .. } => "invalid_model_selection",
             Self::Config { .. } => "config_error",
             Self::ProjectState { .. } => "project_state_error",
@@ -120,6 +120,8 @@ pub enum RuntimeError {
     ToolPauseResponseTypeMismatch { tool_use_id: String },
     #[error("{message}")]
     InvalidRequest { message: String },
+    #[error("failed to persist compacted context: {message}")]
+    Persistence { message: String },
 }
 
 #[derive(Debug, Error)]

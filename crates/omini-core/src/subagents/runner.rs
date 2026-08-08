@@ -12,9 +12,8 @@ use omini_domain::events::{
     SubagentToolResultEvent, SubagentToolUseEvent,
 };
 use omini_domain::message::{ContentBlock, Message, Role};
-use omini_domain::project::sanitize_project_path as sanitize;
 use omini_provider_api::{FinishReason, LlmClient};
-use omini_runtime_contract::persistence::SessionRecord;
+use omini_runtime_contract::persistence::ThreadRecord;
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -79,29 +78,29 @@ async fn run_subagent(
     let (settings, model_warnings) = resolve_subagent_settings(&parent_settings, &spec);
     warnings.extend(model_warnings);
 
-    let session_id = Uuid::new_v4().to_string();
+    let thread_id = Uuid::new_v4().to_string();
     let subagent_span = tracing::debug_span!(
         "subagent_run",
-        parent_session_id = %runtime.session_id,
-        subagent_session_id = %session_id,
+        parent_thread_id = %runtime.thread_id,
+        subagent_thread_id = %thread_id,
         run_id = ?runtime.run_id.as_deref(),
         tool_use_id = %ctx.tool_use_id,
         agent_label = %spec.name,
         title = %request.title
     );
     tracing::debug!(
-        parent_session_id = %runtime.session_id,
-        subagent_session_id = %session_id,
+        parent_thread_id = %runtime.thread_id,
+        subagent_thread_id = %thread_id,
         tool_use_id = %ctx.tool_use_id,
         agent_label = %spec.name,
         title = %request.title,
         "subagent session creating"
     );
-    let session_dir = match runtime.session_dir.create_subagent(&session_id) {
+    let thread_dir = match runtime.project.create_thread(&thread_id) {
         Ok(dir) => dir,
         Err(e) => {
             tracing::warn!(
-                subagent_session_id = %session_id,
+                subagent_thread_id = %thread_id,
                 error = %e,
                 "failed to create subagent session"
             );
@@ -110,12 +109,11 @@ async fn run_subagent(
     };
 
     let now = Utc::now();
-    let session = SessionRecord {
-        id: session_id.clone(),
-        project_path: sanitize(&settings.cwd),
-        parent_session_id: Some(runtime.session_id.clone()),
+    let thread = ThreadRecord {
+        id: thread_id.clone(),
+        parent_thread_id: Some(runtime.thread_id.clone()),
         spawn_tool_use_id: Some(ctx.tool_use_id.clone()),
-        session_type: "subagent".to_string(),
+        thread_type: "subagent".to_string(),
         agent_label: Some(spec.name.clone()),
         provider: settings.active_provider.clone(),
         model: settings.model.clone(),
@@ -124,20 +122,21 @@ async fn run_subagent(
         current_context_tokens: 0,
         total_tokens: 0,
         total_cached_tokens: 0,
+        llm_context_version: 1,
         created_at: now,
         updated_at: now,
     };
     let _ = ctx
         .event_tx
-        .send(EngineToRuntimeEvent::SubagentSessionCreated(session))
+        .send(EngineToRuntimeEvent::SubagentThreadCreated(thread))
         .await;
 
     let _ = ctx
         .event_tx
         .send(EngineToRuntimeEvent::SubagentStarted(
             SubagentStartedEvent {
-                session_id: session_id.clone(),
-                parent_session_id: runtime.session_id.clone(),
+                session_id: thread_id.clone(),
+                parent_session_id: runtime.thread_id.clone(),
                 spawn_tool_use_id: ctx.tool_use_id.clone(),
                 agent_label: spec.name.clone(),
             },
@@ -170,11 +169,12 @@ async fn run_subagent(
         settings.base_url.clone(),
     );
     let child_runtime = Arc::new(ToolRuntimeContext {
-        session_id: session_id.clone(),
+        thread_id: thread_id.clone(),
         run_id: runtime.run_id.clone(),
-        session_type: "subagent".to_string(),
+        thread_type: "subagent".to_string(),
         agent_label: Some(spec.name.clone()),
-        session_dir: session_dir.clone(),
+        thread_dir: thread_dir.clone(),
+        llm_context_version: Arc::new(std::sync::atomic::AtomicI64::new(1)),
         subagent_registry: Arc::clone(&runtime.subagent_registry),
         skill_registry: Arc::clone(&runtime.skill_registry),
         subagent_runner: runtime.subagent_runner.clone(),
@@ -186,7 +186,7 @@ async fn run_subagent(
         .event_tx
         .send(EngineToRuntimeEvent::SubagentMessageProduced(
             SubagentMessageEvent {
-                session_id: session_id.clone(),
+                session_id: thread_id.clone(),
                 message: messages[0].clone(),
                 persist_llm_history: true,
             },
@@ -197,8 +197,8 @@ async fn run_subagent(
     let bridge = spawn_subagent_bridge(
         child_rx,
         ctx.event_tx.clone(),
-        session_id.clone(),
-        runtime.session_id.clone(),
+        thread_id.clone(),
+        runtime.thread_id.clone(),
         spec.name.clone(),
     );
 
@@ -236,20 +236,20 @@ async fn run_subagent(
         .event_tx
         .send(EngineToRuntimeEvent::SubagentFinished(
             SubagentFinishedEvent {
-                session_id: session_id.clone(),
+                session_id: thread_id.clone(),
                 status,
             },
         ))
         .await;
     tracing::debug!(
-        subagent_session_id = %session_id,
+        subagent_thread_id = %thread_id,
         status = ?status,
         "subagent run finished"
     );
 
     let summary = extract_final_text(&messages);
     let payload = json!({
-        "session_id": session_id,
+        "session_id": thread_id,
         "agent_label": spec.name,
         "status": match status {
             SubagentStatus::Running => "running",
@@ -329,12 +329,12 @@ fn apply_provider(
 fn spawn_subagent_bridge(
     mut child_rx: mpsc::Receiver<EngineToRuntimeEvent>,
     parent_tx: mpsc::Sender<EngineToRuntimeEvent>,
-    session_id: String,
-    parent_session_id: String,
+    thread_id: String,
+    parent_thread_id: String,
     agent_label: String,
 ) -> tokio::task::JoinHandle<()> {
-    let span_parent_session_id = parent_session_id.clone();
-    let span_session_id = session_id.clone();
+    let span_parent_thread_id = parent_thread_id.clone();
+    let span_thread_id = thread_id.clone();
     let span_agent_label = agent_label.clone();
     tokio::spawn(
         async move {
@@ -345,7 +345,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentMessageProduced(
                                 SubagentMessageEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     message,
                                     persist_llm_history: true,
                                 },
@@ -356,7 +356,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentMessageProduced(
                                 SubagentMessageEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     message: msg,
                                     persist_llm_history: true,
                                 },
@@ -367,7 +367,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentMessageProduced(
                                 SubagentMessageEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     message: msg,
                                     persist_llm_history: true,
                                 },
@@ -378,7 +378,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentMessageProduced(
                                 SubagentMessageEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     message: msg,
                                     persist_llm_history: false,
                                 },
@@ -387,7 +387,7 @@ fn spawn_subagent_bridge(
                     }
                     EngineToRuntimeEvent::ToolUse(tool_use) => {
                         tracing::debug!(
-                            subagent_session_id = %session_id,
+                            subagent_thread_id = %thread_id,
                             tool_use_id = %tool_use.id,
                             tool_name = %tool_use.name,
                             "bridging subagent tool use"
@@ -395,7 +395,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentToolUse(
                                 SubagentToolUseEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     tool_use,
                                 },
                             ))
@@ -403,7 +403,7 @@ fn spawn_subagent_bridge(
                     }
                     EngineToRuntimeEvent::ToolResult(tool_result) => {
                         tracing::debug!(
-                            subagent_session_id = %session_id,
+                            subagent_thread_id = %thread_id,
                             tool_use_id = %tool_result.tool_use_id,
                             is_error = tool_result.is_error,
                             "bridging subagent tool result"
@@ -411,7 +411,7 @@ fn spawn_subagent_bridge(
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentToolResult(
                                 SubagentToolResultEvent {
-                                    session_id: session_id.clone(),
+                                    session_id: thread_id.clone(),
                                     tool_result,
                                 },
                             ))
@@ -419,7 +419,7 @@ fn spawn_subagent_bridge(
                     }
                     EngineToRuntimeEvent::ToolPauseRequested(req) => {
                         tracing::debug!(
-                            subagent_session_id = %session_id,
+                            subagent_thread_id = %thread_id,
                             tool_use_id = %req.tool_use_id,
                             tool_name = %req.tool_name,
                             "bridging subagent tool pause"
@@ -431,7 +431,7 @@ fn spawn_subagent_bridge(
                     EngineToRuntimeEvent::UsageRecorded(usage) => {
                         let _ = parent_tx
                             .send(EngineToRuntimeEvent::SubagentUsageRecorded {
-                                session_id: session_id.clone(),
+                                thread_id: thread_id.clone(),
                                 usage,
                             })
                             .await;
@@ -441,6 +441,9 @@ fn spawn_subagent_bridge(
                     }
                     EngineToRuntimeEvent::Warning(warning) => {
                         let _ = parent_tx.send(EngineToRuntimeEvent::Warning(warning)).await;
+                    }
+                    event @ EngineToRuntimeEvent::ReplaceLlmContext { .. } => {
+                        let _ = parent_tx.send(event).await;
                     }
                     EngineToRuntimeEvent::TurnStarted
                     | EngineToRuntimeEvent::LlmHistoryProduced(_)
@@ -456,7 +459,7 @@ fn spawn_subagent_bridge(
                     | EngineToRuntimeEvent::CompactSummaryFailed(_)
                     | EngineToRuntimeEvent::CompactSummaryUsageRecorded(_)
                     | EngineToRuntimeEvent::SubagentStarted(_)
-                    | EngineToRuntimeEvent::SubagentSessionCreated(_)
+                    | EngineToRuntimeEvent::SubagentThreadCreated(_)
                     | EngineToRuntimeEvent::SubagentUsageRecorded { .. }
                     | EngineToRuntimeEvent::SubagentMessageProduced(_)
                     | EngineToRuntimeEvent::SubagentToolUse(_)
@@ -468,8 +471,8 @@ fn spawn_subagent_bridge(
         }
         .instrument(tracing::debug_span!(
             "subagent_bridge",
-            parent_session_id = %span_parent_session_id,
-            subagent_session_id = %span_session_id,
+            parent_thread_id = %span_parent_thread_id,
+            subagent_thread_id = %span_thread_id,
             agent_label = %span_agent_label
         )),
     )
@@ -785,7 +788,7 @@ mod tests {
         let visible = subagent_skill_summaries(&with_skill, &skill_registry);
         let hidden = subagent_skill_summaries(&without_skill, &skill_registry);
 
-        assert!(visible.iter().any(|skill| skill.name == "commit-message"));
+        assert!(visible.iter().any(|skill| skill.name == "skill-creator"));
         assert!(hidden.is_empty());
     }
 }

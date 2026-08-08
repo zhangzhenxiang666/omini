@@ -1,8 +1,8 @@
-use crate::{event::bridge::thinking_display_changed_protocol_event, session::SessionRuntime};
+use crate::{event::bridge::thinking_display_changed_protocol_event, thread::ThreadRuntime};
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 
-impl SessionRuntime {
+impl ThreadRuntime {
     pub fn set_thinking_display(
         &self,
         request: client_proto::SetThinkingDisplayRequest,

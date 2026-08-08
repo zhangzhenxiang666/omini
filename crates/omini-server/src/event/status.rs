@@ -78,7 +78,7 @@ pub struct RuntimeStatusSnapshotContext {
     pub loaded: bool,
     pub controller_id: Option<String>,
     pub connected_client_count: usize,
-    pub skills: Vec<runtime_contract::session::RuntimeSkillSnapshot>,
+    pub skills: Vec<runtime_contract::thread::RuntimeSkillSnapshot>,
     // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
     pub mcp_servers: Vec<runtime_contract::mcp::RuntimeMcpServerSnapshot>,
     pub subagent_sessions: Vec<client_proto::AgentSummary>,
@@ -403,7 +403,7 @@ impl RuntimeStatusProjection {
     }
 
     /// 返回当前仍在运行中的子代理 session_id 集合，供 snapshot 恢复真实状态用。
-    pub fn running_subagent_session_ids(&self) -> Vec<String> {
+    pub fn running_subagent_thread_ids(&self) -> Vec<String> {
         self.subagents.keys().cloned().collect()
     }
 
@@ -848,13 +848,13 @@ mod tests {
                 loaded: true,
                 controller_id: None,
                 connected_client_count: 0,
-                skills: vec![runtime_contract::session::RuntimeSkillSnapshot {
+                skills: vec![runtime_contract::thread::RuntimeSkillSnapshot {
                     name: "writer".to_string(),
                     description: "Write carefully".to_string(),
                     short_description: None,
-                    source_kind: runtime_contract::session::RuntimeSkillSourceKind::Project,
+                    source_kind: runtime_contract::thread::RuntimeSkillSourceKind::Project,
                     directory: "/repo/.omini/skills/writer".into(),
-                    status: runtime_contract::session::RuntimeCapabilityStatus::Available,
+                    status: runtime_contract::thread::RuntimeCapabilityStatus::Available,
                     disable_model_invocation: false,
                     user_invocable: true,
                 }],

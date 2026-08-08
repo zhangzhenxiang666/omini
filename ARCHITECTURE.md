@@ -1,152 +1,75 @@
 # Architecture
 
-`omini` uses a local daemon architecture. The active crate set is:
+`omini` is a terminal client backed by a local daemon. The client handles interaction,
+the server owns project and thread orchestration, and core runs the agent.
 
 ```text
-crates/
-  omini-cli
-  omini-config
-  omini-core
-  omini-domain
-  omini-mcp-client
-  omini-permissions
-  omini-provider-api
-  omini-protocol
-  omini-runtim-contract
-  omini-server
-  omini-tui
+omini-cli / omini-tui
+          |
+          | HTTP + WebSocket (omini-protocol)
+          v
+     omini-server
+          |
+          | commands, events, snapshots (omini-runtime-contract)
+          v
+      omini-core
 ```
 
-## Crate Responsibilities
+## Crate Boundaries
 
-- `omini-cli` is the user-facing binary entrypoint. It starts or connects to the installed `omini-server` daemon binary, registers the current project, and starts the TUI/client flow.
-- `omini-config` owns user and project configuration management: user config schema/loading/validation, project-level partial config merge, resolved runtime settings, Omini root paths, managed project state paths, and project/session directory handles.
-- `omini-domain` owns stable data types and small domain helpers shared by core, protocol, TUI, and server-adjacent code: messages, tool definitions, usage, display/history records, proposed plan parsing, shared provider/model view enums, plan approval payloads, tool pause payloads, session summaries, compact event payloads, and subagent event payloads.
-- `omini-mcp-client` owns client-side MCP server runtime concerns: stdio and streamable HTTP connections, rmcp service lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls. It stays independent from core, protocol, server, and TUI.
-- `omini-permissions` owns the runtime permission decision engine: embedded bash safety baseline (code-level deny for `rm -rf /`, `curl|sh`, fork bomb, `mkfs.*`), compile-time embedded bash rule files (deny/ask/allow via `include_str!` + `LazyLock` global precompiled policy), bash/tool rule DSL parsing (`prefix_rule(...)` syntax, `Read(**/...)` path specifiers), path matching with wildcards, and the `PermissionEngine` that produces allow/ask/deny decisions. It depends on `omini-domain` (for shared types) and `omini-config` (for `PermissionSources`), and must stay independent from core, server, protocol, CLI, and TUI.
-- `omini-provider-api` owns provider-facing API clients and shared LLM provider request/response glue used by core.
-- `omini-core` owns the agent implementation: provider clients, engine loop, tools, MCP capability adapters, prompts, skills, subagents, compaction, plan handling, and session runtime service. It consumes resolved settings from `omini-config` and permission decisions from `omini-permissions`.
-- `omini-protocol` owns public HTTP and WebSocket request/response envelopes. It reuses or re-exports `omini-domain` types when the wire shape matches, and it must stay independent from core, server, and TUI implementation types.
-- `omini-runtim-contract` owns the narrow server-core runtime contract: server-to-runtime events, runtime-to-server events, session commands/snapshots, project agent mutation commands, runtime capability/status snapshots, and runtime persistence events consumed by server. It must stay independent from core, server, protocol, CLI, and TUI implementation types.
-- `omini-server` owns the local daemon transport. It exposes HTTP endpoints, session-scoped WebSocket streams, session routing, multi-subscriber fanout, and per-session controller enforcement.
-- `omini-tui` owns the terminal client: input, rendering, local slash commands, mention parsing, attachment parsing, local UI state, permission drawers, and protocol request construction.
+| Crate | Responsibility |
+| --- | --- |
+| `omini-cli` | Binary entrypoint, daemon startup/discovery, project registration, and TUI launch. |
+| `omini-tui` | Terminal input, rendering, client-side interaction state, and protocol requests. |
+| `omini-protocol` | Public HTTP and WebSocket DTOs shared by clients and the server. |
+| `omini-server` | Local daemon, project/thread lifecycle, controllers, event projection, replay, and SQLite persistence. |
+| `omini-runtime-contract` | Internal commands, events, snapshots, and persistence requests exchanged by server and core. |
+| `omini-core` | Agent loop, tools, prompts, skills, subagents, compaction, plans, and provider/MCP orchestration. |
+| `omini-config` | User/project config resolution and Omini-managed filesystem paths. |
+| `omini-domain` | Stable shared value types with no transport, runtime, or persistence behavior. |
+| `omini-permissions` | Permission policy parsing and allow/ask/deny decisions. |
+| `omini-provider-api` | Provider HTTP/SSE clients and provider-facing request/response handling. |
+| `omini-mcp-client` | MCP connections, lifecycle, catalog loading, and remote calls. |
 
-`omini-domain` must not grow into a runtime or config crate. Config loading, API keys, runtime services, TUI state machines, HTTP envelopes, daemon/session orchestration, persistence, and provider clients do not belong in domain.
+The main dependency rules are:
 
-## Dependency Direction
+- `omini-protocol` is the public client/server boundary; `omini-runtime-contract` is the
+  private server/core boundary. Neither contains runtime implementation details.
+- `omini-domain` contains shared vocabulary only. Config loading, API keys, orchestration,
+  persistence, transport envelopes, and UI state stay with their owning crates.
+- Provider, MCP, and permission implementations remain independent services consumed by
+  core rather than leaking through protocol or runtime-contract types.
+- Server persistence consumes `RuntimePersistenceEvent`; SQLite schema, transactions,
+  and replay remain server concerns.
+- Server code uses core's public project/session capabilities instead of deep-linking
+  into skills, subagents, tools, or engine internals.
 
-The intended final dependency direction is:
+## Project Identity and Storage
 
-```text
-omini-domain
-      ^
-      |
-      +-- omini-config
-      |
-      +-- omini-permissions
-      |
-      +-- omini-protocol
-      |
-      +-- omini-runtim-contract
+Projects persist four distinct values:
 
-omini-protocol
-      ^
-      |
-      +-- omini-server
-      |
-      +-- omini-tui
+| Value | Meaning |
+| --- | --- |
+| `id` | Stable public identity, daemon cache key, and thread foreign key. |
+| `path` | Canonical working directory; may change through relinking. |
+| `storage_key` | Stable directory name under `~/.omini/projects/`. |
+| `name` | User-facing display name. |
 
-omini-runtim-contract
-      ^
-      |
-      +-- omini-server --> omini-core
-      |
-      +-- omini-core
-
-omini-provider-api --> omini-domain
-omini-mcp-client
-
-omini-core --> omini-domain + omini-config + omini-runtim-contract + omini-provider-api + omini-mcp-client + omini-permissions
-omini-server --> omini-domain + omini-config + omini-protocol + omini-runtim-contract + omini-core
-omini-tui  --> omini-domain + omini-protocol
-omini-cli --> omini-protocol + omini-tui
-```
-
-Current boundary notes:
-
-- `omini-domain` owns the shared stable type surface used by core, TUI, and protocol.
-- `omini-config` owns user-level `~/.omini/config.toml`, project-level `<cwd>/.omini/config.toml`, merge/validation into effective settings, `OminiRoot`, and Omini-managed project/session directory handles. Project config is a partial overlay and project fields take precedence over user config fields.
-- `omini-provider-api` owns provider HTTP/SSE adapters and may depend on stable domain config/types, but it must not depend on core, server, protocol, CLI, or TUI.
-- `omini-mcp-client` owns the client-side MCP runtime layer and must not depend on core, server, protocol, CLI, or TUI.
-- `omini-permissions` owns all permission decision logic and must not depend on core, server, protocol, CLI, or TUI. It consumes `PermissionSources` from `omini-config` and shared event types from `omini-domain`.
-- `omini-runtim-contract` is the explicit communication contract shared by `omini-server` and `omini-core`. Server should import runtime command/event/snapshot types from it directly instead of deep-linking core modules.
-- `EngineToRuntimeEvent`, `QueryEngine`, provider request/stream types, tool execution internals, config loading, API keys, project state loading, and persistence implementations do not belong in `omini-runtim-contract`; they stay in `omini-config`, core, or their existing owner crates.
-- `RuntimePersistenceEvent` is part of the server-core contract because it is core output consumed by server persistence. SQLite schema, transactions, replay trimming, and store errors remain in `omini-server`.
-- `AgentCoreSession` exposes runtime-api/domain snapshots and commands. `omini-server` owns protocol response/event projection for those snapshots.
-- `omini-core` owns MCP capability adapter behavior: runtime tool registration, permission previews, tool result metadata, and MCP runtime snapshot production. `omini-runtim-contract` owns only the snapshot structs consumed by server. `omini-server` owns protocol status projection. `omini-mcp-client` owns only the client-side MCP lifecycle/catalog/call layer.
-- Skills and subagents discovery/file management are core implementation details. `omini-server` should call root-level core project capability facade functions and session snapshots instead of deep-linking `omini_core::skills` or `omini_core::subagents`.
-- Stable shared display/message/event/usage/subagent payloads are imported from `omini-domain` directly; `omini-core` does not provide `types/*` compatibility re-exports for those payloads. External crates should not deep-link through `omini_core::types`; server-core session command/snapshot and project agent mutation command types are exposed by `omini-runtim-contract`, while `AgentCoreSession` and root-level core facade functions consume or return those contract types.
-- `omini-core` still contains a crate-private legacy command registry for compatibility; do not expose it or add new command behavior there.
+`id` and `storage_key` never change. Relinking updates only `path` and is rejected while
+a cached thread is running or connected. Every thread, including forks and subagents,
+belongs to a project.
 
 ## Runtime Flow
 
-1. `omini-cli` starts or connects to the local `omini-server` daemon binary, attaches the current project, and starts the local client flow.
-2. `omini-tui` starts or connects to the local server, creates/selects a session, claims controller status, and subscribes to `/sessions/{session_id}/ws`.
-3. TUI input is translated locally: slash commands stay client UX, `@` mentions become semantic context refs, and image markers become attachment refs.
-4. `omini-server` validates HTTP requests, applies controller conflict rules, and routes accepted requests to `omini-core`.
-5. `omini-core` runs the agent loop and emits internal runtime events.
-6. Runtime events are wrapped as protocol events and broadcast by `omini-server` to every subscriber for that session.
-7. Observers receive the same events as the controller. Running-related user actions from connected clients first take over controller status, while stricter mutations such as agent edits, attachments, and session metadata changes still require the active controller.
-
-## Protocol Events
-
-`RuntimeEvent` carries a required typed protocol event. WebSocket clients consume `TypedRuntimeEvent` directly instead of decoding legacy `{ kind, payload }` runtime JSON.
-
-Typed runtime events cover the current TUI-consumed runtime stream, including:
-
-- run started/finished
-- notifications
-- tool pause requested
-- plan submitted
-- session snapshot
-- model, usage, title, thinking display, stream delta, tool use/result, agent, compact, and subagent events
-- controller changes through `ServerEnvelope::ControllerChanged`
-
-## Where Changes Usually Go
-
-- CLI startup, installed daemon binary lookup, and client registration/attach: `omini-cli`.
-- Config schema, user/project config loading and merge, resolved settings, Omini root paths, project state paths, and project/session directory handles: `omini-config`.
-- Project attach orchestration and database initialization: `omini-server`.
-- Stable shared messages, usage records, display/history records, plan parsing helpers, no-secret provider/model view types, plan approval payloads, tool pause payloads, compact payloads, and subagent payloads: `omini-domain`.
-- Provider HTTP clients, OpenAI/Anthropic adapters, SSE parsing, provider request/stream errors, and `LlmClient`: `omini-provider-api`.
-- Server-core runtime contract events, session command/snapshot types, project agent mutation commands, runtime MCP snapshots, and runtime persistence events: `omini-runtim-contract`.
-- Agent behavior, tools, provider orchestration, MCP capability adapters, prompts, skills, subagents, compaction, and plans: `omini-core`.
-- Permission decision engine, embedded bash safety baseline, embedded bash rule files (deny/ask/allow), bash/tool rule DSL parsing, path matching, and `PermissionEngine`: `omini-permissions`.
-- Client-side MCP connection lifecycle, catalog loading, status snapshots, and tool/resource/prompt calls: `omini-mcp-client`.
-- Public endpoint bodies, user input DTOs, attachments, controller DTOs, and typed WebSocket event DTO envelopes: `omini-protocol`.
-- HTTP routes, WebSocket fanout, session registry, controller lease enforcement, event persistence/replay, and daemon concerns: `omini-server`.
-- Terminal rendering, input/editing state, local commands, mention parsing, and observer/controller UI affordances: `omini-tui`.
-
-## Validation Strategy
-
-For ordinary development, run focused crate-level checks:
-
-```bash
-cargo test -p omini-domain
-cargo test -p omini-config
-cargo test -p omini-provider-api
-cargo test -p omini-mcp-client
-cargo test -p omini-permissions
-cargo check -p omini-runtim-contract
-cargo check -p omini-protocol
-cargo check -p omini-core
-cargo check -p omini-server
-cargo check -p omini-tui
-```
-
-For final acceptance of non-trivial Rust changes:
-
-```bash
-cargo clippy --workspace
-cargo fmt --all --check
-```
+1. `omini-cli` starts or connects to the daemon, registers the canonical current
+   directory, and opens the returned project UUID.
+2. `omini-server` resolves the project from SQLite and lazily creates its
+   `ProjectManager` using the current path and stable project storage directory.
+3. `omini-tui` creates or selects a thread, claims controller status, and subscribes to
+   its event stream.
+4. The server validates requests and controller ownership, then invokes the relevant
+   core capability through the runtime boundary.
+5. Core runs the agent and emits runtime and persistence events. The server persists,
+   projects, and broadcasts them to the controller and observers.
+6. Reconnecting clients reopen the project by UUID; the current path is not used as
+   project identity.

@@ -22,11 +22,12 @@ impl AgentRuntime {
         let subagent_registry = self.capabilities.subagent_registry();
         let skill_registry = self.capabilities.skill_registry();
         let runtime_context = Arc::new(ToolRuntimeContext {
-            session_id: self.session_id.clone(),
+            thread_id: self.thread_id.clone(),
             run_id: None,
-            session_type: "main".to_string(),
+            thread_type: "main".to_string(),
             agent_label: None,
-            session_dir: self.session_dir.clone(),
+            thread_dir: self.thread_dir.clone(),
+            llm_context_version: Arc::clone(&self.llm_context_version),
             subagent_registry,
             skill_registry,
             subagent_runner: Some(Arc::clone(&self.subagent_runner)),
@@ -51,8 +52,7 @@ impl AgentRuntime {
             input,
             &event_tx,
             &self.persistence_tx,
-            &self.session_usage,
-            &self.session_id,
+            &self.thread_usage,
             cancel_token,
         );
         tokio::pin!(compact_fut);
@@ -111,7 +111,6 @@ pub(super) async fn execute_manual_compact(
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
     usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
-    session_id: &str,
     cancel_token: compact::CompactCancelToken<'_>,
 ) -> Result<crate::runtime::compact::CompactOutcome, RuntimeError> {
     if messages.is_empty() {
@@ -124,8 +123,12 @@ pub(super) async fn execute_manual_compact(
     let forwarder_event_tx = event_tx.clone();
     let forwarder_persistence_tx = persistence_tx.clone();
     let forwarder_usage_state = Arc::clone(usage_state);
-    let forwarder_session_id = session_id.to_string();
-    let span_session_id = forwarder_session_id.clone();
+    let forwarder_thread_id = input.runtime_context.thread_id.clone();
+    let forwarder_model_ref = format!(
+        "{}/{}",
+        input.settings.active_provider, input.settings.model
+    );
+    let span_thread_id = forwarder_thread_id.clone();
     let forwarder = tokio::spawn(
         async move {
             while let Some(event) = compact_rx.recv().await {
@@ -138,7 +141,7 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                         tracing::debug!(
                             trigger = %event.trigger,
-                            compact_session_id = ?event.session_id,
+                            compact_thread_id = ?event.session_id,
                             agent_label = ?event.agent_label,
                             "manual compact summary started"
                         );
@@ -154,15 +157,16 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                         tracing::debug!(
                             trigger = %event.trigger,
-                            compact_session_id = ?event.session_id,
+                            compact_thread_id = ?event.session_id,
                             agent_label = ?event.agent_label,
                             summary_chars = event.summary.chars().count(),
                             after_tokens = event.after_tokens,
                             "manual compact summary finished"
                         );
                         persist_compact_summary_event(
-                            &forwarder_session_id,
+                            &forwarder_thread_id,
                             &event,
+                            &forwarder_model_ref,
                             &forwarder_persistence_tx,
                         )
                         .await;
@@ -173,7 +177,7 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                         tracing::warn!(
                             trigger = %event.trigger,
-                            compact_session_id = ?event.session_id,
+                            compact_thread_id = ?event.session_id,
                             agent_label = ?event.agent_label,
                             message = %event.message,
                             "manual compact summary failed"
@@ -190,7 +194,7 @@ pub(super) async fn execute_manual_compact(
                             "manual compact usage recorded"
                         );
                         record_total_usage_and_notify(
-                            &forwarder_session_id,
+                            &forwarder_thread_id,
                             usage,
                             &forwarder_event_tx,
                             &forwarder_persistence_tx,
@@ -198,13 +202,29 @@ pub(super) async fn execute_manual_compact(
                         )
                         .await;
                     }
+                    EngineToRuntimeEvent::ReplaceLlmContext {
+                        thread_id: compacted_thread_id,
+                        expected_version,
+                        messages,
+                        ack,
+                    } => {
+                        let _ = forwarder_persistence_tx
+                            .send(RuntimePersistenceEvent::ReplaceLlmContext {
+                                thread_id: compacted_thread_id,
+                                expected_version,
+                                messages,
+                                created_at: Utc::now(),
+                                ack,
+                            })
+                            .await;
+                    }
                     _ => {}
                 }
             }
         }
         .instrument(tracing::debug_span!(
             "compact",
-            session_id = %span_session_id,
+            thread_id = %span_thread_id,
             compact_kind = "manual",
             task_kind = "manual_compact_forwarder"
         )),
@@ -228,8 +248,9 @@ pub(super) async fn execute_manual_compact(
 }
 
 pub(super) async fn persist_compact_summary_event(
-    session_id: &str,
+    thread_id: &str,
     event: &omini_domain::events::CompactSummaryFinishedEvent,
+    model_ref: &str,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
     let summary = DisplaySummary {
@@ -238,7 +259,8 @@ pub(super) async fn persist_compact_summary_event(
         markdown: event.summary.clone(),
         created_at: Utc::now(),
     };
-    history::persist_compact_summary_ui_message(session_id, &summary, persistence_tx).await;
+    history::persist_compact_summary_ui_message(thread_id, &summary, model_ref, persistence_tx)
+        .await;
 }
 
 pub(super) fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {

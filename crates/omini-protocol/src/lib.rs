@@ -42,24 +42,59 @@ pub struct RegisterClientResponse {
     pub client_id: String,
 }
 
-/// 将一个项目工作目录挂到 daemon 的请求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectAttachRequest {
-    pub cwd: String,
+/// 项目路径的即时可用状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectPathStatus {
+    Ready,
+    Missing,
 }
 
-/// 项目 attach 的响应同时承担启动快照作用，TUI 用它初始化项目级 UI 状态。
+/// 一个已持久化注册的项目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProjectAttachResponse {
-    /// daemon 内部用于路由项目级请求的稳定 ID。
-    pub project_id: String,
-    /// daemon 实际绑定的项目工作目录。
-    pub cwd: String,
+pub struct ProjectSummary {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub storage_key: String,
+    pub path_status: ProjectPathStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_opened_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectsResponse {
+    pub projects: Vec<ProjectSummary>,
+}
+
+/// 注册当前真实工作目录；同一 canonical path 的请求是幂等的。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// 修改项目展示名称，或显式 relink 到新的真实目录。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProjectRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+/// 打开项目后供客户端初始化的完整快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenProjectResponse {
+    pub project: ProjectSummary,
     /// 项目下可供 TUI 首屏展示或切换的会话列表。
     pub sessions: Vec<SessionSummary>,
-    /// attach 时当前生效的 provider key。
+    /// open 时当前生效的 provider key。
     pub active_provider: String,
-    /// attach 时当前生效的模型 ID。
+    /// open 时当前生效的模型 ID。
     pub model: String,
     /// 当前模型的 thinking effort；不支持或未设置时为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,9 +108,9 @@ pub struct ProjectAttachResponse {
     pub has_project_instructions: bool,
     /// TUI 是否应默认展示 thinking 内容块。
     pub show_thinking_blocks: bool,
-    /// attach 时可用于 @mention 或 agent 管理入口的 agent 摘要。
+    /// open 时可用于 @mention 或 agent 管理入口的 agent 摘要。
     pub agents: Vec<AgentSummary>,
-    /// attach 时可用于 slash skill 列表的用户可调用 skill 摘要。
+    /// open 时可用于 slash skill 列表的用户可调用 skill 摘要。
     pub skills: Vec<SkillSummary>,
     /// 项目工作目录的 git 分支；不在 git 仓库中时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1005,16 +1040,30 @@ mod tests {
     }
 
     #[test]
-    fn project_attach_request_carries_real_cwd() {
-        let request = ProjectAttachRequest {
-            cwd: "/tmp/my project".to_string(),
+    fn create_project_request_carries_path_and_optional_name() {
+        let request = CreateProjectRequest {
+            path: "/tmp/my project".to_string(),
+            name: Some("My project".to_string()),
         };
 
         assert_eq!(
             serde_json::to_value(request).unwrap(),
             json!({
-                "cwd": "/tmp/my project"
+                "path": "/tmp/my project",
+                "name": "My project"
             })
+        );
+    }
+
+    #[test]
+    fn project_path_status_uses_wire_names() {
+        assert_eq!(
+            serde_json::to_value(ProjectPathStatus::Ready).unwrap(),
+            json!("ready")
+        );
+        assert_eq!(
+            serde_json::to_value(ProjectPathStatus::Missing).unwrap(),
+            json!("missing")
         );
     }
 

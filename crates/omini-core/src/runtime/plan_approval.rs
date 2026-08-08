@@ -34,7 +34,7 @@ impl AgentRuntime {
                 self.process_run(RunStart::UserMessage).await;
             }
             // Server 路由层在收到此 action 时已自行 fork 新 session 并广播
-            // SessionSwitched;core 这里只关闭旧 session 的审批抽屉,不改状态。
+            // SessionSwitched；core 这里只关闭原 thread 的审批抽屉，不改状态。
             PlanApprovalAction::ApproveInNewSession { .. } => {
                 self.send_plan_approval_resolved(plan_id, action).await;
             }
@@ -55,7 +55,13 @@ impl AgentRuntime {
         let submitted =
             plan::persist_latest(&self.project, self.active_profile(), &self.messages).await?;
         if let Some(plan) = submitted.as_ref() {
-            history::persist_plan_ui_message(&self.session_id, plan, &self.persistence_tx).await;
+            history::persist_plan_ui_message(
+                &self.thread_id,
+                plan,
+                &format!("{}/{}", self.settings.active_provider, self.settings.model),
+                &self.persistence_tx,
+            )
+            .await;
         }
         Ok(submitted)
     }

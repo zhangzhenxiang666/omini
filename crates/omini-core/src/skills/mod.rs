@@ -283,14 +283,13 @@ fn parse_skill_content(
 }
 
 fn load_built_in_skills(registry: &mut SkillRegistry) {
-    for (name, content) in [("skill-creator", include_str!("builtins/skill-creator.md"))] {
-        let directory = PathBuf::from("<built-in>").join(name);
-        match parse_skill_content(content, directory.clone(), SkillSource::BuiltIn(directory)) {
-            Ok(spec) => insert_skill(registry, spec),
-            Err(e) => registry.diagnostics.push(SkillLoadDiagnostic {
-                message: format!("skipped built-in skill {name}: {e}"),
-            }),
-        }
+    let (name, content) = ("skill-creator", include_str!("builtins/skill-creator.md"));
+    let directory = PathBuf::from("<built-in>").join(name);
+    match parse_skill_content(content, directory.clone(), SkillSource::BuiltIn(directory)) {
+        Ok(spec) => insert_skill(registry, spec),
+        Err(e) => registry.diagnostics.push(SkillLoadDiagnostic {
+            message: format!("skipped built-in skill {name}: {e}"),
+        }),
     }
 }
 
@@ -347,7 +346,6 @@ mod tests {
         let registry = load_skill_registry_from_dirs(std::iter::empty());
 
         let creator = registry.get("skill-creator").unwrap();
-        let commit_message = registry.get("commit-message").unwrap();
 
         assert!(
             creator
@@ -357,7 +355,6 @@ mod tests {
                 .contains("<built-in>")
         );
         assert!(creator.body.contains("Project skill: `.omini/skills"));
-        assert!(commit_message.body.contains("git log --oneline -n 10"));
         assert!(
             registry
                 .injected_summaries()
@@ -369,13 +366,13 @@ mod tests {
     #[test]
     fn built_in_invocation_includes_virtual_directory() {
         let registry = load_skill_registry_from_dirs(std::iter::empty());
-        let spec = registry.get("commit-message").unwrap();
+        let spec = registry.get("skill-creator").unwrap();
 
-        let output = render_skill_invocation(spec, Some("Draft commits."));
+        let output = render_skill_invocation(spec, Some("Create a project skill."));
 
-        assert!(output.contains("<skill_name>commit-message</skill_name>"));
-        assert!(output.contains("<skill_directory><built-in>/commit-message</skill_directory>"));
-        assert!(output.contains("<user_prompt>\nDraft commits.\n</user_prompt>"));
+        assert!(output.contains("<skill_name>skill-creator</skill_name>"));
+        assert!(output.contains("<skill_directory><built-in>/skill-creator</skill_directory>"));
+        assert!(output.contains("<user_prompt>\nCreate a project skill.\n</user_prompt>"));
         assert!(!output.contains("<skill_invocation>"));
     }
 

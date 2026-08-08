@@ -71,7 +71,7 @@ impl Tool for SubagentTool {
         let Some(runtime) = ctx.runtime.clone() else {
             return ToolResult::error("subagent requires runtime context");
         };
-        if runtime.session_type == "subagent" {
+        if runtime.thread_type == "subagent" {
             return ToolResult::error("subagent tool is not available inside subagents");
         }
         let Some(runner) = runtime.subagent_runner.clone() else {

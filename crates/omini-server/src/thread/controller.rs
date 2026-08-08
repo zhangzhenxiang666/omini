@@ -1,7 +1,7 @@
-use crate::session::SessionRuntime;
+use crate::thread::ThreadRuntime;
 use omini_protocol as client_proto;
 
-impl SessionRuntime {
+impl ThreadRuntime {
     pub async fn register_client_connection(&self, client_id: String) -> Option<String> {
         let (controller_id, changed) = self
             .presence

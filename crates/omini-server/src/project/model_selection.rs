@@ -12,7 +12,6 @@ impl ProjectManager {
         let mut settings = self.fresh_settings_with_state()?;
 
         match model {
-            ModelSelection::ProjectDefault => {}
             ModelSelection::Exact { provider, model } => {
                 apply_provider(&mut settings, provider)?;
                 apply_model(&mut settings, model)?;
@@ -28,7 +27,6 @@ impl ProjectManager {
         }
 
         match effort {
-            EffortSelection::InheritProject => {}
             EffortSelection::ClientRequest(Some(effort)) => {
                 if effort != domain::config::ThinkingEffort::None
                     && !settings.current_model_supports_thinking()
@@ -41,9 +39,6 @@ impl ProjectManager {
                 settings.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
             }
             EffortSelection::ClientRequest(None) => {}
-            EffortSelection::PersistedLenient(effort) => {
-                settings.thinking_effort = settings.effective_current_thinking_effort(effort);
-            }
         }
 
         settings.normalize_current_thinking_effort();
@@ -52,7 +47,6 @@ impl ProjectManager {
 }
 
 pub(super) enum ModelSelection<'a> {
-    ProjectDefault,
     Exact {
         provider: &'a str,
         model: &'a str,
@@ -64,9 +58,7 @@ pub(super) enum ModelSelection<'a> {
 }
 
 pub(super) enum EffortSelection {
-    InheritProject,
     ClientRequest(Option<domain::config::ThinkingEffort>),
-    PersistedLenient(Option<domain::config::ThinkingEffort>),
 }
 
 fn apply_provider(settings: &mut Settings, provider: &str) -> Result<(), CoreError> {

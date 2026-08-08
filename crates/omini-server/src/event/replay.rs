@@ -4,7 +4,7 @@ use omini_runtime_contract as runtime_contract;
 
 #[derive(Clone)]
 pub struct SequencedRuntimeEvent {
-    // seq 只在单个 RuntimeSession 内单调递增，用来让 WebSocket replay 和订阅流去重。
+    // seq 只在单个 ThreadRuntime 内单调递增，用来让 WebSocket replay 和订阅流去重。
     pub seq: u64,
     pub event: client_proto::RuntimeEvent,
 }
@@ -146,17 +146,17 @@ impl RuntimeReplayBuffer {
 
     pub fn record_persistence(
         &mut self,
-        owner_session_id: &str,
+        owner_thread_id: &str,
         event: &runtime_contract::RuntimePersistenceEvent,
     ) {
         // 持久化成功意味着对应 UI 片段下一次会从 snapshot 恢复，应从 replay 中裁掉。
         match event {
             runtime_contract::RuntimePersistenceEvent::InsertMessage {
-                session_id,
+                thread_id,
                 role,
                 blocks,
                 ..
-            } if session_id == owner_session_id => {
+            } if thread_id == owner_thread_id => {
                 if role == "assistant" {
                     self.drop_current_assistant_tail();
                 } else if blocks
@@ -169,14 +169,14 @@ impl RuntimeReplayBuffer {
                 }
             }
             runtime_contract::RuntimePersistenceEvent::InsertDisplayMessage {
-                session_id, ..
-            } if session_id == owner_session_id => {
+                thread_id, ..
+            } if thread_id == owner_thread_id => {
                 self.drop_pending_user_injection();
             }
             runtime_contract::RuntimePersistenceEvent::InsertCompactSummaryMessage {
-                session_id,
+                thread_id,
                 ..
-            } if session_id == owner_session_id => {
+            } if thread_id == owner_thread_id => {
                 self.drop_current_compact_summary_tail();
             }
             _ => {}
@@ -186,17 +186,16 @@ impl RuntimeReplayBuffer {
     pub fn record_snapshot(
         &mut self,
         snapshot: &domain::events::LoadedSession,
-        session_messages: &[domain::message::Message],
+        thread_messages: &[domain::message::Message],
     ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
         self.drop_session_title_in_snapshot(snapshot);
-        // LLM 级去重走 jsonl 路径(`session_messages` 来自
-        // `SessionDir::load_history()`),不再用 DB 加载的 HistoryItem 集合。
-        if self.current_assistant_tail_is_in_snapshot(session_messages) {
+        // LLM 级去重使用当前 context version 的 `llm_messages`，不使用 UI 集合。
+        if self.current_assistant_tail_is_in_snapshot(thread_messages) {
             self.drop_current_assistant_tail();
         }
-        if self.current_tool_results_are_in_snapshot(session_messages) {
+        if self.current_tool_results_are_in_snapshot(thread_messages) {
             self.drop_persisted_tool_results();
         }
     }
@@ -277,22 +276,22 @@ impl RuntimeReplayBuffer {
 
     fn current_assistant_tail_is_in_snapshot(
         &self,
-        session_messages: &[domain::message::Message],
+        thread_messages: &[domain::message::Message],
     ) -> bool {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && session_messages.iter().any(|message| {
+            && thread_messages.iter().any(|message| {
                 message.role == domain::message::Role::Assistant && message.content == blocks
             })
     }
 
     fn current_tool_results_are_in_snapshot(
         &self,
-        session_messages: &[domain::message::Message],
+        thread_messages: &[domain::message::Message],
     ) -> bool {
         let blocks = tool_result_tail_blocks(&self.current_tail);
         !blocks.is_empty()
-            && session_messages.iter().any(|message| {
+            && thread_messages.iter().any(|message| {
                 message.role == domain::message::Role::User && message.content == blocks
             })
     }
@@ -521,12 +520,12 @@ mod tests {
         blocks: Vec<domain::message::ContentBlock>,
     ) -> runtime_contract::RuntimePersistenceEvent {
         runtime_contract::RuntimePersistenceEvent::InsertMessage {
-            session_id: session_id.to_string(),
+            thread_id: session_id.to_string(),
             role: role.to_string(),
+            model_ref: (role == "assistant").then(|| "test/model".to_string()),
             blocks,
             kind: "normal".to_string(),
             created_at: chrono::Utc::now(),
-            blocks_dir: PathBuf::new(),
         }
     }
 
@@ -772,7 +771,7 @@ mod tests {
             .expect("event should encode"),
         });
 
-        // LLM 级去重现在走 jsonl 路径,数据放在新参数 `&[Message]` 里。
+        // LLM 级去重使用单独传入的当前 context 消息。
         buffer.record_snapshot(&snapshot(Vec::new()), &[assistant]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
@@ -824,7 +823,7 @@ mod tests {
             )
             .expect("event should encode"),
         });
-        // LLM 级去重现在走 jsonl 路径,数据放在新参数 `&[Message]` 里。
+        // LLM 级去重使用单独传入的当前 context 消息。
         let tool_result_message =
             domain::message::Message::new(domain::message::Role::User, vec![tool_result]);
         buffer.record_snapshot(&snapshot(Vec::new()), &[tool_result_message]);

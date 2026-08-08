@@ -6,7 +6,6 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use omini_protocol as client_proto;
 use std::sync::Arc;
-use uuid::Uuid;
 
 /// 上传当前会话的附件元数据，并返回附件引用信息。
 pub async fn upload_attachment(
@@ -22,9 +21,12 @@ pub async fn upload_attachment(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
+    let attachment_id = session
+        .persist_attachment(&body, &mime_type)
+        .map_err(crate::routes::core_error)?;
     Ok(Json(client_proto::AttachmentUploadResponse {
         attachment: client_proto::AttachmentMetadata {
-            attachment_id: Uuid::new_v4().to_string(),
+            attachment_id,
             mime_type,
             size: body.len() as u64,
             name: "attachment".to_string(),

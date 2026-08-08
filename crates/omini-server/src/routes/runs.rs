@@ -2,7 +2,7 @@ use crate::daemon::GlobalDaemonManager;
 use crate::event::bridge::{
     fallback_session_title_from_user_input, resolve_plan_command_from_protocol_request,
     resolve_tool_pause_command_from_protocol_request, run_submitted_response_from_runtime_result,
-    submit_run_command_from_protocol_request,
+    submit_run_command_from_protocol_request_for_thread,
 };
 use crate::event::tool_pause::ToolPauseResolutionStart;
 use crate::routes::{
@@ -46,8 +46,11 @@ pub async fn submit_run(
             );
         }
     }
+    let command =
+        submit_run_command_from_protocol_request_for_thread(request, &session.thread_dir())
+            .map_err(core_error)?;
     session
-        .submit_run(submit_run_command_from_protocol_request(request))
+        .submit_run(command)
         .await
         .map(run_submitted_response_from_runtime_result)
         .map(Json)
@@ -127,9 +130,9 @@ pub async fn resolve_plan(
         // 旧 session 的 plan 审批状态被 core 重复处理(后端实际只关闭抽屉)。
         // 如果 fork 失败,旧 session 的 core 不应收到 resolve_plan,保持抽屉
         // 等待用户重试。
-        let project = require_project(&manager, &project_id)?;
+        let project = require_project(&manager, &project_id).await?;
         project
-            .fork_session_for_plan(&session_id, &plan_id, profile)
+            .fork_thread_for_plan(&session_id, &plan_id, profile)
             .await
             .map_err(core_error)?;
     }

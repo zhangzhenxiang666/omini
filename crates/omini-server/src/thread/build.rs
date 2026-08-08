@@ -2,11 +2,11 @@ use crate::event::bridge::runtime_event_from_runtime_contract_event;
 use crate::event::replay::SequencedRuntimeEvent;
 use crate::event::tool_pause::apply_tool_pause_update;
 use crate::event::{replay::RuntimeReplayBuffer, status::RuntimeStatusProjection};
-use crate::session::{SessionRuntime, SessionRuntimeInputs};
+use crate::thread::{ThreadRuntime, ThreadRuntimeInputs};
 use crate::{git, store::Database};
 use chrono::Utc;
 use omini_config::{Settings, project::ProjectDir};
-use omini_core::{AgentCoreSession, CoreError};
+use omini_core::{AgentCoreThread, CoreError};
 use omini_domain as domain;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
@@ -15,32 +15,33 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use tracing::Instrument;
 
-impl SessionRuntime {
-    /// 同步构造:不读 DB/jsonl,不跨 `.await`,所需的
-    /// `SessionRuntimeInputs` 由调用方提前加载并派生好。
+impl ThreadRuntime {
+    /// 同步构造：不读 DB、不跨 `.await`，所需的
+    /// `ThreadRuntimeInputs` 由调用方提前加载并派生好。
     ///
     /// 这样拆有两个原因:
-    /// 1. `create_session` / `fork_session_for_plan` 创建的是空 session,
+    /// 1. `create_thread` / `fork_thread_for_plan` 创建的是空 thread，
     ///    在 `build` 里再读一次 DB 是浪费;
-    /// 2. 调用方可以在 `sessions` 锁外完成异步加载,只在短临界区里
+    /// 2. 调用方可以在 `threads` 锁外完成异步加载,只在短临界区里
     ///    get / insert runtime cache,保证外层 future 始终 `Send`。
     ///
-    /// LLM 输入(`session_messages`)在 `load_session_snapshot` 里已经
-    /// 走完 jsonl → `Vec<Message>` 的过滤,这里只原样转发,
-    /// 不会再做代码层面的过滤/合并,保证 LLM 看到的消息全部源自 jsonl。
+    /// LLM 输入在 `load_thread_snapshot` 里从当前 `llm_messages` 版本加载，
+    /// 这里只原样转发，不再做代码层面的过滤或合并。
     pub fn build(
+        project_id: String,
         settings: Settings,
         project: ProjectDir,
-        session_id: String,
+        thread_id: String,
         db: Arc<Database>,
         active_profile: domain::events::ActiveProfile,
-        inputs: SessionRuntimeInputs,
+        inputs: ThreadRuntimeInputs,
     ) -> Result<Self, CoreError> {
-        let SessionRuntimeInputs {
+        let ThreadRuntimeInputs {
             snapshot: loaded,
-            session_messages,
+            thread_messages,
+            llm_context_version,
         } = inputs;
-        let session_usage = loaded.usage;
+        let thread_usage = loaded.usage;
 
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
@@ -50,22 +51,25 @@ impl SessionRuntime {
         // 收到这些已被历史覆盖的事件(目前 snapshot 不发 runtime 事件,
         // 这里保留以防未来 snapshot 再次走 runtime 通道)。
         // `snapshot` 来自 DB(给 user-injection / title 去重用),
-        // `session_messages` 来自 jsonl(给 LLM 级去重用)。必须在
-        // `core` spawn 之前调用,因为 `session_messages` 之后会 move。
+        // `thread_messages` 来自当前 LLM context（给 LLM 级去重用）。必须在
+        // `core` spawn 之前调用，因为之后会 move。
         let replay_buffer = Arc::new(Mutex::new(RuntimeReplayBuffer::default()));
         {
             let mut buffer = replay_buffer.lock().expect("replay buffer lock poisoned");
-            buffer.record_snapshot(&loaded, &session_messages);
+            buffer.record_snapshot(&loaded, &thread_messages);
         }
-        let core = AgentCoreSession::spawn_for_session_with_active_profile(
+        let core = AgentCoreThread::spawn_for_thread_with_active_profile(
             settings.clone(),
             project.clone(),
-            session_id.clone(),
+            thread_id.clone(),
             active_profile,
-            session_messages,
-            session_usage,
+            thread_messages,
+            llm_context_version,
+            thread_usage,
         )?;
-        let mut persistence_rx = core.subscribe_persistence();
+        let mut persistence_rx = core
+            .take_persistence_receiver()
+            .expect("thread persistence receiver already taken");
         let mut tool_pause_rx = core.subscribe();
         let mut runtime_event_rx = core.subscribe();
         let status_projection = Arc::new(Mutex::new(RuntimeStatusProjection::with_active_profile(
@@ -73,34 +77,45 @@ impl SessionRuntime {
         )));
         let persistence_db = Arc::clone(&db);
         let persisted_replay_buffer = Arc::clone(&replay_buffer);
-        let replay_session_id = session_id.clone();
+        let replay_thread_id = thread_id.clone();
+        let persistence_project = project.clone();
+        let persistence_project_id = project_id;
         // core 发出的持久化事件先落 SQLite，成功后再裁剪 replay，避免重连时漏掉未落盘内容。
         let persistence_handle = tokio::spawn(
             async move {
-                loop {
-                    match persistence_rx.recv().await {
-                        Ok(event) => {
-                            let persisted_event = event.clone();
-                            if let Err(error) = persistence_db.apply_persistence_event(event).await
-                            {
-                                tracing::error!(error = %error, "runtime persistence event failed");
-                            } else {
-                                persisted_replay_buffer
-                                    .lock()
-                                    .expect("replay buffer lock poisoned")
-                                    .record_persistence(&replay_session_id, &persisted_event);
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(skipped, "runtime persistence event stream lagged");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
+                while let Some(event) = persistence_rx.recv().await {
+                    let result = persistence_db
+                        .apply_persistence_event(
+                            &event,
+                            &persistence_project_id,
+                            &persistence_project,
+                        )
+                        .await;
+                    if result.is_ok() {
+                        persisted_replay_buffer
+                            .lock()
+                            .expect("replay buffer lock poisoned")
+                            .record_persistence(&replay_thread_id, &event);
+                    } else if let Err(error) = &result {
+                        tracing::error!(error = %error, "runtime persistence event failed");
+                    }
+                    if let runtime_contract::RuntimePersistenceEvent::ReplaceLlmContext {
+                        expected_version,
+                        ack,
+                        ..
+                    } = event
+                    {
+                        let _ = ack.send(
+                            result
+                                .map(|_| expected_version + 1)
+                                .map_err(|error| error.to_string()),
+                        );
                     }
                 }
             }
             .instrument(tracing::debug_span!(
-                "session",
-                session_id = %session_id,
+                "thread",
+                thread_id = %thread_id,
                 task_kind = "persistence_fanout"
             )),
         );
@@ -172,8 +187,8 @@ impl SessionRuntime {
                 }
             }
             .instrument(tracing::debug_span!(
-                "session",
-                session_id = %session_id,
+                "thread",
+                thread_id = %thread_id,
                 task_kind = "runtime_event_fanout"
             )),
         );
@@ -195,14 +210,14 @@ impl SessionRuntime {
                 }
             }
             .instrument(tracing::debug_span!(
-                "session",
-                session_id = %session_id,
+                "thread",
+                thread_id = %thread_id,
                 task_kind = "tool_pause_watcher"
             )),
         );
         Ok(Self {
             core,
-            session_id,
+            thread_id,
             project,
             settings,
             db,

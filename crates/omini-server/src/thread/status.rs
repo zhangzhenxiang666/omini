@@ -1,8 +1,8 @@
-use crate::{event::status::RuntimeStatusSnapshotContext, session::SessionRuntime};
+use crate::{event::status::RuntimeStatusSnapshotContext, thread::ThreadRuntime};
 use chrono::Utc;
 use omini_protocol as client_proto;
 
-impl SessionRuntime {
+impl ThreadRuntime {
     pub fn runtime_state(&self) -> client_proto::SessionRuntimeState {
         self.status_projection
             .lock()
@@ -15,7 +15,7 @@ impl SessionRuntime {
             let presence = self.presence.lock().expect("presence lock poisoned");
             (presence.controller_id.clone(), presence.clients.len())
         };
-        // 新架构下 runtime 启动即加载,RuntimeSession 暴露给上层时一定处于
+        // 新架构下 runtime 启动即加载，ThreadRuntime 暴露给上层时一定处于
         // "已加载" 状态,这里直接告诉 status 模块;老架构下的 RuntimeLoadGate
         // 已经不需要再判断。
         let loaded = true;
@@ -31,7 +31,7 @@ impl SessionRuntime {
             .lock()
             .expect("status projection lock poisoned")
             .to_protocol(
-                &self.session_id,
+                &self.thread_id,
                 RuntimeStatusSnapshotContext {
                     loaded,
                     controller_id,
@@ -57,8 +57,8 @@ impl SessionRuntime {
         !self.has_connected_clients() && !self.is_reclaimable()
     }
 
-    pub fn session_id(&self) -> &str {
-        &self.session_id
+    pub fn thread_id(&self) -> &str {
+        &self.thread_id
     }
 
     #[cfg(test)]

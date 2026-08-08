@@ -69,22 +69,22 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
 
     let mut terminal = init_terminal()?;
     let mut state = UiState::new();
-    let attach = &connection.attach;
-    let cwd = std::path::PathBuf::from(&attach.cwd);
+    let open = &connection.open;
+    let cwd = std::path::PathBuf::from(&open.project.path);
 
-    state.status_bar.model = attach.model.clone();
-    state.status_bar.thinking_effort = attach
+    state.status_bar.model = open.model.clone();
+    state.status_bar.thinking_effort = open
         .thinking_effort
         .map(client::thinking_effort_from_protocol);
-    state.status_bar.active_provider = attach.active_provider.clone();
+    state.status_bar.active_provider = open.active_provider.clone();
     state.status_bar.cwd = cwd.clone();
-    state.status_bar.git_branch = attach.git_branch.clone();
+    state.status_bar.git_branch = open.git_branch.clone();
     state.status_bar.active_profile = ActiveProfile::Main;
-    state.startup_mcp_server_count = attach.mcp_server_count;
-    state.startup_has_project_instructions = attach.has_project_instructions;
-    state.show_thinking_blocks = attach.show_thinking_blocks;
-    state.status_bar.context_window = attach.context_window;
-    state.startup_recent_sessions = attach
+    state.startup_mcp_server_count = open.mcp_server_count;
+    state.startup_has_project_instructions = open.has_project_instructions;
+    state.show_thinking_blocks = open.show_thinking_blocks;
+    state.status_bar.context_window = open.context_window;
+    state.startup_recent_sessions = open
         .sessions
         .clone()
         .into_iter()
@@ -93,8 +93,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
         .take(6)
         .collect();
     state.autocomplete.all_commands = crate::command::commands_with_runtime_skills(
-        attach
-            .skills
+        open.skills
             .clone()
             .into_iter()
             .map(client::skill_command_summary)
@@ -103,8 +102,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
     state.set_mention_context(
         cwd,
         crate::state::agent_summaries_to_mention_candidates(
-            attach
-                .agents
+            open.agents
                 .clone()
                 .into_iter()
                 .map(client::agent_summary_from_protocol)

@@ -158,7 +158,7 @@ impl UiState {
             }
             InteractionRequest::SessionSelection { sessions } => {
                 let mut sorted = sessions.clone();
-                sorted.sort_by_key(|item| item.updated_at);
+                sorted.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
                 let all_sessions = sorted.clone();
                 let selected = self
                     .current_session_id
@@ -882,8 +882,9 @@ mod tests {
     use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
     use crate::types::events::{
         CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
-        CompactSummaryFinishedEvent, CompactTrigger,
+        CompactSummaryFinishedEvent, CompactTrigger, SessionSummary,
     };
+    use chrono::{Duration, Utc};
     use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
     use std::collections::HashMap;
 
@@ -908,6 +909,18 @@ mod tests {
             )]),
             current_provider: "openai".to_string(),
             current_model: "reasoner".to_string(),
+        }
+    }
+
+    fn session_summary(id: &str, updated_at: chrono::DateTime<Utc>) -> SessionSummary {
+        SessionSummary {
+            id: id.to_string(),
+            title: id.to_string(),
+            model: "test-model".to_string(),
+            provider: "test-provider".to_string(),
+            created_at: updated_at,
+            updated_at,
+            runtime_state: None,
         }
     }
 
@@ -966,6 +979,36 @@ mod tests {
             panic!("expected model selection interaction");
         };
         assert_eq!(thinking_idx, 5);
+    }
+
+    #[test]
+    fn session_selection_sorts_by_updated_at_descending() {
+        let now = Utc::now();
+        let mut state = UiState::new();
+        let request = InteractionRequest::SessionSelection {
+            sessions: vec![
+                session_summary("middle", now - Duration::minutes(1)),
+                session_summary("oldest", now - Duration::minutes(2)),
+                session_summary("newest", now),
+            ],
+        };
+
+        state.open_interaction_request(&request);
+
+        let Some(InteractionStep::Session {
+            sessions,
+            all_sessions,
+            ..
+        }) = state.interaction_step
+        else {
+            panic!("expected session selection interaction");
+        };
+        let ids = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["newest", "middle", "oldest"]);
+        assert_eq!(sessions, all_sessions);
     }
 
     #[test]

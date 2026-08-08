@@ -3,12 +3,12 @@ use omini_core::CoreError;
 use omini_protocol as client_proto;
 
 impl ProjectManager {
-    pub async fn attach_response(
+    pub async fn open_response(
         &self,
-        project_id: &str,
-    ) -> Result<client_proto::ProjectAttachResponse, CoreError> {
+        project: client_proto::ProjectSummary,
+    ) -> Result<client_proto::OpenProjectResponse, CoreError> {
         let settings = self.fresh_settings_with_state()?;
-        let sessions = self.list_sessions().await?.sessions;
+        let sessions = self.list_threads().await?.sessions;
         let context_window = settings.current_model_config().map(|model| model.limit);
         let mcp_server_count = settings
             .mcp_servers
@@ -47,11 +47,8 @@ impl ProjectManager {
             })
             .collect();
 
-        let git_branch = git::detect_git_branch(&self.cwd);
-
-        Ok(client_proto::ProjectAttachResponse {
-            project_id: project_id.to_string(),
-            cwd: settings.cwd.display().to_string(),
+        Ok(client_proto::OpenProjectResponse {
+            project,
             sessions,
             active_provider: settings.active_provider.clone(),
             model: settings.model.clone(),
@@ -62,7 +59,7 @@ impl ProjectManager {
             show_thinking_blocks,
             agents,
             skills,
-            git_branch,
+            git_branch: git::detect_git_branch(&self.cwd),
         })
     }
 }

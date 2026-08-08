@@ -7,8 +7,8 @@ pub mod events;
 pub mod mcp;
 pub mod persistence;
 pub mod project;
-pub mod session;
+pub mod thread;
 
 pub use events::{RuntimeToServerEvent, ServerToRuntimeEvent};
-pub use persistence::{RuntimePersistenceEvent, SessionRecord};
+pub use persistence::{RuntimePersistenceEvent, ThreadRecord};
 pub use project::{AgentManagementUpdate, DeleteProjectAgentCommand, SaveProjectAgentCommand};

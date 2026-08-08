@@ -5,6 +5,7 @@ use super::usage::{
 };
 use super::*;
 use omini_domain::display::HistoryItem;
+use std::collections::HashMap;
 use tracing::Instrument;
 
 impl AgentRuntime {
@@ -16,19 +17,18 @@ impl AgentRuntime {
         active_profile_handle: Arc<RwLock<ActiveProfile>>,
         tool_pause_resolver: ToolPauseResolver,
     ) -> tokio::task::JoinHandle<()> {
-        let session_id = self.session_id.clone();
-        let session_dir = self.session_dir.clone();
+        let thread_id = self.thread_id.clone();
         let event_tx = self.event_tx.clone();
         let persistence_tx = self.persistence_tx.clone();
-        let usage_state = Arc::clone(&self.session_usage);
-        let project = self.project.clone();
-        let blocks_dir = session_dir.path().join("blocks");
+        let usage_state = Arc::clone(&self.thread_usage);
+        let model_ref = format!("{}/{}", self.settings.active_provider, self.settings.model);
         let context_window = active_run::current_context_window(&self.settings);
-        let span_session_id = session_id.clone();
+        let span_thread_id = thread_id.clone();
 
         tokio::spawn(
             async move {
                 let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
+                let mut subagent_model_refs = HashMap::<String, String>::new();
                 while let Some(event) = engine_rx.recv().await {
                     let active = *active_profile_handle
                         .read()
@@ -40,11 +40,10 @@ impl AgentRuntime {
                             client_echo_id,
                         } => {
                             history::persist_one(
-                                &session_dir,
-                                &session_id,
-                                &blocks_dir,
+                                &thread_id,
                                 message.clone(),
                                 active,
+                                &model_ref,
                                 &persistence_tx,
                             )
                             .await;
@@ -56,14 +55,31 @@ impl AgentRuntime {
                                 .await;
                         }
                         EngineToRuntimeEvent::LlmHistoryProduced(msg) => {
-                            history::persist_llm_history_only(&session_dir, &msg);
+                            history::persist_llm_history_only(&thread_id, &msg, &persistence_tx)
+                                .await;
+                        }
+                        EngineToRuntimeEvent::ReplaceLlmContext {
+                            thread_id: compacted_thread_id,
+                            expected_version,
+                            messages,
+                            ack,
+                        } => {
+                            let _ = persistence_tx
+                                .send(RuntimePersistenceEvent::ReplaceLlmContext {
+                                    thread_id: compacted_thread_id,
+                                    expected_version,
+                                    messages,
+                                    created_at: Utc::now(),
+                                    ack,
+                                })
+                                .await;
                         }
                         EngineToRuntimeEvent::ToolResultsDisplayProduced(msg) => {
                             history::persist_ui_message(
-                                &session_id,
-                                &blocks_dir,
+                                &thread_id,
                                 &msg,
                                 active,
+                                &model_ref,
                                 &persistence_tx,
                             )
                             .await;
@@ -71,11 +87,10 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::MessageProduced(msg)
                         | EngineToRuntimeEvent::ToolResultsProduced(msg) => {
                             history::persist_one(
-                                &session_dir,
-                                &session_id,
-                                &blocks_dir,
+                                &thread_id,
                                 msg,
                                 active,
+                                &model_ref,
                                 &persistence_tx,
                             )
                             .await;
@@ -118,7 +133,7 @@ impl AgentRuntime {
                             tracing::debug!(
                                 tool_use_id = %req.tool_use_id,
                                 tool_name = %req.tool_name,
-                                source_session_id = ?req.source_session_id,
+                                source_thread_id = ?req.source_session_id,
                                 source_agent_label = ?req.source_agent_label,
                                 pause_kind = ?req.kind,
                                 "tool pause requested"
@@ -162,8 +177,8 @@ impl AgentRuntime {
                                 "recording usage"
                             );
                             let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::RecordSessionUsage {
-                                    session_id: session_id.clone(),
+                                .send(RuntimePersistenceEvent::RecordThreadUsage {
+                                    thread_id: thread_id.clone(),
                                     usage,
                                 })
                                 .await;
@@ -182,7 +197,7 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                             tracing::debug!(
                                 trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
+                                compact_thread_id = ?event.session_id,
                                 agent_label = ?event.agent_label,
                                 "compact summary started"
                             );
@@ -198,14 +213,19 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                             tracing::debug!(
                                 trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
+                                compact_thread_id = ?event.session_id,
                                 agent_label = ?event.agent_label,
                                 summary_chars = event.summary.chars().count(),
                                 after_tokens = event.after_tokens,
                                 "compact summary finished"
                             );
-                            persist_compact_summary_event(&session_id, &event, &persistence_tx)
-                                .await;
+                            persist_compact_summary_event(
+                                &thread_id,
+                                &event,
+                                &model_ref,
+                                &persistence_tx,
+                            )
+                            .await;
                             let _ = event_tx
                                 .send(RuntimeToServerEvent::CompactSummaryFinished(event))
                                 .await;
@@ -213,7 +233,7 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                             tracing::warn!(
                                 trigger = %event.trigger,
-                                compact_session_id = ?event.session_id,
+                                compact_thread_id = ?event.session_id,
                                 agent_label = ?event.agent_label,
                                 message = %event.message,
                                 "compact summary failed"
@@ -230,7 +250,7 @@ impl AgentRuntime {
                                 "recording compact summary usage"
                             );
                             record_total_usage_and_notify(
-                                &session_id,
+                                &thread_id,
                                 usage,
                                 &event_tx,
                                 &persistence_tx,
@@ -244,37 +264,41 @@ impl AgentRuntime {
                                 .send(RuntimeToServerEvent::SubagentStarted(event))
                                 .await;
                         }
-                        EngineToRuntimeEvent::SubagentSessionCreated(session) => {
+                        EngineToRuntimeEvent::SubagentThreadCreated(thread) => {
                             tracing::debug!(
-                                subagent_session_id = %session.id,
-                                parent_session_id = ?session.parent_session_id,
-                                agent_label = ?session.agent_label,
+                                subagent_thread_id = %thread.id,
+                                parent_thread_id = ?thread.parent_thread_id,
+                                agent_label = ?thread.agent_label,
                                 "subagent session created"
                             );
+                            subagent_model_refs.insert(
+                                thread.id.clone(),
+                                format!("{}/{}", thread.provider, thread.model),
+                            );
                             let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::CreateSession(session))
+                                .send(RuntimePersistenceEvent::CreateThread(thread))
                                 .await;
                         }
                         EngineToRuntimeEvent::SubagentUsageRecorded {
-                            session_id: subagent_session_id,
+                            thread_id: subagent_thread_id,
                             usage,
                         } => {
                             tracing::debug!(
-                                subagent_session_id = %subagent_session_id,
+                                subagent_thread_id = %subagent_thread_id,
                                 prompt_tokens = usage.prompt_tokens,
                                 completion_tokens = usage.completion_tokens,
                                 cached_tokens = usage.cached_tokens,
                                 "recording subagent usage"
                             );
                             let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::RecordSessionUsage {
-                                    session_id: subagent_session_id,
+                                .send(RuntimePersistenceEvent::RecordThreadUsage {
+                                    thread_id: subagent_thread_id,
                                     usage,
                                 })
                                 .await;
                             let _ = persistence_tx
                                 .send(RuntimePersistenceEvent::RecordParentSubagentUsage {
-                                    session_id: session_id.clone(),
+                                    thread_id: thread_id.clone(),
                                     usage,
                                 })
                                 .await;
@@ -286,25 +310,25 @@ impl AgentRuntime {
                                 .await;
                         }
                         EngineToRuntimeEvent::SubagentMessageProduced(event) => {
-                            let parent_dir = project.session(&session_id);
-                            let subagent_dir = parent_dir.subagent(&event.session_id);
-                            let subagent_blocks_dir = subagent_dir.path().join("blocks");
+                            let child_model_ref = subagent_model_refs
+                                .get(&event.session_id)
+                                .map(String::as_str)
+                                .unwrap_or(&model_ref);
                             if event.persist_llm_history {
                                 history::persist_one(
-                                    &subagent_dir,
                                     &event.session_id,
-                                    &subagent_blocks_dir,
                                     event.message.clone(),
                                     active,
+                                    child_model_ref,
                                     &persistence_tx,
                                 )
                                 .await;
                             } else {
                                 history::persist_ui_message(
                                     &event.session_id,
-                                    &subagent_blocks_dir,
                                     &event.message,
                                     active,
+                                    child_model_ref,
                                     &persistence_tx,
                                 )
                                 .await;
@@ -315,7 +339,7 @@ impl AgentRuntime {
                         }
                         EngineToRuntimeEvent::SubagentToolUse(event) => {
                             tracing::debug!(
-                                subagent_session_id = %event.session_id,
+                                subagent_thread_id = %event.session_id,
                                 tool_use_id = %event.tool_use.id,
                                 tool_name = %event.tool_use.name,
                                 "subagent tool use"
@@ -326,7 +350,7 @@ impl AgentRuntime {
                         }
                         EngineToRuntimeEvent::SubagentToolResult(event) => {
                             tracing::debug!(
-                                subagent_session_id = %event.session_id,
+                                subagent_thread_id = %event.session_id,
                                 tool_use_id = %event.tool_result.tool_use_id,
                                 is_error = event.tool_result.is_error,
                                 "subagent tool result"
@@ -354,7 +378,7 @@ impl AgentRuntime {
             }
             .instrument(tracing::debug_span!(
                 "event_processor",
-                session_id = %span_session_id
+                thread_id = %span_thread_id
             )),
         )
     }

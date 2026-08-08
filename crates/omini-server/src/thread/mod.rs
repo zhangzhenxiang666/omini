@@ -6,7 +6,7 @@ use crate::{
     store::Database,
 };
 use omini_config::{Settings, project::ProjectDir};
-use omini_core::AgentCoreSession;
+use omini_core::AgentCoreThread;
 use omini_domain as domain;
 use omini_protocol as client_proto;
 use std::{
@@ -29,28 +29,27 @@ mod status;
 mod title;
 mod tool_pause;
 
-/// `SessionRuntime::build` 这个同步构造函数所需的全部 jsonl 派生输入。
+/// `ThreadRuntime::build` 这个同步构造函数所需的全部持久化输入。
 ///
 /// - `snapshot` 喂给 replay buffer 做去重(provider/model/title/usage
-///   来自 DB 的 `Session` 行,messages/subagents 来自 jsonl,这是
+///   来自 DB 的 `Thread` 行，UI messages 与 LLM context 分别来自对应表；这是
 ///   replay 自己的去重需求,跟"喂 LLM"是不同路径);
-/// - `session_messages` 是已经过滤好的、喂给 core 最终给 LLM 的
-///   消息列表,在 `load_session_snapshot` 里从 jsonl 一次性产出,
-///   `build` 不再做任何代码层面的过滤 / 合并 —— LLM 看到的消息
-///   严格只来源于 jsonl。
-pub struct SessionRuntimeInputs {
+/// - `thread_messages` 是从当前 `llm_messages` context version 加载、
+///   最终交给 core/LLM 的消息；`build` 不再过滤或合并。
+pub struct ThreadRuntimeInputs {
     snapshot: domain::events::LoadedSession,
-    session_messages: Vec<domain::message::Message>,
+    thread_messages: Vec<domain::message::Message>,
+    llm_context_version: i64,
 }
 
-/// projection 和 replay buffer。HTTP 路由拿到的 `SessionRuntime` 不直接操作 core 的内部
+/// projection 和 replay buffer。HTTP 路由拿到的 `ThreadRuntime` 不直接操作 core 的内部
 /// loop，而是通过这个类型做 daemon 级的持久化、重连补发和多客户端控制权协调。
-pub struct SessionRuntime {
-    // 单个 daemon session 对应的 core facade；HTTP/controller 校验后的用户动作从这里进入 core。
-    core: AgentCoreSession,
-    // daemon 会话 ID，同时也是数据库、项目 session 目录和 WebSocket 路由使用的稳定 ID。
-    session_id: String,
-    // 当前项目的目录句柄，用于加载 session snapshot、subagent 历史和 block 文件。
+pub struct ThreadRuntime {
+    // 单个 daemon thread 对应的 core facade；HTTP/controller 校验后的用户动作从这里进入 core。
+    core: AgentCoreThread,
+    // daemon thread ID，同时也是数据库、项目 thread 目录和外部 WebSocket 路由使用的稳定 ID。
+    thread_id: String,
+    // 当前项目的目录句柄，用于加载 thread snapshot、subagent 历史和资产文件。
     project: ProjectDir,
     // 创建 runtime 时的项目配置快照；server 用它补充 snapshot/status 中的只读信息。
     settings: Settings,
@@ -80,14 +79,16 @@ pub struct SessionRuntime {
     _tool_pause_handle: JoinHandle<()>,
 }
 
-impl SessionRuntimeInputs {
+impl ThreadRuntimeInputs {
     pub fn new(
         snapshot: domain::events::LoadedSession,
-        session_messages: Vec<domain::message::Message>,
+        thread_messages: Vec<domain::message::Message>,
+        llm_context_version: i64,
     ) -> Self {
         Self {
             snapshot,
-            session_messages,
+            thread_messages,
+            llm_context_version,
         }
     }
 }

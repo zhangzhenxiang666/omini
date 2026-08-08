@@ -105,7 +105,7 @@ pub struct ProjectConnection {
     pub project_id: String,
     // client_id 同时用于 HTTP header 和 WebSocket header，server 用它判断 controller 权限。
     pub client_id: String,
-    pub attach: protocol::ProjectAttachResponse,
+    pub open: protocol::OpenProjectResponse,
 }
 
 pub(crate) fn spawn_project_client(
@@ -180,7 +180,7 @@ async fn run_project_client(
             } else {
                 match reconnect_latest_daemon(&http, &mut connection).await {
                     Ok(()) => {
-                        // 新 daemon 不认识旧 client_id；rediscovery 会重新注册并 attach 项目。
+                        // 新 daemon 不认识旧 client_id；rediscovery 会重新注册并按 UUID open 项目。
                         active_session_id = Some(session_id);
                         pending_requests = session_initial_requests;
                         refreshed_active_session = true;
@@ -431,9 +431,9 @@ async fn create_session(
         http,
         &project_sessions_url(connection),
         &protocol::CreateSessionRequest {
-            provider: Some(connection.attach.active_provider.clone()),
-            model: Some(connection.attach.model.clone()),
-            thinking_effort: connection.attach.thinking_effort,
+            provider: Some(connection.open.active_provider.clone()),
+            model: Some(connection.open.model.clone()),
+            thinking_effort: connection.open.thinking_effort,
             profile: Some(profile),
         },
     )
@@ -458,7 +458,7 @@ async fn emit_blank_session(
             messages: Vec::new(),
             subagents: Vec::new(),
             usage: SessionUsageSnapshot {
-                context_window: connection.attach.context_window,
+                context_window: connection.open.context_window,
                 ..SessionUsageSnapshot::default()
             },
         })
@@ -471,11 +471,11 @@ async fn apply_project_runtime_config(
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     config: protocol::ProjectRuntimeConfigResponse,
 ) -> Result<(), String> {
-    connection.attach.active_provider = config.active_provider.clone();
-    connection.attach.model = config.model.clone();
-    connection.attach.thinking_effort = config.thinking_effort;
-    connection.attach.context_window = config.context_window;
-    connection.attach.show_thinking_blocks = config.show_thinking_blocks;
+    connection.open.active_provider = config.active_provider.clone();
+    connection.open.model = config.model.clone();
+    connection.open.thinking_effort = config.thinking_effort;
+    connection.open.context_window = config.context_window;
+    connection.open.show_thinking_blocks = config.show_thinking_blocks;
 
     event_tx
         .send(RuntimeToUiEvent::ModelChanged {
@@ -722,12 +722,12 @@ async fn run_connected_session(
                                 context_window,
                             } => {
                                 // 服务端发来的 ModelChanged 事件（如打开已有 session 时），
-                                // 同步更新 connection.attach 确保 /new 后创建新 session
+                                // 同步更新 open snapshot，确保 /new 后创建新 session
                                 // 沿用正确的 provider/model/effort。
-                                connection.attach.active_provider = provider;
-                                connection.attach.model = model;
-                                connection.attach.thinking_effort = thinking_effort;
-                                connection.attach.context_window = context_window;
+                                connection.open.active_provider = provider;
+                                connection.open.model = model;
+                                connection.open.thinking_effort = thinking_effort;
+                                connection.open.context_window = context_window;
                             }
                             HandleOutcome::SawRuntimeStatus => {
                                 if !did_calibrate_initial_status {
@@ -781,7 +781,7 @@ async fn handle_server_text(
             if let protocol::TypedRuntimeEvent::SessionSwitched(payload) = event.event {
                 return Ok(HandleOutcome::Switch(payload.to));
             }
-            // ModelChanged 需要同步更新 connection.attach,在转发给 UI 之前先
+            // ModelChanged 需要同步更新 open snapshot，在转发给 UI 之前先
             // 记下模型信息,返回非默认 outcome 让主循环同步缓存。
             let model_changed = match &event.event {
                 protocol::TypedRuntimeEvent::ModelChanged(payload) => {
@@ -823,7 +823,7 @@ enum HandleOutcome {
     SawRuntimeStatus,
     /// 收到 SessionSwitched,主循环断开旧 ws 并按新 id 重新连接。
     Switch(String),
-    /// 收到 ModelChanged,主循环更新 connection.attach 保持与服务端同步。
+    /// 收到 ModelChanged，主循环更新 open snapshot 保持与服务端同步。
     ModelChanged {
         provider: String,
         model: String,
@@ -1040,7 +1040,7 @@ async fn reconnect_latest_daemon(
     connection: &mut ProjectConnection,
 ) -> Result<(), String> {
     let addr = discover_healthy_daemon(http).await?;
-    // daemon 重启后端口和进程内 client registry 都会变；先重建身份，再 attach 原项目。
+    // daemon 重启后端口和进程内 client registry 都会变；先重建身份，再按 UUID open 原项目。
     let register: protocol::RegisterClientResponse = post_json_without_client(
         http,
         &format!("http://{addr}/v1/clients"),
@@ -1049,18 +1049,16 @@ async fn reconnect_latest_daemon(
         },
     )
     .await?;
-    let cwd = connection.attach.cwd.clone();
-    let attach: protocol::ProjectAttachResponse = put_json_without_client(
+    let open: protocol::OpenProjectResponse = post_empty_without_client(
         http,
-        &format!("http://{addr}/v1/projects/{}/attach", connection.project_id),
-        &protocol::ProjectAttachRequest { cwd },
+        &format!("http://{addr}/v1/projects/{}/open", connection.project_id),
     )
     .await?;
 
     connection.addr = addr;
-    connection.project_id = attach.project_id.clone();
+    connection.project_id = open.project.id.clone();
     connection.client_id = register.client_id;
-    connection.attach = attach;
+    connection.open = open;
     Ok(())
 }
 
@@ -1200,9 +1198,9 @@ async fn handle_local_request(
             let config = protocol::ProjectRuntimeConfigResponse {
                 active_provider: provider,
                 model,
-                thinking_effort: thinking_effort.or(connection.attach.thinking_effort),
-                context_window: connection.attach.context_window,
-                show_thinking_blocks: connection.attach.show_thinking_blocks,
+                thinking_effort: thinking_effort.or(connection.open.thinking_effort),
+                context_window: connection.open.context_window,
+                show_thinking_blocks: connection.open.show_thinking_blocks,
             };
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
@@ -1219,11 +1217,11 @@ async fn handle_local_request(
             // 2. 同步更新本地缓存的运行时配置（不写入 project/state.toml），
             //    确保 /new 或 /clear 后创建的新 session 沿用本次选择的 thinking effort。
             let config = protocol::ProjectRuntimeConfigResponse {
-                active_provider: connection.attach.active_provider.clone(),
-                model: connection.attach.model.clone(),
+                active_provider: connection.open.active_provider.clone(),
+                model: connection.open.model.clone(),
                 thinking_effort: Some(effort),
-                context_window: connection.attach.context_window,
-                show_thinking_blocks: connection.attach.show_thinking_blocks,
+                context_window: connection.open.context_window,
+                show_thinking_blocks: connection.open.show_thinking_blocks,
             };
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
@@ -1507,21 +1505,15 @@ where
     decode_response(response, url).await
 }
 
-async fn put_json_without_client<B, T>(
-    http: &reqwest::Client,
-    url: &str,
-    body: &B,
-) -> Result<T, String>
+async fn post_empty_without_client<T>(http: &reqwest::Client, url: &str) -> Result<T, String>
 where
-    B: serde::Serialize + ?Sized,
     T: serde::de::DeserializeOwned,
 {
     let response = http
-        .put(url)
-        .json(body)
+        .post(url)
         .send()
         .await
-        .map_err(|err| format!("PUT {url}: {err}"))?;
+        .map_err(|err| format!("POST {url}: {err}"))?;
     decode_response(response, url).await
 }
 

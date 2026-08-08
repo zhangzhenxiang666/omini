@@ -1,7 +1,6 @@
 use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
 use crate::types::events::EngineToRuntimeEvent;
-use omini_config::project::SessionDir;
 use omini_config::{CompactConfig, Settings};
 use omini_domain::events::{
     CompactEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
@@ -13,8 +12,7 @@ use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::Notify;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
 const DEFAULT_CONTEXT_WINDOW: usize = 256_000;
@@ -110,14 +108,14 @@ pub async fn auto_compact_if_needed(
     }
     // TODO(compact): 等 parent/subagent 的 UI 展示和 history 语义确定后，
     // 再重新启用 subagent 自动压缩。
-    if is_subagent_session_type(
+    if is_subagent_thread_type(
         ctx.runtime_context
-            .map(|runtime| runtime.session_type.as_str()),
+            .map(|runtime| runtime.thread_type.as_str()),
     ) {
         tracing::debug!(
             compact_trigger = %CompactTrigger::Auto,
-            session_id = ?compact_session_id(ctx.runtime_context),
-            session_type = ?compact_session_type(ctx.runtime_context),
+            thread_id = ?compact_thread_id(ctx.runtime_context),
+            thread_type = ?compact_thread_type(ctx.runtime_context),
             agent_label = ?compact_agent_label(ctx.runtime_context),
             "auto compact skipped for subagent session"
         );
@@ -133,8 +131,8 @@ pub async fn auto_compact_if_needed(
     let decision = auto_compact_decision(before_tokens, thresholds);
     tracing::debug!(
         compact_trigger = %CompactTrigger::Auto,
-        session_id = ?compact_session_id(ctx.runtime_context),
-        session_type = ?compact_session_type(ctx.runtime_context),
+        thread_id = ?compact_thread_id(ctx.runtime_context),
+        thread_type = ?compact_thread_type(ctx.runtime_context),
         agent_label = ?compact_agent_label(ctx.runtime_context),
         before_tokens,
         before_messages = messages.len(),
@@ -147,6 +145,7 @@ pub async fn auto_compact_if_needed(
     if decision == AutoCompactDecision::Skip {
         return false;
     }
+    let original_messages = messages.clone();
 
     let event = compact_event(CompactTrigger::Auto, ctx.runtime_context);
     let _ = ctx
@@ -174,7 +173,11 @@ pub async fn auto_compact_if_needed(
         "auto compact micro pass finished"
     );
     if changed && after_micro < thresholds.soft {
-        rewrite_runtime_history(ctx.runtime_context, messages);
+        if let Err(error) = persist_rewritten_context(ctx, messages).await {
+            *messages = original_messages;
+            tracing::error!(%error, "failed to persist compacted context");
+            return false;
+        }
         let outcome = CompactOutcome {
             before_tokens,
             after_tokens: after_micro,
@@ -223,7 +226,11 @@ pub async fn auto_compact_if_needed(
         "auto compact collapse pass finished"
     );
     if changed && after_collapse < thresholds.soft {
-        rewrite_runtime_history(ctx.runtime_context, messages);
+        if let Err(error) = persist_rewritten_context(ctx, messages).await {
+            *messages = original_messages;
+            tracing::error!(%error, "failed to persist compacted context");
+            return false;
+        }
         let outcome = CompactOutcome {
             before_tokens,
             after_tokens: after_collapse,
@@ -251,7 +258,11 @@ pub async fn auto_compact_if_needed(
 
     if decision == AutoCompactDecision::LocalOnly {
         if changed {
-            rewrite_runtime_history(ctx.runtime_context, messages);
+            if let Err(error) = persist_rewritten_context(ctx, messages).await {
+                *messages = original_messages;
+                tracing::error!(%error, "failed to persist compacted context");
+                return false;
+            }
             let outcome = CompactOutcome {
                 before_tokens,
                 after_tokens: after_collapse,
@@ -280,7 +291,11 @@ pub async fn auto_compact_if_needed(
 
     match full_compact(messages, ctx).await {
         Ok(outcome) => {
-            rewrite_runtime_history(ctx.runtime_context, messages);
+            if let Err(error) = persist_rewritten_context(ctx, messages).await {
+                *messages = original_messages;
+                tracing::error!(%error, "failed to persist compacted context");
+                return false;
+            }
             emit_compact_shrink_finished(
                 ctx.event_tx,
                 CompactTrigger::Auto,
@@ -300,10 +315,12 @@ pub async fn auto_compact_if_needed(
             true
         }
         Err(CompactError::Cancelled) => {
+            *messages = original_messages;
             tracing::info!(compact_trigger = %CompactTrigger::Auto, "auto compact cancelled");
-            changed
+            false
         }
         Err(error) => {
+            *messages = original_messages;
             state.consecutive_failures += 1;
             tracing::warn!(
                 compact_trigger = %CompactTrigger::Auto,
@@ -318,7 +335,7 @@ pub async fn auto_compact_if_needed(
                 error.to_string(),
             )
             .await;
-            changed
+            false
         }
     }
 }
@@ -329,8 +346,8 @@ pub async fn force_compact(
 ) -> Result<CompactOutcome, RuntimeError> {
     tracing::debug!(
         compact_trigger = %CompactTrigger::Manual,
-        session_id = ?compact_session_id(ctx.runtime_context),
-        session_type = ?compact_session_type(ctx.runtime_context),
+        thread_id = ?compact_thread_id(ctx.runtime_context),
+        thread_type = ?compact_thread_type(ctx.runtime_context),
         agent_label = ?compact_agent_label(ctx.runtime_context),
         message_count = messages.len(),
         has_custom_instructions = ctx.custom_instructions.is_some(),
@@ -344,9 +361,13 @@ pub async fn force_compact(
         )))
         .await;
 
+    let original_messages = messages.clone();
     match full_compact(messages, ctx).await {
         Ok(outcome) => {
-            rewrite_runtime_history(ctx.runtime_context, messages);
+            if let Err(message) = persist_rewritten_context(ctx, messages).await {
+                *messages = original_messages;
+                return Err(RuntimeError::Persistence { message });
+            }
             emit_compact_shrink_finished(
                 ctx.event_tx,
                 CompactTrigger::Manual,
@@ -502,7 +523,7 @@ fn context_window(settings: &Settings) -> usize {
         .unwrap_or(DEFAULT_CONTEXT_WINDOW)
 }
 
-fn is_subagent_session_type(session_type: Option<&str>) -> bool {
+fn is_subagent_thread_type(session_type: Option<&str>) -> bool {
     session_type == Some("subagent")
 }
 
@@ -630,8 +651,8 @@ async fn full_compact(
     );
     tracing::debug!(
         compact_trigger = %ctx.trigger,
-        session_id = ?compact_session_id(ctx.runtime_context),
-        session_type = ?compact_session_type(ctx.runtime_context),
+        thread_id = ?compact_thread_id(ctx.runtime_context),
+        thread_type = ?compact_thread_type(ctx.runtime_context),
         agent_label = ?compact_agent_label(ctx.runtime_context),
         before_tokens,
         before_messages,
@@ -1076,7 +1097,7 @@ async fn forward_compact_summary_deltas(
                 CompactSummaryDeltaEvent {
                     trigger,
                     delta,
-                    session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
+                    session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                     agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
                 },
             ))
@@ -1361,19 +1382,31 @@ fn is_prompt_too_long_error(error: &str) -> bool {
     .any(|needle| error.contains(needle))
 }
 
-fn rewrite_runtime_history(runtime_context: Option<&ToolRuntimeContext>, messages: &[Message]) {
-    let Some(runtime_context) = runtime_context else {
-        return;
+async fn persist_rewritten_context(
+    ctx: &CompactRequestContext<'_>,
+    messages: &[Message],
+) -> Result<(), String> {
+    let Some(runtime_context) = ctx.runtime_context else {
+        return Ok(());
     };
-    if let Err(error) = rewrite_history(&runtime_context.session_dir, messages) {
-        tracing::error!(msg = "failed to rewrite compacted history", error = %error);
-    }
-}
-
-fn rewrite_history(session_dir: &SessionDir, messages: &[Message]) -> Result<(), String> {
-    session_dir
-        .rewrite_history(messages)
-        .map_err(|error| error.to_string())
+    let expected_version = runtime_context.llm_context_version.load(Ordering::Acquire);
+    let (ack, result) = oneshot::channel();
+    ctx.event_tx
+        .send(EngineToRuntimeEvent::ReplaceLlmContext {
+            thread_id: runtime_context.thread_id.clone(),
+            expected_version,
+            messages: messages.to_vec(),
+            ack,
+        })
+        .await
+        .map_err(|_| "runtime event processor closed".to_string())?;
+    let next_version = result
+        .await
+        .map_err(|_| "persistence acknowledgement dropped".to_string())??;
+    runtime_context
+        .llm_context_version
+        .store(next_version, Ordering::Release);
+    Ok(())
 }
 
 fn compact_event(
@@ -1382,17 +1415,17 @@ fn compact_event(
 ) -> CompactEvent {
     CompactEvent {
         trigger,
-        session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
+        session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
         agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
     }
 }
 
-fn compact_session_id(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
-    runtime_context.map(|runtime| runtime.session_id.as_str())
+fn compact_thread_id(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
+    runtime_context.map(|runtime| runtime.thread_id.as_str())
 }
 
-fn compact_session_type(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
-    runtime_context.map(|runtime| runtime.session_type.as_str())
+fn compact_thread_type(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
+    runtime_context.map(|runtime| runtime.thread_type.as_str())
 }
 
 fn compact_agent_label(runtime_context: Option<&ToolRuntimeContext>) -> Option<&str> {
@@ -1413,7 +1446,7 @@ async fn emit_compact_shrink_finished(
                 after_tokens: outcome.after_tokens,
                 before_messages: outcome.before_messages,
                 after_messages: outcome.after_messages,
-                session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
+                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))
@@ -1446,7 +1479,7 @@ async fn emit_compact_summary_finished(
                 trigger,
                 summary,
                 after_tokens,
-                session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
+                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))
@@ -1464,7 +1497,7 @@ async fn emit_compact_summary_failed(
             CompactSummaryFailedEvent {
                 trigger,
                 message,
-                session_id: runtime_context.map(|runtime| runtime.session_id.clone()),
+                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))

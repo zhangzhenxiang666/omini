@@ -1,23 +1,68 @@
 use crate::daemon::GlobalDaemonManager;
-use crate::routes::{ApiResult, core_error, project_attach_error, require_project};
+use crate::routes::{ApiResult, core_error, project_error, require_project};
 use axum::Json;
 use axum::extract::{Path, State};
 use omini_protocol as protocol;
-use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 将项目工作目录挂载到当前守护进程。
 #[axum::debug_handler]
-pub async fn attach_project(
+pub async fn list_projects(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path(project_id): Path<String>,
-    Json(request): Json<protocol::ProjectAttachRequest>,
-) -> ApiResult<protocol::ProjectAttachResponse> {
+) -> ApiResult<protocol::ProjectsResponse> {
     manager
-        .attach_project(&project_id, PathBuf::from(request.cwd))
+        .list_projects()
         .await
         .map(Json)
-        .map_err(project_attach_error)
+        .map_err(project_error)
+}
+
+#[axum::debug_handler]
+pub async fn create_project(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Json(request): Json<protocol::CreateProjectRequest>,
+) -> ApiResult<protocol::ProjectSummary> {
+    manager
+        .register_project(request)
+        .await
+        .map(Json)
+        .map_err(project_error)
+}
+
+#[axum::debug_handler]
+pub async fn get_project(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path(project_id): Path<String>,
+) -> ApiResult<protocol::ProjectSummary> {
+    manager
+        .project_summary(&project_id)
+        .await
+        .map(Json)
+        .map_err(project_error)
+}
+
+#[axum::debug_handler]
+pub async fn update_project(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path(project_id): Path<String>,
+    Json(request): Json<protocol::UpdateProjectRequest>,
+) -> ApiResult<protocol::ProjectSummary> {
+    manager
+        .update_project(&project_id, request)
+        .await
+        .map(Json)
+        .map_err(project_error)
+}
+
+#[axum::debug_handler]
+pub async fn open_project(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path(project_id): Path<String>,
+) -> ApiResult<protocol::OpenProjectResponse> {
+    manager
+        .open_project(&project_id)
+        .await
+        .map(Json)
+        .map_err(project_error)
 }
 
 /// 列出项目默认可用模型；不需要已有 session。
@@ -26,7 +71,7 @@ pub async fn list_models(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
 ) -> ApiResult<protocol::ModelsResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project.list_models().map(Json).map_err(core_error)
 }
 
@@ -36,7 +81,7 @@ pub async fn set_model(
     Path(project_id): Path<String>,
     Json(request): Json<protocol::SetModelRequest>,
 ) -> ApiResult<protocol::ProjectRuntimeConfigResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project.set_model(request).map(Json).map_err(core_error)
 }
 
@@ -47,7 +92,7 @@ pub async fn set_thinking_effort(
     Path(project_id): Path<String>,
     Json(request): Json<protocol::SetThinkingEffortRequest>,
 ) -> ApiResult<protocol::ProjectRuntimeConfigResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .set_thinking_effort(request)
         .map(Json)
@@ -61,7 +106,7 @@ pub async fn set_thinking_display(
     Path(project_id): Path<String>,
     Json(request): Json<protocol::SetThinkingDisplayRequest>,
 ) -> ApiResult<protocol::ProjectRuntimeConfigResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .set_thinking_display(request)
         .map(Json)

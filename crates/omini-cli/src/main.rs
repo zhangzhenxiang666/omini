@@ -2,7 +2,6 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
-use omini_domain::project::sanitize_project_path as sanitize;
 use omini_protocol as protocol;
 use serde::Deserialize;
 use std::env;
@@ -140,20 +139,24 @@ fn connect_current_project() -> Result<omini_tui::ProjectConnection, String> {
             kind: Some("tui".to_string()),
         },
     )?;
-    let project_id = sanitize(&cwd);
-    let attach: protocol::ProjectAttachResponse = put_json_without_client(
+    let project: protocol::ProjectSummary = post_json_without_client(
         &http,
-        &format!("http://{}/v1/projects/{project_id}/attach", status.addr),
-        &protocol::ProjectAttachRequest {
-            cwd: cwd.display().to_string(),
+        &format!("http://{}/v1/projects", status.addr),
+        &protocol::CreateProjectRequest {
+            path: cwd.display().to_string(),
+            name: None,
         },
+    )?;
+    let open: protocol::OpenProjectResponse = post_empty_without_client(
+        &http,
+        &format!("http://{}/v1/projects/{}/open", status.addr, project.id),
     )?;
 
     Ok(omini_tui::ProjectConnection {
         addr: status.addr,
-        project_id,
+        project_id: project.id,
         client_id: register.client_id,
-        attach,
+        open,
     })
 }
 
@@ -375,23 +378,6 @@ where
         .json(body)
         .send()
         .map_err(|err| format!("POST {url}: {err}"))?;
-    decode_response(response, url)
-}
-
-fn put_json_without_client<B, T>(
-    http: &reqwest::blocking::Client,
-    url: &str,
-    body: &B,
-) -> Result<T, String>
-where
-    B: serde::Serialize + ?Sized,
-    T: serde::de::DeserializeOwned,
-{
-    let response = http
-        .put(url)
-        .json(body)
-        .send()
-        .map_err(|err| format!("PUT {url}: {err}"))?;
     decode_response(response, url)
 }
 

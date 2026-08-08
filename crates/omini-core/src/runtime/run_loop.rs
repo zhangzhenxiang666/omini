@@ -25,7 +25,7 @@ impl AgentRuntime {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
-                                    Some(&self.session_id),
+                                    Some(&self.thread_id),
                                     effort,
                                     &self.event_tx,
                                     &self.persistence_tx,
@@ -104,7 +104,7 @@ impl AgentRuntime {
             &mut self.settings,
             &mut self.llm_client,
             &self.project,
-            Some(&self.session_id),
+            Some(&self.thread_id),
             active_run::ModelSelection {
                 provider,
                 model,
@@ -113,7 +113,7 @@ impl AgentRuntime {
             active_run::RuntimeSinks {
                 event_tx: &self.event_tx,
                 persistence_tx: &self.persistence_tx,
-                usage_state: &self.session_usage,
+                usage_state: &self.thread_usage,
             },
         )
         .await;
@@ -175,15 +175,15 @@ impl AgentRuntime {
         let run_id = Uuid::new_v4().to_string();
         let _ = self
             .persistence_tx
-            .send(RuntimePersistenceEvent::UpdateSessionUpdatedAt {
-                session_id: self.session_id.clone(),
+            .send(RuntimePersistenceEvent::UpdateThreadUpdatedAt {
+                thread_id: self.thread_id.clone(),
             })
             .await;
 
-        let session_id = self.session_id.clone();
+        let thread_id = self.thread_id.clone();
         let run_span = tracing::info_span!(
             "run",
-            session_id = %session_id,
+            thread_id = %thread_id,
             run_id = %run_id,
             start_kind = start.kind(),
             provider = %self.settings.active_provider,
@@ -191,18 +191,18 @@ impl AgentRuntime {
             thinking_effort = ?self.settings.thinking_effort,
             max_turns = ?self.settings.max_turns,
         );
-        self.process_run_inner(start, run_id, session_id)
+        self.process_run_inner(start, run_id, thread_id)
             .instrument(run_span)
             .await;
     }
 
-    async fn process_run_inner(&mut self, start: RunStart, run_id: String, session_id: String) {
+    async fn process_run_inner(&mut self, start: RunStart, run_id: String, thread_id: String) {
         tracing::info!("agent run started");
         history::persist_initial_user_message(
-            &self.session_id,
-            &self.session_dir,
+            &self.thread_id,
             self.messages.last().cloned(),
             start,
+            &format!("{}/{}", self.settings.active_provider, self.settings.model),
             &self.persistence_tx,
         )
         .await;
@@ -240,11 +240,12 @@ impl AgentRuntime {
                 tool_registry: Arc::clone(&tool_registry),
                 active_profile,
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
-                    session_id: self.session_id.clone(),
+                    thread_id: self.thread_id.clone(),
                     run_id: Some(run_id.clone()),
-                    session_type: "main".to_string(),
+                    thread_type: "main".to_string(),
                     agent_label: None,
-                    session_dir: self.session_dir.clone(),
+                    thread_dir: self.thread_dir.clone(),
+                    llm_context_version: Arc::clone(&self.llm_context_version),
                     subagent_registry: Arc::clone(&subagent_registry),
                     skill_registry: Arc::clone(&skill_registry),
                     subagent_runner: Some(Arc::clone(&self.subagent_runner)),
@@ -310,7 +311,7 @@ impl AgentRuntime {
                                 active_run::apply_thinking_effort(
                                     &mut self.settings,
                                     &self.project,
-                                    Some(&self.session_id),
+                                    Some(&self.thread_id),
                                     effort,
                                     &event_tx,
                                     &self.persistence_tx,
@@ -365,7 +366,7 @@ impl AgentRuntime {
                                     &mut self.settings,
                                     &mut self.llm_client,
                                     &self.project,
-                                    Some(&self.session_id),
+                                    Some(&self.thread_id),
                                     active_run::ModelSelection {
                                         provider: &provider,
                                         model: &model,
@@ -374,7 +375,7 @@ impl AgentRuntime {
                                     active_run::RuntimeSinks {
                                         event_tx: &event_tx,
                                         persistence_tx: &self.persistence_tx,
-                                        usage_state: &self.session_usage,
+                                        usage_state: &self.thread_usage,
                                     },
                                 )
                                 .await;
@@ -407,7 +408,7 @@ impl AgentRuntime {
         self.cancelled.store(false, Ordering::Relaxed);
         self.send_event(RuntimeToServerEvent::RunFinished).await;
         tracing::info!(
-            session_id = %session_id,
+            thread_id = %thread_id,
             run_id = %run_id,
             "agent run finished"
         );

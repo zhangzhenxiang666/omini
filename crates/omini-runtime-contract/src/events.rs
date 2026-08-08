@@ -92,8 +92,8 @@ pub enum RuntimeToServerEvent {
         plan_id: String,
         action: PlanApprovalAction,
     },
-    /// server 端 fork 出新 RuntimeSession 后,作为老 session 推送给客户端的
-    /// 切换通知。承载在普通 runtime 通道上,以便 ws 文本帧能直接编码为
+    /// server 端 fork 出新 ThreadRuntime 后，作为原 thread 推送给客户端的
+    /// 外部会话切换通知。承载在普通 runtime 通道上，以便 ws 文本帧能直接编码为
     /// `TypedRuntimeEvent::SessionSwitched`。
     SessionSwitched {
         from: String,

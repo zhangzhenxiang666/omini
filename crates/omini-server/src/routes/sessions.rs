@@ -23,8 +23,8 @@ pub async fn list_sessions(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
 ) -> ApiResult<client_proto::SessionsResponse> {
-    let project = require_project(&manager, &project_id)?;
-    project.list_sessions().await.map(Json).map_err(core_error)
+    let project = require_project(&manager, &project_id).await?;
+    project.list_threads().await.map(Json).map_err(core_error)
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -40,9 +40,9 @@ pub async fn list_session_statuses(
     Path(project_id): Path<String>,
     Query(query): Query<SessionStatusQuery>,
 ) -> ApiResult<client_proto::SessionStatusesResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     let filter = parse_status_filter(query.status.as_deref())?;
-    Ok(Json(project.list_session_statuses(filter.as_deref()).await))
+    Ok(Json(project.list_thread_statuses(filter.as_deref()).await))
 }
 
 /// 获取当前活跃会话的运行状态。
@@ -51,8 +51,8 @@ pub async fn session_status(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
 ) -> ApiResult<client_proto::SessionRuntimeStatusResponse> {
-    let project = require_project(&manager, &project_id)?;
-    let status = if let Some(session) = project.cached_session(&session_id) {
+    let project = require_project(&manager, &project_id).await?;
+    let status = if let Some(session) = project.cached_thread(&session_id) {
         session.runtime_status()
     } else {
         return Err(api_error(
@@ -71,9 +71,9 @@ pub async fn create_session(
     Path(project_id): Path<String>,
     Json(request): Json<client_proto::CreateSessionRequest>,
 ) -> ApiResult<client_proto::CreateSessionResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
-        .create_session(request)
+        .create_thread(request)
         .await
         .map(Json)
         .map_err(core_error)
@@ -192,7 +192,7 @@ pub async fn open_session(
 
 /// 重命名当前会话。
 #[axum::debug_handler]
-pub async fn rename_session(
+pub async fn rename_thread(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id)): Path<(String, String)>,
     headers: HeaderMap,
@@ -202,7 +202,7 @@ pub async fn rename_session(
     ensure_controller_claimed(&session, &headers).await?;
     let title = normalize_session_title(request.title)?;
     session
-        .rename_session(title)
+        .rename_thread(title)
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
@@ -238,7 +238,7 @@ pub async fn session_events(
         Err(error) => return error.into_response(),
     };
 
-    let project = match require_project(&manager, &project_id) {
+    let project = match require_project(&manager, &project_id).await {
         Ok(project) => project,
         Err(error) => return error.into_response(),
     };
@@ -253,7 +253,7 @@ pub async fn session_events(
 }
 
 async fn ensure_controller_claimed(
-    session: &crate::session::SessionRuntime,
+    session: &crate::thread::ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), crate::routes::ApiError> {
     let client_id = client_id_from_headers(headers)?;

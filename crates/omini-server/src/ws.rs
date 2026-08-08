@@ -3,7 +3,7 @@
 //! 这个模块负责把持久化 snapshot、运行中 replay、runtime fanout 和 controller 状态变化
 //! 统一编码成 `ServerEnvelope` 发给单个客户端连接。
 
-use crate::{project::ProjectManager, session::SessionRuntime};
+use crate::{project::ProjectManager, thread::ThreadRuntime};
 use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 pub async fn handle_socket(
     socket: WebSocket,
     manager: Arc<ProjectManager>,
-    session: Arc<SessionRuntime>,
+    session: Arc<ThreadRuntime>,
     session_id: String,
     client_id: String,
 ) {
@@ -46,7 +46,7 @@ pub async fn handle_socket(
                 let envelope = ServerEnvelope::Event { event };
                 if send_axum_envelope(&mut write, &envelope).await.is_err() {
                     session.unregister_client_connection(&client_id).await;
-                    manager.close_session_if_idle(&session_id, &session).await;
+                    manager.close_thread_if_idle(&session_id, &session).await;
                     return;
                 }
             }
@@ -64,7 +64,7 @@ pub async fn handle_socket(
         let envelope = ServerEnvelope::Event { event: event.event };
         if send_axum_envelope(&mut write, &envelope).await.is_err() {
             session.unregister_client_connection(&client_id).await;
-            manager.close_session_if_idle(&session_id, &session).await;
+            manager.close_thread_if_idle(&session_id, &session).await;
             return;
         }
     }
@@ -76,7 +76,7 @@ pub async fn handle_socket(
     };
     if send_axum_envelope(&mut write, &status).await.is_err() {
         session.unregister_client_connection(&client_id).await;
-        manager.close_session_if_idle(&session_id, &session).await;
+        manager.close_thread_if_idle(&session_id, &session).await;
         return;
     }
 
@@ -152,7 +152,7 @@ pub async fn handle_socket(
     }
 
     session.unregister_client_connection(&client_id).await;
-    manager.close_session_if_idle(&session_id, &session).await;
+    manager.close_thread_if_idle(&session_id, &session).await;
 }
 
 /// 将协议 envelope 序列化为 WebSocket 文本帧。

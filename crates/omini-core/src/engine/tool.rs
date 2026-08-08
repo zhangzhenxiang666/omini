@@ -89,8 +89,8 @@ impl ToolExecutor {
             let pause_id = self
                 .runtime_context
                 .as_ref()
-                .filter(|runtime| runtime.session_type == "subagent")
-                .map(|runtime| format!("{}:{}", runtime.session_id, tool_use.id))
+                .filter(|runtime| runtime.thread_type == "subagent")
+                .map(|runtime| format!("{}:{}", runtime.thread_id, tool_use.id))
                 .unwrap_or_else(|| tool_use.id.clone());
 
             let context = ToolExecutionContext {

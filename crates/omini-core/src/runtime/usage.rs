@@ -1,15 +1,15 @@
 use super::*;
 
 pub(super) async fn record_total_usage_and_notify(
-    session_id: &str,
+    thread_id: &str,
     usage: Usage,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
     usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
 ) {
     let _ = persistence_tx
-        .send(RuntimePersistenceEvent::RecordSessionTotalUsage {
-            session_id: session_id.to_string(),
+        .send(RuntimePersistenceEvent::RecordThreadTotalUsage {
+            thread_id: thread_id.to_string(),
             usage,
         })
         .await;

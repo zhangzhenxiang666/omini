@@ -3,7 +3,7 @@ use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
 use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;
 use omini_config::Settings;
-use omini_config::project::{ProjectDir, SessionDir};
+use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::events::{
     ActiveProfile, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
     ToolPauseResponse, UserInputPreview,
@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -163,11 +163,12 @@ pub struct ToolExecutionContext {
 
 #[derive(Clone)]
 pub struct ToolRuntimeContext {
-    pub session_id: String,
+    pub thread_id: String,
     pub run_id: Option<String>,
-    pub session_type: String,
+    pub thread_type: String,
     pub agent_label: Option<String>,
-    pub session_dir: SessionDir,
+    pub thread_dir: ThreadDir,
+    pub llm_context_version: Arc<AtomicI64>,
     pub subagent_registry: Arc<AgentRegistry>,
     pub skill_registry: Arc<SkillRegistry>,
     pub subagent_runner: Option<Arc<RuntimeSubagentRunner>>,
@@ -177,11 +178,15 @@ pub struct ToolRuntimeContext {
 impl std::fmt::Debug for ToolRuntimeContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolRuntimeContext")
-            .field("session_id", &self.session_id)
+            .field("thread_id", &self.thread_id)
             .field("run_id", &self.run_id)
-            .field("session_type", &self.session_type)
+            .field("thread_type", &self.thread_type)
             .field("agent_label", &self.agent_label)
-            .field("session_dir", &self.session_dir)
+            .field("thread_dir", &self.thread_dir)
+            .field(
+                "llm_context_version",
+                &self.llm_context_version.load(Ordering::Relaxed),
+            )
             .field("subagent_registry", &self.subagent_registry)
             .field("skill_registry", &self.skill_registry)
             .field("project", &self.project)
@@ -289,7 +294,7 @@ impl ToolExecutionContext {
             source_session_id: self
                 .runtime
                 .as_ref()
-                .map(|runtime| runtime.session_id.clone()),
+                .map(|runtime| runtime.thread_id.clone()),
             source_agent_label: self
                 .runtime
                 .as_ref()
@@ -338,7 +343,7 @@ impl ToolExecutionContext {
             source_session_id: self
                 .runtime
                 .as_ref()
-                .map(|runtime| runtime.session_id.clone()),
+                .map(|runtime| runtime.thread_id.clone()),
             source_agent_label: self
                 .runtime
                 .as_ref()
@@ -399,7 +404,7 @@ fn normalize_path_field(raw_input: &mut Value, field: &str, cwd: &Path, default_
                 }
                 return;
             }
-            *path = resolve_session_path(cwd, raw).display().to_string();
+            *path = resolve_thread_path(cwd, raw).display().to_string();
         }
         Some(Value::Null) if default_to_cwd => {
             input.insert(field.to_string(), Value::String(cwd.display().to_string()));
@@ -411,7 +416,7 @@ fn normalize_path_field(raw_input: &mut Value, field: &str, cwd: &Path, default_
     }
 }
 
-fn resolve_session_path(cwd: &Path, raw: &str) -> PathBuf {
+fn resolve_thread_path(cwd: &Path, raw: &str) -> PathBuf {
     let path = Path::new(raw);
     if path.is_absolute() {
         path.to_path_buf()

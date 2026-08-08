@@ -4,7 +4,7 @@ use crate::mcp::McpManager;
 use crate::subagents::RuntimeSubagentRunner;
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
-use omini_config::project::{ProjectDir, SessionDir};
+use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::display::DisplayMessage;
 use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_domain::message::Message;
@@ -14,7 +14,7 @@ use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::sync::Arc;
 use std::sync::RwLock;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicI64};
 use tokio::sync::{Mutex, mpsc};
 
 pub(crate) struct RuntimeCapabilityHandles {
@@ -40,9 +40,10 @@ pub struct AgentRuntimeChannels {
 pub struct AgentRuntimeDeps {
     pub settings: Settings,
     pub project: ProjectDir,
-    pub session_id: String,
-    pub session_dir: SessionDir,
+    pub thread_id: String,
+    pub thread_dir: ThreadDir,
     pub messages: Vec<Message>,
+    pub llm_context_version: i64,
     pub usage: SessionUsageSnapshot,
     pub active_profile: ActiveProfile,
 }
@@ -51,7 +52,7 @@ pub struct AgentRuntimeDeps {
 pub(super) enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
-    /// 启动前将最新 runtime 消息写入 JSONL，将 UI-only display 消息写入 SQLite/UI 历史。
+    /// 启动前将最新 runtime 消息写入 LLM 上下文，将 UI-only display 消息写入 UI 历史。
     SplitDisplayMessage { display_message: DisplayMessage },
 }
 
@@ -70,15 +71,10 @@ impl RunStart {
 /// 一次 `ServerToRuntimeEvent::SendMessage` 可能触发多轮 LLM 调用和工具执行，
 /// 直到 LLM 自然结束或达到最大轮次。
 ///
-/// 自身**不负责**创建会话：调用方（`AgentCoreSession::spawn_for_session_with_active_profile`）
-/// 必须传入一个已存在的 `session_id` 与 `session_dir`，即 server 端已经下好 SQLite 行、建好
-/// 目录之后的句柄。runtime 内部不再生成 session_id，也不再写入 title —— 这些都是 server
-/// 编排层在 `SessionManager` 中做的。
+/// 自身不负责创建 thread；调用方必须传入 server 已经持久化的 thread 与目录句柄。
 pub struct AgentRuntime {
-    /// 当前会话 ID，由 server 在 spawn 时提供。
-    pub(crate) session_id: String,
-    /// 与 `session_id` 对应的会话目录句柄。
-    pub(crate) session_dir: SessionDir,
+    pub(crate) thread_id: String,
+    pub(crate) thread_dir: ThreadDir,
     /// 向 server/facade 发送 runtime 事件。
     pub(super) event_tx: mpsc::Sender<RuntimeToServerEvent>,
     /// 向外部 server 转发展示/SQLite 级持久化事件。
@@ -91,6 +87,7 @@ pub struct AgentRuntime {
     pub(crate) project: ProjectDir,
     /// 运行时自主维护的对话历史。
     pub(crate) messages: Vec<Message>,
+    pub(crate) llm_context_version: Arc<AtomicI64>,
     /// LLM 客户端。
     pub(super) llm_client: LlmClient,
     /// 查询引擎。
@@ -109,8 +106,8 @@ pub struct AgentRuntime {
     pub(super) cancelled: Arc<AtomicBool>,
     /// 当前活跃 profile，供 runtime 主循环和运行中事件处理器共享读取。
     pub(crate) active_profile: Arc<RwLock<ActiveProfile>>,
-    /// 当前 session 的 usage 快照；SQLite 落库由 server 处理。
-    pub(super) session_usage: Arc<Mutex<SessionUsageSnapshot>>,
+    /// 当前 thread 的 usage 快照；SQLite 落库由 server 处理。
+    pub(super) thread_usage: Arc<Mutex<SessionUsageSnapshot>>,
 }
 
 impl AgentRuntime {
@@ -137,9 +134,10 @@ impl AgentRuntime {
         let AgentRuntimeDeps {
             mut settings,
             project,
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             messages,
+            llm_context_version,
             usage,
             active_profile,
         } = deps;
@@ -190,14 +188,15 @@ impl AgentRuntime {
         }
 
         Self {
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             event_tx,
             persistence_tx,
             request_rx,
             settings,
             project,
             messages,
+            llm_context_version: Arc::new(AtomicI64::new(llm_context_version)),
             cancelled: Arc::new(AtomicBool::new(false)),
             llm_client,
             tool_registry,
@@ -207,7 +206,7 @@ impl AgentRuntime {
             capabilities,
             query_engine: QueryEngine::new(permission_engine),
             active_profile: Arc::new(RwLock::new(active_profile)),
-            session_usage: Arc::new(Mutex::new(usage)),
+            thread_usage: Arc::new(Mutex::new(usage)),
         }
     }
 
@@ -235,7 +234,7 @@ mod tests {
     use crate::runtime::history;
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
-    use omini_config::project::{ProjectsDir, SessionDir};
+    use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{ModelEntry, ModelTiers, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::ProviderEndpointKind;
     use omini_domain::display::{HistoryItem, UserDraft};
@@ -338,29 +337,37 @@ mod tests {
         events
     }
 
-    /// 为测试在 project 下建一个 session,并把 session_id / session_dir 返回出来。
+    /// 这些测试会同步启动 run，但只验证 query 前的 runtime 副作用，不应访问真实 provider。
+    /// `max_turns = 0` 会执行一次 finalization turn，不能再用作无请求的测试短路。
+    fn cancel_next_run(runtime: &AgentRuntime) {
+        runtime
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 为测试在 project 下建一个 thread，并返回其 id 与目录。
     ///
     /// 新架构下 `AgentRuntime` 必须依赖一个已存在的 session,不再自己生成 UUID。
     /// 测试中用这个 helper 模拟 server 的预创建行为,然后把结果传给 `AgentRuntime::new`。
-    fn create_test_session(project: &ProjectDir) -> (String, SessionDir) {
-        let session_id = Uuid::new_v4().to_string();
-        let session_dir = project
-            .create_session(&session_id)
-            .expect("test session directory should be created");
-        (session_id, session_dir)
+    fn create_test_thread(project: &ProjectDir) -> (String, ThreadDir) {
+        let thread_id = Uuid::new_v4().to_string();
+        let thread_dir = project
+            .create_thread(&thread_id)
+            .expect("test thread directory should be created");
+        (thread_id, thread_dir)
     }
 
     /// 把 `AgentRuntime::new` 的样板参数(channel 等)收口,只暴露 `settings` / `project`。
     ///
     /// 用法示例:
     /// ```ignore
-    /// let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+    /// let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
     /// ```
-    fn runtime_for_session(
+    fn runtime_for_thread(
         settings: Settings,
         project: ProjectDir,
     ) -> (AgentRuntime, mpsc::Receiver<RuntimeToServerEvent>) {
-        let (session_id, session_dir) = create_test_session(&project);
+        let (thread_id, thread_dir) = create_test_thread(&project);
         let (event_tx, event_rx) = mpsc::channel(32);
         let (_request_tx, request_rx) = mpsc::channel(1);
         let channels = AgentRuntimeChannels {
@@ -371,9 +378,10 @@ mod tests {
         let deps = AgentRuntimeDeps {
             settings,
             project,
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             messages: Vec::new(),
+            llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
         };
@@ -381,9 +389,9 @@ mod tests {
         (runtime, event_rx)
     }
 
-    /// 和 `runtime_for_session` 类似,但额外把 `persistence_rx` 暴露给测试,
+    /// 和 `runtime_for_thread` 类似,但额外把 `persistence_rx` 暴露给测试,
     /// 适用于需要断言 `RuntimePersistenceEvent` 的场景。
-    fn runtime_for_session_with_persistence(
+    fn runtime_for_thread_with_persistence(
         settings: Settings,
         project: ProjectDir,
     ) -> (
@@ -391,7 +399,7 @@ mod tests {
         mpsc::Receiver<RuntimeToServerEvent>,
         mpsc::Receiver<RuntimePersistenceEvent>,
     ) {
-        let (session_id, session_dir) = create_test_session(&project);
+        let (thread_id, thread_dir) = create_test_thread(&project);
         let (event_tx, event_rx) = mpsc::channel(32);
         let (persistence_tx, persistence_rx) = test_persistence_channel();
         let (_request_tx, request_rx) = mpsc::channel(1);
@@ -403,9 +411,10 @@ mod tests {
         let deps = AgentRuntimeDeps {
             settings,
             project,
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             messages: Vec::new(),
+            llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
         };
@@ -459,12 +468,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
-        let mut settings = settings_for_cwd(&config, &cwd);
-        settings.max_turns = Some(0);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+        let settings = settings_for_cwd(&config, &cwd);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
         drain_events(&mut event_rx);
+        cancel_next_run(&runtime);
 
         runtime
             .submit_user_message(
@@ -501,10 +510,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
 
         assert_eq!(runtime.active_profile(), ActiveProfile::Main);
 
@@ -540,11 +549,11 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         // 本测试需要把 event_tx 单独拿出来调 `active_run::toggle_active_profile`。
-        let (session_id, session_dir) = create_test_session(&project);
+        let (thread_id, thread_dir) = create_test_thread(&project);
         let (event_tx, mut event_rx) = mpsc::channel(16);
         let (_request_tx, request_rx) = mpsc::channel(1);
         let channels = AgentRuntimeChannels {
@@ -555,9 +564,10 @@ mod tests {
         let deps = AgentRuntimeDeps {
             settings,
             project,
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             messages: Vec::new(),
+            llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
         };
@@ -622,10 +632,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
+        let (mut runtime, _event_rx) = runtime_for_thread(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -661,10 +671,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
+        let (mut runtime, _event_rx) = runtime_for_thread(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -718,10 +728,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, _event_rx) = runtime_for_session(settings, project.clone());
+        let (mut runtime, _event_rx) = runtime_for_thread(settings, project.clone());
 
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
@@ -760,14 +770,18 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (mut runtime, _event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project.clone());
+            runtime_for_thread_with_persistence(settings, project.clone());
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.session_id.clone();
+        let session_id = runtime.thread_id.clone();
+        let expected_model_ref = format!(
+            "{}/{}",
+            runtime.settings.active_provider, runtime.settings.model
+        );
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -785,12 +799,14 @@ mod tests {
         let mut saw_plan_event = false;
         while let Ok(event) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertPlanMessage {
-                session_id: event_session_id,
+                thread_id: event_session_id,
                 plan: event_plan,
+                model_ref,
             } = event
             {
                 assert_eq!(event_session_id, session_id);
                 assert_eq!(event_plan.markdown, plan.markdown);
+                assert_eq!(model_ref, expected_model_ref);
                 saw_plan_event = true;
             }
         }
@@ -806,15 +822,14 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (mut runtime, _event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project);
+            runtime_for_thread_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.session_id.clone();
-        let session_dir = runtime.session_dir.clone();
+        let session_id = runtime.thread_id.clone();
         runtime.set_active_profile(ActiveProfile::Plan);
 
         let original = Message::new(
@@ -826,37 +841,47 @@ mod tests {
         );
 
         history::persist_one(
-            &session_dir,
             &session_id,
-            session_dir.path().join("blocks").as_path(),
             original.clone(),
             ActiveProfile::Plan,
+            "test/model",
             &runtime.persistence_tx,
         )
         .await;
 
         let mut normal_event: Option<RuntimePersistenceEvent> = None;
         let mut saw_plan_event = false;
+        let mut saw_llm_message = false;
         while let Ok(event) = persistence_rx.try_recv() {
             match event {
                 RuntimePersistenceEvent::InsertMessage {
-                    role, kind, blocks, ..
+                    role,
+                    model_ref,
+                    kind,
+                    blocks,
+                    ..
                 } if role == "assistant" && kind == "normal" => {
+                    assert_eq!(model_ref.as_deref(), Some("test/model"));
                     assert!(
                         normal_event.is_none(),
                         "exactly one InsertMessage(kind=normal) should arrive"
                     );
                     normal_event = Some(RuntimePersistenceEvent::InsertMessage {
-                        session_id: session_id.clone(),
+                        thread_id: session_id.clone(),
                         role,
+                        model_ref: Some("test/model".to_string()),
                         blocks,
                         kind,
                         created_at: chrono::Utc::now(),
-                        blocks_dir: std::path::PathBuf::new(),
                     });
                 }
                 RuntimePersistenceEvent::InsertPlanMessage { .. } => {
                     saw_plan_event = true;
+                }
+                RuntimePersistenceEvent::AppendLlmMessage { message, .. }
+                    if message == original =>
+                {
+                    saw_llm_message = true;
                 }
                 _ => {}
             }
@@ -879,10 +904,7 @@ mod tests {
         assert_eq!(text_block.text, "Intro\nOutro");
         assert!(!text_block.text.contains("<proposed_plan>"));
 
-        let history_messages = session_dir
-            .load_history()
-            .expect("failed to load persisted history");
-        assert_eq!(history_messages, vec![original]);
+        assert!(saw_llm_message);
     }
 
     #[tokio::test]
@@ -894,15 +916,14 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (mut runtime, _event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project);
+            runtime_for_thread_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.session_id.clone();
-        let session_dir = runtime.session_dir.clone();
+        let session_id = runtime.thread_id.clone();
 
         let original = Message::new(
             Role::Assistant,
@@ -913,11 +934,10 @@ mod tests {
         );
 
         history::persist_one(
-            &session_dir,
             &session_id,
-            session_dir.path().join("blocks").as_path(),
             original.clone(),
             ActiveProfile::Main,
+            "test/model",
             &runtime.persistence_tx,
         )
         .await;
@@ -959,12 +979,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         // 测试需要同时拥有 `persistence_tx` 副本(传给 `persist_compact_summary_event`)
         // 和 `runtime` 内部的那一份,不能直接用 helper。
-        let (session_id, session_dir) = create_test_session(&project);
+        let (thread_id, thread_dir) = create_test_thread(&project);
         let (event_tx, _event_rx) = mpsc::channel(16);
         let (persistence_tx, mut persistence_rx) = test_persistence_channel();
         let (_request_tx, request_rx) = mpsc::channel(1);
@@ -976,16 +996,17 @@ mod tests {
         let deps = AgentRuntimeDeps {
             settings,
             project,
-            session_id,
-            session_dir,
+            thread_id,
+            thread_dir,
             messages: Vec::new(),
+            llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
         };
         let mut runtime = AgentRuntime::new(channels, deps);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.session_id.clone();
+        let session_id = runtime.thread_id.clone();
         let event = CompactSummaryFinishedEvent {
             trigger: CompactTrigger::Manual,
             summary: "# Summary\n\n- Keep this.".to_string(),
@@ -994,17 +1015,19 @@ mod tests {
             agent_label: None,
         };
 
-        persist_compact_summary_event(&session_id, &event, &persistence_tx).await;
+        persist_compact_summary_event(&session_id, &event, "test/model", &persistence_tx).await;
 
         let mut saw_summary_event = false;
         while let Ok(event_out) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertCompactSummaryMessage {
-                session_id: event_session_id,
+                thread_id: event_session_id,
                 summary,
+                model_ref,
             } = event_out
             {
                 assert_eq!(event_session_id, session_id);
                 assert_eq!(summary.markdown, event.summary);
+                assert_eq!(model_ref, "test/model");
                 saw_summary_event = true;
             }
         }
@@ -1020,11 +1043,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
-        let mut settings = settings_for_cwd(&config, &cwd);
-        settings.max_turns = Some(0);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project.clone());
+        let settings = settings_for_cwd(&config, &cwd);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project.clone());
 
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -1032,6 +1054,7 @@ mod tests {
                 "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
             )],
         )];
+        cancel_next_run(&runtime);
 
         runtime
             .resolve_plan_approval(
@@ -1077,11 +1100,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
-        let mut settings = settings_for_cwd(&config, &cwd);
-        settings.max_turns = Some(0);
-        let (mut runtime, _event_rx) = runtime_for_session(settings, project);
+        let settings = settings_for_cwd(&config, &cwd);
+        let (mut runtime, _event_rx) = runtime_for_thread(settings, project);
 
         runtime.messages = vec![Message::new(
             Role::Assistant,
@@ -1089,6 +1111,7 @@ mod tests {
                 "<proposed_plan>\n# Approved plan\n\n- Execute it.\n</proposed_plan>".to_string(),
             )],
         )];
+        cancel_next_run(&runtime);
 
         runtime
             .resolve_plan_approval(
@@ -1111,10 +1134,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
 
         runtime
             .resolve_plan_approval("plan_1", PlanApprovalAction::ContinueDiscussing)
@@ -1133,7 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn approve_in_new_session_only_resolves_drawer_without_changing_state() {
-        // Server 路由层在收到 ApproveInNewSession 时会自行 fork 新 RuntimeSession,
+        // Server 路由层在收到 ApproveInNewSession 时会自行 fork 新 ThreadRuntime，
         // core 收到此 action 后只能关闭审批抽屉,不能改 active_profile、注入 plan
         // 消息或启动 run(否则会和 server 的 fork 路径重复执行)。
         ensure_test_persistence().await;
@@ -1143,10 +1166,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
 
         let original_profile = runtime.active_profile();
         let original_message_count = runtime.messages.len();
@@ -1190,97 +1213,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_for_session_with_active_profile_loads_history_from_session_dir() {
-        ensure_test_persistence().await;
-
-        let root = unique_temp_root("spawn-loads-history");
-        let cwd = root.join("workspace");
-        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
-        let config = test_user_config();
-        let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
-            .expect("failed to create project dir");
-        let settings = settings_for_cwd(&config, &cwd);
-        let (session_id, session_dir) = create_test_session(&project);
-
-        // 写一条 JSONL 到 session_dir,模拟 server 在 spawn runtime 之前已加载好的
-        // 持久化历史。core 在新架构下不再自己读 jsonl,而是接收 server 传入的
-        // `Vec<Message>`;但仓库内 helper `session_dir.load_history()` 正是 server
-        // 用来读取的入口,验证它返回非空,作为回归 baseline。
-        let seed = Message::from_user_text("seed history".to_string());
-        session_dir
-            .append_history(&seed)
-            .expect("seed jsonl should be written");
-        let loaded = session_dir
-            .load_history()
-            .expect("history should load from session_dir");
-        assert_eq!(loaded, vec![seed.clone()]);
-
-        let messages = loaded;
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, _persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let channels = AgentRuntimeChannels {
-            event_tx,
-            persistence_tx,
-            request_rx,
-        };
-        let deps = AgentRuntimeDeps {
-            settings,
-            project,
-            session_id,
-            session_dir,
-            messages,
-            usage: SessionUsageSnapshot::default(),
-            active_profile: ActiveProfile::Main,
-        };
-        let runtime = AgentRuntime::new(channels, deps);
-        assert_eq!(runtime.messages, vec![seed]);
-    }
-
-    #[tokio::test]
-    async fn spawn_for_session_with_active_profile_handles_missing_history() {
-        ensure_test_persistence().await;
-
-        let root = unique_temp_root("spawn-missing-history");
-        let cwd = root.join("workspace");
-        std::fs::create_dir_all(&cwd).expect("failed to create cwd");
-        let config = test_user_config();
-        let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
-            .expect("failed to create project dir");
-        let settings = settings_for_cwd(&config, &cwd);
-        let (session_id, session_dir) = create_test_session(&project);
-
-        // session_dir 存在但 jsonl 不存在时,`load_history()` 必须退化为空,
-        // 避免 server 在调用 spawn 时炸出 IO 错误。
-        let loaded = session_dir
-            .load_history()
-            .expect("missing history should yield empty messages");
-        assert!(loaded.is_empty());
-
-        let (event_tx, _event_rx) = mpsc::channel(16);
-        let (persistence_tx, _persistence_rx) = test_persistence_channel();
-        let (_request_tx, request_rx) = mpsc::channel(1);
-        let channels = AgentRuntimeChannels {
-            event_tx,
-            persistence_tx,
-            request_rx,
-        };
-        let deps = AgentRuntimeDeps {
-            settings,
-            project,
-            session_id,
-            session_dir,
-            messages: loaded,
-            usage: SessionUsageSnapshot::default(),
-            active_profile: ActiveProfile::Main,
-        };
-        let runtime = AgentRuntime::new(channels, deps);
-        assert!(runtime.messages.is_empty());
-    }
-
-    #[tokio::test]
     async fn reload_subagent_registry_rebuilds_runtime_capabilities_and_prompt() {
         ensure_test_persistence().await;
 
@@ -1289,10 +1221,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, _event_rx) = runtime_for_session(settings, project);
+        let (mut runtime, _event_rx) = runtime_for_thread(settings, project);
 
         assert!(
             !runtime
@@ -1346,10 +1278,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (mut runtime, mut event_rx) = runtime_for_session(settings, project);
+        let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
         runtime.set_active_profile(ActiveProfile::Auto);
         drain_events(&mut event_rx);
 
@@ -1402,10 +1334,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
-        let (runtime, mut event_rx) = runtime_for_session(settings, project);
+        let (runtime, mut event_rx) = runtime_for_thread(settings, project);
         drain_events(&mut event_rx);
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
@@ -1448,12 +1380,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (runtime, mut event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project);
-        let session_id = runtime.session_id.clone();
+            runtime_for_thread_with_persistence(settings, project);
+        let session_id = runtime.thread_id.clone();
         drain_events(&mut event_rx);
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
@@ -1493,7 +1425,7 @@ mod tests {
         let mut saw_persistence_event = false;
         while let Ok(event) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertMessage {
-                session_id: event_session_id,
+                thread_id: event_session_id,
                 role,
                 blocks,
                 ..
@@ -1512,7 +1444,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn split_tool_result_history_writes_image_only_to_jsonl() {
+    async fn split_tool_result_history_writes_image_only_to_llm_context() {
         ensure_test_persistence().await;
 
         let root = unique_temp_root("split-tool-result-history");
@@ -1520,13 +1452,12 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (runtime, _event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project);
-        let session_id = runtime.session_id.clone();
-        let session_dir = runtime.session_dir.clone();
+            runtime_for_thread_with_persistence(settings, project);
+        let session_id = runtime.thread_id.clone();
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
@@ -1572,26 +1503,29 @@ mod tests {
         drop(engine_tx);
         processor.await.expect("processor should finish");
 
-        assert_eq!(session_dir.load_history().unwrap(), vec![llm_msg]);
-
         let mut saw_display_message = false;
+        let mut saw_llm_message = false;
         while let Ok(event) = persistence_rx.try_recv() {
-            if let RuntimePersistenceEvent::InsertMessage {
-                session_id: event_session_id,
-                blocks,
-                ..
-            } = event
-                && event_session_id == session_id
-                && blocks == display_msg.content
-            {
-                assert!(
-                    !blocks
-                        .iter()
-                        .any(|block| matches!(block, ContentBlock::Image(_)))
-                );
-                saw_display_message = true;
+            match event {
+                RuntimePersistenceEvent::AppendLlmMessage {
+                    thread_id, message, ..
+                } if thread_id == session_id && message == llm_msg => {
+                    saw_llm_message = true;
+                }
+                RuntimePersistenceEvent::InsertMessage {
+                    thread_id, blocks, ..
+                } if thread_id == session_id && blocks == display_msg.content => {
+                    assert!(
+                        !blocks
+                            .iter()
+                            .any(|block| matches!(block, ContentBlock::Image(_)))
+                    );
+                    saw_display_message = true;
+                }
+                _ => {}
             }
         }
+        assert!(saw_llm_message);
         assert!(saw_display_message);
     }
 
@@ -1604,14 +1538,14 @@ mod tests {
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
         let project = ProjectsDir::new(&root)
-            .for_cwd(&cwd, &config)
+            .for_storage_key("test-project", &config)
             .expect("failed to create project dir");
         let settings = settings_for_cwd(&config, &cwd);
         let (mut runtime, mut event_rx, mut persistence_rx) =
-            runtime_for_session_with_persistence(settings, project);
+            runtime_for_thread_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("session body".to_string())];
-        let parent_session_id = runtime.session_id.clone();
+        let parent_session_id = runtime.thread_id.clone();
         drain_events(&mut event_rx);
         while persistence_rx.try_recv().is_ok() {}
 
@@ -1638,7 +1572,7 @@ mod tests {
             .expect("usage event should send");
         engine_tx
             .send(EngineToRuntimeEvent::SubagentUsageRecorded {
-                session_id: subagent_session_id.clone(),
+                thread_id: subagent_session_id.clone(),
                 usage: Usage {
                     prompt_tokens: 7,
                     completion_tokens: 8,
@@ -1655,22 +1589,22 @@ mod tests {
         let mut saw_parent_subagent_usage = false;
         while let Ok(event) = persistence_rx.try_recv() {
             match event {
-                RuntimePersistenceEvent::RecordSessionUsage { session_id, usage }
-                    if session_id == parent_session_id =>
+                RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage }
+                    if thread_id == parent_session_id =>
                 {
                     assert_eq!(usage.total_tokens(), 15);
                     assert_eq!(usage.cached_tokens, 3);
                     saw_parent_usage = true;
                 }
-                RuntimePersistenceEvent::RecordSessionUsage { session_id, usage }
-                    if session_id == subagent_session_id =>
+                RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage }
+                    if thread_id == subagent_session_id =>
                 {
                     assert_eq!(usage.total_tokens(), 15);
                     assert_eq!(usage.cached_tokens, 4);
                     saw_subagent_usage = true;
                 }
-                RuntimePersistenceEvent::RecordParentSubagentUsage { session_id, usage }
-                    if session_id == parent_session_id =>
+                RuntimePersistenceEvent::RecordParentSubagentUsage { thread_id, usage }
+                    if thread_id == parent_session_id =>
                 {
                     assert_eq!(usage.total_tokens(), 15);
                     assert_eq!(usage.cached_tokens, 4);

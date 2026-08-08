@@ -2,16 +2,16 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     event::bridge::{fallback_session_title_from_user_input, session_title_changed_protocol_event},
-    session::SessionRuntime,
+    thread::ThreadRuntime,
 };
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 use tracing::Instrument;
 
-impl SessionRuntime {
-    pub async fn rename_session(&self, title: String) -> Result<(), CoreError> {
+impl ThreadRuntime {
+    pub async fn rename_thread(&self, title: String) -> Result<(), CoreError> {
         self.db
-            .update_session_title(&self.session_id, &title)
+            .update_thread_title(&self.thread_id, &title)
             .await
             .map_err(|error| {
                 CoreError::persistence("failed to rename session", error.to_string())
@@ -33,7 +33,7 @@ impl SessionRuntime {
         };
         let updated = self
             .db
-            .set_initial_session_title(&self.session_id, &title)
+            .set_initial_thread_title(&self.thread_id, &title)
             .await
             .map_err(|error| {
                 CoreError::persistence("failed to set initial session title", error.to_string())
@@ -57,41 +57,41 @@ impl SessionRuntime {
         user_input: String,
     ) {
         let db = Arc::clone(&self.db);
-        let session_id = self.session_id.clone();
-        let span_session_id = session_id.clone();
+        let thread_id = self.thread_id.clone();
+        let span_thread_id = thread_id.clone();
         let inbox_tx = self.server_event_inbox_tx.clone();
         tokio::spawn(
             async move {
-                let log_session_id = &session_id;
+                let log_thread_id = &thread_id;
                 // 1. 拉一次最新 settings，再调 LLM，带超时。
-                let settings = match manager.project(&project_id).map_err(|err| {
-                    CoreError::new(format!("failed to lookup project {project_id} for background settings load: {err:?}"
-                    ))}
-                ).and_then(|project|{
-                    project.fresh_settings_with_state()
-
-                })
-                {
+                let project = match manager.get_or_load_project(&project_id).await {
+                    Ok(project) => project,
+                    Err(error) => {
+                        tracing::warn!(thread_id = %log_thread_id, ?error, "failed to load project");
+                        return;
+                    }
+                };
+                let settings = match project.fresh_settings_with_state() {
                     Ok(settings) => settings,
                     Err(error) => {
-                        tracing::warn!(session_id = %log_session_id, %error, "failed to load fresh settings");
+                        tracing::warn!(thread_id = %log_thread_id, %error, "failed to load fresh settings");
                         return;
                     }
                 };
                 let result = tokio::time::timeout(
                     Duration::from_secs(15),
-                    omini_core::generate_session_title(&settings, &user_input),
+                    omini_core::generate_thread_title(&settings, &user_input),
                 )
                 .await;
 
                 let title = match result {
                     Ok(Ok(title)) => title,
                     Ok(Err(error)) => {
-                        tracing::warn!(session_id = %log_session_id, %error, "background title generation failed");
+                        tracing::warn!(thread_id = %log_thread_id, %error, "background title generation failed");
                         return;
                     }
                     Err(_) => {
-                        tracing::warn!(session_id = %log_session_id, "background title generation timed out");
+                        tracing::warn!(thread_id = %log_thread_id, "background title generation timed out");
                         return;
                     }
                 };
@@ -100,34 +100,34 @@ impl SessionRuntime {
                 //      a) 用户在 LLM 跑完前 /rename → 当前 title 已变 → 跳过;
                 //      b) fork 派生 session 的预设 title (非空) 仍存在 → 跳过;
                 //      c) 兜底没被改 → 写入 LLM 生成版本并广播。
-                let current = match db.get_session(&session_id).await {
+                let current = match db.get_thread(&thread_id).await {
                     Ok(Some(row)) => row.title,
                     Ok(None) => {
-                        tracing::warn!(session_id = %log_session_id, "session disappeared during background title generation");
+                        tracing::warn!(thread_id = %log_thread_id, "thread disappeared during background title generation");
                         return;
                     }
                     Err(error) => {
-                        tracing::warn!(session_id = %log_session_id, %error, "background title recheck failed");
+                        tracing::warn!(thread_id = %log_thread_id, %error, "background title recheck failed");
                         return;
                     }
                 };
                 if current.as_deref() != Some(fallback_title.as_str()) {
                     tracing::debug!(
-                        session_id = %log_session_id,
+                        thread_id = %log_thread_id,
                         current_title = ?current,
                         "session title changed during background generation, skipping update"
                     );
                     return;
                 }
-                if let Err(error) = db.update_session_title(&session_id, &title).await {
-                    tracing::warn!(session_id = %log_session_id, %error, "background title write failed");
+                if let Err(error) = db.update_thread_title(&thread_id, &title).await {
+                    tracing::warn!(thread_id = %log_thread_id, %error, "background title write failed");
                     return;
                 }
                 let _ = inbox_tx.send(session_title_changed_protocol_event(Some(title)));
             }
             .instrument(tracing::debug_span!(
-                "session",
-                session_id = %span_session_id,
+                "thread",
+                thread_id = %span_thread_id,
                 task_kind = "background_title_generation"
             )),
         );

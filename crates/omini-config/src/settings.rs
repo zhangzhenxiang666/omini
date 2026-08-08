@@ -909,10 +909,10 @@ impl OminiRoot {
 
     pub fn init_project(
         &self,
-        cwd: &Path,
+        storage_key: &str,
         config: &UserConfig,
     ) -> Result<crate::project::ProjectDir, ConfigError> {
-        self.projects_dir().for_cwd(cwd, config)
+        self.projects_dir().for_storage_key(storage_key, config)
     }
 }
 

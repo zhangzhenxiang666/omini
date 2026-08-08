@@ -1,23 +1,38 @@
 use crate::store as store_model;
+use crate::store;
 use omini_config::Settings;
+use omini_config::project::ThreadDir;
 use omini_core::CoreError;
 use omini_domain as domain;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::path::Path;
 
+#[cfg(test)]
 pub fn submit_run_command_from_protocol_request(
     request: client_proto::SubmitRunRequest,
-) -> runtime_contract::session::SubmitRunCommand {
-    runtime_contract::session::SubmitRunCommand {
-        draft: user_input_from_protocol(request.input),
+) -> runtime_contract::thread::SubmitRunCommand {
+    runtime_contract::thread::SubmitRunCommand {
+        draft: user_input_from_protocol(request.input, None)
+            .expect("uploaded attachments require a thread directory"),
         client_echo_id: request.client_echo_id,
         mode: run_input_mode_from_protocol(request.mode),
     }
 }
 
+pub fn submit_run_command_from_protocol_request_for_thread(
+    request: client_proto::SubmitRunRequest,
+    thread_dir: &ThreadDir,
+) -> Result<runtime_contract::thread::SubmitRunCommand, CoreError> {
+    Ok(runtime_contract::thread::SubmitRunCommand {
+        draft: user_input_from_protocol(request.input, Some(thread_dir))?,
+        client_echo_id: request.client_echo_id,
+        mode: run_input_mode_from_protocol(request.mode),
+    })
+}
+
 pub fn run_submitted_response_from_runtime_result(
-    result: runtime_contract::session::RunSubmitted,
+    result: runtime_contract::thread::RunSubmitted,
 ) -> client_proto::RunSubmittedResponse {
     client_proto::RunSubmittedResponse {
         run_id: result.run_id,
@@ -25,7 +40,7 @@ pub fn run_submitted_response_from_runtime_result(
 }
 
 pub fn models_response_from_runtime_snapshot(
-    snapshot: runtime_contract::session::ModelsSnapshot,
+    snapshot: runtime_contract::thread::ModelsSnapshot,
 ) -> client_proto::ModelsResponse {
     client_proto::ModelsResponse {
         providers: snapshot.providers,
@@ -35,7 +50,7 @@ pub fn models_response_from_runtime_snapshot(
 }
 
 pub fn agents_response_from_runtime_snapshot(
-    snapshot: runtime_contract::session::AgentsSnapshot,
+    snapshot: runtime_contract::thread::AgentsSnapshot,
 ) -> client_proto::AgentsResponse {
     client_proto::AgentsResponse {
         records: snapshot
@@ -50,7 +65,7 @@ pub fn agents_response_from_runtime_snapshot(
 }
 
 pub fn skills_response_from_runtime_skill_summaries(
-    skills: Vec<runtime_contract::session::SkillSummarySnapshot>,
+    skills: Vec<runtime_contract::thread::SkillSummarySnapshot>,
 ) -> client_proto::SkillsResponse {
     client_proto::SkillsResponse {
         skills: skills
@@ -65,7 +80,7 @@ pub fn skills_response_from_runtime_skill_summaries(
 }
 
 pub fn skill_response_from_runtime_skill_detail(
-    skill: runtime_contract::session::SkillDetailSnapshot,
+    skill: runtime_contract::thread::SkillDetailSnapshot,
 ) -> client_proto::SkillResponse {
     client_proto::SkillResponse {
         skill: client_proto::SkillDetail {
@@ -80,7 +95,7 @@ pub fn skill_response_from_runtime_skill_detail(
 }
 
 pub fn session_runtime_skills_from_runtime_snapshot(
-    skills: Vec<runtime_contract::session::RuntimeSkillSnapshot>,
+    skills: Vec<runtime_contract::thread::RuntimeSkillSnapshot>,
 ) -> Vec<client_proto::SessionRuntimeSkill> {
     skills
         .into_iter()
@@ -99,8 +114,8 @@ pub fn session_runtime_skills_from_runtime_snapshot(
 
 pub fn set_model_command_from_protocol_request(
     request: client_proto::SetModelRequest,
-) -> runtime_contract::session::SetModelCommand {
-    runtime_contract::session::SetModelCommand {
+) -> runtime_contract::thread::SetModelCommand {
+    runtime_contract::thread::SetModelCommand {
         provider: request.provider,
         model: request.model,
         thinking_effort: request.thinking_effort,
@@ -109,16 +124,16 @@ pub fn set_model_command_from_protocol_request(
 
 pub fn set_thinking_effort_command_from_protocol_request(
     request: client_proto::SetThinkingEffortRequest,
-) -> runtime_contract::session::SetThinkingEffortCommand {
-    runtime_contract::session::SetThinkingEffortCommand {
+) -> runtime_contract::thread::SetThinkingEffortCommand {
+    runtime_contract::thread::SetThinkingEffortCommand {
         effort: request.effort,
     }
 }
 
 pub fn set_active_profile_command_from_protocol_request(
     request: client_proto::SetActiveProfileRequest,
-) -> runtime_contract::session::SetActiveProfileCommand {
-    runtime_contract::session::SetActiveProfileCommand {
+) -> runtime_contract::thread::SetActiveProfileCommand {
+    runtime_contract::thread::SetActiveProfileCommand {
         profile: request.profile,
     }
 }
@@ -126,8 +141,8 @@ pub fn set_active_profile_command_from_protocol_request(
 pub fn resolve_tool_pause_command_from_protocol_request(
     tool_use_id: String,
     request: client_proto::ResolveToolPauseRequest,
-) -> runtime_contract::session::ResolveToolPauseCommand {
-    runtime_contract::session::ResolveToolPauseCommand {
+) -> runtime_contract::thread::ResolveToolPauseCommand {
+    runtime_contract::thread::ResolveToolPauseCommand {
         tool_use_id,
         response: request.response,
     }
@@ -136,8 +151,8 @@ pub fn resolve_tool_pause_command_from_protocol_request(
 pub fn resolve_plan_command_from_protocol_request(
     plan_id: String,
     request: client_proto::ResolvePlanRequest,
-) -> runtime_contract::session::ResolvePlanCommand {
-    runtime_contract::session::ResolvePlanCommand {
+) -> runtime_contract::thread::ResolvePlanCommand {
+    runtime_contract::thread::ResolvePlanCommand {
         plan_id,
         action: request.action,
     }
@@ -145,15 +160,18 @@ pub fn resolve_plan_command_from_protocol_request(
 
 fn run_input_mode_from_protocol(
     mode: client_proto::RunInputMode,
-) -> runtime_contract::session::RunInputMode {
+) -> runtime_contract::thread::RunInputMode {
     match mode {
-        client_proto::RunInputMode::Submit => runtime_contract::session::RunInputMode::Submit,
-        client_proto::RunInputMode::Intervene => runtime_contract::session::RunInputMode::Intervene,
+        client_proto::RunInputMode::Submit => runtime_contract::thread::RunInputMode::Submit,
+        client_proto::RunInputMode::Intervene => runtime_contract::thread::RunInputMode::Intervene,
     }
 }
 
-fn user_input_from_protocol(input: client_proto::UserInput) -> domain::display::UserDraft {
-    domain::display::UserDraft {
+fn user_input_from_protocol(
+    input: client_proto::UserInput,
+    thread_dir: Option<&ThreadDir>,
+) -> Result<domain::display::UserDraft, CoreError> {
+    Ok(domain::display::UserDraft {
         text: input.text.clone(),
         mentions: input
             .context_refs
@@ -165,9 +183,12 @@ fn user_input_from_protocol(input: client_proto::UserInput) -> domain::display::
             .attachments
             .unwrap_or_default()
             .into_iter()
-            .filter_map(image_from_protocol)
+            .map(|attachment| image_from_protocol(attachment, thread_dir))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect(),
-    }
+    })
 }
 
 fn mention_from_protocol(
@@ -208,7 +229,8 @@ fn find_reference_span(text: &str, label: &str) -> Option<(usize, usize)> {
 
 fn image_from_protocol(
     attachment: client_proto::AttachmentRef,
-) -> Option<domain::display::DisplayImageAttachment> {
+    thread_dir: Option<&ThreadDir>,
+) -> Result<Option<domain::display::DisplayImageAttachment>, CoreError> {
     match attachment {
         client_proto::AttachmentRef::LocalPath { path, name, .. } => {
             let file_name = name.unwrap_or_else(|| {
@@ -218,15 +240,38 @@ fn image_from_protocol(
                     .unwrap_or_default()
                     .to_string()
             });
-            Some(domain::display::DisplayImageAttachment {
+            Ok(Some(domain::display::DisplayImageAttachment {
                 start_char: 0,
                 end_char: 0,
                 marker: String::new(),
                 source_path: path,
                 file_name,
-            })
+            }))
         }
-        client_proto::AttachmentRef::Uploaded { .. } => None,
+        client_proto::AttachmentRef::Uploaded {
+            attachment_id,
+            mime_type,
+            name,
+        } => {
+            let thread_dir = thread_dir.ok_or_else(|| {
+                CoreError::new("uploaded attachment cannot be resolved without a thread")
+            })?;
+            let path = store::asset_path(thread_dir, &attachment_id, &mime_type)
+                .map_err(|error| CoreError::persistence("invalid attachment", error.to_string()))?;
+            if !path.is_file() {
+                return Err(CoreError::new(format!(
+                    "uploaded attachment '{}' does not exist",
+                    attachment_id
+                )));
+            }
+            Ok(Some(domain::display::DisplayImageAttachment {
+                start_char: 0,
+                end_char: 0,
+                marker: String::new(),
+                source_path: path.display().to_string(),
+                file_name: name.unwrap_or(attachment_id),
+            }))
+        }
     }
 }
 
@@ -253,26 +298,26 @@ fn agent_record_snapshot_to_protocol(
 }
 
 fn runtime_skill_source_kind_to_protocol(
-    source_kind: runtime_contract::session::RuntimeSkillSourceKind,
+    source_kind: runtime_contract::thread::RuntimeSkillSourceKind,
 ) -> client_proto::SkillSourceKind {
     match source_kind {
-        runtime_contract::session::RuntimeSkillSourceKind::BuiltIn => {
+        runtime_contract::thread::RuntimeSkillSourceKind::BuiltIn => {
             client_proto::SkillSourceKind::BuiltIn
         }
-        runtime_contract::session::RuntimeSkillSourceKind::Project => {
+        runtime_contract::thread::RuntimeSkillSourceKind::Project => {
             client_proto::SkillSourceKind::Project
         }
-        runtime_contract::session::RuntimeSkillSourceKind::User => {
+        runtime_contract::thread::RuntimeSkillSourceKind::User => {
             client_proto::SkillSourceKind::User
         }
     }
 }
 
 fn runtime_capability_status_to_protocol(
-    status: runtime_contract::session::RuntimeCapabilityStatus,
+    status: runtime_contract::thread::RuntimeCapabilityStatus,
 ) -> client_proto::SessionRuntimeCapabilityStatus {
     match status {
-        runtime_contract::session::RuntimeCapabilityStatus::Available => {
+        runtime_contract::thread::RuntimeCapabilityStatus::Available => {
             client_proto::SessionRuntimeCapabilityStatus::Available
         }
     }
@@ -312,7 +357,7 @@ pub fn models_response_from_settings(settings: &Settings) -> client_proto::Model
 
 /// 将数据库会话记录压缩成协议层会话摘要。
 pub fn session_summary_from_store_record(
-    session: store_model::Session,
+    session: store_model::Thread,
 ) -> client_proto::SessionSummary {
     client_proto::SessionSummary {
         id: session.id,
@@ -624,7 +669,7 @@ mod tests {
 
         assert_eq!(
             command.mode,
-            runtime_contract::session::RunInputMode::Intervene
+            runtime_contract::thread::RunInputMode::Intervene
         );
         assert_eq!(command.client_echo_id.as_deref(), Some("echo-1"));
         assert_eq!(command.draft.text, "open @src/lib.rs");

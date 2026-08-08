@@ -18,7 +18,7 @@ pub async fn list_project_agents(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
 ) -> ApiResult<client_proto::AgentsResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project.list_agents().map(Json).map_err(core_error)
 }
 
@@ -30,7 +30,7 @@ pub async fn save_project_agent(
     Query(query): Query<AgentMutationQuery>,
     Json(request): Json<client_proto::SaveAgentRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .save_agent(request, query.target_session_id.as_deref())
         .await
@@ -45,7 +45,7 @@ pub async fn delete_project_agent(
     Path((project_id, agent_id)): Path<(String, String)>,
     Query(query): Query<AgentMutationQuery>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .delete_agent(&agent_id, query.target_session_id.as_deref())
         .await
@@ -59,7 +59,7 @@ pub async fn generate_project_agent(
     Path(project_id): Path<String>,
     Json(request): Json<client_proto::GenerateAgentRequest>,
 ) -> ApiResult<client_proto::GenerateAgentResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .generate_agent(request)
         .await
@@ -73,7 +73,7 @@ pub async fn list_session_agents(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, _session_id)): Path<(String, String)>,
 ) -> ApiResult<client_proto::AgentsResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project.list_agents().map(Json).map_err(core_error)
 }
 
@@ -84,7 +84,7 @@ pub async fn save_session_agent(
     Path((project_id, session_id)): Path<(String, String)>,
     Json(request): Json<client_proto::SaveAgentRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .save_agent(request, Some(&session_id))
         .await
@@ -98,7 +98,7 @@ pub async fn delete_session_agent(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, session_id, agent_id)): Path<(String, String, String)>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .delete_agent(&agent_id, Some(&session_id))
         .await
@@ -112,7 +112,7 @@ pub async fn generate_session_agent(
     Path((project_id, _session_id)): Path<(String, String)>,
     Json(request): Json<client_proto::GenerateAgentRequest>,
 ) -> ApiResult<client_proto::GenerateAgentResponse> {
-    let project = require_project(&manager, &project_id)?;
+    let project = require_project(&manager, &project_id).await?;
     project
         .generate_agent(request)
         .await

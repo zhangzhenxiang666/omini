@@ -1,8 +1,8 @@
 //! HTTP handler 的共享错误转换、鉴权和会话查找工具。
 
-use crate::daemon::{GlobalDaemonManager, ProjectAttachError, ProjectLookupError};
-use crate::project::{ProjectManager, SessionError};
-use crate::session::SessionRuntime;
+use crate::daemon::{GlobalDaemonManager, ProjectError};
+use crate::project::{ProjectManager, ThreadError};
+use crate::thread::ThreadRuntime;
 use axum::Json;
 use axum::http::{HeaderMap, StatusCode};
 use omini_protocol::ProtocolError;
@@ -38,7 +38,7 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
         omini_core::CoreError::RuntimeClosed | omini_core::CoreError::RuntimeLoadInterrupted => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        omini_core::CoreError::SessionNotFound => StatusCode::NOT_FOUND,
+        omini_core::CoreError::ThreadNotFound => StatusCode::NOT_FOUND,
         omini_core::CoreError::InvalidModelSelection { .. } => StatusCode::BAD_REQUEST,
         omini_core::CoreError::Internal { .. }
         | omini_core::CoreError::Config { .. }
@@ -50,19 +50,22 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
     api_error(status, error.code(), error.message().into_owned())
 }
 
-pub fn require_project(
+pub async fn require_project(
     manager: &GlobalDaemonManager,
     project_id: &str,
 ) -> Result<Arc<ProjectManager>, ApiError> {
-    manager.project(project_id).map_err(project_lookup_error)
+    manager
+        .get_or_load_project(project_id)
+        .await
+        .map_err(project_error)
 }
 
 pub async fn require_session(
     manager: &ProjectManager,
     session_id: &str,
-) -> Result<Arc<SessionRuntime>, ApiError> {
+) -> Result<Arc<ThreadRuntime>, ApiError> {
     manager
-        .get_or_load_session(session_id)
+        .get_or_load_thread(session_id)
         .await
         .map_err(session_lookup_error)
 }
@@ -71,9 +74,8 @@ pub async fn require_daemon_session(
     manager: &GlobalDaemonManager,
     project_id: &str,
     session_id: &str,
-) -> Result<Arc<SessionRuntime>, ApiError> {
-    // 大多数 session endpoint 都需要先确认项目已 attach，再确认 session 属于该项目。
-    let project = require_project(manager, project_id)?;
+) -> Result<Arc<ThreadRuntime>, ApiError> {
+    let project = require_project(manager, project_id).await?;
     require_session(&project, session_id).await
 }
 
@@ -92,7 +94,7 @@ pub fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 pub async fn ensure_controller(
-    session: &SessionRuntime,
+    session: &ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
@@ -111,7 +113,7 @@ pub async fn ensure_controller(
 }
 
 pub async fn ensure_connected_controller(
-    session: &SessionRuntime,
+    session: &ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
@@ -139,36 +141,44 @@ pub async fn ensure_connected_controller(
     Ok(())
 }
 
-pub fn project_attach_error(error: ProjectAttachError) -> ApiError {
+pub fn project_error(error: ProjectError) -> ApiError {
     match error {
-        ProjectAttachError::BadRequest(message) => {
-            api_error(StatusCode::BAD_REQUEST, "invalid_project_attach", message)
+        ProjectError::NotFound => api_error(
+            StatusCode::NOT_FOUND,
+            "project_not_found",
+            "Project does not exist",
+        ),
+        ProjectError::Invalid(message) => {
+            api_error(StatusCode::BAD_REQUEST, "invalid_project", message)
         }
-        ProjectAttachError::Config(message) => {
+        ProjectError::Conflict(message) => {
+            api_error(StatusCode::CONFLICT, "project_conflict", message)
+        }
+        ProjectError::MissingPath(path) => api_error(
+            StatusCode::CONFLICT,
+            "project_path_missing",
+            format!("Project path '{path}' is not available"),
+        ),
+        ProjectError::Config(message) => {
             api_error(StatusCode::INTERNAL_SERVER_ERROR, "config_error", message)
         }
-        ProjectAttachError::Core(error) => core_error(error),
-    }
-}
-
-fn project_lookup_error(error: ProjectLookupError) -> ApiError {
-    match error {
-        ProjectLookupError::NotFound => api_error(
-            StatusCode::NOT_FOUND,
-            "project_not_attached",
-            "Project has not been attached to this daemon",
+        ProjectError::Store(error) => api_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "project_store_error",
+            error.to_string(),
         ),
+        ProjectError::Core(error) => core_error(error),
     }
 }
 
-fn session_lookup_error(error: SessionError) -> ApiError {
+fn session_lookup_error(error: ThreadError) -> ApiError {
     match error {
-        SessionError::NotFound => api_error(
+        ThreadError::NotFound => api_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
             "Session does not exist",
         ),
-        SessionError::Core(error) => core_error(error),
+        ThreadError::Core(error) => core_error(error),
     }
 }
 
@@ -196,9 +206,25 @@ mod tests {
 
     #[test]
     fn core_error_maps_missing_session_to_not_found() {
-        let error = core_error(omini_core::CoreError::SessionNotFound);
+        let error = core_error(omini_core::CoreError::ThreadNotFound);
 
         assert_eq!(error.0, StatusCode::NOT_FOUND);
         assert_eq!(error.1.0.code, "session_not_found");
+    }
+
+    #[test]
+    fn project_conflict_maps_to_http_conflict() {
+        let error = project_error(ProjectError::Conflict("busy".to_string()));
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1.0.code, "project_conflict");
+    }
+
+    #[test]
+    fn missing_project_path_maps_to_http_conflict() {
+        let error = project_error(ProjectError::MissingPath("/missing".to_string()));
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1.0.code, "project_path_missing");
     }
 }

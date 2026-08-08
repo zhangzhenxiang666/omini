@@ -1,6 +1,6 @@
-//! 项目管理器, 负责项目级别的状态维护以及session的管理
+//! 项目管理器，负责项目级别的状态维护以及 thread 的管理。
 
-use crate::{session::SessionRuntime, store::Database};
+use crate::{store::Database, thread::ThreadRuntime};
 use omini_config::{ConfigError, OminiRoot, UserConfig, project::ProjectDir};
 use omini_core::CoreError;
 use std::{
@@ -10,48 +10,68 @@ use std::{
 };
 
 mod agents;
-mod attach;
 mod model_selection;
-mod sessions;
+mod open;
 mod settings;
+mod threads;
 
 #[cfg(test)]
 mod test_support;
 
-/// 单个项目下的会话管理器。
+/// 单个项目下的 thread 管理器。
 ///
-/// 它只缓存当前有客户端使用的 runtime session；持久化会话列表和历史仍来自数据库。
+/// 它只缓存当前有客户端使用的 runtime thread；持久化列表和历史来自数据库。
 pub struct ProjectManager {
+    project_id: String,
     root: Arc<OminiRoot>,
     cwd: PathBuf,
     project: ProjectDir,
     db: Arc<Database>,
     // 这里只缓存正在被客户端使用的 runtime；空闲后会关闭并从数据库按需恢复。
-    sessions: Mutex<HashMap<String, Arc<SessionRuntime>>>,
+    threads: Mutex<HashMap<String, Arc<ThreadRuntime>>>,
 }
 
-/// 会话查找或恢复过程中可能出现的错误。
+/// thread 查找或恢复过程中可能出现的错误。
 #[derive(Debug)]
-pub enum SessionError {
+pub enum ThreadError {
     NotFound,
     Core(CoreError),
 }
 
-impl From<CoreError> for SessionError {
+impl From<CoreError> for ThreadError {
     fn from(error: CoreError) -> Self {
         Self::Core(error)
     }
 }
 
 impl ProjectManager {
-    pub fn new(root: Arc<OminiRoot>, cwd: PathBuf, project: ProjectDir, db: Arc<Database>) -> Self {
+    pub fn new(
+        project_id: String,
+        root: Arc<OminiRoot>,
+        cwd: PathBuf,
+        project: ProjectDir,
+        db: Arc<Database>,
+    ) -> Self {
         Self {
+            project_id,
             root,
             cwd,
             project,
             db,
-            sessions: Mutex::new(HashMap::new()),
+            threads: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn id(&self) -> &str {
+        &self.project_id
+    }
+
+    pub fn has_active_or_connected_threads(&self) -> bool {
+        self.threads
+            .lock()
+            .expect("threads lock poisoned")
+            .values()
+            .any(|thread| thread.has_connected_clients() || !thread.is_reclaimable())
     }
 }
 

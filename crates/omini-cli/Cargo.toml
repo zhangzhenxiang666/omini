@@ -6,7 +6,6 @@ edition.workspace = true
 [dependencies]
 clap.workspace = true
 dirs.workspace = true
-omini-domain.workspace = true
 omini-protocol.workspace = true
 omini-tui.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }

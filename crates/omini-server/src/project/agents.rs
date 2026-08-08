@@ -11,7 +11,7 @@ use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 
 impl ProjectManager {
-    async fn refresh_target_session_agents(
+    async fn refresh_target_thread_agents(
         &self,
         target_session_id: Option<&str>,
         records: Vec<domain::subagents::AgentRecord>,
@@ -19,7 +19,7 @@ impl ProjectManager {
         let Some(session_id) = target_session_id else {
             return Ok(());
         };
-        let Some(session) = self.cached_session(session_id) else {
+        let Some(session) = self.cached_thread(session_id) else {
             return Ok(());
         };
         session.reload_subagent_registry().await?;
@@ -46,7 +46,7 @@ impl ProjectManager {
                 draft: request.draft,
             },
         )?;
-        self.refresh_target_session_agents(target_session_id, update.records)
+        self.refresh_target_thread_agents(target_session_id, update.records)
             .await
     }
 
@@ -61,7 +61,7 @@ impl ProjectManager {
                 agent_id: agent_id.to_string(),
             },
         )?;
-        self.refresh_target_session_agents(target_session_id, update.records)
+        self.refresh_target_thread_agents(target_session_id, update.records)
             .await
     }
 
@@ -124,7 +124,7 @@ mod tests {
         );
         assert!(
             manager
-                .sessions
+                .threads
                 .lock()
                 .expect("sessions lock poisoned")
                 .is_empty()
@@ -137,13 +137,13 @@ mod tests {
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
         let session_id = manager
-            .create_session(client_proto::CreateSessionRequest::default())
+            .create_thread(client_proto::CreateSessionRequest::default())
             .await
             .expect("session should create")
             .session_id
             .expect("session id should be returned");
         let session = manager
-            .get_or_load_session(&session_id)
+            .get_or_load_thread(&session_id)
             .await
             .expect("session should load");
         let mut events = session.subscribe();

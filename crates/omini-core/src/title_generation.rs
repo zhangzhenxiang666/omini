@@ -28,7 +28,7 @@ impl std::error::Error for TitleGenError {}
 
 /// 后台异步生成 session 标题。`Err(_)` 表示请求 / 流 / JSON 解析失败，
 /// 调用方统一按 "保留兜底 title, 记 tracing::warn" 处理。
-pub async fn generate_session_title(
+pub async fn generate_thread_title(
     settings: &Settings,
     user_input: &str,
 ) -> Result<String, TitleGenError> {

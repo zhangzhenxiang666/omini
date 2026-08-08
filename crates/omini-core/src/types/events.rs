@@ -6,13 +6,14 @@ use omini_domain::events::{
 };
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
-use omini_runtime_contract::persistence::SessionRecord;
+use omini_runtime_contract::persistence::ThreadRecord;
+use tokio::sync::oneshot;
 
 /// engine 发往 runtime 的 core 内部事件。
 ///
 /// Runtime 消费这些事件后更新本地状态、增量持久化，并把外部可见更新转换为
 /// `omini_runtime_contract::RuntimeToServerEvent`。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum EngineToRuntimeEvent {
     /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。
     UserMessageProduced {
@@ -26,8 +27,16 @@ pub enum EngineToRuntimeEvent {
     /// 引擎收集完所有工具结果，打包成一条 User Message。
     ToolResultsProduced(Message),
 
-    /// 一条只写入 LLM JSONL 历史、不会进入 SQLite/UI 历史的 Message。
+    /// 一条只写入 LLM 上下文、不会进入 UI 历史的 Message。
     LlmHistoryProduced(Message),
+
+    /// compact 产生的新完整上下文，持久化成功后才允许调用方切换内存版本。
+    ReplaceLlmContext {
+        thread_id: String,
+        expected_version: i64,
+        messages: Vec<Message>,
+        ack: oneshot::Sender<Result<i64, String>>,
+    },
 
     /// 工具结果的 UI/SQLite 展示消息，不写入 LLM JSONL 历史。
     ToolResultsDisplayProduced(Message),
@@ -70,9 +79,9 @@ pub enum EngineToRuntimeEvent {
     /// 子 agent 创建并开始运行。
     SubagentStarted(SubagentStartedEvent),
     /// 子 agent 会话元数据已创建，需要外部持久化。
-    SubagentSessionCreated(SessionRecord),
+    SubagentThreadCreated(ThreadRecord),
     /// 子 agent 的一轮 LLM usage。
-    SubagentUsageRecorded { session_id: String, usage: Usage },
+    SubagentUsageRecorded { thread_id: String, usage: Usage },
     /// 子 agent 产生了一条完整消息，需要持久化并更新 UI 视图模型。
     SubagentMessageProduced(SubagentMessageEvent),
     /// 子 agent 请求工具调用。

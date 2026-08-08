@@ -6,55 +6,61 @@
 //! 反向解析 `<proposed_plan>` 标签。
 
 use crate::store::{self, Database};
-use omini_config::project::ProjectDir;
+use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
 use omini_domain::events::{SubagentSnapshot, SubagentStatus};
 use omini_domain::message::{Message, Role};
-use std::path::Path;
 
 /// 加载一个会话的消息历史，跳过无法解析的损坏记录以保证会话仍可打开。
 pub(crate) async fn load_messages(
     db: &Database,
-    session_id: &str,
-    blocks_dir: &Path,
+    thread_id: &str,
+    thread_dir: &ThreadDir,
 ) -> Vec<HistoryItem> {
-    let stored = match db.get_messages(session_id).await {
+    let stored = match db.get_messages(thread_id).await {
         Ok(rows) => rows,
         Err(error) => {
-            tracing::warn!(session_id, error = %error, "failed to load messages");
+            tracing::warn!(thread_id, error = %error, "failed to load messages");
             return Vec::new();
         }
     };
 
     let mut messages = Vec::with_capacity(stored.len());
     for sm in stored {
+        let content = match store::load_ui_content(&sm.content, thread_dir) {
+            Ok(content) => content,
+            Err(error) => {
+                tracing::warn!(thread_id, error = %error, "failed to load message sidecar");
+                continue;
+            }
+        };
         // kind 决定这条记录恢复成哪类 HistoryItem；normal message 才继续解析 ContentBlock。
         if sm.kind == "display" {
-            match serde_json::from_str::<DisplayMessage>(&sm.content) {
+            match serde_json::from_str::<DisplayMessage>(&content) {
                 Ok(display) => messages.push(HistoryItem::Display(display)),
                 Err(error) => {
-                    tracing::warn!(session_id, error = %error, "failed to parse display message");
+                    tracing::warn!(thread_id, error = %error, "failed to parse display message");
                 }
             }
             continue;
         }
 
         if sm.kind == "plan" {
-            match serde_json::from_str::<DisplayPlan>(&sm.content) {
+            match serde_json::from_str::<DisplayPlan>(&content) {
                 Ok(plan) => messages.push(HistoryItem::Plan(plan)),
                 Err(error) => {
-                    tracing::warn!(session_id, error = %error, "failed to parse plan message");
+                    tracing::warn!(thread_id, error = %error, "failed to parse plan message");
                 }
             }
             continue;
         }
 
         if sm.kind == "compact_summary" {
-            match serde_json::from_str::<DisplaySummary>(&sm.content) {
+            match serde_json::from_str::<DisplaySummary>(&content) {
                 Ok(summary) => messages.push(HistoryItem::Summary(summary)),
                 Err(error) => {
                     tracing::warn!(
-                        session_id,
+                        thread_id,
                         error = %error,
                         "failed to parse compact summary message"
                     );
@@ -68,17 +74,17 @@ pub(crate) async fn load_messages(
             "assistant" => Role::Assistant,
             _ => continue,
         };
-        let content_json: Vec<serde_json::Value> = match serde_json::from_str(&sm.content) {
+        let content_json: Vec<serde_json::Value> = match serde_json::from_str(&content) {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!(session_id, error = %error, "failed to parse message content");
+                tracing::warn!(thread_id, error = %error, "failed to parse message content");
                 continue;
             }
         };
-        let blocks = match store::load_blocks(&content_json, blocks_dir) {
+        let blocks = match store::load_blocks(&content_json, thread_dir) {
             Ok(blocks) => blocks,
             Err(error) => {
-                tracing::warn!(session_id, error = %error, "failed to load message blocks");
+                tracing::warn!(thread_id, error = %error, "failed to load message blocks");
                 continue;
             }
         };
@@ -90,32 +96,30 @@ pub(crate) async fn load_messages(
 }
 
 /// 加载父会话下的子 agent 历史，并恢复成已完成的 snapshot。
-pub(crate) async fn load_subagents_for_session(
+pub(crate) async fn load_subagents_for_thread(
     db: &Database,
-    session_id: &str,
+    thread_id: &str,
     project: &ProjectDir,
 ) -> Vec<SubagentSnapshot> {
-    let sessions = match db.list_child_sessions(session_id).await {
+    let sessions = match db.list_child_threads(thread_id).await {
         Ok(sessions) => sessions,
         Err(error) => {
-            tracing::warn!(session_id, error = %error, "failed to load subagents for session");
+            tracing::warn!(thread_id, error = %error, "failed to load subagents for thread");
             return Vec::new();
         }
     };
 
     let mut subagents = Vec::with_capacity(sessions.len());
     for session in sessions {
-        let Some(parent_session_id) = session.parent_session_id.clone() else {
+        let Some(parent_session_id) = session.parent_thread_id.clone() else {
             continue;
         };
         let Some(spawn_tool_use_id) = session.spawn_tool_use_id.clone() else {
             continue;
         };
-        let parent_dir = project.session(&parent_session_id);
-        let session_dir = parent_dir.subagent(&session.id);
-        let blocks_dir = session_dir.path().join("blocks");
+        let thread_dir = project.thread(&session.id);
         // 子代理运行态不随 daemon 存活，这里从子会话历史恢复成 completed snapshot。
-        let messages = load_messages(db, &session.id, &blocks_dir)
+        let messages = load_messages(db, &session.id, &thread_dir)
             .await
             .into_iter()
             .filter_map(|item| match item {

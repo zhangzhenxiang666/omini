@@ -1,20 +1,23 @@
-//! SQLite 持久化层。
-//!
-//! server 在这里保存会话元数据、消息历史和运行时发来的持久化事件。大型
-//! `ContentBlock` 会拆到 sidecar 文件，避免单行 JSON 过大影响数据库读写。
-
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
+use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
-use omini_domain::message::ContentBlock;
+use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::usage::Usage;
-use omini_runtime_contract::persistence::{RuntimePersistenceEvent, SessionRecord};
-use sqlx::sqlite::SqlitePoolOptions;
+use omini_runtime_contract::persistence::{RuntimePersistenceEvent, ThreadRecord};
+use sha2::{Digest, Sha256};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};
-use std::path::Path;
-use std::path::PathBuf;
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 use uuid::Uuid;
 
-/// server 持久化层统一错误。
+const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("sqlite error: {0}")]
@@ -23,40 +26,72 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("base64 error: {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("invalid persisted data: {0}")]
+    InvalidData(String),
+    #[error("LLM context version conflict: expected {expected}, found {actual}")]
+    ContextVersionConflict { expected: i64, actual: i64 },
 }
 
-/// server 使用 core persistence 的会话记录作为数据库会话模型。
-pub(crate) type Session = SessionRecord;
+#[derive(Debug, Clone, FromRow)]
+pub struct Project {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub storage_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_opened_at: Option<DateTime<Utc>>,
+}
 
-/// 从数据库读出的消息行。
+#[derive(Debug, Clone)]
+pub struct Thread {
+    pub id: String,
+    pub project_id: String,
+    pub parent_thread_id: Option<String>,
+    pub spawn_tool_use_id: Option<String>,
+    pub thread_type: String,
+    pub agent_label: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub thinking_effort: Option<String>,
+    pub title: Option<String>,
+    pub current_context_tokens: i64,
+    pub total_tokens: i64,
+    pub total_cached_tokens: i64,
+    pub llm_context_version: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub id: i64,
-    pub session_id: String,
+    pub thread_id: String,
     pub role: String,
+    pub model_ref: Option<String>,
     pub content: String,
     pub kind: String,
     pub created_at: DateTime<Utc>,
 }
 
-/// 准备写入数据库的新消息。
 pub struct NewMessage {
-    pub session_id: String,
+    pub thread_id: String,
     pub role: String,
+    pub model_ref: Option<String>,
     pub blocks: Vec<ContentBlock>,
     pub kind: String,
     pub created_at: DateTime<Utc>,
-    pub blocks_dir: PathBuf,
 }
 
-/// `sessions` 表的原始行结构。
 #[derive(Debug, Clone, FromRow)]
-struct SessionRow {
+struct ThreadRow {
     id: String,
-    project_path: String,
-    parent_session_id: Option<String>,
+    project_id: String,
+    parent_thread_id: Option<String>,
     spawn_tool_use_id: Option<String>,
-    session_type: String,
+    thread_type: String,
     agent_label: Option<String>,
     provider: String,
     model: String,
@@ -65,29 +100,36 @@ struct SessionRow {
     current_context_tokens: i64,
     total_tokens: i64,
     total_cached_tokens: i64,
+    llm_context_version: i64,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 
-/// `messages` 表的原始行结构。
 #[derive(Debug, Clone, FromRow)]
 struct StoredMessageRow {
     id: i64,
-    session_id: String,
+    thread_id: String,
     role: String,
+    model_ref: Option<String>,
     content: String,
     kind: String,
     created_at: DateTime<Utc>,
 }
 
-impl From<SessionRow> for Session {
-    fn from(row: SessionRow) -> Self {
+#[derive(Debug, Clone, FromRow)]
+struct StoredLlmMessageRow {
+    role: String,
+    content: String,
+}
+
+impl From<ThreadRow> for Thread {
+    fn from(row: ThreadRow) -> Self {
         Self {
             id: row.id,
-            project_path: row.project_path,
-            parent_session_id: row.parent_session_id,
+            project_id: row.project_id,
+            parent_thread_id: row.parent_thread_id,
             spawn_tool_use_id: row.spawn_tool_use_id,
-            session_type: row.session_type,
+            thread_type: row.thread_type,
             agent_label: row.agent_label,
             provider: row.provider,
             model: row.model,
@@ -96,6 +138,7 @@ impl From<SessionRow> for Session {
             current_context_tokens: row.current_context_tokens,
             total_tokens: row.total_tokens,
             total_cached_tokens: row.total_cached_tokens,
+            llm_context_version: row.llm_context_version,
             created_at: row.created_at,
             updated_at: row.updated_at,
         }
@@ -106,8 +149,9 @@ impl From<StoredMessageRow> for StoredMessage {
     fn from(row: StoredMessageRow) -> Self {
         Self {
             id: row.id,
-            session_id: row.session_id,
+            thread_id: row.thread_id,
             role: row.role,
+            model_ref: row.model_ref,
             content: row.content,
             kind: row.kind,
             created_at: row.created_at,
@@ -115,17 +159,18 @@ impl From<StoredMessageRow> for StoredMessage {
     }
 }
 
-/// SQLite 数据库句柄和所有持久化操作入口。
 pub struct Database {
     pool: SqlitePool,
 }
 
 impl Database {
-    /// 打开（或创建）SQLite 数据库并初始化表结构。
     pub async fn open(path: &Path) -> Result<Self, StoreError> {
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.display()))?
+            .create_if_missing(true)
+            .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .max_connections(3)
+            .connect_with(options)
             .await?;
 
         let db = Self { pool };
@@ -133,133 +178,234 @@ impl Database {
         Ok(db)
     }
 
-    /// 初始化表结构，并对旧数据库补齐缺失列。
     async fn initialize(&self) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id                TEXT PRIMARY KEY,
-                project_path      TEXT NOT NULL,
-                parent_session_id TEXT REFERENCES sessions(id),
-                spawn_tool_use_id TEXT,
-                session_type      TEXT NOT NULL DEFAULT 'main',
-                agent_label       TEXT,
-                provider          TEXT NOT NULL DEFAULT '',
-                model             TEXT NOT NULL DEFAULT '',
-                thinking_effort   TEXT,
-                title             TEXT,
-                current_context_tokens INTEGER NOT NULL DEFAULT 0,
-                total_tokens      INTEGER NOT NULL DEFAULT 0,
-                total_cached_tokens INTEGER NOT NULL DEFAULT 0,
-                created_at        TEXT NOT NULL,
-                updated_at        TEXT NOT NULL
+            "CREATE TABLE IF NOT EXISTS project (
+                id              TEXT PRIMARY KEY,
+                name            TEXT NOT NULL,
+                path            TEXT NOT NULL UNIQUE,
+                storage_key     TEXT NOT NULL UNIQUE,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                last_opened_at  TEXT
             )",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
-        self.ensure_sessions_column("spawn_tool_use_id", "TEXT")
-            .await?;
-        self.ensure_sessions_column("current_context_tokens", "INTEGER NOT NULL DEFAULT 0")
-            .await?;
-        self.ensure_sessions_column("total_tokens", "INTEGER NOT NULL DEFAULT 0")
-            .await?;
-        self.ensure_sessions_column("total_cached_tokens", "INTEGER NOT NULL DEFAULT 0")
-            .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS thread (
+                id                     TEXT PRIMARY KEY,
+                project_id             TEXT NOT NULL REFERENCES project(id) ON DELETE RESTRICT,
+                parent_thread_id       TEXT REFERENCES thread(id) ON DELETE CASCADE,
+                spawn_tool_use_id      TEXT,
+                thread_type            TEXT NOT NULL DEFAULT 'main',
+                agent_label            TEXT,
+                provider               TEXT NOT NULL,
+                model                  TEXT NOT NULL,
+                thinking_effort        TEXT,
+                title                  TEXT,
+                current_context_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens           INTEGER NOT NULL DEFAULT 0,
+                total_cached_tokens    INTEGER NOT NULL DEFAULT 0,
+                llm_context_version    INTEGER NOT NULL DEFAULT 0,
+                created_at             TEXT NOT NULL,
+                updated_at             TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS messages (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-                role            TEXT NOT NULL,
+                thread_id       TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                role            TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                model_ref       TEXT,
                 content         TEXT NOT NULL,
                 kind            TEXT NOT NULL DEFAULT 'normal',
-                created_at      TEXT NOT NULL
+                created_at      TEXT NOT NULL,
+                CHECK (
+                    (role = 'assistant' AND model_ref IS NOT NULL) OR
+                    (role <> 'assistant' AND model_ref IS NULL)
+                )
             )",
         )
-        .execute(&self.pool)
-        .await?;
-
-        // New index on (session_id, id) for efficient session message queries
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_messages_session_id ON messages(session_id, id)",
-        )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_project
-            ON sessions(project_path)",
+            "CREATE TABLE IF NOT EXISTS llm_messages (
+                thread_id          TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                context_version    INTEGER NOT NULL,
+                ordinal            INTEGER NOT NULL,
+                role               TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content            TEXT NOT NULL,
+                created_at         TEXT NOT NULL,
+                PRIMARY KEY (thread_id, context_version, ordinal)
+            )",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_thread_project ON thread(project_id)")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_thread_parent ON thread(parent_thread_id)")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id, id)")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_sessions_parent
-            ON sessions(parent_session_id)",
+            "CREATE INDEX IF NOT EXISTS idx_llm_messages_current ON llm_messages(thread_id, context_version, ordinal)",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
-
+        tx.commit().await?;
         Ok(())
     }
 
-    // -----------------------------------------------------------------------
-    // Session CRUD
-    // -----------------------------------------------------------------------
-
-    /// 插入一条新的会话记录。
-    pub async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
+    pub async fn create_project(&self, project: &Project) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO sessions
-            (id, project_path, parent_session_id, spawn_tool_use_id, session_type, agent_label,
-            provider, model, thinking_effort, title, current_context_tokens, total_tokens,
-            total_cached_tokens, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO project(
+                    id, 
+                    name, 
+                    path, 
+                    storage_key, 
+                    created_at, 
+                    updated_at, 
+                    last_opened_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(&session.id)
-        .bind(&session.project_path)
-        .bind(&session.parent_session_id)
-        .bind(&session.spawn_tool_use_id)
-        .bind(&session.session_type)
-        .bind(&session.agent_label)
-        .bind(&session.provider)
-        .bind(&session.model)
-        .bind(&session.thinking_effort)
-        .bind(&session.title)
-        .bind(session.current_context_tokens)
-        .bind(session.total_tokens)
-        .bind(session.total_cached_tokens)
-        .bind(session.created_at)
-        .bind(session.updated_at)
+        .bind(&project.id)
+        .bind(&project.name)
+        .bind(&project.path)
+        .bind(&project.storage_key)
+        .bind(project.created_at)
+        .bind(project.updated_at)
+        .bind(project.last_opened_at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// 按 ID 读取会话元数据。
-    pub async fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
-        let row = sqlx::query_as::<_, SessionRow>("SELECT * FROM sessions WHERE id = ?")
+    pub async fn get_project(&self, id: &str) -> Result<Option<Project>, StoreError> {
+        Ok(
+            sqlx::query_as::<_, Project>("SELECT * FROM project WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn get_project_by_path(&self, path: &str) -> Result<Option<Project>, StoreError> {
+        Ok(
+            sqlx::query_as::<_, Project>("SELECT * FROM project WHERE path = ?")
+                .bind(path)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
+    pub async fn list_projects(&self) -> Result<Vec<Project>, StoreError> {
+        Ok(sqlx::query_as::<_, Project>(
+            "SELECT * 
+                FROM project
+                ORDER BY last_opened_at IS NULL, last_opened_at DESC, created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn update_project(&self, project: &Project) -> Result<(), StoreError> {
+        sqlx::query("UPDATE project SET name = ?, path = ?, updated_at = ? WHERE id = ?")
+            .bind(&project.name)
+            .bind(&project.path)
+            .bind(project.updated_at)
+            .bind(&project.id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_project_opened(&self, id: &str) -> Result<(), StoreError> {
+        let now = Utc::now();
+        sqlx::query("UPDATE project SET last_opened_at = ? WHERE id = ?")
+            .bind(now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn create_thread(&self, thread: &Thread) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO thread(
+                    id,
+                    project_id,
+                    parent_thread_id,
+                    spawn_tool_use_id,
+                    thread_type,
+                    agent_label,
+                    provider,
+                    model,
+                    thinking_effort,
+                    title,
+                    current_context_tokens,
+                    total_tokens,
+                    total_cached_tokens,
+                    llm_context_version,
+                    created_at,
+                    updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&thread.id)
+        .bind(&thread.project_id)
+        .bind(&thread.parent_thread_id)
+        .bind(&thread.spawn_tool_use_id)
+        .bind(&thread.thread_type)
+        .bind(&thread.agent_label)
+        .bind(&thread.provider)
+        .bind(&thread.model)
+        .bind(&thread.thinking_effort)
+        .bind(&thread.title)
+        .bind(thread.current_context_tokens)
+        .bind(thread.total_tokens)
+        .bind(thread.total_cached_tokens)
+        .bind(thread.llm_context_version)
+        .bind(thread.created_at)
+        .bind(thread.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_thread(&self, id: &str) -> Result<Option<Thread>, StoreError> {
+        let row = sqlx::query_as::<_, ThreadRow>("SELECT * FROM thread WHERE id = ?")
             .bind(id)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(Into::into))
     }
 
-    /// 列出项目下的主会话，按最近更新时间倒序返回。
-    pub async fn list_sessions(&self, project_path: &str) -> Result<Vec<Session>, StoreError> {
-        let rows = sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE project_path = ? AND session_type = 'main' ORDER BY updated_at DESC, created_at DESC",
+    pub async fn list_threads(&self, project_id: &str) -> Result<Vec<Thread>, StoreError> {
+        let rows = sqlx::query_as::<_, ThreadRow>(
+            "SELECT * FROM thread
+                WHERE project_id = ? AND thread_type = 'main'
+                ORDER BY updated_at DESC, created_at DESC",
         )
-        .bind(project_path)
+        .bind(project_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// 列出某个主会话派生出的子 agent 会话。
-    pub async fn list_child_sessions(&self, parent_id: &str) -> Result<Vec<Session>, StoreError> {
-        let rows = sqlx::query_as::<_, SessionRow>(
-            "SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC",
+    pub async fn list_child_threads(&self, parent_id: &str) -> Result<Vec<Thread>, StoreError> {
+        let rows = sqlx::query_as::<_, ThreadRow>(
+            "SELECT * FROM thread WHERE parent_thread_id = ? ORDER BY created_at ASC",
         )
         .bind(parent_id)
         .fetch_all(&self.pool)
@@ -267,18 +413,17 @@ impl Database {
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// 记录主会话 usage，并同步当前 context token 计数。
-    pub async fn record_session_usage(&self, id: &str, usage: Usage) -> Result<(), StoreError> {
+    pub async fn record_thread_usage(&self, id: &str, usage: Usage) -> Result<(), StoreError> {
         let now = Utc::now();
         let total_tokens = usage_tokens_i64(usage);
         let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
         sqlx::query(
-            "UPDATE sessions
-            SET current_context_tokens = ?,
-                total_tokens = total_tokens + ?,
-                total_cached_tokens = total_cached_tokens + ?,
-                updated_at = ?
-            WHERE id = ?",
+            "UPDATE thread SET
+                    current_context_tokens = ?,
+                    total_tokens = total_tokens + ?,
+                    total_cached_tokens = total_cached_tokens + ?,
+                    updated_at = ?
+                WHERE id = ?",
         )
         .bind(total_tokens)
         .bind(total_tokens)
@@ -290,32 +435,21 @@ impl Database {
         Ok(())
     }
 
-    pub async fn record_parent_subagent_usage(
-        &self,
-        id: &str,
-        usage: Usage,
-    ) -> Result<(), StoreError> {
-        self.record_session_total_usage(id, usage).await
-    }
-
-    /// 只累计 total usage，不覆盖当前 context token。
-    pub async fn record_session_total_usage(
+    pub async fn record_thread_total_usage(
         &self,
         id: &str,
         usage: Usage,
     ) -> Result<(), StoreError> {
         let now = Utc::now();
-        let total_tokens = usage_tokens_i64(usage);
-        let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
         sqlx::query(
-            "UPDATE sessions
-            SET total_tokens = total_tokens + ?,
-                total_cached_tokens = total_cached_tokens + ?,
-                updated_at = ?
-            WHERE id = ?",
+            "UPDATE thread SET
+                    total_tokens = total_tokens + ?,
+                    total_cached_tokens = total_cached_tokens + ?,
+                    updated_at = ?
+                WHERE id = ?",
         )
-        .bind(total_tokens)
-        .bind(cached_tokens)
+        .bind(usage_tokens_i64(usage))
+        .bind(usage_usize_to_i64(usage.cached_tokens))
         .bind(now)
         .bind(id)
         .execute(&self.pool)
@@ -323,86 +457,79 @@ impl Database {
         Ok(())
     }
 
-    /// 更新会话的 updated_at 时间戳（在发起 query 时调用）。
-    pub async fn update_session_updated_at(&self, id: &str) -> Result<(), StoreError> {
-        let now = Utc::now();
-        sqlx::query("UPDATE sessions SET updated_at = ? WHERE id = ?")
-            .bind(now)
+    pub async fn update_thread_updated_at(&self, id: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE thread SET updated_at = ? WHERE id = ?")
+            .bind(Utc::now())
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// 更新会话的提供商 / 模型 / 思考程度配置。
-    pub async fn update_session_config(
+    pub async fn update_thread_config(
         &self,
         id: &str,
         provider: &str,
         model: &str,
         thinking_effort: Option<&str>,
     ) -> Result<(), StoreError> {
-        let now = Utc::now();
         sqlx::query(
-            "UPDATE sessions SET provider = ?, model = ?, thinking_effort = ?, updated_at = ? WHERE id = ?",
+            "UPDATE thread SET
+                    provider = ?,
+                    model = ?,
+                    thinking_effort = ?,
+                    updated_at = ?
+                WHERE id = ?",
         )
         .bind(provider)
         .bind(model)
         .bind(thinking_effort)
-        .bind(now)
+        .bind(Utc::now())
         .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// 更新会话的思考程度配置。
-    pub async fn update_session_thinking_effort(
+    pub async fn update_thread_thinking_effort(
         &self,
         id: &str,
         thinking_effort: Option<&str>,
     ) -> Result<(), StoreError> {
-        let now = Utc::now();
-        sqlx::query("UPDATE sessions SET thinking_effort = ?, updated_at = ? WHERE id = ?")
+        sqlx::query("UPDATE thread SET thinking_effort = ?, updated_at = ? WHERE id = ?")
             .bind(thinking_effort)
-            .bind(now)
+            .bind(Utc::now())
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// 更新会话标题。
-    pub async fn update_session_title(&self, id: &str, title: &str) -> Result<(), StoreError> {
-        let now = Utc::now();
-        sqlx::query("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
+    pub async fn update_thread_title(&self, id: &str, title: &str) -> Result<(), StoreError> {
+        sqlx::query("UPDATE thread SET title = ?, updated_at = ? WHERE id = ?")
             .bind(title)
-            .bind(now)
+            .bind(Utc::now())
             .bind(id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// 仅当会话仍为空白且没有消息时设置初始标题。
-    pub async fn set_initial_session_title(
+    pub async fn set_initial_thread_title(
         &self,
         id: &str,
         title: &str,
     ) -> Result<bool, StoreError> {
-        let now = Utc::now();
-        // 首条用户输入只能在会话仍无标题且无消息时设为初始标题，避免覆盖用户重命名。
         let result = sqlx::query(
-            "UPDATE sessions
-            SET title = ?, updated_at = ?
-            WHERE id = ?
+            "UPDATE thread SET
+                    title = ?,
+                    updated_at = ?
+                WHERE id = ?
                 AND (title IS NULL OR TRIM(title) = '')
-                AND NOT EXISTS (
-                    SELECT 1 FROM messages WHERE session_id = ? LIMIT 1
-                )",
+                AND NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = ? LIMIT 1)",
         )
         .bind(title)
-        .bind(now)
+        .bind(Utc::now())
         .bind(id)
         .bind(id)
         .execute(&self.pool)
@@ -410,231 +537,500 @@ impl Database {
         Ok(result.rows_affected() > 0)
     }
 
-    // -----------------------------------------------------------------------
-    // Message CRUD
-    // -----------------------------------------------------------------------
-
-    /// 写入普通 LLM 消息，必要时把大内容块拆到 sidecar。
-    pub async fn insert_message(&self, msg: &NewMessage) -> Result<(), StoreError> {
-        let blocks_json = {
-            let stored = prepare_blocks(&msg.blocks, &msg.blocks_dir)?;
-            serde_json::to_string(&stored)?
-        };
-
-        sqlx::query(
-            "INSERT INTO messages (session_id, role, content, kind, created_at)
-            VALUES (?, ?, ?, ?, ?)",
+    pub async fn insert_message(
+        &self,
+        msg: &NewMessage,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        let prepared = prepare_blocks(&msg.blocks, thread_dir)?;
+        let blocks_json = serde_json::to_string(&prepared.values)?;
+        let result = sqlx::query(
+            "INSERT INTO messages(
+                    thread_id,
+                    role,
+                    model_ref,
+                    content,
+                    kind,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)",
         )
-        .bind(&msg.session_id)
+        .bind(&msg.thread_id)
         .bind(&msg.role)
-        .bind(&blocks_json)
+        .bind(&msg.model_ref)
+        .bind(blocks_json)
         .bind(&msg.kind)
         .bind(msg.created_at)
         .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await;
+        finish_prepared_write(result.map(|_| ()), &prepared.created_files)
     }
 
-    /// 写入只用于 UI/SQLite 展示的消息。
-    pub async fn insert_display_message(
+    async fn insert_display_message(
         &self,
-        session_id: &str,
+        thread_id: &str,
         display: &DisplayMessage,
-    ) -> Result<(), StoreError> {
-        self.insert_display_message_with_created_at(session_id, display, Utc::now())
-            .await
-    }
-
-    async fn insert_display_message_with_created_at(
-        &self,
-        session_id: &str,
-        display: &DisplayMessage,
+        model_ref: Option<&str>,
         created_at: DateTime<Utc>,
+        thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
-        let content = serde_json::to_string(display)?;
-        sqlx::query(
-            "INSERT INTO messages (session_id, role, content, kind, created_at)
-            VALUES (?, ?, ?, ?, ?)",
+        insert_ui_json(
+            &self.pool,
+            NewUiJson {
+                thread_id,
+                role: &display.role.to_string(),
+                model_ref,
+                content: &serde_json::to_string(display)?,
+                kind: "display",
+                created_at,
+            },
+            thread_dir,
         )
-        .bind(session_id)
-        .bind(display.role.to_string())
-        .bind(content)
-        .bind("display")
-        .bind(created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
-    /// 写入独立 plan 记录，避免从 assistant 文本里二次解析。
-    pub async fn insert_plan_message(
+    async fn insert_plan_message(
         &self,
-        session_id: &str,
+        thread_id: &str,
         plan: &DisplayPlan,
+        model_ref: &str,
+        thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
-        let content = serde_json::to_string(plan)?;
-        sqlx::query(
-            "INSERT INTO messages (session_id, role, content, kind, created_at)
-            VALUES (?, ?, ?, ?, ?)",
+        insert_ui_json(
+            &self.pool,
+            NewUiJson {
+                thread_id,
+                role: "assistant",
+                model_ref: Some(model_ref),
+                content: &serde_json::to_string(plan)?,
+                kind: "plan",
+                created_at: plan.created_at,
+            },
+            thread_dir,
         )
-        .bind(session_id)
-        .bind("assistant")
-        .bind(content)
-        .bind("plan")
-        .bind(plan.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
-    /// 写入压缩摘要展示记录。
-    pub async fn insert_compact_summary_message(
+    async fn insert_compact_summary_message(
         &self,
-        session_id: &str,
+        thread_id: &str,
         summary: &DisplaySummary,
+        model_ref: &str,
+        thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
-        let content = serde_json::to_string(summary)?;
-        sqlx::query(
-            "INSERT INTO messages (session_id, role, content, kind, created_at)
-            VALUES (?, ?, ?, ?, ?)",
+        insert_ui_json(
+            &self.pool,
+            NewUiJson {
+                thread_id,
+                role: "assistant",
+                model_ref: Some(model_ref),
+                content: &serde_json::to_string(summary)?,
+                kind: "compact_summary",
+                created_at: summary.created_at,
+            },
+            thread_dir,
         )
-        .bind(session_id)
-        .bind("assistant")
-        .bind(content)
-        .bind("compact_summary")
-        .bind(summary.created_at)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        .await
     }
 
-    /// 按写入顺序读取一个会话的全部消息行。
-    pub async fn get_messages(&self, session_id: &str) -> Result<Vec<StoredMessage>, StoreError> {
+    pub async fn get_messages(&self, thread_id: &str) -> Result<Vec<StoredMessage>, StoreError> {
         let rows = sqlx::query_as::<_, StoredMessageRow>(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY id",
+            "SELECT * FROM messages WHERE thread_id = ? ORDER BY id",
         )
-        .bind(session_id)
+        .bind(thread_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
 
-    /// 获取指定会话第一条消息的纯文本内容。
-    pub async fn get_first_message_text(&self, session_id: &str) -> Result<String, StoreError> {
+    pub async fn get_first_message_text(&self, thread_id: &str) -> Result<String, StoreError> {
         let row = sqlx::query_as::<_, StoredMessageRow>(
-            "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC LIMIT 1",
+            "SELECT * FROM messages WHERE thread_id = ? ORDER BY id ASC LIMIT 1",
         )
-        .bind(session_id)
+        .bind(thread_id)
         .fetch_optional(&self.pool)
         .await?;
-
-        match row {
-            Some(msg) => Ok(extract_message_text(&msg.content)),
-            None => Ok(String::new()),
-        }
+        Ok(row
+            .map(|message| extract_message_text(&message.content))
+            .unwrap_or_default())
     }
 
-    /// 消费 core 发出的持久化事件并映射到具体数据库操作。
+    pub async fn append_llm_message(
+        &self,
+        thread_id: &str,
+        message: &Message,
+        created_at: DateTime<Utc>,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        let prepared = prepare_blocks(&message.content, thread_dir)?;
+        let content = serde_json::to_string(&prepared.values)?;
+        let mut tx = self.pool.begin().await?;
+        let version: i64 =
+            sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
+                .bind(thread_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let ordinal: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal) + 1, 0)
+                FROM llm_messages
+                WHERE thread_id = ? AND context_version = ?",
+        )
+        .bind(thread_id)
+        .bind(version)
+        .fetch_one(&mut *tx)
+        .await?;
+        let result = sqlx::query(
+            "INSERT INTO llm_messages(
+                    thread_id,
+                    context_version,
+                    ordinal,
+                    role,
+                    content,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(thread_id)
+        .bind(version)
+        .bind(ordinal)
+        .bind(message.role.to_string())
+        .bind(content)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await;
+        if let Err(error) = result {
+            cleanup_created_files(&prepared.created_files);
+            return Err(error.into());
+        }
+        if let Err(error) = tx.commit().await {
+            cleanup_created_files(&prepared.created_files);
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    pub async fn replace_llm_context(
+        &self,
+        thread_id: &str,
+        expected_version: i64,
+        messages: &[Message],
+        created_at: DateTime<Utc>,
+        thread_dir: &ThreadDir,
+    ) -> Result<i64, StoreError> {
+        let mut prepared_messages = Vec::with_capacity(messages.len());
+        let mut created_files = Vec::new();
+        for message in messages {
+            match prepare_blocks(&message.content, thread_dir) {
+                Ok(prepared) => {
+                    created_files.extend(prepared.created_files);
+                    prepared_messages.push((message.role.to_string(), prepared.values));
+                }
+                Err(error) => {
+                    cleanup_created_files(&created_files);
+                    return Err(error);
+                }
+            }
+        }
+
+        let result = async {
+            let mut tx = self.pool.begin().await?;
+            let actual: i64 =
+                sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
+                    .bind(thread_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            if actual != expected_version {
+                return Err(StoreError::ContextVersionConflict {
+                    expected: expected_version,
+                    actual,
+                });
+            }
+            let next_version = expected_version + 1;
+            for (ordinal, (role, blocks)) in prepared_messages.iter().enumerate() {
+                sqlx::query(
+                    "INSERT INTO llm_messages(
+                            thread_id,
+                            context_version,
+                            ordinal,
+                            role,
+                            content,
+                            created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(thread_id)
+                .bind(next_version)
+                .bind(i64::try_from(ordinal).unwrap_or(i64::MAX))
+                .bind(role)
+                .bind(serde_json::to_string(blocks)?)
+                .bind(created_at)
+                .execute(&mut *tx)
+                .await?;
+            }
+            let updated = sqlx::query(
+                "UPDATE thread SET
+                        llm_context_version = ?,
+                        updated_at = ?
+                    WHERE id = ? AND llm_context_version = ?",
+            )
+            .bind(next_version)
+            .bind(Utc::now())
+            .bind(thread_id)
+            .bind(expected_version)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() != 1 {
+                return Err(StoreError::ContextVersionConflict {
+                    expected: expected_version,
+                    actual,
+                });
+            }
+            tx.commit().await?;
+            Ok(next_version)
+        }
+        .await;
+
+        if result.is_err() {
+            cleanup_created_files(&created_files);
+        }
+        result
+    }
+
+    pub async fn load_current_llm_messages(
+        &self,
+        thread_id: &str,
+        thread_dir: &ThreadDir,
+    ) -> Result<Vec<Message>, StoreError> {
+        let rows = sqlx::query_as::<_, StoredLlmMessageRow>(
+            "SELECT lm.role, lm.content
+                FROM llm_messages lm
+                JOIN thread t ON t.id = lm.thread_id
+                WHERE lm.thread_id = ? AND lm.context_version = t.llm_context_version
+                ORDER BY lm.ordinal",
+        )
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let role = parse_role(&row.role)?;
+                let stored = serde_json::from_str::<Vec<serde_json::Value>>(&row.content)?;
+                Ok(Message::new(role, load_blocks(&stored, thread_dir)?))
+            })
+            .collect()
+    }
+
+    pub async fn delete_thread_tree(
+        &self,
+        thread_id: &str,
+        project: &ProjectDir,
+    ) -> Result<(), StoreError> {
+        let ids = sqlx::query_scalar::<_, String>(
+            "WITH RECURSIVE descendants(id) AS (
+                    SELECT id FROM thread WHERE id = ?
+                    UNION ALL
+                    SELECT child.id FROM thread child
+                    JOIN descendants parent ON child.parent_thread_id = parent.id
+                ) SELECT id FROM descendants",
+        )
+        .bind(thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+        sqlx::query("DELETE FROM thread WHERE id = ?")
+            .bind(thread_id)
+            .execute(&self.pool)
+            .await?;
+        for id in ids {
+            let path = project.thread(&id).path().to_path_buf();
+            if path.exists() {
+                fs::remove_dir_all(path)?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn apply_persistence_event(
         &self,
-        event: RuntimePersistenceEvent,
+        event: &RuntimePersistenceEvent,
+        project_id: &str,
+        project: &ProjectDir,
     ) -> Result<(), StoreError> {
-        // server 是 core 持久化事件到 SQLite 的边界；这里保持事件到表操作的一一映射。
         match event {
-            RuntimePersistenceEvent::CreateSession(session) => self.create_session(&session).await,
-            RuntimePersistenceEvent::UpdateSessionUpdatedAt { session_id } => {
-                self.update_session_updated_at(&session_id).await
+            RuntimePersistenceEvent::CreateThread(thread) => {
+                self.create_thread(&thread_from_runtime(project_id, thread))
+                    .await
             }
-            RuntimePersistenceEvent::UpdateSessionConfig {
-                session_id,
+            RuntimePersistenceEvent::UpdateThreadUpdatedAt { thread_id } => {
+                self.update_thread_updated_at(thread_id).await
+            }
+            RuntimePersistenceEvent::UpdateThreadConfig {
+                thread_id,
                 provider,
                 model,
                 thinking_effort,
             } => {
-                self.update_session_config(
-                    &session_id,
-                    &provider,
-                    &model,
-                    thinking_effort.as_deref(),
-                )
-                .await
+                self.update_thread_config(thread_id, provider, model, thinking_effort.as_deref())
+                    .await
             }
-            RuntimePersistenceEvent::UpdateSessionThinkingEffort {
-                session_id,
+            RuntimePersistenceEvent::UpdateThreadThinkingEffort {
+                thread_id,
                 thinking_effort,
             } => {
-                self.update_session_thinking_effort(&session_id, thinking_effort.as_deref())
+                self.update_thread_thinking_effort(thread_id, thinking_effort.as_deref())
                     .await
             }
             RuntimePersistenceEvent::InsertMessage {
-                session_id,
+                thread_id,
                 role,
+                model_ref,
                 blocks,
                 kind,
                 created_at,
-                blocks_dir,
             } => {
-                self.insert_message(&NewMessage {
-                    session_id,
-                    role,
-                    blocks,
-                    kind,
-                    created_at,
-                    blocks_dir,
-                })
+                self.insert_message(
+                    &NewMessage {
+                        thread_id: thread_id.clone(),
+                        role: role.clone(),
+                        model_ref: model_ref.clone(),
+                        blocks: blocks.clone(),
+                        kind: kind.clone(),
+                        created_at: *created_at,
+                    },
+                    &project.thread(thread_id),
+                )
                 .await
             }
             RuntimePersistenceEvent::InsertDisplayMessage {
-                session_id,
+                thread_id,
                 display,
+                model_ref,
                 created_at,
             } => {
-                self.insert_display_message_with_created_at(&session_id, &display, created_at)
-                    .await
+                self.insert_display_message(
+                    thread_id,
+                    display,
+                    model_ref.as_deref(),
+                    *created_at,
+                    &project.thread(thread_id),
+                )
+                .await
             }
-            RuntimePersistenceEvent::InsertPlanMessage { session_id, plan } => {
-                self.insert_plan_message(&session_id, &plan).await
+            RuntimePersistenceEvent::InsertPlanMessage {
+                thread_id,
+                plan,
+                model_ref,
+            } => {
+                self.insert_plan_message(thread_id, plan, model_ref, &project.thread(thread_id))
+                    .await
             }
             RuntimePersistenceEvent::InsertCompactSummaryMessage {
-                session_id,
+                thread_id,
                 summary,
+                model_ref,
             } => {
-                self.insert_compact_summary_message(&session_id, &summary)
+                self.insert_compact_summary_message(
+                    thread_id,
+                    summary,
+                    model_ref,
+                    &project.thread(thread_id),
+                )
+                .await
+            }
+            RuntimePersistenceEvent::AppendLlmMessage {
+                thread_id,
+                message,
+                created_at,
+            } => {
+                self.append_llm_message(thread_id, message, *created_at, &project.thread(thread_id))
                     .await
             }
-            RuntimePersistenceEvent::RecordSessionUsage { session_id, usage } => {
-                self.record_session_usage(&session_id, usage).await
+            RuntimePersistenceEvent::ReplaceLlmContext {
+                thread_id,
+                expected_version,
+                messages,
+                created_at,
+                ..
+            } => self
+                .replace_llm_context(
+                    thread_id,
+                    *expected_version,
+                    messages,
+                    *created_at,
+                    &project.thread(thread_id),
+                )
+                .await
+                .map(|_| ()),
+            RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage } => {
+                self.record_thread_usage(thread_id, *usage).await
             }
-            RuntimePersistenceEvent::RecordSessionTotalUsage { session_id, usage } => {
-                self.record_session_total_usage(&session_id, usage).await
+            RuntimePersistenceEvent::RecordThreadTotalUsage { thread_id, usage } => {
+                self.record_thread_total_usage(thread_id, *usage).await
             }
-            RuntimePersistenceEvent::RecordParentSubagentUsage { session_id, usage } => {
-                self.record_parent_subagent_usage(&session_id, usage).await
+            RuntimePersistenceEvent::RecordParentSubagentUsage { thread_id, usage } => {
+                self.record_thread_usage(thread_id, *usage).await
             }
         }
     }
+}
 
-    /// 旧数据库轻量迁移：缺列时追加新列。
-    async fn ensure_sessions_column(
-        &self,
-        column: &str,
-        definition: &str,
-    ) -> Result<(), StoreError> {
-        let rows = sqlx::query("PRAGMA table_info(sessions)")
-            .fetch_all(&self.pool)
-            .await?;
-        let exists = rows.iter().any(|row| {
-            use sqlx::Row;
-            row.try_get::<String, _>("name")
-                .map(|name| name == column)
-                .unwrap_or(false)
-        });
-        if !exists {
-            let sql = format!("ALTER TABLE sessions ADD COLUMN {column} {definition}");
-            sqlx::query(&sql).execute(&self.pool).await?;
-        }
-        Ok(())
+fn thread_from_runtime(project_id: &str, thread: &ThreadRecord) -> Thread {
+    Thread {
+        id: thread.id.clone(),
+        project_id: project_id.to_string(),
+        parent_thread_id: thread.parent_thread_id.clone(),
+        spawn_tool_use_id: thread.spawn_tool_use_id.clone(),
+        thread_type: thread.thread_type.clone(),
+        agent_label: thread.agent_label.clone(),
+        provider: thread.provider.clone(),
+        model: thread.model.clone(),
+        thinking_effort: thread.thinking_effort.clone(),
+        title: thread.title.clone(),
+        current_context_tokens: thread.current_context_tokens,
+        total_tokens: thread.total_tokens,
+        total_cached_tokens: thread.total_cached_tokens,
+        llm_context_version: thread.llm_context_version,
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
     }
+}
+
+struct NewUiJson<'a> {
+    thread_id: &'a str,
+    role: &'a str,
+    model_ref: Option<&'a str>,
+    content: &'a str,
+    kind: &'a str,
+    created_at: DateTime<Utc>,
+}
+
+async fn insert_ui_json(
+    pool: &SqlitePool,
+    row: NewUiJson<'_>,
+    thread_dir: &ThreadDir,
+) -> Result<(), StoreError> {
+    let PreparedUiContent {
+        value,
+        created_files,
+    } = prepare_ui_content(row.content, thread_dir)?;
+    let result = sqlx::query(
+        "INSERT INTO messages(
+                thread_id,
+                role,
+                model_ref,
+                content,
+                kind,
+                created_at)
+            VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(row.thread_id)
+    .bind(row.role)
+    .bind(row.model_ref)
+    .bind(value)
+    .bind(row.kind)
+    .bind(row.created_at)
+    .execute(pool)
+    .await;
+    finish_prepared_write(result.map(|_| ()), &created_files)
 }
 
 fn usage_tokens_i64(usage: Usage) -> i64 {
@@ -645,65 +1041,307 @@ fn usage_usize_to_i64(value: usize) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// 单个 `ContentBlock` 超过该大小后会存入 sidecar 文件。
-const BLOCK_SIZE_THRESHOLD: usize = 10 * 1024;
+pub(crate) struct PreparedBlocks {
+    values: Vec<serde_json::Value>,
+    created_files: Vec<PathBuf>,
+}
 
-/// 将内容块转换成可写入 messages.content 的 JSON，必要时生成 sidecar 引用。
+struct PreparedUiContent {
+    value: String,
+    created_files: Vec<PathBuf>,
+}
+
+fn prepare_ui_content(
+    content: &str,
+    thread_dir: &ThreadDir,
+) -> Result<PreparedUiContent, StoreError> {
+    if content.len() <= CONTENT_SIZE_THRESHOLD {
+        return Ok(PreparedUiContent {
+            value: content.to_string(),
+            created_files: Vec::new(),
+        });
+    }
+    let bytes = content.as_bytes();
+    let sha256 = sha256_hex(bytes);
+    let relative_path = PathBuf::from("sidecars").join(format!("{sha256}.json"));
+    let path = thread_dir.path().join(&relative_path);
+    let created_files = if write_atomically_if_absent(thread_dir, &path, bytes)? {
+        vec![path]
+    } else {
+        Vec::new()
+    };
+    Ok(PreparedUiContent {
+        value: serde_json::to_string(&serde_json::json!({
+            "type": "sidecar_document",
+            "path": path_to_relative_string(&relative_path)?,
+            "bytes": bytes.len(),
+            "sha256": sha256,
+        }))?,
+        created_files,
+    })
+}
+
+pub(crate) fn load_ui_content(stored: &str, thread_dir: &ThreadDir) -> Result<String, StoreError> {
+    let Ok(reference) = serde_json::from_str::<serde_json::Value>(stored) else {
+        return Ok(stored.to_string());
+    };
+    if reference.get("type").and_then(serde_json::Value::as_str) != Some("sidecar_document") {
+        return Ok(stored.to_string());
+    }
+    let relative = required_string(&reference, "path")?;
+    let bytes = fs::read(safe_relative_path(thread_dir.path(), relative)?)?;
+    verify_stored_bytes(&reference, &bytes)?;
+    String::from_utf8(bytes)
+        .map_err(|error| StoreError::InvalidData(format!("sidecar is not UTF-8: {error}")))
+}
+
 pub(crate) fn prepare_blocks(
     blocks: &[ContentBlock],
-    blocks_dir: &Path,
-) -> Result<Vec<serde_json::Value>, StoreError> {
-    let mut out = Vec::with_capacity(blocks.len());
+    thread_dir: &ThreadDir,
+) -> Result<PreparedBlocks, StoreError> {
+    let mut values = Vec::with_capacity(blocks.len());
+    let mut created_files = Vec::new();
     for block in blocks {
-        let value = serde_json::to_value(block)?;
-        let json_str = serde_json::to_string(block)?;
-
-        if json_str.len() > BLOCK_SIZE_THRESHOLD {
-            // 大块内容落 sidecar，messages.content 只保留轻量索引字段，避免 SQLite 行膨胀。
-            let file_id = Uuid::new_v4().to_string();
-            let block_dir = blocks_dir.join(&file_id);
-            std::fs::create_dir_all(&block_dir)?;
-            std::fs::write(block_dir.join("block.json"), &json_str)?;
-
-            let mut ref_val = serde_json::Map::new();
-            if let Some(obj) = value.as_object() {
-                // type/id 等字段保留在行内，列表页和调试时不必读取 sidecar 才能识别块。
-                for key in ["type", "id", "name", "tool_use_id", "is_error"] {
-                    if let Some(v) = obj.get(key) {
-                        ref_val.insert(key.to_string(), v.clone());
-                    }
-                }
+        if let ContentBlock::Image(image) = block {
+            let bytes = BASE64_STANDARD.decode(&image.source.data)?;
+            let sha256 = sha256_hex(&bytes);
+            let relative_path = asset_relative_path(&sha256, &image.source.media_type)?;
+            let path = thread_dir.path().join(&relative_path);
+            if write_atomically_if_absent(thread_dir, &path, &bytes)? {
+                created_files.push(path);
             }
-            ref_val.insert("file".to_string(), serde_json::json!(file_id));
-            out.push(serde_json::Value::Object(ref_val));
+            values.push(serde_json::json!({
+                "type": "asset",
+                "path": path_to_relative_string(&relative_path)?,
+                "mime_type": image.source.media_type,
+                "bytes": bytes.len(),
+                "sha256": sha256,
+            }));
+            continue;
+        }
+
+        let encoded = serde_json::to_vec(block)?;
+        if should_externalize_block(block, encoded.len()) {
+            let sha256 = sha256_hex(&encoded);
+            let relative_path = PathBuf::from("sidecars").join(format!("{sha256}.json"));
+            let path = thread_dir.path().join(&relative_path);
+            if write_atomically_if_absent(thread_dir, &path, &encoded)? {
+                created_files.push(path);
+            }
+            values.push(serde_json::json!({
+                "type": "sidecar",
+                "path": path_to_relative_string(&relative_path)?,
+                "bytes": encoded.len(),
+                "sha256": sha256,
+            }));
         } else {
-            out.push(value);
+            values.push(serde_json::from_slice(&encoded)?);
         }
     }
-    Ok(out)
+    Ok(PreparedBlocks {
+        values,
+        created_files,
+    })
 }
 
-/// 从行内 JSON 或 sidecar 文件恢复完整内容块。
+fn should_externalize_block(block: &ContentBlock, encoded_len: usize) -> bool {
+    match block {
+        ContentBlock::Text(block) => block.text.len() > CONTENT_SIZE_THRESHOLD,
+        ContentBlock::Thinking(block) => block.thinking.len() > CONTENT_SIZE_THRESHOLD,
+        ContentBlock::ToolResult(block) => block.content.len() > CONTENT_SIZE_THRESHOLD,
+        ContentBlock::ToolUse(_) => encoded_len > CONTENT_SIZE_THRESHOLD,
+        ContentBlock::Image(_) => false,
+    }
+}
+
 pub(crate) fn load_blocks(
     stored: &[serde_json::Value],
-    blocks_dir: &Path,
+    thread_dir: &ThreadDir,
 ) -> Result<Vec<ContentBlock>, StoreError> {
-    let mut blocks = Vec::with_capacity(stored.len());
-    for val in stored {
-        // 带 file 字段的是 sidecar 引用；普通块仍按行内 JSON 解析，兼容小消息和旧数据。
-        let block = if let Some(file_id) = val.get("file").and_then(|v| v.as_str()) {
-            let file_path = blocks_dir.join(file_id).join("block.json");
-            let content = std::fs::read_to_string(&file_path)?;
-            serde_json::from_str::<ContentBlock>(&content)?
-        } else {
-            serde_json::from_value(val.clone())?
-        };
-        blocks.push(block);
-    }
-    Ok(blocks)
+    stored
+        .iter()
+        .map(
+            |value| match value.get("type").and_then(serde_json::Value::as_str) {
+                Some("asset") => {
+                    let relative = required_string(value, "path")?;
+                    let path = safe_relative_path(thread_dir.path(), relative)?;
+                    let bytes = fs::read(path)?;
+                    verify_stored_bytes(value, &bytes)?;
+                    Ok(ContentBlock::from_base64_image(
+                        required_string(value, "mime_type")?.to_string(),
+                        BASE64_STANDARD.encode(bytes),
+                    ))
+                }
+                Some("sidecar") => {
+                    let relative = required_string(value, "path")?;
+                    let path = safe_relative_path(thread_dir.path(), relative)?;
+                    let bytes = fs::read(path)?;
+                    verify_stored_bytes(value, &bytes)?;
+                    Ok(serde_json::from_slice(&bytes)?)
+                }
+                _ => Ok(serde_json::from_value(value.clone())?),
+            },
+        )
+        .collect()
 }
 
-/// 从不同消息 JSON 形状中提取可作为标题候选的纯文本。
+pub(crate) fn persist_asset(
+    thread_dir: &ThreadDir,
+    bytes: &[u8],
+    mime_type: &str,
+) -> Result<(String, String), StoreError> {
+    let sha256 = sha256_hex(bytes);
+    let relative_path = asset_relative_path(&sha256, mime_type)?;
+    let path = thread_dir.path().join(&relative_path);
+    write_atomically_if_absent(thread_dir, &path, bytes)?;
+    Ok((sha256, path_to_relative_string(&relative_path)?))
+}
+
+pub(crate) fn asset_path(
+    thread_dir: &ThreadDir,
+    sha256: &str,
+    mime_type: &str,
+) -> Result<PathBuf, StoreError> {
+    if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StoreError::InvalidData("invalid attachment id".to_string()));
+    }
+    Ok(thread_dir
+        .path()
+        .join(asset_relative_path(sha256, mime_type)?))
+}
+
+fn asset_relative_path(sha256: &str, mime_type: &str) -> Result<PathBuf, StoreError> {
+    let extension = match mime_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => {
+            return Err(StoreError::InvalidData(format!(
+                "unsupported attachment MIME type {mime_type}"
+            )));
+        }
+    };
+    Ok(PathBuf::from("assets").join(format!("{sha256}.{extension}")))
+}
+
+fn write_atomically_if_absent(
+    thread_dir: &ThreadDir,
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<bool, StoreError> {
+    if destination.exists() {
+        return Ok(false);
+    }
+    fs::create_dir_all(thread_dir.staging_dir())?;
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let temp_path = thread_dir
+        .staging_dir()
+        .join(format!("{}.tmp", Uuid::new_v4()));
+    let write_result = (|| -> Result<(), std::io::Error> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp_path, destination)?;
+        if let Some(parent) = destination.parent() {
+            File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(true)
+}
+
+fn required_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, StoreError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| StoreError::InvalidData(format!("missing {field}")))
+}
+
+fn verify_stored_bytes(value: &serde_json::Value, bytes: &[u8]) -> Result<(), StoreError> {
+    let expected_bytes = value
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| StoreError::InvalidData("missing bytes".to_string()))?;
+    let expected_hash = required_string(value, "sha256")?;
+    if expected_bytes != bytes.len() as u64 || expected_hash != sha256_hex(bytes) {
+        return Err(StoreError::InvalidData(
+            "sidecar or asset integrity check failed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn safe_relative_path(root: &Path, relative: &str) -> Result<PathBuf, StoreError> {
+    let relative = Path::new(relative);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(StoreError::InvalidData(
+            "persisted path is not a safe relative path".to_string(),
+        ));
+    }
+    Ok(root.join(relative))
+}
+
+fn path_to_relative_string(path: &Path) -> Result<String, StoreError> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| StoreError::InvalidData("non-UTF-8 persisted path".to_string()))
+}
+
+// TODO: 需要考虑这里的性能问题
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn finish_prepared_write(
+    result: Result<(), sqlx::Error>,
+    created_files: &[PathBuf],
+) -> Result<(), StoreError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            cleanup_created_files(created_files);
+            Err(error.into())
+        }
+    }
+}
+
+fn cleanup_created_files(paths: &[PathBuf]) {
+    for path in paths {
+        if let Err(error) = fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), %error, "failed to clean unreferenced file");
+        }
+    }
+}
+
+fn parse_role(role: &str) -> Result<Role, StoreError> {
+    match role {
+        "user" => Ok(Role::User),
+        "assistant" => Ok(Role::Assistant),
+        _ => Err(StoreError::InvalidData(format!("unknown role {role}"))),
+    }
+}
+
 fn extract_message_text(content_json: &str) -> String {
     if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
         return display.text.replace('\n', " ").replace('\r', "");
@@ -711,43 +1349,50 @@ fn extract_message_text(content_json: &str) -> String {
     if let Ok(summary) = serde_json::from_str::<DisplaySummary>(content_json) {
         return summary.markdown.replace('\n', " ").replace('\r', "");
     }
-
-    if let Ok(values) = serde_json::from_str::<Vec<serde_json::Value>>(content_json) {
-        let texts: Vec<String> = values
-            .iter()
-            .filter_map(|v| {
-                if v.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    v.get("text")
-                        .and_then(|t| t.as_str())
-                        .map(|s| s.replace('\n', " ").replace('\r', ""))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        return texts.join(" ");
-    }
-    String::new()
+    serde_json::from_str::<Vec<serde_json::Value>>(content_json)
+        .unwrap_or_default()
+        .iter()
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|value| value.get("text").and_then(serde_json::Value::as_str))
+        .map(|text| text.replace('\n', " ").replace('\r', ""))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use omini_domain::message::{ImageSource, ImageSourceType, TextBlock};
 
-    async fn temp_db() -> Database {
-        let path = std::env::temp_dir().join(format!("omini-db-test-{}.sqlite", Uuid::new_v4()));
-        Database::open(&path).await.expect("db should open")
+    const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+    async fn temp_db() -> (Database, ProjectDir) {
+        let root = std::env::temp_dir().join(format!("omini-db-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let db = Database::open(&root.join("omini.sqlite")).await.unwrap();
+        let now = Utc::now();
+        db.create_project(&Project {
+            id: TEST_PROJECT_ID.to_string(),
+            name: "test project".to_string(),
+            path: root.join("cwd").display().to_string(),
+            storage_key: "test-project".to_string(),
+            created_at: now,
+            updated_at: now,
+            last_opened_at: None,
+        })
+        .await
+        .unwrap();
+        (db, ProjectDir::from_path(root.join("project")))
     }
 
-    fn test_session(id: &str) -> Session {
+    fn test_thread(id: &str) -> Thread {
         let now = Utc::now();
-        Session {
+        Thread {
             id: id.to_string(),
-            project_path: "/tmp/project".to_string(),
-            parent_session_id: None,
+            project_id: TEST_PROJECT_ID.to_string(),
+            parent_thread_id: None,
             spawn_tool_use_id: None,
-            session_type: "main".to_string(),
+            thread_type: "main".to_string(),
             agent_label: None,
             provider: "openai".to_string(),
             model: "gpt-test".to_string(),
@@ -756,241 +1401,271 @@ mod tests {
             current_context_tokens: 0,
             total_tokens: 0,
             total_cached_tokens: 0,
+            llm_context_version: 1,
             created_at: now,
             updated_at: now,
         }
     }
 
-    #[tokio::test]
-    async fn session_usage_fields_default_to_zero() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
-            .await
-            .expect("session should insert");
+    #[test]
+    fn runtime_child_thread_is_bound_to_server_project_id() {
+        let now = Utc::now();
+        let runtime = ThreadRecord {
+            id: "child".to_string(),
+            parent_thread_id: Some("parent".to_string()),
+            spawn_tool_use_id: Some("tool".to_string()),
+            thread_type: "subagent".to_string(),
+            agent_label: Some("explorer".to_string()),
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            thinking_effort: None,
+            title: Some("Explore".to_string()),
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
+            llm_context_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
 
-        let session = db
-            .get_session("s1")
-            .await
-            .expect("session should load")
-            .expect("session should exist");
+        let stored = thread_from_runtime(TEST_PROJECT_ID, &runtime);
 
-        assert_eq!(session.current_context_tokens, 0);
-        assert_eq!(session.total_tokens, 0);
-        assert_eq!(session.total_cached_tokens, 0);
+        assert_eq!(stored.project_id, TEST_PROJECT_ID);
+        assert_eq!(stored.id, "child");
+        assert_eq!(stored.parent_thread_id.as_deref(), Some("parent"));
     }
 
     #[tokio::test]
-    async fn record_session_usage_updates_current_and_totals() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
+    async fn llm_context_loads_only_current_version_and_keeps_old_version() {
+        let (db, project) = temp_db().await;
+        project.create_thread("t1").unwrap();
+        db.create_thread(&test_thread("t1")).await.unwrap();
+        let first = Message::from_user_text("old".to_string());
+        db.append_llm_message("t1", &first, Utc::now(), &project.thread("t1"))
             .await
-            .expect("session should insert");
-
-        db.record_session_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                cached_tokens: 3,
-            },
-        )
-        .await
-        .expect("usage should update");
-        db.record_session_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 2,
-                completion_tokens: 4,
-                cached_tokens: 1,
-            },
-        )
-        .await
-        .expect("usage should update");
-
-        let session = db
-            .get_session("s1")
-            .await
-            .expect("session should load")
-            .expect("session should exist");
-
-        assert_eq!(session.current_context_tokens, 6);
-        assert_eq!(session.total_tokens, 21);
-        assert_eq!(session.total_cached_tokens, 4);
-    }
-
-    #[tokio::test]
-    async fn record_parent_subagent_usage_only_updates_totals() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
-            .await
-            .expect("session should insert");
-        db.record_session_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                cached_tokens: 3,
-            },
-        )
-        .await
-        .expect("usage should update");
-
-        db.record_parent_subagent_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 7,
-                completion_tokens: 8,
-                cached_tokens: 4,
-            },
-        )
-        .await
-        .expect("subagent usage should update");
-
-        let session = db
-            .get_session("s1")
-            .await
-            .expect("session should load")
-            .expect("session should exist");
-
-        assert_eq!(session.current_context_tokens, 15);
-        assert_eq!(session.total_tokens, 30);
-        assert_eq!(session.total_cached_tokens, 7);
-    }
-
-    #[tokio::test]
-    async fn record_session_total_usage_only_updates_totals() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
-            .await
-            .expect("session should insert");
-        db.record_session_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 10,
-                completion_tokens: 5,
-                cached_tokens: 3,
-            },
-        )
-        .await
-        .expect("usage should update");
-
-        db.record_session_total_usage(
-            "s1",
-            Usage {
-                prompt_tokens: 7,
-                completion_tokens: 8,
-                cached_tokens: 4,
-            },
-        )
-        .await
-        .expect("total usage should update");
-
-        let session = db
-            .get_session("s1")
-            .await
-            .expect("session should load")
-            .expect("session should exist");
-
-        assert_eq!(session.current_context_tokens, 15);
-        assert_eq!(session.total_tokens, 30);
-        assert_eq!(session.total_cached_tokens, 7);
-    }
-
-    #[tokio::test]
-    async fn set_initial_session_title_updates_only_untitled_empty_sessions() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
-            .await
-            .expect("session should insert");
-
-        assert!(
-            db.set_initial_session_title("s1", "first message")
+            .unwrap();
+        let next = vec![
+            Message::from_user_text("summary".to_string()),
+            first.clone(),
+        ];
+        assert_eq!(
+            db.replace_llm_context("t1", 1, &next, Utc::now(), &project.thread("t1"))
                 .await
-                .expect("title should update")
+                .unwrap(),
+            2
         );
         assert_eq!(
-            db.get_session("s1")
+            db.load_current_llm_messages("t1", &project.thread("t1"))
                 .await
-                .expect("session should load")
-                .expect("session should exist")
-                .title
-                .as_deref(),
-            Some("first message")
+                .unwrap(),
+            next
         );
-
-        assert!(
-            !db.set_initial_session_title("s1", "replacement")
-                .await
-                .expect("title should not update")
-        );
-        assert_eq!(
-            db.get_session("s1")
-                .await
-                .expect("session should load")
-                .expect("session should exist")
-                .title
-                .as_deref(),
-            Some("first message")
-        );
+        let old_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM llm_messages WHERE thread_id = 't1' AND context_version = 1",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_count, 1);
     }
 
     #[tokio::test]
-    async fn set_initial_session_title_skips_sessions_with_messages() {
-        let db = temp_db().await;
-        db.create_session(&test_session("s1"))
-            .await
-            .expect("session should insert");
-        db.insert_display_message(
-            "s1",
-            &DisplayMessage {
-                role: omini_domain::message::Role::User,
-                text: "first message".to_string(),
-                mentions: Vec::new(),
+    async fn images_are_raw_assets_and_rehydrate_to_equivalent_blocks() {
+        let (db, project) = temp_db().await;
+        project.create_thread("t1").unwrap();
+        db.create_thread(&test_thread("t1")).await.unwrap();
+        let raw = b"not-really-a-png";
+        let image = ContentBlock::Image(omini_domain::message::ImageBlock {
+            source: ImageSource {
+                source_type: ImageSourceType::Base64,
+                media_type: "image/png".to_string(),
+                data: BASE64_STANDARD.encode(raw),
             },
+        });
+        let message = Message::new(Role::User, vec![image.clone()]);
+        db.append_llm_message("t1", &message, Utc::now(), &project.thread("t1"))
+            .await
+            .unwrap();
+        let loaded = db
+            .load_current_llm_messages("t1", &project.thread("t1"))
+            .await
+            .unwrap();
+        assert_eq!(loaded, vec![message]);
+        let db_content: String = sqlx::query_scalar("SELECT content FROM llm_messages LIMIT 1")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert!(!db_content.contains(&BASE64_STANDARD.encode(raw)));
+        let asset = fs::read_dir(project.thread("t1").assets_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(fs::read(asset).unwrap(), raw);
+    }
+
+    #[tokio::test]
+    async fn compact_reuses_existing_media_asset() {
+        let (db, project) = temp_db().await;
+        project.create_thread("t1").unwrap();
+        db.create_thread(&test_thread("t1")).await.unwrap();
+        let image_message = Message::new(
+            Role::User,
+            vec![ContentBlock::Image(omini_domain::message::ImageBlock {
+                source: ImageSource {
+                    source_type: ImageSourceType::Base64,
+                    media_type: "image/png".to_string(),
+                    data: BASE64_STANDARD.encode(b"shared-image"),
+                },
+            })],
+        );
+        let thread_dir = project.thread("t1");
+        db.append_llm_message("t1", &image_message, Utc::now(), &thread_dir)
+            .await
+            .unwrap();
+        db.replace_llm_context(
+            "t1",
+            1,
+            &[
+                Message::from_user_text("summary".to_string()),
+                image_message,
+            ],
+            Utc::now(),
+            &thread_dir,
         )
         .await
-        .expect("message should insert");
+        .unwrap();
 
-        assert!(
-            !db.set_initial_session_title("s1", "late title")
-                .await
-                .expect("title should not update")
-        );
+        assert_eq!(fs::read_dir(thread_dir.assets_dir()).unwrap().count(), 1);
+        let stored: Vec<String> = sqlx::query_scalar(
+            "SELECT content FROM llm_messages
+             WHERE thread_id = 't1' AND (
+                 (context_version = 1 AND ordinal = 0) OR
+                 (context_version = 2 AND ordinal = 1)
+             ) ORDER BY context_version",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0], stored[1]);
+    }
+
+    #[tokio::test]
+    async fn context_version_conflict_cleans_unreferenced_sidecars() {
+        let (db, project) = temp_db().await;
+        project.create_thread("t1").unwrap();
+        db.create_thread(&test_thread("t1")).await.unwrap();
+        let thread_dir = project.thread("t1");
+        let message = Message::from_user_text("x".repeat(CONTENT_SIZE_THRESHOLD + 1));
+
+        let error = db
+            .replace_llm_context("t1", 99, &[message], Utc::now(), &thread_dir)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            StoreError::ContextVersionConflict {
+                expected: 99,
+                actual: 1
+            }
+        ));
+        assert_eq!(fs::read_dir(thread_dir.sidecars_dir()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(thread_dir.staging_dir()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn large_compact_summary_uses_sidecar_and_keeps_model_snapshot() {
+        let (db, project) = temp_db().await;
+        project.create_thread("t1").unwrap();
+        db.create_thread(&test_thread("t1")).await.unwrap();
+        let summary = DisplaySummary {
+            id: "summary-1".to_string(),
+            title: "Compacted".to_string(),
+            markdown: "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
+            created_at: Utc::now(),
+        };
+        db.apply_persistence_event(
+            &RuntimePersistenceEvent::InsertCompactSummaryMessage {
+                thread_id: "t1".to_string(),
+                summary: summary.clone(),
+                model_ref: "provider/model".to_string(),
+            },
+            TEST_PROJECT_ID,
+            &project,
+        )
+        .await
+        .unwrap();
+
+        let stored = db.get_messages("t1").await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].model_ref.as_deref(), Some("provider/model"));
+        assert!(stored[0].content.contains("sidecar_document"));
+        assert!(!stored[0].content.contains(&summary.markdown));
         assert_eq!(
-            db.get_session("s1")
-                .await
-                .expect("session should load")
-                .expect("session should exist")
-                .title,
-            None
+            fs::read_dir(project.thread("t1").sidecars_dir())
+                .unwrap()
+                .count(),
+            1
+        );
+        let loaded = crate::history::load_messages(&db, "t1", &project.thread("t1")).await;
+        assert_eq!(
+            loaded,
+            vec![omini_domain::display::HistoryItem::Summary(summary)]
         );
     }
 
     #[tokio::test]
-    async fn set_initial_session_title_is_idempotent_for_fork_preset_title() {
-        let db = temp_db().await;
-        // fork 路径 (`fork_session_for_plan`) 在 DB insert 时就预设了
-        // "(source) (new from plan)" 形式的非空 title;`set_initial_session_title`
-        // 的 SQL 软写条件必须保证这条预设 title 不会被后台 LLM 调用覆盖。
-        let mut forked = test_session("s1");
-        forked.title = Some("(source) (new from plan)".to_string());
-        db.create_session(&forked)
-            .await
-            .expect("session should insert");
+    async fn delete_thread_tree_removes_rows_and_private_directories() {
+        let (db, project) = temp_db().await;
+        project.create_thread("parent").unwrap();
+        project.create_thread("child").unwrap();
+        db.create_thread(&test_thread("parent")).await.unwrap();
+        let mut child = test_thread("child");
+        child.parent_thread_id = Some("parent".to_string());
+        child.thread_type = "subagent".to_string();
+        db.create_thread(&child).await.unwrap();
+        db.append_llm_message(
+            "child",
+            &Message::from_user_text("x".repeat(CONTENT_SIZE_THRESHOLD + 1)),
+            Utc::now(),
+            &project.thread("child"),
+        )
+        .await
+        .unwrap();
 
-        assert!(
-            !db.set_initial_session_title("s1", "llm_title")
-                .await
-                .expect("title should not update")
-        );
-        assert_eq!(
-            db.get_session("s1")
-                .await
-                .expect("session should load")
-                .expect("session should exist")
-                .title
-                .as_deref(),
-            Some("(source) (new from plan)")
-        );
+        db.delete_thread_tree("parent", &project).await.unwrap();
+
+        assert!(db.get_thread("parent").await.unwrap().is_none());
+        assert!(db.get_thread("child").await.unwrap().is_none());
+        assert!(!project.thread("parent").path().exists());
+        assert!(!project.thread("child").path().exists());
+    }
+
+    #[test]
+    fn threshold_is_strictly_greater_than_64_kib() {
+        let root = std::env::temp_dir().join(format!("omini-block-test-{}", Uuid::new_v4()));
+        let thread = ThreadDir::from_path(root);
+        fs::create_dir_all(thread.path()).unwrap();
+        let at_limit = ContentBlock::Text(TextBlock {
+            text: "x".repeat(CONTENT_SIZE_THRESHOLD),
+        });
+        let prepared = prepare_blocks(&[at_limit], &thread).unwrap();
+        assert_eq!(prepared.values[0]["type"], "text");
+        let above_limit = ContentBlock::Text(TextBlock {
+            text: "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
+        });
+        let prepared = prepare_blocks(&[above_limit], &thread).unwrap();
+        assert_eq!(prepared.values[0]["type"], "sidecar");
+        let inline = prepare_blocks(
+            &[ContentBlock::Text(TextBlock {
+                text: "small".to_string(),
+            })],
+            &thread,
+        )
+        .unwrap();
+        assert_eq!(inline.values[0]["type"], "text");
     }
 }
