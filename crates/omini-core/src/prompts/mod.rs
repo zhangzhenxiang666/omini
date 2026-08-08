@@ -313,7 +313,7 @@ mod tests {
     fn plan_system_prompt_contains_hard_gate_block() {
         let body = plan_mode_body();
 
-        let (start, end) = first_section_block(&body, "HARD-GATE")
+        let (start, end) = first_section_block(body, "HARD-GATE")
             .expect("plan prompt should contain a <HARD-GATE> block");
         assert!(start < end);
         let block = &body[start..end];
