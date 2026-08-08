@@ -40,5 +40,13 @@ jobs:
       - name: Lint (clippy)
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      - name: Install bundled ripgrep
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          install --directory "$HOME/.omini/bin"
+          install --mode=0755 "$(command -v rg)" "$HOME/.omini/bin/rg"
+          "$HOME/.omini/bin/rg" --version
+
       - name: Run tests
         run: cargo test --locked --workspace
