@@ -32,6 +32,20 @@ pub struct DisplaySummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentTaskNotificationItem {
+    pub task_id: String,
+    pub agent: String,
+    pub title: String,
+    pub status: crate::events::AgentTaskStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentTaskNotification {
+    pub tasks: Vec<AgentTaskNotificationItem>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayMention {
     pub start_char: usize,
     pub end_char: usize,
@@ -68,6 +82,7 @@ pub enum HistoryItem {
     Display(DisplayMessage),
     Plan(DisplayPlan),
     Summary(DisplaySummary),
+    AgentTaskNotification(AgentTaskNotification),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

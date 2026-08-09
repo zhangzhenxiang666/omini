@@ -47,6 +47,11 @@ impl ThreadRuntime {
 
     pub fn is_reclaimable(&self) -> bool {
         self.runtime_state() == client_proto::SessionRuntimeState::Idle
+            && !self
+                .status_projection
+                .lock()
+                .expect("status projection lock poisoned")
+                .has_active_agent_tasks()
     }
 
     pub fn can_reclaim_without_clients(&self) -> bool {

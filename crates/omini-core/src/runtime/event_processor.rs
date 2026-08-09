@@ -1,11 +1,8 @@
 use super::manual_compact::persist_compact_summary_event;
 use super::service::AgentRuntime;
-use super::usage::{
-    record_total_usage_and_notify, record_total_usage_snapshot, record_usage_snapshot,
-};
+use super::usage::{record_total_usage_and_notify, record_usage_snapshot};
 use super::*;
 use omini_domain::display::HistoryItem;
-use std::collections::HashMap;
 use tracing::Instrument;
 
 impl AgentRuntime {
@@ -23,12 +20,12 @@ impl AgentRuntime {
         let usage_state = Arc::clone(&self.thread_usage);
         let model_ref = format!("{}/{}", self.settings.active_provider, self.settings.model);
         let context_window = active_run::current_context_window(&self.settings);
+        let task_supervisor = Arc::clone(&self.task_supervisor);
         let span_thread_id = thread_id.clone();
 
         tokio::spawn(
             async move {
                 let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
-                let mut subagent_model_refs = HashMap::<String, String>::new();
                 while let Some(event) = engine_rx.recv().await {
                     let active = *active_profile_handle
                         .read()
@@ -53,6 +50,48 @@ impl AgentRuntime {
                                     client_echo_id,
                                 })
                                 .await;
+                        }
+                        EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+                            notification,
+                            llm_message,
+                            task_ids,
+                            ack,
+                        } => {
+                            let (persistence_ack, persistence_result) =
+                                tokio::sync::oneshot::channel();
+                            let result = if persistence_tx
+                                .send(RuntimePersistenceEvent::InsertAgentTaskNotification {
+                                    owner_thread_id: thread_id.clone(),
+                                    notification: notification.clone(),
+                                    llm_message,
+                                    task_ids: task_ids.clone(),
+                                    created_at: Utc::now(),
+                                    ack: persistence_ack,
+                                })
+                                .await
+                                .is_err()
+                            {
+                                Err("agent task notification persistence channel closed"
+                                    .to_string())
+                            } else {
+                                persistence_result
+                                    .await
+                                    .map_err(|_| {
+                                        "agent task notification acknowledgement dropped"
+                                            .to_string()
+                                    })
+                                    .and_then(|result| result)
+                            };
+                            if result.is_ok() {
+                                task_supervisor.mark_notifications_delivered(&task_ids);
+                                let _ = event_tx
+                                    .send(RuntimeToServerEvent::UserMessageInjected {
+                                        item: HistoryItem::AgentTaskNotification(notification),
+                                        client_echo_id: None,
+                                    })
+                                    .await;
+                            }
+                            let _ = ack.send(result);
                         }
                         EngineToRuntimeEvent::LlmHistoryProduced(msg) => {
                             history::persist_llm_history_only(&thread_id, &msg, &persistence_tx)
@@ -183,7 +222,7 @@ impl AgentRuntime {
                                 })
                                 .await;
                             let snapshot =
-                                record_usage_snapshot(&usage_state, usage, context_window).await;
+                                record_usage_snapshot(&usage_state, usage, context_window);
                             let _ = event_tx
                                 .send(RuntimeToServerEvent::UsageChanged(snapshot))
                                 .await;
@@ -257,113 +296,6 @@ impl AgentRuntime {
                                 &usage_state,
                             )
                             .await;
-                        }
-                        EngineToRuntimeEvent::SubagentStarted(event) => {
-                            tracing::debug!(event = ?event, "subagent started");
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::SubagentStarted(event))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentThreadCreated(thread) => {
-                            tracing::debug!(
-                                subagent_thread_id = %thread.id,
-                                parent_thread_id = ?thread.parent_thread_id,
-                                agent_label = ?thread.agent_label,
-                                "subagent session created"
-                            );
-                            subagent_model_refs.insert(
-                                thread.id.clone(),
-                                format!("{}/{}", thread.provider, thread.model),
-                            );
-                            let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::CreateThread(thread))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentUsageRecorded {
-                            thread_id: subagent_thread_id,
-                            usage,
-                        } => {
-                            tracing::debug!(
-                                subagent_thread_id = %subagent_thread_id,
-                                prompt_tokens = usage.prompt_tokens,
-                                completion_tokens = usage.completion_tokens,
-                                cached_tokens = usage.cached_tokens,
-                                "recording subagent usage"
-                            );
-                            let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::RecordThreadUsage {
-                                    thread_id: subagent_thread_id,
-                                    usage,
-                                })
-                                .await;
-                            let _ = persistence_tx
-                                .send(RuntimePersistenceEvent::RecordParentSubagentUsage {
-                                    thread_id: thread_id.clone(),
-                                    usage,
-                                })
-                                .await;
-                            let snapshot =
-                                record_total_usage_snapshot(&usage_state, usage, context_window)
-                                    .await;
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::UsageChanged(snapshot))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentMessageProduced(event) => {
-                            let child_model_ref = subagent_model_refs
-                                .get(&event.session_id)
-                                .map(String::as_str)
-                                .unwrap_or(&model_ref);
-                            if event.persist_llm_history {
-                                history::persist_one(
-                                    &event.session_id,
-                                    event.message.clone(),
-                                    active,
-                                    child_model_ref,
-                                    &persistence_tx,
-                                )
-                                .await;
-                            } else {
-                                history::persist_ui_message(
-                                    &event.session_id,
-                                    &event.message,
-                                    active,
-                                    child_model_ref,
-                                    &persistence_tx,
-                                )
-                                .await;
-                            }
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::SubagentMessageProduced(event))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentToolUse(event) => {
-                            tracing::debug!(
-                                subagent_thread_id = %event.session_id,
-                                tool_use_id = %event.tool_use.id,
-                                tool_name = %event.tool_use.name,
-                                "subagent tool use"
-                            );
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::SubagentToolUse(event))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentToolResult(event) => {
-                            tracing::debug!(
-                                subagent_thread_id = %event.session_id,
-                                tool_use_id = %event.tool_result.tool_use_id,
-                                is_error = event.tool_result.is_error,
-                                "subagent tool result"
-                            );
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::SubagentToolResult(event))
-                                .await;
-                        }
-                        EngineToRuntimeEvent::SubagentFinished(event) => {
-                            tracing::debug!(event = ?event, "subagent finished");
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::SubagentFinished(event))
-                                .await;
                         }
                         EngineToRuntimeEvent::Error(e) => {
                             tracing::warn!(error = %e, "runtime engine error");

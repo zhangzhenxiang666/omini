@@ -5,8 +5,9 @@ use super::{
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    CommandKind, CommandSummary, CompactTrigger, InteractionRequest, Notification,
-    NotificationKind, RuntimeToUiEvent, SubagentSnapshot, SubagentStatus,
+    AgentTaskEvent, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandKind,
+    CommandSummary, CompactTrigger, InteractionRequest, Notification, NotificationKind,
+    RuntimeToUiEvent,
 };
 use omini_domain::display::{HistoryItem, UserDraft};
 use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
@@ -25,6 +26,9 @@ fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
         HistoryItem::Summary(summary) => UiMessage::CompactSummary {
             text: summary.markdown,
         },
+        HistoryItem::AgentTaskNotification(notification) => {
+            UiMessage::AgentTaskNotification(notification)
+        }
     }
 }
 
@@ -34,6 +38,10 @@ impl UiState {
             self.agent_status,
             AgentStatus::Working | AgentStatus::Thinking | AgentStatus::AwaitingInput
         )
+    }
+
+    pub fn is_main_query_active(&self) -> bool {
+        self.main_query_active
     }
 
     /// 清除正在流式构建中的 compact 摘要占位。
@@ -274,6 +282,7 @@ impl UiState {
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
         match event {
             RuntimeToUiEvent::RunStarted => {
+                self.main_query_active = true;
                 self.show_start_screen = false;
                 self.manual_compact_running = false;
                 self.activity_status_title = None;
@@ -408,6 +417,7 @@ impl UiState {
                 self.status_bar.git_branch = branch;
             }
             RuntimeToUiEvent::RunFinished => {
+                self.main_query_active = false;
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
@@ -432,14 +442,6 @@ impl UiState {
                 self.activity_status_title = None;
                 self.refresh_input_placeholder();
                 self.agent_status = AgentStatus::Idle;
-                // Run 结束：将仍然 Running 的 subagent 标记为 Failed（安全网）。
-                // 正常情况下 SubagentFinished 先于 RunFinished 到达，此处仅处理
-                // 事件丢失的边界情况，避免 live_message_start 被永久压低。
-                for node in self.subagents.values_mut() {
-                    if matches!(node.status, crate::types::events::SubagentStatus::Running) {
-                        node.status = crate::types::events::SubagentStatus::Failed;
-                    }
-                }
                 self.update_live_boundary();
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {
@@ -457,58 +459,56 @@ impl UiState {
             RuntimeToUiEvent::PlanApprovalResolved { plan_id, .. } => {
                 self.clear_resolved_plan_approval(&plan_id);
             }
-            RuntimeToUiEvent::SubagentStarted(event) => {
-                self.subagents_by_tool_use
-                    .insert(event.spawn_tool_use_id.clone(), event.session_id.clone());
-                self.subagents.insert(
-                    event.session_id.clone(),
-                    SubagentNode {
-                        session_id: event.session_id,
-                        parent_session_id: event.parent_session_id,
-                        spawn_tool_use_id: event.spawn_tool_use_id,
-                        agent_label: event.agent_label,
-                        status: SubagentStatus::Running,
-                        messages: Vec::new(),
-                    },
-                );
-                self.activity_status_title = None;
-                self.agent_status = AgentStatus::Working;
-                self.update_live_boundary();
-            }
-            RuntimeToUiEvent::SubagentMessageProduced(event) => {
-                if let Some(node) = self.subagents.get_mut(&event.session_id) {
-                    node.messages.push(event.message);
+            RuntimeToUiEvent::AgentTaskEvent(event) => {
+                match event.payload {
+                    AgentTaskEvent::Started {
+                        parent_thread_id,
+                        spawn_tool_use_id,
+                        agent,
+                        title,
+                        execution_mode,
+                        ..
+                    } => {
+                        self.subagents_by_tool_use
+                            .insert(spawn_tool_use_id.clone(), event.thread_id.clone());
+                        self.subagents.insert(
+                            event.thread_id.clone(),
+                            SubagentNode {
+                                task_id: event.task_id,
+                                session_id: event.thread_id,
+                                parent_session_id: parent_thread_id,
+                                spawn_tool_use_id,
+                                agent_label: agent,
+                                title,
+                                execution_mode,
+                                status: AgentTaskStatus::Running,
+                                messages: Vec::new(),
+                            },
+                        );
+                        self.update_live_boundary();
+                    }
+                    AgentTaskEvent::MessageCommitted { .. } | AgentTaskEvent::ToolUse { .. } => {}
+                    AgentTaskEvent::ToolResult { tool_result } => {
+                        let scoped_tool_use_id =
+                            format!("{}:{}", event.thread_id, tool_result.tool_use_id);
+                        self.running_tools.remove(&scoped_tool_use_id);
+                        let removed_active = self.remove_tool_pause(&scoped_tool_use_id);
+                        self.finish_tool_pause_removal(removed_active);
+                    }
+                    AgentTaskEvent::Finished { status, .. } => {
+                        if let Some(node) = self.subagents.get_mut(&event.thread_id) {
+                            node.status = status;
+                        }
+                        self.update_live_boundary();
+                    }
+                    AgentTaskEvent::TurnStarted
+                    | AgentTaskEvent::ThinkingDelta { .. }
+                    | AgentTaskEvent::TextDelta { .. }
+                    | AgentTaskEvent::TurnEnded => {
+                        // 当前不渲染子线程流式内容，也不允许它写入主线程的
+                        // pending_assistant 缓冲区。
+                    }
                 }
-            }
-            RuntimeToUiEvent::SubagentToolUse(event) => {
-                if let Some(node) = self.subagents.get_mut(&event.session_id) {
-                    let msg =
-                        Message::new(Role::Assistant, vec![ContentBlock::ToolUse(event.tool_use)]);
-                    node.messages.push(msg);
-                }
-            }
-            RuntimeToUiEvent::SubagentToolResult(event) => {
-                self.activity_status_title = None;
-                self.running_tools.remove(&event.tool_result.tool_use_id);
-                let removed_active = self.remove_tool_pause(&event.tool_result.tool_use_id);
-                let removed_active = self.remove_tool_pause(&format!(
-                    "{}:{}",
-                    event.session_id, event.tool_result.tool_use_id
-                )) || removed_active;
-                self.finish_tool_pause_removal(removed_active);
-                if let Some(node) = self.subagents.get_mut(&event.session_id) {
-                    let msg = Message::new(
-                        Role::User,
-                        vec![ContentBlock::ToolResult(event.tool_result)],
-                    );
-                    node.messages.push(msg);
-                }
-            }
-            RuntimeToUiEvent::SubagentFinished(event) => {
-                if let Some(node) = self.subagents.get_mut(&event.session_id) {
-                    node.status = event.status;
-                }
-                self.update_live_boundary();
             }
             RuntimeToUiEvent::Notification(notification) => {
                 match notification.kind {
@@ -734,18 +734,22 @@ impl UiState {
         let Some(node) = self.subagents.get_mut(session_id) else {
             return;
         };
-        if node.status != SubagentStatus::Running {
+        if node.status != AgentTaskStatus::Running {
+            return;
+        }
+
+        if !result.is_error && node.execution_mode == AgentTaskExecutionMode::Background {
             return;
         }
 
         node.status = if result.is_error {
             if result.content.trim() == "Execution cancelled" {
-                SubagentStatus::Cancelled
+                AgentTaskStatus::Cancelled
             } else {
-                SubagentStatus::Failed
+                AgentTaskStatus::Failed
             }
         } else {
-            SubagentStatus::Completed
+            AgentTaskStatus::Completed
         };
     }
 
@@ -753,7 +757,7 @@ impl UiState {
         &mut self,
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
-        subagents: Vec<SubagentSnapshot>,
+        subagents: Vec<AgentTaskSnapshot>,
         usage: crate::types::events::SessionUsageSnapshot,
     ) {
         self.show_start_screen = false;
@@ -781,6 +785,7 @@ impl UiState {
         self.pending_proposed_plan = None;
         self.pending_compact_summary = None;
         self.pending_intervention_client_echo_id = None;
+        self.main_query_active = false;
         self.activity_status_title = None;
         self.run_timer = None;
         self.manual_compact_running = false;
@@ -1387,11 +1392,14 @@ mod tests {
         state.subagents.insert(
             "sub-1".to_string(),
             SubagentNode {
+                task_id: "task-1".to_string(),
                 session_id: "sub-1".to_string(),
                 parent_session_id: "main".to_string(),
                 spawn_tool_use_id: "tool-1".to_string(),
                 agent_label: "worker".to_string(),
-                status: SubagentStatus::Running,
+                title: "Work".to_string(),
+                execution_mode: AgentTaskExecutionMode::Background,
+                status: AgentTaskStatus::Running,
                 messages: Vec::new(),
             },
         );
@@ -1401,6 +1409,6 @@ mod tests {
         ));
 
         let sub = state.subagents.get("sub-1").unwrap();
-        assert_eq!(sub.status, SubagentStatus::Running);
+        assert_eq!(sub.status, AgentTaskStatus::Running);
     }
 }

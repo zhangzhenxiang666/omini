@@ -42,6 +42,11 @@ impl ThreadRuntime {
             llm_context_version,
         } = inputs;
         let thread_usage = loaded.usage;
+        let agent_tasks = loaded
+            .agent_tasks
+            .iter()
+            .map(|snapshot| snapshot.task.clone())
+            .collect();
 
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
@@ -63,9 +68,12 @@ impl ThreadRuntime {
             project.clone(),
             thread_id.clone(),
             active_profile,
-            thread_messages,
-            llm_context_version,
-            thread_usage,
+            omini_core::AgentCoreThreadLoad {
+                messages: thread_messages,
+                llm_context_version,
+                usage: thread_usage,
+                agent_tasks,
+            },
         )?;
         let mut persistence_rx = core
             .take_persistence_receiver()
@@ -99,17 +107,25 @@ impl ThreadRuntime {
                     } else if let Err(error) = &result {
                         tracing::error!(error = %error, "runtime persistence event failed");
                     }
-                    if let runtime_contract::RuntimePersistenceEvent::ReplaceLlmContext {
-                        expected_version,
-                        ack,
-                        ..
-                    } = event
-                    {
-                        let _ = ack.send(
-                            result
-                                .map(|_| expected_version + 1)
-                                .map_err(|error| error.to_string()),
-                        );
+                    match event {
+                        runtime_contract::RuntimePersistenceEvent::ReplaceLlmContext {
+                            expected_version,
+                            ack,
+                            ..
+                        } => {
+                            let _ = ack.send(
+                                result
+                                    .map(|_| expected_version + 1)
+                                    .map_err(|error| error.to_string()),
+                            );
+                        }
+                        runtime_contract::RuntimePersistenceEvent::CreateAgentTask { ack, .. }
+                        | runtime_contract::RuntimePersistenceEvent::PersistAgentMessage { ack, .. }
+                        | runtime_contract::RuntimePersistenceEvent::FinishAgentTask { ack, .. }
+                        | runtime_contract::RuntimePersistenceEvent::InsertAgentTaskNotification { ack, .. } => {
+                            let _ = ack.send(result.map_err(|error| error.to_string()));
+                        }
+                        _ => {}
                     }
                 }
             }

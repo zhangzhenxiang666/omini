@@ -6,11 +6,11 @@ use super::{
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    build_bordered_lines, build_thinking_lines, render_tool, tool_error_display_text,
-    truncate_display_width,
+    build_bordered_lines, build_thinking_lines, render_get_task, render_tool,
+    tool_error_display_text, truncate_display_width,
 };
 use omini_domain::display::DisplayMessage;
-use omini_domain::message::ContentBlock;
+use omini_domain::message::{ContentBlock, ToolUseBlock};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -524,6 +524,20 @@ fn render_single_ui_message(
             selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
             all_lines.extend(block_lines);
         }
+        UiMessage::AgentTaskNotification(notification) => {
+            let dim = Style::default().fg(Color::Rgb(140, 145, 155));
+            for task in &notification.tasks {
+                let text = format!(
+                    "agent task · {} · {} · {}",
+                    task.agent,
+                    task.title,
+                    task.status.as_str()
+                );
+                let text = truncate_str(&text, content_width);
+                selectable_lines.push(text.clone());
+                all_lines.push(Line::from(Span::styled(text, dim)));
+            }
+        }
         UiMessage::Message(message) => {
             let msg_idx = *rendered_msg_idx;
             *rendered_msg_idx += 1;
@@ -580,7 +594,7 @@ fn render_single_ui_message(
                         let tool_pause = state.tool_pause_for_tool_use(&tu.id);
                         let tool_pause_active =
                             tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                        if tu.name == "subagent" {
+                        if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
                             let node = state
                                 .subagents_by_tool_use
                                 .get(&tu.id)
@@ -603,6 +617,17 @@ fn render_single_ui_message(
                                 &state.pending_tool_pauses,
                                 content_width,
                                 Some(state.status_bar.cwd.as_path()),
+                            ));
+                            if let Some(positions) = tool_result_map.get(&tu.id) {
+                                for pos in positions {
+                                    consumed.insert(*pos);
+                                }
+                            }
+                        } else if tu.name == "get_task" {
+                            block_lines.extend(render_get_task(
+                                tu,
+                                get_task_label(state, tu),
+                                false,
                             ));
                             if let Some(positions) = tool_result_map.get(&tu.id) {
                                 for pos in positions {
@@ -732,7 +757,7 @@ fn render_pending_assistant_lines(
             ContentBlock::ToolUse(tu) => {
                 let tool_pause = state.tool_pause_for_tool_use(&tu.id);
                 let tool_pause_active = tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                if tu.name == "subagent" {
+                if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
                     let node = state
                         .subagents_by_tool_use
                         .get(&tu.id)
@@ -752,6 +777,11 @@ fn render_pending_assistant_lines(
                         content_width,
                         Some(state.status_bar.cwd.as_path()),
                     ));
+                    if let Some(&bi) = tr_indices.get(&tu.id) {
+                        consumed_tr.insert(bi);
+                    }
+                } else if tu.name == "get_task" {
+                    block_lines.extend(render_get_task(tu, get_task_label(state, tu), false));
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }
@@ -807,6 +837,15 @@ fn render_pending_assistant_lines(
     }
 
     (all_lines, selectable_lines)
+}
+
+fn get_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'a str, &'a str)> {
+    let task_id = tool_use.input.get("task_id")?.as_str()?;
+    state
+        .subagents
+        .values()
+        .find(|node| node.task_id == task_id)
+        .map(|node| (node.agent_label.as_str(), node.title.as_str()))
 }
 
 /// 渲染 pending_proposed_plan。

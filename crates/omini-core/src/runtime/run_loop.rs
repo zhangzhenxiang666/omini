@@ -54,8 +54,7 @@ impl AgentRuntime {
                             }
                             ServerToRuntimeEvent::CancelRun => {
                                 tracing::debug!(request_kind = "cancel_run", "runtime request received");
-                                self.cancelled.store(true, Ordering::Relaxed);
-                                self.query_engine.notify_cancel_waiters();
+                                self.task_supervisor.cancel_all().await;
                             }
                             ServerToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 tracing::debug!(
@@ -69,21 +68,29 @@ impl AgentRuntime {
                             }
                             ServerToRuntimeEvent::CloseRuntime => {
                                 tracing::debug!(request_kind = "close_runtime", "runtime request received");
+                                self.task_supervisor.cancel_all().await;
+                                self.task_supervisor.wait_until_idle().await;
                                 break;
                             }
                             ServerToRuntimeEvent::SubagentRegistryChanged => {
                                 tracing::debug!(request_kind = "subagent_registry_changed", "runtime request received");
                                 self.reload_subagent_registry();
                             }
-                            ServerToRuntimeEvent::ResolveToolPause { .. } => {
-                                tracing::debug!(request_kind = "resolve_tool_pause", "stale tool pause resolution ignored");
-                                // 过期的权限响应可能在其他客户端已处理暂停、运行继续后抵达。
+                            ServerToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
+                                if let Err(error) = self.query_engine.resolve_tool_pause(&tool_use_id, response) {
+                                    tracing::debug!(tool_use_id, %error, "stale tool pause resolution ignored");
+                                }
                             }
                             ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 tracing::debug!(request_kind = "resolve_plan_approval", plan_id = %plan_id, action = ?action, "runtime request received");
                                 self.resolve_plan_approval(&plan_id, action).await;
                             }
                         }
+                    }
+                    Some(completion) = self.task_completion_rx.recv() => {
+                        self.query_engine.enqueue_agent_task_completion(completion);
+                        self.collect_task_completions().await;
+                        self.process_run(RunStart::PendingAgentTaskNotification).await;
                     }
                     else => break,
                 }
@@ -171,33 +178,51 @@ impl AgentRuntime {
     ///
     /// `AgentRuntime` 始终绑定一个已存在的 session，所以这里只需刷新 `updated_at`
     /// 然后进入 query loop；不再生成 UUID、建目录或写 title —— 这些都交由 server。
-    pub(super) async fn process_run(&mut self, start: RunStart) {
-        let run_id = Uuid::new_v4().to_string();
-        let _ = self
-            .persistence_tx
-            .send(RuntimePersistenceEvent::UpdateThreadUpdatedAt {
-                thread_id: self.thread_id.clone(),
-            })
-            .await;
+    pub(super) async fn process_run(&mut self, mut start: RunStart) {
+        loop {
+            self.collect_task_completions().await;
+            let run_id = Uuid::new_v4().to_string();
+            let _ = self
+                .persistence_tx
+                .send(RuntimePersistenceEvent::UpdateThreadUpdatedAt {
+                    thread_id: self.thread_id.clone(),
+                })
+                .await;
 
-        let thread_id = self.thread_id.clone();
-        let run_span = tracing::info_span!(
-            "run",
-            thread_id = %thread_id,
-            run_id = %run_id,
-            start_kind = start.kind(),
-            provider = %self.settings.active_provider,
-            model = %self.settings.model,
-            thinking_effort = ?self.settings.thinking_effort,
-            max_turns = ?self.settings.max_turns,
-        );
-        self.process_run_inner(start, run_id, thread_id)
-            .instrument(run_span)
-            .await;
+            let thread_id = self.thread_id.clone();
+            let run_span = tracing::info_span!(
+                "run",
+                thread_id = %thread_id,
+                run_id = %run_id,
+                start_kind = start.kind(),
+                provider = %self.settings.active_provider,
+                model = %self.settings.model,
+                thinking_effort = ?self.settings.thinking_effort,
+                max_turns = ?self.settings.max_turns,
+            );
+            let follow_up = self
+                .process_run_inner(start, run_id, thread_id)
+                .instrument(run_span)
+                .await;
+            let collected_after_run = self.collect_task_completions().await;
+            start = if follow_up {
+                RunStart::PersistedAgentTaskNotification
+            } else if collected_after_run {
+                RunStart::PendingAgentTaskNotification
+            } else {
+                break;
+            };
+        }
     }
 
-    async fn process_run_inner(&mut self, start: RunStart, run_id: String, thread_id: String) {
+    async fn process_run_inner(
+        &mut self,
+        start: RunStart,
+        run_id: String,
+        thread_id: String,
+    ) -> bool {
         tracing::info!("agent run started");
+        let requires_internal_input = matches!(start, RunStart::PendingAgentTaskNotification);
         history::persist_initial_user_message(
             &self.thread_id,
             self.messages.last().cloned(),
@@ -227,7 +252,7 @@ impl AgentRuntime {
             )
             .await;
 
-        {
+        let follow_up = {
             let subagent_registry = self.capabilities.subagent_registry();
             let skill_registry = self.capabilities.skill_registry();
             let run_settings = self.settings.clone();
@@ -238,7 +263,7 @@ impl AgentRuntime {
                 settings: Arc::clone(&run_settings),
                 llm_client: self.llm_client.clone(),
                 tool_registry: Arc::clone(&tool_registry),
-                active_profile,
+                active_profile: Arc::clone(&active_profile_handle),
                 runtime_context: Some(Arc::new(ToolRuntimeContext {
                     thread_id: self.thread_id.clone(),
                     run_id: Some(run_id.clone()),
@@ -246,11 +271,15 @@ impl AgentRuntime {
                     agent_label: None,
                     thread_dir: self.thread_dir.clone(),
                     llm_context_version: Arc::clone(&self.llm_context_version),
-                    subagent_registry: Arc::clone(&subagent_registry),
+                    agent_depth: 0,
+                    task_id: None,
+                    owner_thread_id: self.thread_id.clone(),
+                    agent_registry: Arc::clone(&subagent_registry),
                     skill_registry: Arc::clone(&skill_registry),
-                    subagent_runner: Some(Arc::clone(&self.subagent_runner)),
+                    task_supervisor: Some(Arc::clone(&self.task_supervisor)),
                     project: self.project.clone(),
                 })),
+                requires_internal_input,
             };
 
             let event_tx = self.event_tx.clone();
@@ -272,6 +301,7 @@ impl AgentRuntime {
                                 tracing::debug!("active run cancellation requested");
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.notify_cancel_waiters();
+                                self.task_supervisor.cancel_all().await;
                             }
                             ServerToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
                                 tracing::debug!(tool_use_id = %tool_use_id, response = ?response, "resolving tool pause");
@@ -389,17 +419,25 @@ impl AgentRuntime {
                             }
                         }
                     }
+                    Some(completion) = self.task_completion_rx.recv() => {
+                        self.query_engine.enqueue_agent_task_completion(completion);
+                        tokio::task::yield_now().await;
+                        while let Ok(completion) = self.task_completion_rx.try_recv() {
+                            self.query_engine.enqueue_agent_task_completion(completion);
+                        }
+                    }
                     else => break,
                 }
             }
-            if let Some(result) = query_result {
+            if let Some(result) = &query_result {
                 tracing::info!(
                     turns = result.turns,
                     finish_reason = ?result.finish_reason,
                     "query finished"
                 );
             }
-        }
+            query_result.is_some_and(|result| result.follow_up)
+        };
 
         // 等待事件处理器在 engine_tx drop 后自然退出。
         let _ = processor.await;
@@ -426,6 +464,17 @@ impl AgentRuntime {
                 self.send_event(RuntimeToServerEvent::error(error)).await;
             }
         }
+        follow_up
+    }
+
+    async fn collect_task_completions(&mut self) -> bool {
+        tokio::task::yield_now().await;
+        let mut collected = false;
+        while let Ok(completion) = self.task_completion_rx.try_recv() {
+            self.query_engine.enqueue_agent_task_completion(completion);
+            collected = true;
+        }
+        collected
     }
 
     async fn ensure_mcp_initialized(&mut self) {

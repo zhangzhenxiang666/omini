@@ -457,10 +457,10 @@ mod tests {
     }
 
     #[test]
-    fn subagent_user_permission_denial_without_note_continues_next_query() {
+    fn agent_user_permission_denial_without_note_continues_next_query() {
         let results = vec![permission_denied_tool_result(false)];
 
-        assert!(!should_stop_after_denial(Some("subagent"), &results));
+        assert!(!should_stop_after_denial(Some("agent"), &results));
     }
 
     #[test]

@@ -41,7 +41,7 @@ If you find yourself about to do any of the following, STOP. You are about to vi
 | If you find yourself... | Why it's wrong | What to do instead |
 |---|---|---|
 | Writing the plan as prose, a Markdown heading, or a fenced code block | The UI will not render it as a plan | Wrap it in `<proposed_plan>...</proposed_plan>` |
-| Calling `edit`, `write`, or `todo_write` | The harness will reject the call with an error | Use `ask_user` or a read-only `subagent` instead |
+| Calling `edit`, `write`, or `todo_write` | The harness will reject the call with an error | Use `ask_user` or spawn a read-only `explorer` agent instead |
 | Asking `Should I proceed?` or `Is this plan okay?` | Plan approval goes through the block, not chat | Emit `<proposed_plan>` and let the UI handle it |
 | Referencing `the plan` in an `ask_user` question | The user cannot see the plan in the UI until you submit it | First emit the plan, then wait for the user |
 | Carrying `implementation mode` state from a prior turn | This is Plan Mode, not Main Mode | Reset intent at the start of every turn |

@@ -15,7 +15,6 @@ pub enum ToolPauseResolutionStart {
 enum ToolPauseUpdate {
     Add(String),
     Remove(Vec<String>),
-    Clear,
 }
 
 pub fn apply_tool_pause_update(
@@ -35,7 +34,6 @@ pub fn apply_tool_pause_update(
                 pending.remove(&tool_use_id);
             }
         }
-        ToolPauseUpdate::Clear => pending.clear(),
     }
 }
 
@@ -48,17 +46,18 @@ fn tool_pause_update(event: &runtime_contract::RuntimeToServerEvent) -> Option<T
         runtime_contract::RuntimeToServerEvent::ToolResult(result) => {
             Some(ToolPauseUpdate::Remove(vec![result.tool_use_id.clone()]))
         }
-        runtime_contract::RuntimeToServerEvent::SubagentToolResult(event) => {
-            let session_id = &event.session_id;
-            let tool_use_id = &event.tool_result.tool_use_id;
-            // 子代理暂停在 UI 中可能用 session_id:tool_use_id 表示，两个 key 都要清掉。
-            Some(ToolPauseUpdate::Remove(vec![
-                tool_use_id.clone(),
-                format!("{session_id}:{tool_use_id}"),
-            ]))
-        }
-        runtime_contract::RuntimeToServerEvent::RunStarted
-        | runtime_contract::RuntimeToServerEvent::RunFinished => Some(ToolPauseUpdate::Clear),
+        runtime_contract::RuntimeToServerEvent::AgentTaskEvent(event) => match &event.payload {
+            omini_domain::events::AgentTaskEvent::ToolResult { tool_result } => {
+                let tool_use_id = &tool_result.tool_use_id;
+                Some(ToolPauseUpdate::Remove(vec![format!(
+                    "{}:{tool_use_id}",
+                    event.thread_id
+                )]))
+            }
+            _ => None,
+        },
+        runtime_contract::RuntimeToServerEvent::RunStarted => None,
+        runtime_contract::RuntimeToServerEvent::RunFinished => None,
         _ => None,
     }
 }

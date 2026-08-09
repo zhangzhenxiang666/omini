@@ -28,9 +28,12 @@ impl AgentRuntime {
             agent_label: None,
             thread_dir: self.thread_dir.clone(),
             llm_context_version: Arc::clone(&self.llm_context_version),
-            subagent_registry,
+            agent_depth: 0,
+            task_id: None,
+            owner_thread_id: self.thread_id.clone(),
+            agent_registry: subagent_registry,
             skill_registry,
-            subagent_runner: Some(Arc::clone(&self.subagent_runner)),
+            task_supervisor: Some(Arc::clone(&self.task_supervisor)),
             project: self.project.clone(),
         });
         let tool_definitions = self.tool_registry_snapshot().definitions();

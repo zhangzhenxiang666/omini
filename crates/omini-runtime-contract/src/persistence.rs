@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::display::{AgentTaskNotification, DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::events::{AgentTaskInfo, AgentTaskResult, AgentTaskStatus};
 use omini_domain::message::{ContentBlock, Message};
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
@@ -26,6 +27,43 @@ pub struct ThreadRecord {
 #[derive(Debug)]
 pub enum RuntimePersistenceEvent {
     CreateThread(ThreadRecord),
+    /// 原子创建子线程、task 记录和初始用户消息。
+    CreateAgentTask {
+        task: Box<AgentTaskInfo>,
+        thread: ThreadRecord,
+        initial_message: Message,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// 在发送 `message_committed` 流式事件前持久化子线程消息。
+    PersistAgentMessage {
+        thread_id: String,
+        message: Message,
+        model_ref: Option<String>,
+        persist_llm_history: bool,
+        display_in_ui: bool,
+        created_at: DateTime<Utc>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// 持久化通道严格有序，因此只有全部子线程消息处理完后才会提交终态。
+    FinishAgentTask {
+        task_id: String,
+        status: AgentTaskStatus,
+        result: AgentTaskResult,
+        completed_at: DateTime<Utc>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    SetAgentTasksCancelling {
+        task_ids: Vec<String>,
+        updated_at: DateTime<Utc>,
+    },
+    InsertAgentTaskNotification {
+        owner_thread_id: String,
+        notification: AgentTaskNotification,
+        llm_message: Message,
+        task_ids: Vec<String>,
+        created_at: DateTime<Utc>,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     UpdateThreadUpdatedAt {
         thread_id: String,
     },
@@ -83,7 +121,7 @@ pub enum RuntimePersistenceEvent {
         thread_id: String,
         usage: Usage,
     },
-    RecordParentSubagentUsage {
+    RecordOwnerAgentUsage {
         thread_id: String,
         usage: Usage,
     },

@@ -1,6 +1,6 @@
 use super::state::{
-    AgentCreateStep, AgentGenerateReturn, AgentManagerView, AgentModelEntry, AgentStatus,
-    InteractionStep, ModelSelectionEntry, UiMessage, UiState,
+    AgentCreateStep, AgentGenerateReturn, AgentManagerView, AgentModelEntry, InteractionStep,
+    ModelSelectionEntry, UiMessage, UiState,
 };
 use crate::client::ClientRequest;
 use crate::protocol;
@@ -9,12 +9,19 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 use tokio::sync::mpsc;
 
-const AGENT_TOOL_ROW_COUNT: usize = 17;
-const AGENT_TOOL_NAMES: [&str; 7] = [
-    "search", "read", "bash", "edit", "write", "ask_user", "skill",
+const AGENT_TOOL_NAMES: [&str; 8] = [
+    "search",
+    "read",
+    "bash",
+    "edit",
+    "write",
+    "ask_user",
+    "skill",
+    "run_agent",
 ];
 const AGENT_ALLOW_TOOL_START: usize = 3;
 const AGENT_DENY_TOOL_START: usize = AGENT_ALLOW_TOOL_START + AGENT_TOOL_NAMES.len();
+const AGENT_TOOL_ROW_COUNT: usize = AGENT_DENY_TOOL_START + AGENT_TOOL_NAMES.len();
 const AGENT_EDIT_ACTION_COUNT: usize = 4;
 
 /// 处理交互模式的键盘事件。
@@ -497,11 +504,7 @@ fn agent_record_matches_draft(record: &AgentRecord, draft: &AgentDraft) -> bool 
 }
 
 fn comparable_tools(tools: &[String]) -> Vec<String> {
-    tools
-        .iter()
-        .filter(|tool| tool.as_str() != "subagent")
-        .cloned()
-        .collect()
+    tools.to_vec()
 }
 
 async fn handle_agent_create_enter(
@@ -742,13 +745,8 @@ fn toggle_agent_tool_group_or_item(manager: &mut super::state::AgentManagerState
         }
         _ => {}
     }
-    manager.draft.tools.retain(|tool| tool != "subagent");
     manager.draft.tools.sort();
     manager.draft.tools.dedup();
-    manager
-        .draft
-        .disallow_tools
-        .retain(|tool| tool != "subagent");
     manager.draft.disallow_tools.sort();
     manager.draft.disallow_tools.dedup();
 }
@@ -886,6 +884,9 @@ pub(super) async fn flush_queued_user_inputs(
             omini_domain::display::HistoryItem::Summary(summary) => UiMessage::CompactSummary {
                 text: summary.markdown,
             },
+            omini_domain::display::HistoryItem::AgentTaskNotification(_) => {
+                unreachable!("user drafts cannot produce agent task notifications")
+            }
         })
         .collect::<Vec<_>>();
     let Some(draft) = state.take_queued_user_draft() else {
@@ -897,7 +898,7 @@ pub(super) async fn flush_queued_user_inputs(
     state.extend_optimistic_echoes(ui_messages, client_echo_id.clone());
     state.scroll_offset = 0;
     state.auto_scroll = true;
-    state.agent_status = AgentStatus::Working;
+    state.begin_main_query_submission();
     let _ = request_tx
         .send(ClientRequest::RunSubmitUserInput {
             input: protocol::user_input_from_draft(draft),
@@ -910,7 +911,7 @@ pub(super) async fn submit_queued_intervention(
     state: &mut UiState,
     request_tx: &mpsc::Sender<ClientRequest>,
 ) {
-    if !state.is_run_active() || !state.pending_intervention_inputs.is_empty() {
+    if !state.is_main_query_active() || !state.pending_intervention_inputs.is_empty() {
         return;
     }
 
@@ -1139,24 +1140,24 @@ mod tests {
 
     #[test]
     fn toggle_allow_tool_handles_last_tool_row() {
-        let mut manager = manager_with_tool_selected(9);
+        let mut manager = manager_with_tool_selected(AGENT_DENY_TOOL_START - 1);
         manager.draft.tools = vec!["read".to_string()];
 
         toggle_agent_tool_group_or_item(&mut manager);
 
-        assert!(manager.draft.tools.iter().any(|tool| tool == "skill"));
+        assert!(manager.draft.tools.iter().any(|tool| tool == "run_agent"));
         assert!(
             !manager
                 .draft
                 .disallow_tools
                 .iter()
-                .any(|tool| tool == "skill")
+                .any(|tool| tool == "run_agent")
         );
     }
 
     #[test]
     fn toggle_deny_tool_handles_last_tool_row() {
-        let mut manager = manager_with_tool_selected(16);
+        let mut manager = manager_with_tool_selected(AGENT_TOOL_ROW_COUNT - 1);
 
         toggle_agent_tool_group_or_item(&mut manager);
 
@@ -1165,7 +1166,7 @@ mod tests {
                 .draft
                 .disallow_tools
                 .iter()
-                .any(|tool| tool == "skill")
+                .any(|tool| tool == "run_agent")
         );
         assert!(!manager.draft.tools.iter().any(|tool| tool == "skill"));
     }

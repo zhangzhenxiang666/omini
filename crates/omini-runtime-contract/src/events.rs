@@ -1,10 +1,9 @@
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display::{HistoryItem, UserDraft};
 use omini_domain::events::{
-    ActiveProfile, CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
-    CompactSummaryFinishedEvent, Notification, PlanApprovalAction, SessionUsageSnapshot,
-    SubagentFinishedEvent, SubagentMessageEvent, SubagentStartedEvent, SubagentToolResultEvent,
-    SubagentToolUseEvent, SubmittedPlan, ToolPauseRequest, ToolPauseResponse,
+    ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
+    CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
+    SessionUsageSnapshot, SubmittedPlan, ToolPauseRequest, ToolPauseResponse,
 };
 use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
@@ -99,11 +98,7 @@ pub enum RuntimeToServerEvent {
         from: String,
         to: String,
     },
-    SubagentStarted(SubagentStartedEvent),
-    SubagentMessageProduced(SubagentMessageEvent),
-    SubagentToolUse(SubagentToolUseEvent),
-    SubagentToolResult(SubagentToolResultEvent),
-    SubagentFinished(SubagentFinishedEvent),
+    AgentTaskEvent(AgentTaskEventEnvelope),
 }
 
 impl RuntimeToServerEvent {

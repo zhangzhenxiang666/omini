@@ -1,6 +1,6 @@
 use super::truncate_str;
 use crate::state::{SubagentNode, pause_preview_tool_use_id};
-use crate::types::events::{SubagentStatus, ToolPauseKind, ToolPauseRequest};
+use crate::types::events::{AgentTaskStatus, ToolPauseKind, ToolPauseRequest};
 use crate::widgets::{display_path, tool_title_style};
 use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
@@ -30,16 +30,19 @@ pub(super) fn render_subagent_tool(
         .or_else(|| {
             result.map(|result| {
                 if result.is_error {
-                    SubagentStatus::Failed
+                    AgentTaskStatus::Failed
                 } else {
-                    SubagentStatus::Completed
+                    AgentTaskStatus::Completed
                 }
             })
         })
-        .unwrap_or(SubagentStatus::Running);
+        .unwrap_or(AgentTaskStatus::Running);
 
     let mut header = vec![Span::raw("· ")];
-    if matches!(status, SubagentStatus::Running) {
+    if matches!(
+        status,
+        AgentTaskStatus::Running | AgentTaskStatus::Cancelling
+    ) {
         header.push(Span::styled(label, tool_title_style(accent, true)));
     } else {
         header.push(Span::styled(
@@ -378,7 +381,7 @@ mod tests {
     fn rejected_subagent_without_started_event_renders_finished() {
         let tool_use = ToolUseBlock {
             id: "tool_1".to_string(),
-            name: "subagent".to_string(),
+            name: "spawn_agent".to_string(),
             input: std::collections::HashMap::from([(
                 "name".to_string(),
                 serde_json::Value::String("explorer".to_string()),
@@ -387,7 +390,7 @@ mod tests {
         let result = ToolResultBlock {
             tool_use_id: "tool_1".to_string(),
             is_error: true,
-            content: "subagent is not available in plan profile".to_string(),
+            content: "spawn_agent is not available in plan profile".to_string(),
             metadata: None,
         };
 
@@ -400,7 +403,7 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .any(|line| line.contains("subagent is not available"))
+                .any(|line| line.contains("spawn_agent is not available"))
         );
     }
 
@@ -408,7 +411,7 @@ mod tests {
     fn active_child_tool_marker_keeps_tool_label_aligned() {
         let tool_use = ToolUseBlock {
             id: "spawn-1".to_string(),
-            name: "subagent".to_string(),
+            name: "spawn_agent".to_string(),
             input: std::collections::HashMap::from([(
                 "name".to_string(),
                 serde_json::Value::String("explorer".to_string()),
@@ -423,11 +426,14 @@ mod tests {
             )]),
         };
         let node = SubagentNode {
+            task_id: "task-1".to_string(),
             session_id: "subagent-1".to_string(),
             parent_session_id: "main".to_string(),
             spawn_tool_use_id: "spawn-1".to_string(),
             agent_label: "explorer".to_string(),
-            status: SubagentStatus::Running,
+            title: "Explore".to_string(),
+            execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
+            status: AgentTaskStatus::Running,
             messages: vec![Message::new(
                 Role::Assistant,
                 vec![
@@ -463,18 +469,21 @@ mod tests {
     fn child_view_image_tool_renders_name_and_path() {
         let tool_use = ToolUseBlock {
             id: "spawn-1".to_string(),
-            name: "subagent".to_string(),
+            name: "spawn_agent".to_string(),
             input: std::collections::HashMap::from([(
                 "name".to_string(),
                 serde_json::Value::String("explorer".to_string()),
             )]),
         };
         let node = SubagentNode {
+            task_id: "task-1".to_string(),
             session_id: "subagent-1".to_string(),
             parent_session_id: "main".to_string(),
             spawn_tool_use_id: "spawn-1".to_string(),
             agent_label: "explorer".to_string(),
-            status: SubagentStatus::Running,
+            title: "Explore".to_string(),
+            execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
+            status: AgentTaskStatus::Running,
             messages: vec![Message::new(
                 Role::Assistant,
                 vec![ContentBlock::ToolUse(ToolUseBlock {

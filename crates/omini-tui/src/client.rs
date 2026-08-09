@@ -456,7 +456,7 @@ async fn emit_blank_session(
         .send(RuntimeToUiEvent::SessionSnapshot {
             session_id: None,
             messages: Vec::new(),
-            subagents: Vec::new(),
+            agent_tasks: Vec::new(),
             usage: SessionUsageSnapshot {
                 context_window: connection.open.context_window,
                 ..SessionUsageSnapshot::default()
@@ -938,23 +938,11 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::SessionSnapshot(event) => RuntimeToUiEvent::SessionSnapshot {
             session_id: event.session_id,
             messages: event.messages,
-            subagents: event.subagents,
+            agent_tasks: event.agent_tasks,
             usage: event.usage,
         },
-        protocol::TypedRuntimeEvent::SubagentStarted(event) => {
-            RuntimeToUiEvent::SubagentStarted(event)
-        }
-        protocol::TypedRuntimeEvent::SubagentMessageProduced(event) => {
-            RuntimeToUiEvent::SubagentMessageProduced(event)
-        }
-        protocol::TypedRuntimeEvent::SubagentToolUse(event) => {
-            RuntimeToUiEvent::SubagentToolUse(event)
-        }
-        protocol::TypedRuntimeEvent::SubagentToolResult(event) => {
-            RuntimeToUiEvent::SubagentToolResult(event)
-        }
-        protocol::TypedRuntimeEvent::SubagentFinished(event) => {
-            RuntimeToUiEvent::SubagentFinished(event)
+        protocol::TypedRuntimeEvent::AgentTaskEvent(event) => {
+            RuntimeToUiEvent::AgentTaskEvent(event)
         }
         // SessionSwitched 在 `handle_server_text` 拦截,不会流到这里。
         protocol::TypedRuntimeEvent::SessionSwitched(_) => unreachable!(
@@ -2052,7 +2040,7 @@ mod tests {
                 protocol::SessionSnapshotEvent {
                     session_id: Some("session_1".to_string()),
                     messages: Vec::new(),
-                    subagents: Vec::new(),
+                    agent_tasks: Vec::new(),
                     usage: SessionUsageSnapshot::default(),
                 },
             )),

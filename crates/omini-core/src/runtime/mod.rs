@@ -28,10 +28,9 @@ use omini_domain::message::Message;
 use omini_domain::usage::Usage;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::Ordering;
-use tokio::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 pub(crate) use capabilities::CapabilityStore;

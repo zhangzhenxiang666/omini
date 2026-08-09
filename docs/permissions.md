@@ -5,7 +5,7 @@ Omini 支持多种方式来配置工具权限和 Bash 命令规则，实现精�
 ## 权限配置来源
 
 | 来源 | 路径 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 主配置段 | `~/.omini/config.toml` 的 `[permissions]` 段 | 全局工具权限规则 |
 | 项目权限文件 | `<project>/.omini/permissions.toml` | 项目级权限规则（兼容入口） |
 | 用户 Bash 规则 | `~/.omini/rules/*.rules` | 全局 Bash 命令规则 |
@@ -49,12 +49,12 @@ deny = [
 - `read`、`view_image` — 读取文件
 - `search` — 搜索文件
 - `edit`、`write` — 编辑/写入文件
-- `subagent` — 子 Agent（按 name 匹配）
+- `Agent` — 同时匹配 `spawn_agent` 与 `run_agent`（按 `name` 匹配，例如 `Agent(explorer)`）
 
 **路径语法：**
 
 | 前缀 | 说明 | 示例 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `./` | 相对于项目根目录 | `"read(./src/**)"` |
 | `/` | 绝对路径 | `"write(/etc/**)"` |
 | `~/` | 相对于用户主目录 | `"read(~/.ssh/**)"` |
@@ -146,7 +146,7 @@ prefix_rule(
 ### 字段说明
 
 | 字段 | 类型 | 必需 | 默认值 | 说明 |
-|------|------|------|--------|------|
+| ------ | ------ | ------ | -------- | ------ |
 | `pattern` | `[[String]]` | ✅ | — | 命令前缀匹配模式 |
 | `decision` | `String` | ❌ | `"allow"` | 决策：`"allow"` / `"prompt"` / `"forbidden"` |
 | `justification` | `String` | ❌ | — | 拒绝时的原因说明 |
@@ -292,7 +292,7 @@ prefix_rule(
 除了用户配置的规则外，Omini 还有内置的 Bash 安全策略：
 
 | 命令模式 | 默认决策 | 说明 |
-|----------|----------|------|
+| ---------- | ---------- | ------ |
 | `sudo ...` | `prompt` | 需要确认 |
 | `su ...` | `prompt` | 需要确认 |
 | `chmod 777 ...` | `prompt` | 需要确认 |
@@ -306,12 +306,12 @@ prefix_rule(
 如果没有配置任何权限规则，Omini 使用以下默认行为：
 
 | 工具 | 默认决策 | 说明 |
-|------|----------|------|
+| ------ | ---------- | ------ |
 | `read`、`view_image` | 项目内/`/tmp` 内允许，其他需确认 | 读取项目内文件直接允许 |
 | `search` | 允许 | 搜索操作直接允许 |
 | `edit`、`write` | 需确认 | 写入操作需要用户确认 |
 | `todo_write` | 允许 | 创建待办清单直接允许 |
-| `ask_user`、`skill`、`subagent` | 允许 | 交互类工具直接允许 |
+| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`get_task`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
 | `bash` | 按规则判断 | 根据 Bash 规则和内置策略决定 |
 
 ## 相关文档

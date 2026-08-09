@@ -5,11 +5,19 @@ use std::path::{Path, PathBuf};
 mod builtins;
 mod generator;
 mod parser;
-mod runner;
+mod tasks;
 
 pub(crate) use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
-pub use runner::{RuntimeSubagentRunner, SubagentRunRequest};
+pub(crate) use tasks::AgentTaskCompletion;
+pub use tasks::AgentTaskSupervisor;
+
+#[derive(Debug, Clone)]
+pub struct AgentTaskRequest {
+    pub name: String,
+    pub prompt: String,
+    pub title: String,
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct AgentSpec {
@@ -202,7 +210,7 @@ fn record_from_spec(
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .filter(|tool| tool != "subagent")
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "get_task" | "cancel_task"))
         .collect();
     let disallow_tools = spec
         .tool_policy
@@ -210,7 +218,7 @@ fn record_from_spec(
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .filter(|tool| tool != "subagent")
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "get_task" | "cancel_task"))
         .collect();
     let model = spec
         .model
@@ -258,14 +266,14 @@ fn render_agent_file(draft: &AgentDraft) -> String {
     let tools = draft
         .tools
         .iter()
-        .filter(|tool| tool.as_str() != "subagent")
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "get_task" | "cancel_task"))
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
     let disallow_tools = draft
         .disallow_tools
         .iter()
-        .filter(|tool| tool.as_str() != "subagent")
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "get_task" | "cancel_task"))
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
@@ -471,7 +479,7 @@ mod tests {
             r#"---
 name: code-comment-translator
 description: "Translate code comments"
-tools: "Bash, Read, Subagent"
+tools: "Bash, Read, RunAgent"
 ---
 Translate comments without changing code.
 "#,
@@ -484,7 +492,14 @@ Translate comments without changing code.
         assert_eq!(agent.description, "Translate code comments");
         assert_eq!(
             agent.tool_policy.allow.as_deref(),
-            Some(["bash".to_string(), "read".to_string()].as_slice())
+            Some(
+                [
+                    "bash".to_string(),
+                    "read".to_string(),
+                    "run_agent".to_string()
+                ]
+                .as_slice()
+            )
         );
         assert!(agent.tool_policy.deny.is_none());
         assert_eq!(
@@ -548,7 +563,7 @@ Handle the assigned task.
             r#"---
 name: safe-worker
 description: Worker without writes
-disallow_tools: "Write, Edit, Subagent"
+disallow_tools: "Write, Edit, RunAgent"
 ---
 Inspect and report.
 "#,
@@ -565,7 +580,7 @@ Inspect and report.
                 [
                     "write".to_string(),
                     "edit".to_string(),
-                    "subagent".to_string()
+                    "run_agent".to_string()
                 ]
                 .as_slice()
             )
@@ -723,7 +738,7 @@ Help in this project.
             tools: vec![
                 "read".to_string(),
                 "write".to_string(),
-                "subagent".to_string(),
+                "run_agent".to_string(),
             ],
             disallow_tools: vec!["edit".to_string()],
             model: Some("openai/gpt-test".to_string()),
@@ -736,7 +751,13 @@ Help in this project.
         assert_eq!(parsed.description, "Help with comments");
         assert_eq!(
             parsed.tool_policy.allow.as_deref(),
-            Some(&["read".to_string(), "write".to_string()][..])
+            Some(
+                &[
+                    "read".to_string(),
+                    "write".to_string(),
+                    "run_agent".to_string()
+                ][..]
+            )
         );
         assert_eq!(
             parsed.tool_policy.deny.as_deref(),

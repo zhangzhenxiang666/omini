@@ -53,7 +53,7 @@ impl RuntimePendingPause {
 
 /// 当前运行中子 agent 的来源信息，用于标注其工具活动。
 #[derive(Debug, Clone)]
-struct RuntimeSubagentContext {
+struct RuntimeAgentTaskContext {
     agent_label: String,
 }
 
@@ -70,7 +70,7 @@ pub struct RuntimeStatusProjection {
     pending_pauses: HashMap<String, RuntimePendingPause>,
     pending_plan_approval: Option<client_proto::PlanSubmittedEvent>,
     active_tools: HashMap<String, RuntimeToolActivity>,
-    subagents: HashMap<String, RuntimeSubagentContext>,
+    agent_tasks: HashMap<String, RuntimeAgentTaskContext>,
 }
 
 /// 生成协议状态快照时由 session 层补充的外部上下文。
@@ -136,17 +136,8 @@ impl RuntimeStatusProjection {
                 self.compact_started_at = None;
                 self.mark_query_working();
             }
-            client_proto::TypedRuntimeEvent::SubagentStarted(event) => {
-                self.record_subagent_started(event, now)
-            }
-            client_proto::TypedRuntimeEvent::SubagentToolUse(event) => {
-                self.record_subagent_tool_use(event, now)
-            }
-            client_proto::TypedRuntimeEvent::SubagentToolResult(event) => {
-                self.record_subagent_tool_result(event, now)
-            }
-            client_proto::TypedRuntimeEvent::SubagentFinished(event) => {
-                self.record_subagent_finished(event, now)
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(event) => {
+                self.record_agent_task_event(event, now)
             }
             _ => {}
         }
@@ -195,10 +186,11 @@ impl RuntimeStatusProjection {
         self.query_pause_started_at = None;
         self.query_paused_ms = 0;
         self.query_state = client_proto::SessionRuntimeState::Thinking;
-        self.pending_pauses.clear();
+        self.pending_pauses
+            .retain(|_, pause| pause.source_session_id.is_some());
         self.pending_plan_approval = None;
-        self.active_tools.clear();
-        self.subagents.clear();
+        self.active_tools
+            .retain(|_, tool| tool.source_session_id.is_some());
     }
 
     fn clear_active_run(&mut self) {
@@ -207,10 +199,11 @@ impl RuntimeStatusProjection {
         self.query_pause_started_at = None;
         self.query_paused_ms = 0;
         self.query_state = client_proto::SessionRuntimeState::Idle;
-        self.pending_pauses.clear();
+        self.pending_pauses
+            .retain(|_, pause| pause.source_session_id.is_some());
         self.pending_plan_approval = None;
-        self.active_tools.clear();
-        self.subagents.clear();
+        self.active_tools
+            .retain(|_, tool| tool.source_session_id.is_some());
     }
 
     fn mark_query_working(&mut self) {
@@ -262,6 +255,24 @@ impl RuntimeStatusProjection {
         tool
     }
 
+    fn record_agent_tool(
+        &mut self,
+        thread_id: &str,
+        tool_use: &client_proto::ToolUseBlock,
+        now: DateTime<Utc>,
+        agent_label: Option<String>,
+    ) {
+        let activity_key = format!("{thread_id}:{}", tool_use.id);
+        let tool = RuntimeToolActivity {
+            tool_use_id: tool_use.id.clone(),
+            tool_name: tool_use.name.clone(),
+            started_at: now,
+            source_session_id: Some(thread_id.to_string()),
+            source_agent_label: agent_label,
+        };
+        self.active_tools.insert(activity_key, tool);
+    }
+
     fn finish_tool(&mut self, tool_use_id: &str) {
         self.active_tools.remove(tool_use_id);
     }
@@ -305,68 +316,47 @@ impl RuntimeStatusProjection {
             .saturating_add(elapsed_ms(paused_at, now));
     }
 
-    fn record_subagent_started(
+    fn record_agent_task_event(
         &mut self,
-        event: &client_proto::SubagentStartedEvent,
-        _now: DateTime<Utc>,
-    ) {
-        self.subagents.insert(
-            event.session_id.clone(),
-            RuntimeSubagentContext {
-                agent_label: event.agent_label.clone(),
-            },
-        );
-        self.mark_query_working();
-    }
-
-    fn record_subagent_tool_use(
-        &mut self,
-        event: &client_proto::SubagentToolUseEvent,
+        event: &client_proto::AgentTaskEventEnvelope,
         now: DateTime<Utc>,
     ) {
-        let agent_label = self
-            .subagents
-            .get(&event.session_id)
-            .map(|subagent| subagent.agent_label.clone());
-        self.record_tool_use_for_subagent(&event.tool_use, now, &event.session_id, agent_label);
-        self.mark_query_working();
-    }
-
-    fn record_tool_use_for_subagent(
-        &mut self,
-        tool_use: &client_proto::ToolUseBlock,
-        now: DateTime<Utc>,
-        session_id: &str,
-        agent_label: Option<String>,
-    ) -> Option<RuntimeToolActivity> {
-        Some(self.record_tool(
-            &tool_use.id,
-            &tool_use.name,
-            now,
-            Some(session_id.to_string()),
-            agent_label,
-        ))
-    }
-
-    fn record_subagent_tool_result(
-        &mut self,
-        event: &client_proto::SubagentToolResultEvent,
-        now: DateTime<Utc>,
-    ) {
-        let tool_use_id = &event.tool_result.tool_use_id;
-        self.finish_tool(tool_use_id);
-        self.finish_pause(tool_use_id, now);
-        self.finish_pause(&format!("{}:{tool_use_id}", event.session_id), now);
-        self.mark_query_working();
-    }
-
-    fn record_subagent_finished(
-        &mut self,
-        event: &client_proto::SubagentFinishedEvent,
-        _now: DateTime<Utc>,
-    ) {
-        self.subagents.remove(&event.session_id);
-        self.mark_query_working();
+        match &event.payload {
+            client_proto::AgentTaskEvent::Started { agent, .. } => {
+                self.agent_tasks.insert(
+                    event.task_id.clone(),
+                    RuntimeAgentTaskContext {
+                        agent_label: agent.clone(),
+                    },
+                );
+            }
+            client_proto::AgentTaskEvent::ToolUse { tool_use } => {
+                let agent_label = self
+                    .agent_tasks
+                    .get(&event.task_id)
+                    .map(|task| task.agent_label.clone());
+                self.record_agent_tool(&event.thread_id, tool_use, now, agent_label);
+            }
+            client_proto::AgentTaskEvent::ToolResult { tool_result } => {
+                let tool_use_id = &tool_result.tool_use_id;
+                let activity_key = format!("{}:{tool_use_id}", event.thread_id);
+                self.finish_tool(&activity_key);
+                self.finish_pause(&activity_key, now);
+            }
+            client_proto::AgentTaskEvent::Finished { .. } => {
+                self.agent_tasks.remove(&event.task_id);
+                self.active_tools
+                    .retain(|_, tool| tool.source_session_id.as_deref() != Some(&event.thread_id));
+                self.pending_pauses.retain(|_, pause| {
+                    pause.source_session_id.as_deref() != Some(&event.thread_id)
+                });
+            }
+            client_proto::AgentTaskEvent::TurnStarted
+            | client_proto::AgentTaskEvent::ThinkingDelta { .. }
+            | client_proto::AgentTaskEvent::TextDelta { .. }
+            | client_proto::AgentTaskEvent::MessageCommitted { .. }
+            | client_proto::AgentTaskEvent::TurnEnded => {}
+        }
     }
 
     pub fn state(&self) -> client_proto::SessionRuntimeState {
@@ -403,8 +393,8 @@ impl RuntimeStatusProjection {
     }
 
     /// 返回当前仍在运行中的子代理 session_id 集合，供 snapshot 恢复真实状态用。
-    pub fn running_subagent_thread_ids(&self) -> Vec<String> {
-        self.subagents.keys().cloned().collect()
+    pub fn has_active_agent_tasks(&self) -> bool {
+        !self.agent_tasks.is_empty()
     }
 
     fn pending_plan_matches(&self, event: &client_proto::RuntimeEvent) -> bool {
@@ -547,7 +537,7 @@ mod tests {
                 client_proto::SessionSnapshotEvent {
                     session_id: Some("s1".to_string()),
                     messages: Vec::new(),
-                    subagents: Vec::new(),
+                    agent_tasks: Vec::new(),
                     usage: client_proto::SessionUsageSnapshot::default(),
                 },
             ),
@@ -899,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_status_tracks_subagent_tools_through_active_tools() {
+    fn runtime_status_tracks_agent_task_tools_through_active_tools() {
         let mut projection = RuntimeStatusProjection::default();
         let started_at = Utc::now();
 
@@ -922,24 +912,39 @@ mod tests {
         assert_eq!(status.active_tools[0].tool_name, "skill");
 
         projection.record_event(
-            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::SubagentStarted(
-                client_proto::SubagentStartedEvent {
-                    session_id: "sub_1".to_string(),
-                    parent_session_id: "s1".to_string(),
-                    spawn_tool_use_id: "tool_subagent".to_string(),
-                    agent_label: "explorer".to_string(),
+            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::AgentTaskEvent(
+                client_proto::AgentTaskEventEnvelope {
+                    task_id: "task_1".to_string(),
+                    thread_id: "agent_1".to_string(),
+                    parent_task_id: None,
+                    owner_thread_id: "s1".to_string(),
+                    truncated: false,
+                    payload: client_proto::AgentTaskEvent::Started {
+                        parent_thread_id: "s1".to_string(),
+                        spawn_tool_use_id: "tool_agent".to_string(),
+                        agent: "explorer".to_string(),
+                        title: "Explore".to_string(),
+                        depth: 1,
+                        execution_mode: client_proto::AgentTaskExecutionMode::Background,
+                    },
                 },
             )),
             started_at,
         );
         projection.record_event(
-            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::SubagentToolUse(
-                client_proto::SubagentToolUseEvent {
-                    session_id: "sub_1".to_string(),
-                    tool_use: ToolUseBlock {
-                        id: "sub_tool_1".to_string(),
-                        name: "read".to_string(),
-                        input: HashMap::new(),
+            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::AgentTaskEvent(
+                client_proto::AgentTaskEventEnvelope {
+                    task_id: "task_1".to_string(),
+                    thread_id: "agent_1".to_string(),
+                    parent_task_id: None,
+                    owner_thread_id: "s1".to_string(),
+                    truncated: false,
+                    payload: client_proto::AgentTaskEvent::ToolUse {
+                        tool_use: ToolUseBlock {
+                            id: "sub_tool_1".to_string(),
+                            name: "read".to_string(),
+                            input: HashMap::new(),
+                        },
                     },
                 },
             )),
@@ -952,7 +957,7 @@ mod tests {
             .iter()
             .find(|tool| tool.tool_use_id == "sub_tool_1")
             .expect("subagent tool should be tracked as an active tool");
-        assert_eq!(subagent_tool.source_session_id.as_deref(), Some("sub_1"));
+        assert_eq!(subagent_tool.source_session_id.as_deref(), Some("agent_1"));
         assert_eq!(
             subagent_tool.source_agent_label.as_deref(),
             Some("explorer")

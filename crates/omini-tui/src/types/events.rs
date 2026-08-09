@@ -132,19 +132,6 @@ pub enum EngineToRuntimeEvent {
     /// 当前 engine/session 的 LLM 摘要 usage。
     CompactSummaryUsageRecorded(Usage),
 
-    /// 子 agent 创建并开始运行。
-    SubagentStarted(SubagentStartedEvent),
-    /// 子 agent 的一轮 LLM usage。
-    SubagentUsageRecorded { session_id: String, usage: Usage },
-    /// 子 agent 产生了一条完整消息，需要持久化并更新 UI 视图模型。
-    SubagentMessageProduced(SubagentMessageEvent),
-    /// 子 agent 请求工具调用。
-    SubagentToolUse(SubagentToolUseEvent),
-    /// 子 agent 工具执行完成。
-    SubagentToolResult(SubagentToolResultEvent),
-    /// 子 agent 运行结束。
-    SubagentFinished(SubagentFinishedEvent),
-
     /// 引擎出错
     Error(String),
     /// 引擎运行时警告
@@ -202,7 +189,7 @@ pub enum RuntimeToUiEvent {
     SessionSnapshot {
         session_id: Option<String>,
         messages: Vec<HistoryItem>,
-        subagents: Vec<SubagentSnapshot>,
+        agent_tasks: Vec<AgentTaskSnapshot>,
         usage: SessionUsageSnapshot,
     },
 
@@ -272,16 +259,8 @@ pub enum RuntimeToUiEvent {
         action: PlanApprovalAction,
     },
 
-    /// 子 agent 创建并开始运行。
-    SubagentStarted(SubagentStartedEvent),
-    /// 子 agent 产生了一条完整消息。
-    SubagentMessageProduced(SubagentMessageEvent),
-    /// 子 agent 请求工具调用。
-    SubagentToolUse(SubagentToolUseEvent),
-    /// 子 agent 工具执行完成。
-    SubagentToolResult(SubagentToolResultEvent),
-    /// 子 agent 运行结束。
-    SubagentFinished(SubagentFinishedEvent),
+    /// 单个 Agent task 的统一生命周期与流式事件。
+    AgentTaskEvent(AgentTaskEventEnvelope),
 }
 
 impl RuntimeToUiEvent {

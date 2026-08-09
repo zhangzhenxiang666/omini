@@ -62,32 +62,34 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
     let mut section = String::new();
     section.push_str("<delegation_instructions>\n");
     section.push_str("## Delegation Policy\n\n");
+    section
+        .push_str("- Agent tasks isolate their intermediate context from the main conversation.\n");
     section.push_str(
-        "- Subagents isolate their intermediate context from the main conversation and return only a final result.\n",
+        "- The main agent uses `spawn_agent` to start background tasks. It returns immediately with a task ID and child thread ID.\n",
     );
     section.push_str(
-        "- Use the `subagent` tool proactively when isolation, parallelism, or specialized exploration materially helps the task.\n",
+        "- For broad codebase exploration, architecture discovery, dependency tracing, project introductions, project overviews, or research likely to require more than 3 searches or file reads, spawn an `explorer` agent instead of doing all exploration in the main context.\n",
     );
     section.push_str(
-        "- For broad codebase exploration, architecture discovery, dependency tracing, project introductions, project overviews, or research likely to require more than 3 searches or file reads, use the `explorer` subagent instead of doing all exploration in the main context.\n",
-    );
-    section.push_str(
-        "- For multiple independent codebase questions, run multiple `explorer` subagents in the same assistant turn when practical.\n",
+        "- For multiple independent codebase questions, start multiple `explorer` tasks in the same assistant turn when practical.\n",
     );
     match active_profile {
         ActiveProfile::Main | ActiveProfile::Auto => {
             section.push_str(
-                "- For focused implementation work that can be separated by file or module ownership, use the `general` subagent; give it a bounded scope and explicit files or responsibilities.\n",
+                "- For focused implementation work that can be separated by file or module ownership, spawn a `general` agent; give it a bounded scope and explicit files or responsibilities.\n",
             );
         }
         ActiveProfile::Plan => {
             section.push_str(
-                "- In Plan Mode, use subagents only for non-mutating exploration, architecture discovery, feasibility checks, and independent planning questions.\n",
+                "- In Plan Mode, spawn agents only for non-mutating exploration, architecture discovery, feasibility checks, and independent planning questions.\n",
             );
         }
     }
     section.push_str(
-        "- Do not duplicate a subagent's investigation in the main context. Use the subagent result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
+        "- Completion notifications contain only task identity and status. Call `get_task` for the terminal output, error, or warnings.\n",
+    );
+    section.push_str(
+        "- Do not duplicate an agent task's investigation in the main context. Use its result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
     );
     section.push_str(
         "- Keep urgent blocking work local when the next step cannot proceed without your own immediate inspection or judgment.\n",
@@ -104,7 +106,7 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
             );
         }
     }
-    section.push_str("## Subagent Prompting\n\n");
+    section.push_str("## Agent Task Prompting\n\n");
     section.push_str(
         "- Use a short `title` as a compact UI label; keep it brief and in the user's language.\n",
     );
@@ -112,24 +114,24 @@ pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActivePr
         "- Write prompts as self-contained briefs: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own.\n",
     );
     section.push_str(
-        "- Prefer assigning questions over step-by-step command scripts for investigations, so the subagent can adapt if the first search path is wrong.\n",
+        "- Prefer assigning questions over step-by-step command scripts for investigations, so the agent can adapt if the first search path is wrong.\n",
     );
     section.push_str(
-        "- Subagents cannot spawn other subagents. Do not ask them to delegate further.\n\n",
+        "- Only the main agent can start background tasks. A depth-1 agent may use `run_agent` for one synchronous depth-2 child when its tool policy allows it; depth-2 agents cannot derive further agents.\n\n",
     );
-    section.push_str("## Available Subagents\n\n");
-    section.push_str("<available_subagents>\n");
+    section.push_str("## Available Agents\n\n");
+    section.push_str("<available_agents>\n");
     for agent in agents {
-        section.push_str("  <subagent>\n");
+        section.push_str("  <agent>\n");
         section.push_str("    <name>");
         section.push_str(&agent.name);
         section.push_str("</name>\n");
         section.push_str("    <description>");
         section.push_str(&agent.description);
         section.push_str("</description>\n");
-        section.push_str("  </subagent>\n");
+        section.push_str("  </agent>\n");
     }
-    section.push_str("</available_subagents>\n");
+    section.push_str("</available_agents>\n");
     section.push_str("</delegation_instructions>");
     section
 }

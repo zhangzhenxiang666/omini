@@ -7,8 +7,8 @@ use omini_domain::events::ActiveProfile;
 use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_permissions::PermissionEngine;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::{JoinError, JoinSet};
 
@@ -39,7 +39,7 @@ pub struct ToolExecutor {
     settings: Arc<Settings>,
     pending_tool_pauses: PendingToolPauses,
     permission_engine: Arc<PermissionEngine>,
-    active_profile: ActiveProfile,
+    active_profile: Arc<RwLock<ActiveProfile>>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
     runtime_context: Option<Arc<ToolRuntimeContext>>,
@@ -53,7 +53,7 @@ impl ToolExecutor {
         settings: Arc<Settings>,
         pending_tool_pauses: PendingToolPauses,
         permission_engine: Arc<PermissionEngine>,
-        active_profile: ActiveProfile,
+        active_profile: Arc<RwLock<ActiveProfile>>,
         cancelled: Arc<AtomicBool>,
         cancel_notify: Arc<Notify>,
         runtime_context: Option<Arc<ToolRuntimeContext>>,
@@ -86,10 +86,14 @@ impl ToolExecutor {
         );
 
         let result = if let Some(tool) = self.tool_registry.get(&tool_use.name) {
+            let active_profile = *self
+                .active_profile
+                .read()
+                .expect("active profile lock poisoned");
             let pause_id = self
                 .runtime_context
                 .as_ref()
-                .filter(|runtime| runtime.thread_type == "subagent")
+                .filter(|runtime| runtime.agent_depth > 0)
                 .map(|runtime| format!("{}:{}", runtime.thread_id, tool_use.id))
                 .unwrap_or_else(|| tool_use.id.clone());
 
@@ -102,7 +106,7 @@ impl ToolExecutor {
                 event_tx: self.event_tx.clone(),
                 pending_tool_pauses: self.pending_tool_pauses,
                 permission_engine: self.permission_engine,
-                active_profile: self.active_profile,
+                active_profile,
                 cancelled: self.cancelled,
                 cancel_notify: self.cancel_notify,
                 runtime: self.runtime_context,
@@ -398,5 +402,41 @@ mod tests {
 
         assert!(messages.is_empty());
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn tool_execution_reads_profile_when_the_tool_starts() {
+        let context = ToolExecutionContext::test("write");
+        let active_profile = Arc::new(RwLock::new(ActiveProfile::Main));
+        let executor = ToolExecutor::new(
+            Arc::clone(&context.settings),
+            Arc::clone(&context.pending_tool_pauses),
+            Arc::clone(&context.permission_engine),
+            Arc::clone(&active_profile),
+            Arc::clone(&context.cancelled),
+            Arc::clone(&context.cancel_notify),
+            None,
+            Arc::new(crate::tools::create_main_registry()),
+            context.event_tx.clone(),
+        );
+        *active_profile
+            .write()
+            .expect("active profile lock poisoned") = ActiveProfile::Plan;
+
+        let result = executor
+            .execute(ToolUseBlock {
+                id: "tool_1".to_string(),
+                name: "write".to_string(),
+                input: HashMap::new(),
+            })
+            .await;
+
+        assert!(result.block.is_error);
+        assert!(
+            result
+                .block
+                .content
+                .contains("not available in plan profile")
+        );
     }
 }

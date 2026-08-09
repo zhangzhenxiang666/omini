@@ -1,5 +1,5 @@
 use crate::skills::SkillRegistry;
-use crate::subagents::{AgentRegistry, RuntimeSubagentRunner};
+use crate::subagents::{AgentRegistry, AgentTaskSupervisor};
 use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;
 use omini_config::Settings;
@@ -23,13 +23,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc, oneshot};
 
+pub mod agent_tools;
 pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod edit_tool;
 pub mod read_tool;
 pub mod search_tool;
 pub mod skill_tool;
-pub mod subagent_tool;
 pub mod todo_tool;
 pub mod view_image_tool;
 pub mod write_tool;
@@ -149,7 +149,6 @@ pub struct ToolExecutionContext {
     pub tool_use_id: String,
     pub pause_id: String,
     pub tool_name: String,
-    /// 会话配置，包含 session cwd 等信息。在正常运行时一定存在。
     pub settings: Arc<Settings>,
     pub tool_registry: Arc<ToolRegistry>,
     pub event_tx: mpsc::Sender<EngineToRuntimeEvent>,
@@ -169,9 +168,12 @@ pub struct ToolRuntimeContext {
     pub agent_label: Option<String>,
     pub thread_dir: ThreadDir,
     pub llm_context_version: Arc<AtomicI64>,
-    pub subagent_registry: Arc<AgentRegistry>,
+    pub agent_depth: u8,
+    pub task_id: Option<String>,
+    pub owner_thread_id: String,
+    pub agent_registry: Arc<AgentRegistry>,
     pub skill_registry: Arc<SkillRegistry>,
-    pub subagent_runner: Option<Arc<RuntimeSubagentRunner>>,
+    pub task_supervisor: Option<Arc<AgentTaskSupervisor>>,
     pub project: ProjectDir,
 }
 
@@ -187,7 +189,10 @@ impl std::fmt::Debug for ToolRuntimeContext {
                 "llm_context_version",
                 &self.llm_context_version.load(Ordering::Relaxed),
             )
-            .field("subagent_registry", &self.subagent_registry)
+            .field("agent_depth", &self.agent_depth)
+            .field("task_id", &self.task_id)
+            .field("owner_thread_id", &self.owner_thread_id)
+            .field("agent_registry", &self.agent_registry)
             .field("skill_registry", &self.skill_registry)
             .field("project", &self.project)
             .finish_non_exhaustive()
@@ -696,21 +701,22 @@ impl ToolRegistry {
 ///
 /// 当需要集成所有 tools/ 中定义的工具时，调用此函数即可。
 pub fn create_default_registry() -> ToolRegistry {
-    create_registry_with_allowed(None, false)
+    create_registry_with_allowed(None, AgentToolSet::None)
 }
 
 pub fn create_main_registry() -> ToolRegistry {
-    create_registry_with_allowed(None, true)
+    create_registry_with_allowed(None, AgentToolSet::Main)
 }
 
-pub fn create_subagent_registry(allowed_tools: &[String]) -> ToolRegistry {
-    create_registry_with_allowed(Some(allowed_tools), false)
+pub fn create_agent_registry(allowed_tools: &[String]) -> ToolRegistry {
+    create_registry_with_allowed(Some(allowed_tools), AgentToolSet::None)
 }
 
-pub fn create_subagent_registry_from_parent(
+pub fn create_agent_registry_from_parent(
     parent: &ToolRegistry,
     allow: Option<&[String]>,
     deny: &[String],
+    depth: u8,
 ) -> Result<(ToolRegistry, Vec<String>), String> {
     let mut warnings = Vec::new();
     let parent_names: HashSet<String> = parent.tool_names().into_iter().collect();
@@ -720,7 +726,7 @@ pub fn create_subagent_registry_from_parent(
     match allow {
         Some(allow) => {
             for name in allow {
-                if name == "subagent" {
+                if is_agent_control_tool(name) {
                     continue;
                 }
                 if deny_names.contains(name.as_str()) {
@@ -739,7 +745,7 @@ pub fn create_subagent_registry_from_parent(
             selected.extend(
                 parent_names
                     .iter()
-                    .filter(|name| name.as_str() != "subagent")
+                    .filter(|name| !is_agent_control_tool(name))
                     .filter(|name| !deny_names.contains(name.as_str()))
                     .cloned(),
             );
@@ -747,7 +753,7 @@ pub fn create_subagent_registry_from_parent(
     }
 
     for name in deny {
-        if name != "subagent" && !parent_names.contains(name) {
+        if !is_agent_control_tool(name) && !parent_names.contains(name) {
             warnings.push(format!(
                 "disallowed tool '{name}' is not available to the parent agent"
             ));
@@ -759,18 +765,25 @@ pub fn create_subagent_registry_from_parent(
     if selected.is_empty() {
         if !warnings.is_empty() {
             return Err(format!(
-                "subagent tool policy leaves no available tools: {}",
+                "agent tool policy leaves no available tools: {}",
                 warnings.join("; ")
             ));
         }
-        return Err("subagent tool policy leaves no available tools".to_string());
+        return Err("agent tool policy leaves no available tools".to_string());
     }
 
-    Ok((parent.filtered(&selected), warnings))
+    let mut registry = parent.filtered(&selected);
+    let run_agent_allowed = depth < omini_domain::events::MAX_AGENT_DEPTH
+        && allow.is_none_or(|tools| tools.iter().any(|tool| tool == "run_agent"))
+        && !deny_names.contains("run_agent");
+    if run_agent_allowed {
+        registry.register(agent_tools::RunAgentTool);
+    }
+    Ok((registry, warnings))
 }
 
-pub fn inherited_subagent_tool_names() -> Vec<String> {
-    create_subagent_registry(&[
+pub fn inherited_agent_tool_names() -> Vec<String> {
+    create_agent_registry(&[
         "ask_user".to_string(),
         "bash".to_string(),
         "search".to_string(),
@@ -785,7 +798,7 @@ pub fn inherited_subagent_tool_names() -> Vec<String> {
 
 fn create_registry_with_allowed(
     allowed: Option<&[String]>,
-    include_subagent: bool,
+    agent_tool_set: AgentToolSet,
 ) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     if tool_allowed(allowed, "ask_user") {
@@ -812,11 +825,13 @@ fn create_registry_with_allowed(
     if tool_allowed(allowed, "write") {
         registry.register(write_tool::WriteTool);
     }
-    if include_subagent && tool_allowed(allowed, "todo_write") {
+    if agent_tool_set == AgentToolSet::Main && tool_allowed(allowed, "todo_write") {
         registry.register(todo_tool::TodoWriteTool);
     }
-    if include_subagent && tool_allowed(allowed, "subagent") {
-        registry.register(subagent_tool::SubagentTool);
+    if agent_tool_set == AgentToolSet::Main {
+        registry.register(agent_tools::SpawnAgentTool);
+        registry.register(agent_tools::GetTaskTool);
+        registry.register(agent_tools::CancelTaskTool);
     }
     registry
 }
@@ -836,9 +851,25 @@ fn tool_definition_priority(name: &str) -> usize {
         "ask_user" => 6,
         "skill" => 7,
         "todo_write" => 8,
-        "subagent" => 9,
+        "spawn_agent" => 9,
+        "run_agent" => 10,
+        "get_task" => 11,
+        "cancel_task" => 12,
         _ => 100,
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AgentToolSet {
+    None,
+    Main,
+}
+
+fn is_agent_control_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "spawn_agent" | "run_agent" | "get_task" | "cancel_task"
+    )
 }
 
 #[cfg(test)]
@@ -892,38 +923,69 @@ mod tests {
     }
 
     #[test]
-    fn subagent_registry_inherits_parent_tools_without_subagent() {
+    fn agent_registry_inherits_parent_tools_and_adds_sync_agent_for_general_policy() {
         let parent = create_main_registry();
 
         let (child, warnings) =
-            create_subagent_registry_from_parent(&parent, None, &[]).expect("policy should work");
+            create_agent_registry_from_parent(&parent, None, &[], 1).expect("policy should work");
 
         assert!(warnings.is_empty());
         assert!(child.contains("search"));
         assert!(child.contains("read"));
         assert!(child.contains("write"));
-        assert!(!child.contains("subagent"));
+        assert!(child.contains("run_agent"));
+        assert!(!child.contains("spawn_agent"));
     }
 
     #[test]
-    fn subagent_registry_applies_allow_then_deny() {
+    fn agent_registry_applies_allow_then_deny() {
         let parent = create_main_registry();
         let allow = vec![
             "read".to_string(),
             "search".to_string(),
             "write".to_string(),
-            "subagent".to_string(),
+            "run_agent".to_string(),
         ];
         let deny = vec!["write".to_string()];
 
-        let (child, warnings) = create_subagent_registry_from_parent(&parent, Some(&allow), &deny)
+        let (child, warnings) = create_agent_registry_from_parent(&parent, Some(&allow), &deny, 1)
             .expect("policy should leave read available");
 
         assert!(warnings.is_empty());
         assert!(child.contains("search"));
         assert!(child.contains("read"));
         assert!(!child.contains("write"));
-        assert!(!child.contains("subagent"));
+        assert!(child.contains("run_agent"));
+    }
+
+    #[test]
+    fn explicit_read_only_agent_policy_does_not_gain_run_agent() {
+        let parent = create_main_registry();
+        let allow = vec!["read".to_string(), "search".to_string()];
+
+        let (child, warnings) = create_agent_registry_from_parent(&parent, Some(&allow), &[], 1)
+            .expect("read-only policy should work");
+
+        assert!(warnings.is_empty());
+        assert!(child.contains("read"));
+        assert!(child.contains("search"));
+        assert!(!child.contains("run_agent"));
+    }
+
+    #[test]
+    fn maximum_depth_agent_cannot_derive_another_agent() {
+        let parent = create_main_registry();
+
+        let (child, warnings) = create_agent_registry_from_parent(
+            &parent,
+            None,
+            &[],
+            omini_domain::events::MAX_AGENT_DEPTH,
+        )
+        .expect("maximum-depth policy should work");
+
+        assert!(warnings.is_empty());
+        assert!(!child.contains("run_agent"));
     }
 
     #[test]
@@ -931,6 +993,10 @@ mod tests {
         let registry = create_main_registry();
 
         assert!(registry.contains("search"));
+        assert!(registry.contains("spawn_agent"));
+        assert!(registry.contains("get_task"));
+        assert!(registry.contains("cancel_task"));
+        assert!(!registry.contains("run_agent"));
     }
 
     #[test]

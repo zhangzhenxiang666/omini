@@ -502,8 +502,8 @@ mod tests {
         assert!(main_prompt.contains("focused implementation work"));
         assert!(auto_prompt.contains("focused implementation work"));
         assert!(!plan_prompt.contains("focused implementation work"));
-        assert!(plan_prompt.contains("use subagents only for non-mutating exploration"));
-        assert!(plan_prompt.contains("<available_subagents>"));
+        assert!(plan_prompt.contains("spawn agents only for non-mutating exploration"));
+        assert!(plan_prompt.contains("<available_agents>"));
     }
 
     #[test]
@@ -528,8 +528,8 @@ mod tests {
             build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
 
         assert!(prompt.contains("<delegation_instructions>"));
-        assert!(prompt.contains("<available_subagents>"));
-        assert!(prompt.contains("<subagent>"));
+        assert!(prompt.contains("<available_agents>"));
+        assert!(prompt.contains("<agent>"));
         assert!(prompt.contains("<name>explorer</name>"));
         assert!(
             prompt.contains("<description>Read-only codebase exploration agent.</description>")
@@ -558,7 +558,7 @@ mod tests {
         let main_prompt =
             build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
 
-        assert!(main_prompt.contains("use the `general` subagent"));
+        assert!(main_prompt.contains("spawn a `general` agent"));
         assert!(main_prompt.contains("bounded scope"));
     }
 
@@ -603,7 +603,7 @@ mod tests {
             prompt.find("</delegation_instructions>").unwrap() + "</delegation_instructions>".len();
         let delegation_block = &prompt[delegation_block_start..delegation_block_end];
 
-        assert!(delegation_block.contains("<available_subagents>"));
+        assert!(delegation_block.contains("<available_agents>"));
         assert!(delegation_block.contains("<name>explorer</name>"));
         assert!(!delegation_block.contains("- `explorer`: "));
     }

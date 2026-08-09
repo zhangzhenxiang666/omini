@@ -1,10 +1,11 @@
 use super::*;
 use crate::types::events::{
-    PermissionPreview, RuntimeToUiEvent, SubagentStartedEvent, ToolPauseKind, ToolPauseRequest,
+    AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
+    PermissionPreview, RuntimeToUiEvent, SessionUsageSnapshot, ToolPauseKind, ToolPauseRequest,
 };
 use chrono::Utc;
 use omini_domain::display::MentionKind;
-use omini_domain::message::ToolResultBlock;
+use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use omini_protocol as protocol;
 use std::time::Duration;
@@ -38,12 +39,50 @@ fn temp_image_path(name: &str) -> PathBuf {
 }
 
 fn start_subagent(state: &mut UiState) {
-    state.apply_event(RuntimeToUiEvent::SubagentStarted(SubagentStartedEvent {
-        session_id: "sub_1".to_string(),
-        parent_session_id: "parent".to_string(),
-        spawn_tool_use_id: "tool_1".to_string(),
-        agent_label: "explorer".to_string(),
+    start_subagent_with_execution_mode(state, AgentTaskExecutionMode::Background);
+}
+
+fn start_subagent_with_execution_mode(state: &mut UiState, execution_mode: AgentTaskExecutionMode) {
+    state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        parent_task_id: None,
+        owner_thread_id: "parent".to_string(),
+        truncated: false,
+        payload: AgentTaskEvent::Started {
+            parent_thread_id: "parent".to_string(),
+            spawn_tool_use_id: "tool_1".to_string(),
+            agent: "explorer".to_string(),
+            title: "Explore".to_string(),
+            depth: 1,
+            execution_mode,
+        },
     }));
+}
+
+fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
+    let now = Utc::now();
+    AgentTaskSnapshot {
+        task: AgentTaskInfo {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            parent_thread_id: "parent".to_string(),
+            spawn_tool_use_id: "tool_1".to_string(),
+            agent: "explorer".to_string(),
+            title: "Explore".to_string(),
+            depth: 1,
+            execution_mode: AgentTaskExecutionMode::Background,
+            status: AgentTaskStatus::Completed,
+            result: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            notification_delivered: true,
+        },
+        messages,
+    }
 }
 
 fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
@@ -307,6 +346,22 @@ fn runtime_status_sync_applies_thinking_state() {
 }
 
 #[test]
+fn idle_runtime_status_clears_main_query_while_background_task_remains_active() {
+    let mut state = UiState::new();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    start_subagent(&mut state);
+    let mut status = query_runtime_status(protocol::SessionRuntimeState::Idle, 0, &[]);
+    status.activity = None;
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+
+    assert_eq!(state.agent_status, AgentStatus::Idle);
+    assert!(!state.is_main_query_active());
+    assert!(state.run_timer.is_none());
+    assert!(state.has_active_agent_tasks());
+}
+
+#[test]
 fn replayed_run_started_keeps_synced_elapsed_timer() {
     let mut state = UiState::new();
     let status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
@@ -551,7 +606,7 @@ fn subagent_spawn_tool_error_finishes_running_state() {
     }));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, SubagentStatus::Failed);
+    assert_eq!(node.status, AgentTaskStatus::Failed);
 }
 
 #[test]
@@ -564,7 +619,161 @@ fn runtime_error_does_not_fail_running_subagent_state() {
     ));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, SubagentStatus::Running);
+    assert_eq!(node.status, AgentTaskStatus::Running);
+}
+
+#[test]
+fn parent_run_finished_does_not_finish_running_agent_task() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    assert_eq!(
+        state.subagents.get("sub_1").unwrap().status,
+        AgentTaskStatus::Running
+    );
+}
+
+#[test]
+fn background_spawn_tool_result_keeps_running_subagent_live() {
+    let mut state = UiState::new();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::ToolUse(ToolUseBlock {
+        id: "tool_1".to_string(),
+        name: "spawn_agent".to_string(),
+        input: std::collections::HashMap::from([
+            (
+                "name".to_string(),
+                serde_json::Value::String("explorer".to_string()),
+            ),
+            (
+                "title".to_string(),
+                serde_json::Value::String("Explore".to_string()),
+            ),
+        ]),
+    }));
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: r#"{"task_id":"task_1","status":"running"}"#.to_string(),
+        metadata: None,
+    }));
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    let node = state.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, AgentTaskStatus::Running);
+    assert!(state.pending_tool_message_map.is_empty());
+    assert_eq!(state.live_message_start, 0);
+    assert_eq!(state.render_cache.completed_message_count, 0);
+}
+
+#[test]
+fn synchronous_agent_tool_result_finishes_subagent_state() {
+    let mut state = UiState::new();
+    start_subagent_with_execution_mode(&mut state, AgentTaskExecutionMode::Synchronous);
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: r#"{"task_id":"task_1","status":"completed"}"#.to_string(),
+        metadata: None,
+    }));
+
+    let node = state.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, AgentTaskStatus::Completed);
+}
+
+#[test]
+fn session_snapshot_discards_subagent_transcript_in_tui_state() {
+    let mut state = UiState::new();
+    let child_tool = ContentBlock::from_tool_use(
+        "child_tool".to_string(),
+        "read".to_string(),
+        std::collections::HashMap::new(),
+    );
+
+    state.apply_session_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![subagent_snapshot(vec![Message::new(
+            Role::Assistant,
+            vec![child_tool],
+        )])],
+        SessionUsageSnapshot::default(),
+    );
+
+    assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
+}
+
+#[test]
+fn agent_message_and_tool_events_do_not_update_subagent_transcript() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+
+    for payload in [
+        AgentTaskEvent::MessageCommitted {
+            message: Message::from_user_text("child prompt".to_string()),
+            persist_llm_history: true,
+        },
+        AgentTaskEvent::ToolUse {
+            tool_use: ToolUseBlock {
+                id: "child_tool".to_string(),
+                name: "read".to_string(),
+                input: std::collections::HashMap::new(),
+            },
+        },
+        AgentTaskEvent::ToolResult {
+            tool_result: ToolResultBlock {
+                tool_use_id: "child_tool".to_string(),
+                is_error: false,
+                content: "done".to_string(),
+                metadata: None,
+            },
+        },
+    ] {
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            truncated: false,
+            payload,
+        }));
+    }
+
+    assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
+}
+
+#[test]
+fn agent_turn_and_delta_events_do_not_pollute_main_pending_assistant() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+
+    for payload in [
+        AgentTaskEvent::TurnStarted,
+        AgentTaskEvent::ThinkingDelta {
+            delta: "private reasoning".to_string(),
+        },
+        AgentTaskEvent::TextDelta {
+            delta: "partial child answer".to_string(),
+        },
+        AgentTaskEvent::TurnEnded,
+    ] {
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            truncated: false,
+            payload,
+        }));
+    }
+
+    assert!(state.pending_assistant.is_none());
+    assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
 }
 
 #[test]

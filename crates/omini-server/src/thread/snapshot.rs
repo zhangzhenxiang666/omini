@@ -35,22 +35,9 @@ impl ThreadRuntime {
         let thread_dir = self.project.thread(&self.thread_id);
         // DB → UI 视角:给 TUI 的 SessionSnapshotEvent 渲染 + user_injection 去重。
         let messages = crate::history::load_messages(&self.db, &self.thread_id, &thread_dir).await;
-        // 子代理运行态不随 daemon 存活，DB 加载一律为 Completed；
-        // 但当前 daemon 若仍在运行，需要从 runtime 状态投影恢复真实 Running 状态，
-        // 否则中途连接的 TUI 无法为仍在运行的子代理加载正确状态。
-        let mut subagents =
-            crate::history::load_subagents_for_thread(&self.db, &self.thread_id, &self.project)
+        let agent_tasks =
+            crate::history::load_agent_tasks_for_thread(&self.db, &self.thread_id, &self.project)
                 .await;
-        let running_subagent_ids = self
-            .status_projection
-            .lock()
-            .expect("status projection lock poisoned")
-            .running_subagent_thread_ids();
-        for subagent in &mut subagents {
-            if running_subagent_ids.contains(&subagent.session_id) {
-                subagent.status = client_proto::SubagentStatus::Running;
-            }
-        }
         let active_profile = self
             .status_projection
             .lock()
@@ -71,7 +58,7 @@ impl ThreadRuntime {
             active_profile,
             title: thread.title,
             messages,
-            subagents,
+            agent_tasks,
             usage: client_proto::SessionUsageSnapshot {
                 current_context_tokens: thread.current_context_tokens,
                 total_tokens: thread.total_tokens,

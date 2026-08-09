@@ -405,7 +405,7 @@ pub fn protocol_events_from_loaded_session_snapshot(
             client_proto::SessionSnapshotEvent {
                 session_id: Some(snapshot.session_id),
                 messages: snapshot.messages,
-                subagents: snapshot.subagents,
+                agent_tasks: snapshot.agent_tasks,
                 usage,
             },
         )),
@@ -568,20 +568,8 @@ fn typed_runtime_event_from_runtime_contract_event(
                 },
             )
         }
-        runtime_contract::RuntimeToServerEvent::SubagentStarted(event) => {
-            client_proto::TypedRuntimeEvent::SubagentStarted(event)
-        }
-        runtime_contract::RuntimeToServerEvent::SubagentMessageProduced(event) => {
-            client_proto::TypedRuntimeEvent::SubagentMessageProduced(event)
-        }
-        runtime_contract::RuntimeToServerEvent::SubagentToolUse(event) => {
-            client_proto::TypedRuntimeEvent::SubagentToolUse(event)
-        }
-        runtime_contract::RuntimeToServerEvent::SubagentToolResult(event) => {
-            client_proto::TypedRuntimeEvent::SubagentToolResult(event)
-        }
-        runtime_contract::RuntimeToServerEvent::SubagentFinished(event) => {
-            client_proto::TypedRuntimeEvent::SubagentFinished(event)
+        runtime_contract::RuntimeToServerEvent::AgentTaskEvent(event) => {
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(event)
         }
         runtime_contract::RuntimeToServerEvent::SessionSwitched { from, to } => {
             client_proto::TypedRuntimeEvent::SessionSwitched(client_proto::SessionSwitchedEvent {
@@ -697,7 +685,7 @@ mod tests {
                 messages: vec![domain::display::HistoryItem::Message(
                     domain::message::Message::from_user_text("hello".to_string()),
                 )],
-                subagents: Vec::new(),
+                agent_tasks: Vec::new(),
                 usage: domain::events::SessionUsageSnapshot {
                     current_context_tokens: 3,
                     total_tokens: 5,

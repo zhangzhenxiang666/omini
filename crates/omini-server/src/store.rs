@@ -3,6 +3,9 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::events::{
+    AgentTaskExecutionMode, AgentTaskInfo, AgentTaskResult, AgentTaskStatus,
+};
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::usage::Usage;
 use omini_runtime_contract::persistence::{RuntimePersistenceEvent, ThreadRecord};
@@ -76,6 +79,46 @@ pub struct StoredMessage {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AgentTask {
+    pub task_id: String,
+    pub owner_thread_id: String,
+    pub agent_thread_id: String,
+    pub parent_task_id: Option<String>,
+    pub parent_thread_id: String,
+    pub spawn_tool_use_id: String,
+    pub depth: u8,
+    pub execution_mode: AgentTaskExecutionMode,
+    pub status: AgentTaskStatus,
+    pub agent_name: String,
+    pub title: String,
+    pub result: Option<AgentTaskResult>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub notification_delivered: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct AgentTaskRow {
+    task_id: String,
+    owner_thread_id: String,
+    agent_thread_id: String,
+    parent_task_id: Option<String>,
+    parent_thread_id: String,
+    spawn_tool_use_id: String,
+    depth: i64,
+    execution_mode: String,
+    status: String,
+    agent_name: String,
+    title: String,
+    result_json: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    completed_at: Option<DateTime<Utc>>,
+    notification_delivered: bool,
+}
+
 pub struct NewMessage {
     pub thread_id: String,
     pub role: String,
@@ -83,6 +126,16 @@ pub struct NewMessage {
     pub blocks: Vec<ContentBlock>,
     pub kind: String,
     pub created_at: DateTime<Utc>,
+}
+
+struct AgentMessagePersistence<'a> {
+    thread_id: &'a str,
+    message: &'a Message,
+    model_ref: Option<&'a str>,
+    persist_llm_history: bool,
+    display_in_ui: bool,
+    created_at: DateTime<Utc>,
+    project: &'a ProjectDir,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -159,6 +212,61 @@ impl From<StoredMessageRow> for StoredMessage {
     }
 }
 
+impl TryFrom<AgentTaskRow> for AgentTask {
+    type Error = StoreError;
+
+    fn try_from(row: AgentTaskRow) -> Result<Self, Self::Error> {
+        let execution_mode = match row.execution_mode.as_str() {
+            "background" => AgentTaskExecutionMode::Background,
+            "synchronous" => AgentTaskExecutionMode::Synchronous,
+            value => {
+                return Err(StoreError::InvalidData(format!(
+                    "unknown agent task execution mode '{value}'"
+                )));
+            }
+        };
+        let status = parse_agent_task_status(&row.status)?;
+        let result = row
+            .result_json
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        Ok(Self {
+            task_id: row.task_id,
+            owner_thread_id: row.owner_thread_id,
+            agent_thread_id: row.agent_thread_id,
+            parent_task_id: row.parent_task_id,
+            parent_thread_id: row.parent_thread_id,
+            spawn_tool_use_id: row.spawn_tool_use_id,
+            depth: u8::try_from(row.depth).map_err(|_| {
+                StoreError::InvalidData(format!("invalid agent task depth {}", row.depth))
+            })?,
+            execution_mode,
+            status,
+            agent_name: row.agent_name,
+            title: row.title,
+            result,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            completed_at: row.completed_at,
+            notification_delivered: row.notification_delivered,
+        })
+    }
+}
+
+fn parse_agent_task_status(value: &str) -> Result<AgentTaskStatus, StoreError> {
+    match value {
+        "running" => Ok(AgentTaskStatus::Running),
+        "cancelling" => Ok(AgentTaskStatus::Cancelling),
+        "completed" => Ok(AgentTaskStatus::Completed),
+        "failed" => Ok(AgentTaskStatus::Failed),
+        "cancelled" => Ok(AgentTaskStatus::Cancelled),
+        "interrupted" => Ok(AgentTaskStatus::Interrupted),
+        _ => Err(StoreError::InvalidData(format!(
+            "unknown agent task status '{value}'"
+        ))),
+    }
+}
+
 pub struct Database {
     pool: SqlitePool,
 }
@@ -193,6 +301,7 @@ impl Database {
         )
         .execute(&mut *tx)
         .await?;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS thread (
                 id                     TEXT PRIMARY KEY,
@@ -248,6 +357,29 @@ impl Database {
         .execute(&mut *tx)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_task (
+                task_id                 TEXT PRIMARY KEY,
+                owner_thread_id         TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                agent_thread_id         TEXT NOT NULL UNIQUE REFERENCES thread(id) ON DELETE CASCADE,
+                parent_task_id          TEXT REFERENCES agent_task(task_id) ON DELETE CASCADE,
+                parent_thread_id        TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                spawn_tool_use_id       TEXT NOT NULL,
+                depth                   INTEGER NOT NULL,
+                execution_mode          TEXT NOT NULL CHECK (execution_mode IN ('background', 'synchronous')),
+                status                  TEXT NOT NULL CHECK (status IN ('running', 'cancelling', 'completed', 'failed', 'cancelled', 'interrupted')),
+                agent_name              TEXT NOT NULL,
+                title                   TEXT NOT NULL,
+                result_json             TEXT,
+                created_at              TEXT NOT NULL,
+                updated_at              TEXT NOT NULL,
+                completed_at            TEXT,
+                notification_delivered  INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_thread_project ON thread(project_id)")
             .execute(&mut *tx)
             .await?;
@@ -262,6 +394,27 @@ impl Database {
         )
         .execute(&mut *tx)
         .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_task_owner ON agent_task(owner_thread_id, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            "UPDATE agent_task SET status = 'interrupted', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status = 'running'",
+        )
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE agent_task SET status = 'cancelled', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status = 'cancelling'",
+        )
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&mut *tx)
+        .await?;
+
         tx.commit().await?;
         Ok(())
     }
@@ -380,6 +533,309 @@ impl Database {
         .bind(thread.updated_at)
         .execute(&self.pool)
         .await?;
+        Ok(())
+    }
+
+    pub async fn create_agent_task(
+        &self,
+        project_id: &str,
+        task: &AgentTaskInfo,
+        thread: &ThreadRecord,
+        initial_message: &Message,
+    ) -> Result<(), StoreError> {
+        let thread = thread_from_runtime(project_id, thread);
+        let initial_content = serde_json::to_string(&initial_message.content)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO thread(
+                    id,
+                    project_id,
+                    parent_thread_id,
+                    spawn_tool_use_id,
+                    thread_type,
+                    agent_label,
+                    provider,
+                    model,
+                    thinking_effort,
+                    title,
+                    current_context_tokens,
+                    total_tokens,
+                    total_cached_tokens,
+                    llm_context_version,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&thread.id)
+        .bind(&thread.project_id)
+        .bind(&thread.parent_thread_id)
+        .bind(&thread.spawn_tool_use_id)
+        .bind(&thread.thread_type)
+        .bind(&thread.agent_label)
+        .bind(&thread.provider)
+        .bind(&thread.model)
+        .bind(&thread.thinking_effort)
+        .bind(&thread.title)
+        .bind(thread.current_context_tokens)
+        .bind(thread.total_tokens)
+        .bind(thread.total_cached_tokens)
+        .bind(thread.llm_context_version)
+        .bind(thread.created_at)
+        .bind(thread.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_task(
+                    task_id,
+                    owner_thread_id,
+                    agent_thread_id,
+                    parent_task_id,
+                    parent_thread_id,
+                    spawn_tool_use_id,
+                    depth,
+                    execution_mode,
+                    status,
+                    agent_name,
+                    title,
+                    result_json,
+                    created_at,
+                    updated_at,
+                    completed_at,
+                    notification_delivered
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0)",
+        )
+        .bind(&task.task_id)
+        .bind(&task.owner_thread_id)
+        .bind(&task.thread_id)
+        .bind(&task.parent_task_id)
+        .bind(&task.parent_thread_id)
+        .bind(&task.spawn_tool_use_id)
+        .bind(i64::from(task.depth))
+        .bind(task.execution_mode.as_str())
+        .bind(task.status.as_str())
+        .bind(&task.agent)
+        .bind(&task.title)
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO messages(
+                    thread_id,
+                    role,
+                    model_ref,
+                    content,
+                    kind,
+                    created_at
+                )
+                VALUES (?, 'user', NULL, ?, 'normal', ?)",
+        )
+        .bind(&task.thread_id)
+        .bind(&initial_content)
+        .bind(task.created_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO llm_messages(
+                    thread_id,
+                    context_version,
+                    ordinal,
+                    role,
+                    content,
+                    created_at)
+                VALUES (?, 1, 0, 'user', ?, ?)",
+        )
+        .bind(&task.thread_id)
+        .bind(initial_content)
+        .bind(task.created_at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn list_agent_tasks(
+        &self,
+        owner_thread_id: &str,
+    ) -> Result<Vec<AgentTask>, StoreError> {
+        let rows = sqlx::query_as::<_, AgentTaskRow>(
+            "SELECT * FROM agent_task WHERE owner_thread_id = ? ORDER BY created_at, task_id",
+        )
+        .bind(owner_thread_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    async fn persist_agent_message(
+        &self,
+        request: AgentMessagePersistence<'_>,
+    ) -> Result<(), StoreError> {
+        if request.display_in_ui {
+            self.insert_message(
+                &NewMessage {
+                    thread_id: request.thread_id.to_string(),
+                    role: request.message.role.to_string(),
+                    model_ref: (request.message.role == Role::Assistant)
+                        .then(|| request.model_ref.map(str::to_string))
+                        .flatten(),
+                    blocks: request.message.content.clone(),
+                    kind: "normal".to_string(),
+                    created_at: request.created_at,
+                },
+                &request.project.thread(request.thread_id),
+            )
+            .await?;
+        }
+        if request.persist_llm_history {
+            self.append_llm_message(
+                request.thread_id,
+                request.message,
+                request.created_at,
+                &request.project.thread(request.thread_id),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn finish_agent_task(
+        &self,
+        task_id: &str,
+        status: AgentTaskStatus,
+        result: &AgentTaskResult,
+        completed_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE agent_task SET
+                    status = ?,
+                    result_json = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE task_id = ?",
+        )
+        .bind(status.as_str())
+        .bind(serde_json::to_string(result)?)
+        .bind(completed_at)
+        .bind(completed_at)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn set_agent_tasks_cancelling(
+        &self,
+        task_ids: &[String],
+        updated_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        for task_id in task_ids {
+            sqlx::query(
+                "UPDATE agent_task SET
+                status = 'cancelling',
+                updated_at = ?
+                WHERE task_id = ? AND status = 'running'",
+            )
+            .bind(updated_at)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn insert_agent_task_notification(
+        &self,
+        owner_thread_id: &str,
+        notification: &omini_domain::display::AgentTaskNotification,
+        llm_message: &Message,
+        task_ids: &[String],
+        created_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let mut has_pending_task = false;
+        for task_id in task_ids {
+            let pending: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM agent_task
+                    WHERE task_id = ? AND notification_delivered = 0
+                )",
+            )
+            .bind(task_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            has_pending_task |= pending;
+        }
+        if !has_pending_task {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        let notification_json = serde_json::to_string(notification)?;
+        let llm_json = serde_json::to_string(&llm_message.content)?;
+        sqlx::query(
+            "INSERT INTO messages(
+                    thread_id,
+                    role,
+                    model_ref,
+                    content,
+                    kind,
+                    created_at
+                )
+                VALUES (?, 'user', NULL, ?, 'agent_task_notification', ?)",
+        )
+        .bind(owner_thread_id)
+        .bind(notification_json)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await?;
+        let version: i64 =
+            sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
+                .bind(owner_thread_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let ordinal: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM llm_messages WHERE thread_id = ? AND context_version = ?",
+        )
+        .bind(owner_thread_id)
+        .bind(version)
+        .fetch_one(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO llm_messages(
+                    thread_id,
+                    context_version,
+                    ordinal,
+                    role,
+                    content,
+                    created_at
+                )
+                VALUES (?, ?, ?, 'user', ?, ?)",
+        )
+        .bind(owner_thread_id)
+        .bind(version)
+        .bind(ordinal)
+        .bind(llm_json)
+        .bind(created_at)
+        .execute(&mut *tx)
+        .await?;
+        for task_id in task_ids {
+            sqlx::query(
+                "UPDATE agent_task SET
+                        notification_delivered = 1,
+                        updated_at = ?
+                    WHERE task_id = ? AND notification_delivered = 0",
+            )
+            .bind(created_at)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -860,6 +1316,66 @@ impl Database {
                 self.create_thread(&thread_from_runtime(project_id, thread))
                     .await
             }
+            RuntimePersistenceEvent::CreateAgentTask {
+                task,
+                thread,
+                initial_message,
+                ..
+            } => {
+                self.create_agent_task(project_id, task, thread, initial_message)
+                    .await
+            }
+            RuntimePersistenceEvent::PersistAgentMessage {
+                thread_id,
+                message,
+                model_ref,
+                persist_llm_history,
+                display_in_ui,
+                created_at,
+                ..
+            } => {
+                self.persist_agent_message(AgentMessagePersistence {
+                    thread_id,
+                    message,
+                    model_ref: model_ref.as_deref(),
+                    persist_llm_history: *persist_llm_history,
+                    display_in_ui: *display_in_ui,
+                    created_at: *created_at,
+                    project,
+                })
+                .await
+            }
+            RuntimePersistenceEvent::FinishAgentTask {
+                task_id,
+                status,
+                result,
+                completed_at,
+                ..
+            } => {
+                self.finish_agent_task(task_id, *status, result, *completed_at)
+                    .await
+            }
+            RuntimePersistenceEvent::SetAgentTasksCancelling {
+                task_ids,
+                updated_at,
+            } => self.set_agent_tasks_cancelling(task_ids, *updated_at).await,
+            RuntimePersistenceEvent::InsertAgentTaskNotification {
+                owner_thread_id,
+                notification,
+                llm_message,
+                task_ids,
+                created_at,
+                ..
+            } => {
+                self.insert_agent_task_notification(
+                    owner_thread_id,
+                    notification,
+                    llm_message,
+                    task_ids,
+                    *created_at,
+                )
+                .await
+            }
             RuntimePersistenceEvent::UpdateThreadUpdatedAt { thread_id } => {
                 self.update_thread_updated_at(thread_id).await
             }
@@ -966,8 +1482,8 @@ impl Database {
             RuntimePersistenceEvent::RecordThreadTotalUsage { thread_id, usage } => {
                 self.record_thread_total_usage(thread_id, *usage).await
             }
-            RuntimePersistenceEvent::RecordParentSubagentUsage { thread_id, usage } => {
-                self.record_thread_usage(thread_id, *usage).await
+            RuntimePersistenceEvent::RecordOwnerAgentUsage { thread_id, usage } => {
+                self.record_thread_total_usage(thread_id, *usage).await
             }
         }
     }
@@ -1407,6 +1923,49 @@ mod tests {
         }
     }
 
+    fn test_agent_task(task_id: &str, thread_id: &str, owner_thread_id: &str) -> AgentTaskInfo {
+        let now = Utc::now();
+        AgentTaskInfo {
+            task_id: task_id.to_string(),
+            thread_id: thread_id.to_string(),
+            parent_task_id: None,
+            owner_thread_id: owner_thread_id.to_string(),
+            parent_thread_id: owner_thread_id.to_string(),
+            spawn_tool_use_id: format!("tool_{task_id}"),
+            agent: "general".to_string(),
+            title: "Test agent".to_string(),
+            depth: 1,
+            execution_mode: AgentTaskExecutionMode::Background,
+            status: AgentTaskStatus::Running,
+            result: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+            notification_delivered: false,
+        }
+    }
+
+    fn test_agent_thread(id: &str, parent_thread_id: &str) -> ThreadRecord {
+        let now = Utc::now();
+        ThreadRecord {
+            id: id.to_string(),
+            parent_thread_id: Some(parent_thread_id.to_string()),
+            spawn_tool_use_id: Some(format!("tool_{id}")),
+            thread_type: "agent".to_string(),
+            agent_label: Some("general".to_string()),
+            provider: "openai".to_string(),
+            model: "gpt-test".to_string(),
+            thinking_effort: None,
+            title: Some("Test agent".to_string()),
+            current_context_tokens: 0,
+            total_tokens: 0,
+            total_cached_tokens: 0,
+            llm_context_version: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[test]
     fn runtime_child_thread_is_bound_to_server_project_id() {
         let now = Utc::now();
@@ -1414,7 +1973,7 @@ mod tests {
             id: "child".to_string(),
             parent_thread_id: Some("parent".to_string()),
             spawn_tool_use_id: Some("tool".to_string()),
-            thread_type: "subagent".to_string(),
+            thread_type: "agent".to_string(),
             agent_label: Some("explorer".to_string()),
             provider: "openai".to_string(),
             model: "gpt-test".to_string(),
@@ -1467,6 +2026,259 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(old_count, 1);
+    }
+
+    #[tokio::test]
+    async fn agent_task_creation_is_atomic_and_startup_recovers_terminal_statuses() {
+        let (db, project) = temp_db().await;
+        project.create_thread("owner").unwrap();
+        db.create_thread(&test_thread("owner")).await.unwrap();
+        let initial = Message::from_user_text("do work".to_string());
+
+        let task = test_agent_task("task_running", "agent_running", "owner");
+        db.create_agent_task(
+            TEST_PROJECT_ID,
+            &task,
+            &test_agent_thread("agent_running", "owner"),
+            &initial,
+        )
+        .await
+        .unwrap();
+        assert_eq!(db.get_messages("agent_running").await.unwrap().len(), 1);
+        assert_eq!(
+            db.load_current_llm_messages("agent_running", &project.thread("agent_running"))
+                .await
+                .unwrap(),
+            vec![initial.clone()]
+        );
+
+        let cancelling = test_agent_task("task_cancelling", "agent_cancelling", "owner");
+        db.create_agent_task(
+            TEST_PROJECT_ID,
+            &cancelling,
+            &test_agent_thread("agent_cancelling", "owner"),
+            &initial,
+        )
+        .await
+        .unwrap();
+        db.set_agent_tasks_cancelling(&["task_cancelling".to_string()], Utc::now())
+            .await
+            .unwrap();
+
+        let invalid = test_agent_task("task_invalid", "agent_rolled_back", "missing_owner");
+        assert!(
+            db.create_agent_task(
+                TEST_PROJECT_ID,
+                &invalid,
+                &test_agent_thread("agent_rolled_back", "owner"),
+                &initial,
+            )
+            .await
+            .is_err()
+        );
+        assert!(db.get_thread("agent_rolled_back").await.unwrap().is_none());
+
+        db.initialize().await.unwrap();
+        let tasks = db.list_agent_tasks("owner").await.unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.task_id == "task_running")
+                .unwrap()
+                .status,
+            AgentTaskStatus::Interrupted
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .find(|task| task.task_id == "task_cancelling")
+                .unwrap()
+                .status,
+            AgentTaskStatus::Cancelled
+        );
+        assert!(tasks.iter().all(|task| task.completed_at.is_some()));
+    }
+
+    #[tokio::test]
+    async fn agent_task_notification_is_inserted_exactly_once() {
+        let (db, project) = temp_db().await;
+        project.create_thread("owner").unwrap();
+        db.create_thread(&test_thread("owner")).await.unwrap();
+        let task = test_agent_task("task_done", "agent_done", "owner");
+        db.create_agent_task(
+            TEST_PROJECT_ID,
+            &task,
+            &test_agent_thread("agent_done", "owner"),
+            &Message::from_user_text("do work".to_string()),
+        )
+        .await
+        .unwrap();
+        let completed_at = Utc::now();
+        db.finish_agent_task(
+            "task_done",
+            AgentTaskStatus::Completed,
+            &AgentTaskResult {
+                output: Some("done".to_string()),
+                error: None,
+                warnings: Vec::new(),
+            },
+            completed_at,
+        )
+        .await
+        .unwrap();
+        let before = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text("before notification".to_string())],
+        );
+        db.append_llm_message("owner", &before, Utc::now(), &project.thread("owner"))
+            .await
+            .unwrap();
+        let notification = omini_domain::display::AgentTaskNotification {
+            tasks: vec![omini_domain::display::AgentTaskNotificationItem {
+                task_id: "task_done".to_string(),
+                agent: "general".to_string(),
+                title: "Test agent".to_string(),
+                status: AgentTaskStatus::Completed,
+            }],
+            created_at: completed_at,
+        };
+        let llm_message = Message::from_user_text("agent task completed".to_string());
+        for _ in 0..2 {
+            db.insert_agent_task_notification(
+                "owner",
+                &notification,
+                &llm_message,
+                &["task_done".to_string()],
+                completed_at,
+            )
+            .await
+            .unwrap();
+        }
+        let after = Message::new(
+            Role::Assistant,
+            vec![ContentBlock::from_text("after notification".to_string())],
+        );
+        db.append_llm_message("owner", &after, Utc::now(), &project.thread("owner"))
+            .await
+            .unwrap();
+
+        let ui_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages WHERE thread_id = 'owner' AND kind = 'agent_task_notification'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let llm_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM llm_messages WHERE thread_id = 'owner' AND role = 'user'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(ui_count, 1);
+        assert_eq!(llm_count, 1);
+        assert_eq!(
+            db.load_current_llm_messages("owner", &project.thread("owner"))
+                .await
+                .unwrap(),
+            vec![before, llm_message, after]
+        );
+        assert!(db.list_agent_tasks("owner").await.unwrap()[0].notification_delivered);
+        assert!(matches!(
+            crate::history::load_messages(&db, "owner", &project.thread("owner"))
+                .await
+                .as_slice(),
+            [omini_domain::display::HistoryItem::AgentTaskNotification(restored)]
+                if restored == &notification
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_compact_advances_llm_version_without_rewriting_ui_history() {
+        let (db, project) = temp_db().await;
+        project.create_thread("owner").unwrap();
+        db.create_thread(&test_thread("owner")).await.unwrap();
+        let initial = Message::from_user_text("do work".to_string());
+        let task = test_agent_task("task_compact", "agent_compact", "owner");
+        db.create_agent_task(
+            TEST_PROJECT_ID,
+            &task,
+            &test_agent_thread("agent_compact", "owner"),
+            &initial,
+        )
+        .await
+        .unwrap();
+        let compacted = vec![
+            Message::from_user_text("summary".to_string()),
+            Message::from_user_text("retained tail".to_string()),
+        ];
+
+        let next_version = db
+            .replace_llm_context(
+                "agent_compact",
+                1,
+                &compacted,
+                Utc::now(),
+                &project.thread("agent_compact"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(next_version, 2);
+        assert_eq!(
+            db.load_current_llm_messages("agent_compact", &project.thread("agent_compact"))
+                .await
+                .unwrap(),
+            compacted
+        );
+        let old_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM llm_messages
+                WHERE thread_id = 'agent_compact' AND context_version = 1",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(old_count, 1);
+        assert!(matches!(
+            crate::history::load_messages(&db, "agent_compact", &project.thread("agent_compact"))
+                .await
+                .as_slice(),
+            [omini_domain::display::HistoryItem::Message(message)] if message == &initial
+        ));
+    }
+
+    #[tokio::test]
+    async fn owner_agent_usage_updates_totals_without_replacing_main_context_usage() {
+        let (db, project) = temp_db().await;
+        project.create_thread("owner").unwrap();
+        db.create_thread(&test_thread("owner")).await.unwrap();
+        let main_usage = Usage {
+            prompt_tokens: 8,
+            completion_tokens: 2,
+            cached_tokens: 1,
+        };
+        db.record_thread_usage("owner", main_usage).await.unwrap();
+        let agent_usage = Usage {
+            prompt_tokens: 4,
+            completion_tokens: 1,
+            cached_tokens: 2,
+        };
+
+        db.apply_persistence_event(
+            &RuntimePersistenceEvent::RecordOwnerAgentUsage {
+                thread_id: "owner".to_string(),
+                usage: agent_usage,
+            },
+            TEST_PROJECT_ID,
+            &project,
+        )
+        .await
+        .unwrap();
+
+        let owner = db.get_thread("owner").await.unwrap().unwrap();
+        assert_eq!(owner.current_context_tokens, 10);
+        assert_eq!(owner.total_tokens, 15);
+        assert_eq!(owner.total_cached_tokens, 3);
     }
 
     #[tokio::test]
@@ -1625,7 +2437,7 @@ mod tests {
         db.create_thread(&test_thread("parent")).await.unwrap();
         let mut child = test_thread("child");
         child.parent_thread_id = Some("parent".to_string());
-        child.thread_type = "subagent".to_string();
+        child.thread_type = "agent".to_string();
         db.create_thread(&child).await.unwrap();
         db.append_llm_message(
             "child",

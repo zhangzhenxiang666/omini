@@ -284,7 +284,7 @@ impl PermissionEngine {
     }
 
     /// 内建工具默认策略：read/search 按路径判断，edit/write 永远 ask，
-    /// todo_write/ask_user/skill/subagent 永远 allow。
+    /// `todo_write`、`ask_user`、`skill` 和 Agent task 控制工具默认始终允许。
     fn decide_builtin(
         &self,
         tool_name: &str,
@@ -310,7 +310,9 @@ impl PermissionEngine {
             }
             "edit" | "write" => PermissionDecision::Ask,
             "todo_write" => PermissionDecision::Allow,
-            "ask_user" | "skill" | "subagent" => PermissionDecision::Allow,
+            "ask_user" | "skill" | "spawn_agent" | "run_agent" | "get_task" | "cancel_task" => {
+                PermissionDecision::Allow
+            }
             _ => PermissionDecision::Ask,
         }
     }
@@ -651,7 +653,7 @@ mod tests {
         assert_eq!(
             engine.decide_for_profile(
                 ActiveProfile::Plan,
-                "subagent",
+                "spawn_agent",
                 None,
                 &serde_json::json!({})
             ),
@@ -819,23 +821,24 @@ prefix_rule(
     }
 
     #[test]
-    fn subagent_rule_matches_agent_name() {
-        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Subagent(explorer)"]));
+    fn agent_rule_matches_spawn_and_run_agent_name() {
+        let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &["Agent(explorer)"]));
         let input = serde_json::json!({"name": "explorer"});
-        assert!(matches!(
-            engine.decide("subagent", None, &input),
-            PermissionDecision::Deny { .. }
-        ));
+        for tool in ["spawn_agent", "run_agent"] {
+            assert!(matches!(
+                engine.decide(tool, None, &input),
+                PermissionDecision::Deny { .. }
+            ));
+        }
     }
 
     #[test]
-    fn subagent_defaults_to_allow() {
+    fn agent_tools_default_to_allow() {
         let engine = PermissionEngine::for_test("/repo", raw(&[], &[], &[]));
         let input = serde_json::json!({"name": "explorer"});
-        assert_eq!(
-            engine.decide("subagent", None, &input),
-            PermissionDecision::Allow
-        );
+        for tool in ["spawn_agent", "run_agent", "get_task", "cancel_task"] {
+            assert_eq!(engine.decide(tool, None, &input), PermissionDecision::Allow);
+        }
     }
 
     #[test]

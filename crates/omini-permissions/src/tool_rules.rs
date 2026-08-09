@@ -1,4 +1,4 @@
-//! TOML 内联 tool rule 解析和匹配（如 `Read(**/...)`、`Subagent(explorer)` 语法）。
+//! TOML 内联工具规则的解析与匹配，例如 `Read(**/...)` 和 `Agent(explorer)`。
 
 use omini_config::RawPermissionConfig;
 use omini_domain::events::{PermissionPreview, PermissionSource};
@@ -115,7 +115,7 @@ fn parse_tool_rule_parts(
 fn is_supported_permission_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "read" | "search" | "edit" | "write" | "subagent" | "ask_user" | "todo_write"
+        "read" | "search" | "edit" | "write" | "agent" | "ask_user" | "todo_write"
     )
 }
 
@@ -127,7 +127,7 @@ pub(crate) fn normalize_tool_name(tool: &str) -> String {
         "Read" | "read" => "read".to_string(),
         "Edit" | "edit" => "edit".to_string(),
         "Write" | "write" => "write".to_string(),
-        "Subagent" | "subagent" => "subagent".to_string(),
+        "Agent" | "agent" | "spawn_agent" | "run_agent" => "agent".to_string(),
         "TodoWrite" | "todo_write" => "todo_write".to_string(),
         other => other.to_ascii_lowercase(),
     }
@@ -154,7 +154,7 @@ impl ToolRule {
                 };
                 engine.normalize_rule_path(specifier).matches(&path)
             }
-            "subagent" => raw_input
+            "agent" => raw_input
                 .get("name")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|name| name == specifier),

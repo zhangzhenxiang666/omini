@@ -375,20 +375,8 @@ impl AgentManagerState {
             description: self.draft.description.trim().to_string(),
             short_description: None,
             instructions: self.draft.instructions.trim().to_string(),
-            tools: self
-                .draft
-                .tools
-                .iter()
-                .filter(|tool| tool.as_str() != "subagent")
-                .cloned()
-                .collect(),
-            disallow_tools: self
-                .draft
-                .disallow_tools
-                .iter()
-                .filter(|tool| tool.as_str() != "subagent")
-                .cloned()
-                .collect(),
+            tools: self.draft.tools.clone(),
+            disallow_tools: self.draft.disallow_tools.clone(),
             model: self.draft.model.clone(),
         }
     }
@@ -630,16 +618,19 @@ mod tests {
     }
 
     #[test]
-    fn agent_draft_filters_subagent_tool() {
+    fn agent_draft_keeps_run_agent_policy() {
         let mut manager = manager();
         manager.draft.name = "safe".to_string();
         manager.draft.description = "Safe helper".to_string();
         manager.draft.instructions = "Read and summarize.".to_string();
-        manager.draft.tools = vec!["read".to_string(), "subagent".to_string()];
+        manager.draft.tools = vec!["read".to_string(), "run_agent".to_string()];
 
         let draft = manager.to_agent_draft();
 
-        assert_eq!(draft.tools, vec!["read".to_string()]);
+        assert_eq!(
+            draft.tools,
+            vec!["read".to_string(), "run_agent".to_string()]
+        );
         assert!(draft.model.is_none());
     }
 

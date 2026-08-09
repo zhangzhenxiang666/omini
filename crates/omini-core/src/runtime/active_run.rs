@@ -5,8 +5,7 @@ use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 use super::capabilities::CapabilityStore;
@@ -226,9 +225,10 @@ async fn send_usage_snapshot(
     settings: &Settings,
 ) {
     let context_window = current_context_window(settings);
-    let mut snapshot = usage_state.lock().await;
-    snapshot.context_window = context_window;
-    let event = RuntimeToServerEvent::UsageChanged(*snapshot);
-    drop(snapshot);
+    let event = {
+        let mut snapshot = usage_state.lock().expect("thread usage lock poisoned");
+        snapshot.context_window = context_window;
+        RuntimeToServerEvent::UsageChanged(*snapshot)
+    };
     let _ = event_tx.send(event).await;
 }

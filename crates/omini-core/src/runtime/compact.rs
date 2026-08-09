@@ -106,22 +106,6 @@ pub async fn auto_compact_if_needed(
         );
         return false;
     }
-    // TODO(compact): 等 parent/subagent 的 UI 展示和 history 语义确定后，
-    // 再重新启用 subagent 自动压缩。
-    if is_subagent_thread_type(
-        ctx.runtime_context
-            .map(|runtime| runtime.thread_type.as_str()),
-    ) {
-        tracing::debug!(
-            compact_trigger = %CompactTrigger::Auto,
-            thread_id = ?compact_thread_id(ctx.runtime_context),
-            thread_type = ?compact_thread_type(ctx.runtime_context),
-            agent_label = ?compact_agent_label(ctx.runtime_context),
-            "auto compact skipped for subagent session"
-        );
-        return false;
-    }
-
     let before_tokens = estimate_request_tokens(
         messages,
         ctx.settings.system_prompt.as_deref(),
@@ -523,10 +507,6 @@ fn context_window(settings: &Settings) -> usize {
         .unwrap_or(DEFAULT_CONTEXT_WINDOW)
 }
 
-fn is_subagent_thread_type(session_type: Option<&str>) -> bool {
-    session_type == Some("subagent")
-}
-
 fn microcompact_messages(messages: &mut [Message], keep_recent: usize) -> usize {
     let compactable_ids = collect_compactable_tool_ids(messages);
     if compactable_ids.len() <= keep_recent.max(1) {
@@ -572,7 +552,10 @@ fn collect_compactable_tool_ids(messages: &[Message]) -> Vec<String> {
 }
 
 fn is_compactable_tool(name: &str) -> bool {
-    matches!(name, "read" | "bash" | "search" | "subagent" | "skill")
+    matches!(
+        name,
+        "read" | "bash" | "search" | "spawn_agent" | "run_agent" | "skill"
+    )
 }
 
 fn try_context_collapse(messages: &[Message], preserve_recent: usize) -> Option<Vec<Message>> {

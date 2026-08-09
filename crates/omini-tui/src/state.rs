@@ -1,9 +1,11 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    ActiveProfile, CommandSummary, InteractionRequest, Notification, SessionSummary,
-    SubagentSnapshot, SubagentStatus, SubmittedPlan, ToolPauseRequest,
+    ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandSummary,
+    InteractionRequest, Notification, SessionSummary, SubmittedPlan, ToolPauseRequest,
 };
-use omini_domain::display::{DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft};
+use omini_domain::display::{
+    AgentTaskNotification, DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft,
+};
 use omini_domain::message::Message;
 use rand::Rng;
 use ratatui::layout::Rect;
@@ -226,27 +228,34 @@ pub enum UiMessage {
     RunDivider { elapsed: Duration },
     Notification(Notification),
     CompactSummary { text: String },
+    AgentTaskNotification(AgentTaskNotification),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentNode {
+    pub task_id: String,
     pub session_id: String,
     pub parent_session_id: String,
     pub spawn_tool_use_id: String,
     pub agent_label: String,
-    pub status: SubagentStatus,
+    pub title: String,
+    pub execution_mode: AgentTaskExecutionMode,
+    pub status: AgentTaskStatus,
     pub messages: Vec<Message>,
 }
 
-impl From<SubagentSnapshot> for SubagentNode {
-    fn from(snapshot: SubagentSnapshot) -> Self {
+impl From<AgentTaskSnapshot> for SubagentNode {
+    fn from(snapshot: AgentTaskSnapshot) -> Self {
         Self {
-            session_id: snapshot.session_id,
-            parent_session_id: snapshot.parent_session_id,
-            spawn_tool_use_id: snapshot.spawn_tool_use_id,
-            agent_label: snapshot.agent_label,
-            status: snapshot.status,
-            messages: snapshot.messages,
+            task_id: snapshot.task.task_id,
+            session_id: snapshot.task.thread_id,
+            parent_session_id: snapshot.task.parent_thread_id,
+            spawn_tool_use_id: snapshot.task.spawn_tool_use_id,
+            agent_label: snapshot.task.agent,
+            title: snapshot.task.title,
+            execution_mode: snapshot.task.execution_mode,
+            status: snapshot.task.status,
+            messages: Vec::new(),
         }
     }
 }
@@ -264,6 +273,9 @@ impl UiMessage {
                 HistoryItem::Summary(summary) => Self::CompactSummary {
                     text: summary.markdown,
                 },
+                HistoryItem::AgentTaskNotification(notification) => {
+                    Self::AgentTaskNotification(notification)
+                }
             })
             .collect()
     }
@@ -275,7 +287,8 @@ impl UiMessage {
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notification(_)
-            | Self::CompactSummary { .. } => None,
+            | Self::CompactSummary { .. }
+            | Self::AgentTaskNotification(_) => None,
         }
     }
 
@@ -286,7 +299,8 @@ impl UiMessage {
             | Self::ProposedPlan { .. }
             | Self::RunDivider { .. }
             | Self::Notification(_)
-            | Self::CompactSummary { .. } => None,
+            | Self::CompactSummary { .. }
+            | Self::AgentTaskNotification(_) => None,
         }
     }
 }
@@ -420,6 +434,8 @@ pub struct UiState {
     pub pending_intervention_inputs: VecDeque<UserDraft>,
     /// 当前 intervention 请求对应的 optimistic echo token。
     pub pending_intervention_client_echo_id: Option<String>,
+    /// 主 agent 的 query 是否正在运行；后台任务不影响普通输入和 intervention 的分流。
+    pub main_query_active: bool,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
@@ -545,6 +561,7 @@ impl UiState {
             queued_user_inputs: VecDeque::new(),
             pending_intervention_inputs: VecDeque::new(),
             pending_intervention_client_echo_id: None,
+            main_query_active: false,
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
             activity_status_title: None,
@@ -708,6 +725,11 @@ impl UiState {
         self.agent_status = AgentStatus::Idle;
     }
 
+    pub fn begin_main_query_submission(&mut self) {
+        self.main_query_active = true;
+        self.agent_status = AgentStatus::Working;
+    }
+
     pub fn clear_run_dividers(&mut self) {
         let before = self.messages.len();
         self.messages
@@ -766,7 +788,17 @@ impl UiState {
         self.update_input_autocomplete();
         self.sync_pending_plan_approval(pending_plan_approval);
 
+        self.main_query_active = activity.as_ref().is_some_and(|activity| {
+            activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
+        });
+
         let Some(activity) = activity else {
+            if state == omini_protocol::SessionRuntimeState::Idle {
+                self.manual_compact_running = false;
+                self.run_timer = None;
+                self.activity_status_title = None;
+                self.agent_status = AgentStatus::Idle;
+            }
             return;
         };
 
@@ -851,6 +883,9 @@ impl UiState {
                 self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
             }
         }
+        if self.message_has_pending_tools(msg_idx) {
+            self.set_live_message_start(self.live_message_start.min(msg_idx));
+        }
     }
 
     /// 全量重建 `pending_tool_message_map` 并重算 `live_message_start`。
@@ -915,7 +950,7 @@ impl UiState {
             // 也检查后面是否有 running subagent（它们不在 map 中）
             let sub_min = self.find_earliest_running_subagent_from(msg_idx + 1);
             new_start = new_start.min(sub_min);
-            self.live_message_start = new_start;
+            self.set_live_message_start(new_start);
         }
         // 若该消息仍有 pending tool 或不在边界，边界不变
     }
@@ -930,14 +965,12 @@ impl UiState {
                 if self.pending_tool_message_map.contains_key(&tu.id) {
                     return true;
                 }
-                if tu.name == "subagent"
+                if matches!(tu.name.as_str(), "spawn_agent" | "run_agent")
                     && self
                         .subagents_by_tool_use
                         .get(&tu.id)
                         .and_then(|sid| self.subagents.get(sid))
-                        .is_some_and(|node| {
-                            matches!(node.status, crate::types::events::SubagentStatus::Running)
-                        })
+                        .is_some_and(|node| node.status_keeps_message_live())
                 {
                     return true;
                 }
@@ -953,14 +986,12 @@ impl UiState {
         };
         for block in &message.content {
             if let omini_domain::message::ContentBlock::ToolUse(tu) = block
-                && tu.name == "subagent"
+                && matches!(tu.name.as_str(), "spawn_agent" | "run_agent")
                 && self
                     .subagents_by_tool_use
                     .get(&tu.id)
                     .and_then(|sid| self.subagents.get(sid))
-                    .is_some_and(|node| {
-                        matches!(node.status, crate::types::events::SubagentStatus::Running)
-                    })
+                    .is_some_and(SubagentNode::status_keeps_message_live)
             {
                 return true;
             }
@@ -970,10 +1001,13 @@ impl UiState {
 
     /// 从 `start_idx` 开始找第一个含 running subagent 的消息索引。
     fn find_earliest_running_subagent_from(&self, start_idx: usize) -> usize {
-        let has_running = self
-            .subagents
-            .values()
-            .any(|node| matches!(node.status, crate::types::events::SubagentStatus::Running));
+        let has_running = self.subagents.values().any(|node| {
+            matches!(
+                node.status,
+                crate::types::events::AgentTaskStatus::Running
+                    | crate::types::events::AgentTaskStatus::Cancelling
+            )
+        });
         if !has_running {
             return usize::MAX;
         }
@@ -996,16 +1030,38 @@ impl UiState {
             .copied()
             .min()
             .unwrap_or(usize::MAX);
-        let sub_min = self.find_earliest_running_subagent_from(self.live_message_start);
+        let sub_min = self.find_earliest_running_subagent_from(0);
         let new_start = map_min.min(sub_min);
+        self.set_live_message_start(new_start);
+    }
+
+    pub fn has_active_agent_tasks(&self) -> bool {
+        self.subagents.values().any(|node| {
+            matches!(
+                node.status,
+                crate::types::events::AgentTaskStatus::Running
+                    | crate::types::events::AgentTaskStatus::Cancelling
+            )
+        })
+    }
+}
+
+impl SubagentNode {
+    fn status_keeps_message_live(&self) -> bool {
+        matches!(
+            self.status,
+            crate::types::events::AgentTaskStatus::Running
+                | crate::types::events::AgentTaskStatus::Cancelling
+        )
+    }
+}
+
+impl UiState {
+    fn set_live_message_start(&mut self, new_start: usize) {
         if new_start == self.live_message_start {
             return;
         }
         self.live_message_start = new_start;
-        // 边界前进（new_start < cached）时，缓存尾部超出新边界。
-        // 将 completed_message_count 缩小到 new_start，下次渲染时
-        // completed_message_count == live_start，走缓存命中 + 增量追加分支，
-        // 无需全量重建——messages[..new_start] 的内容未变，缓存仍然有效。
         let cached = self.render_cache.completed_message_count;
         if cached > new_start {
             self.render_cache.completed_message_count = new_start;

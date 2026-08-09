@@ -11,7 +11,7 @@ pub(super) fn parse_agent_file(path: &Path) -> Result<AgentSpec, String> {
     let description = frontmatter::required_string(&raw, "description")?;
     let short_description = frontmatter::optional_string(&raw, "short-description")?;
     let allow = frontmatter::optional_string_list(&raw, "tools")?
-        .map(|tools| normalize_allow_tools(&tools))
+        .map(|tools| normalize_tools(&tools))
         .transpose()?;
     let deny = frontmatter::optional_string_list(&raw, "disallow_tools")?
         .map(|tools| normalize_tools(&tools))
@@ -47,14 +47,6 @@ fn normalize_tools(tools: &[String]) -> Result<Vec<String>, String> {
     Ok(normalized)
 }
 
-fn normalize_allow_tools(tools: &[String]) -> Result<Vec<String>, String> {
-    let tools = normalize_tools(tools)?;
-    Ok(tools
-        .into_iter()
-        .filter(|tool| tool != "subagent")
-        .collect())
-}
-
 fn normalize_tool_name(tool: &str) -> Result<String, String> {
     let trimmed = tool.trim();
     if trimmed.is_empty() {
@@ -68,7 +60,7 @@ fn normalize_tool_name(tool: &str) -> Result<String, String> {
         "Edit" | "edit" => "edit",
         "Write" | "write" => "write",
         "Skill" | "skill" => "skill",
-        "Subagent" | "subagent" => "subagent",
+        "RunAgent" | "run_agent" => "run_agent",
         _ => trimmed,
     };
     Ok(normalized.to_ascii_lowercase())

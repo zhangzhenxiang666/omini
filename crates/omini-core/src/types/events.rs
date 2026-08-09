@@ -1,12 +1,10 @@
+use omini_domain::display::AgentTaskNotification;
 use omini_domain::events::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
-    CompactSummaryFailedEvent, CompactSummaryFinishedEvent, SubagentFinishedEvent,
-    SubagentMessageEvent, SubagentStartedEvent, SubagentToolResultEvent, SubagentToolUseEvent,
-    ToolPauseRequest,
+    CompactSummaryFailedEvent, CompactSummaryFinishedEvent, ToolPauseRequest,
 };
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
-use omini_runtime_contract::persistence::ThreadRecord;
 use tokio::sync::oneshot;
 
 /// engine 发往 runtime 的 core 内部事件。
@@ -19,6 +17,14 @@ pub enum EngineToRuntimeEvent {
     UserMessageProduced {
         message: Message,
         client_echo_id: Option<String>,
+    },
+
+    /// Agent task completion 已到达安全输入边界，等待原子持久化后进入内存历史。
+    AgentTaskNotificationsProduced {
+        notification: AgentTaskNotification,
+        llm_message: Message,
+        task_ids: Vec<String>,
+        ack: oneshot::Sender<Result<(), String>>,
     },
 
     /// 引擎完成一轮流式输出，产出一条完整的 Assistant Message。
@@ -75,22 +81,6 @@ pub enum EngineToRuntimeEvent {
     CompactSummaryFailed(CompactSummaryFailedEvent),
     /// 当前 engine/session 的 LLM 摘要 usage。
     CompactSummaryUsageRecorded(Usage),
-
-    /// 子 agent 创建并开始运行。
-    SubagentStarted(SubagentStartedEvent),
-    /// 子 agent 会话元数据已创建，需要外部持久化。
-    SubagentThreadCreated(ThreadRecord),
-    /// 子 agent 的一轮 LLM usage。
-    SubagentUsageRecorded { thread_id: String, usage: Usage },
-    /// 子 agent 产生了一条完整消息，需要持久化并更新 UI 视图模型。
-    SubagentMessageProduced(SubagentMessageEvent),
-    /// 子 agent 请求工具调用。
-    SubagentToolUse(SubagentToolUseEvent),
-    /// 子 agent 工具执行完成。
-    SubagentToolResult(SubagentToolResultEvent),
-    /// 子 agent 运行结束。
-    SubagentFinished(SubagentFinishedEvent),
-
     /// 引擎出错
     Error(String),
     /// 引擎运行时警告

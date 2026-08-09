@@ -72,57 +72,143 @@ impl Notification {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentStartedEvent {
-    pub session_id: String,
-    pub parent_session_id: String,
-    pub spawn_tool_use_id: String,
-    pub agent_label: String,
+pub const MAX_AGENT_DEPTH: u8 = 2;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskExecutionMode {
+    Background,
+    Synchronous,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentSnapshot {
-    pub session_id: String,
-    pub parent_session_id: String,
-    pub spawn_tool_use_id: String,
-    pub agent_label: String,
-    pub status: SubagentStatus,
-    pub messages: Vec<Message>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentMessageEvent {
-    pub session_id: String,
-    pub message: Message,
-    #[serde(default)]
-    pub persist_llm_history: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentToolUseEvent {
-    pub session_id: String,
-    pub tool_use: ToolUseBlock,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentToolResultEvent {
-    pub session_id: String,
-    pub tool_result: ToolResultBlock,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubagentFinishedEvent {
-    pub session_id: String,
-    pub status: SubagentStatus,
+impl AgentTaskExecutionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Background => "background",
+            Self::Synchronous => "synchronous",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SubagentStatus {
+pub enum AgentTaskStatus {
     Running,
+    Cancelling,
     Completed,
     Failed,
     Cancelled,
+    Interrupted,
+}
+
+impl AgentTaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskInfo {
+    pub task_id: String,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    pub owner_thread_id: String,
+    pub parent_thread_id: String,
+    pub spawn_tool_use_id: String,
+    pub agent: String,
+    pub title: String,
+    pub depth: u8,
+    pub execution_mode: AgentTaskExecutionMode,
+    pub status: AgentTaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<AgentTaskResult>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub notification_delivered: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskSnapshot {
+    #[serde(flatten)]
+    pub task: AgentTaskInfo,
+    pub messages: Vec<Message>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentTaskEventEnvelope {
+    pub task_id: String,
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_task_id: Option<String>,
+    pub owner_thread_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    pub payload: AgentTaskEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AgentTaskEvent {
+    Started {
+        parent_thread_id: String,
+        spawn_tool_use_id: String,
+        agent: String,
+        title: String,
+        depth: u8,
+        execution_mode: AgentTaskExecutionMode,
+    },
+    TurnStarted,
+    ThinkingDelta {
+        delta: String,
+    },
+    TextDelta {
+        delta: String,
+    },
+    ToolUse {
+        tool_use: ToolUseBlock,
+    },
+    ToolResult {
+        tool_result: ToolResultBlock,
+    },
+    MessageCommitted {
+        message: Message,
+        #[serde(default)]
+        persist_llm_history: bool,
+    },
+    TurnEnded,
+    Finished {
+        status: AgentTaskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<AgentTaskResult>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -292,7 +378,7 @@ pub struct LoadedSession {
     pub active_profile: ActiveProfile,
     pub title: Option<String>,
     pub messages: Vec<HistoryItem>,
-    pub subagents: Vec<SubagentSnapshot>,
+    pub agent_tasks: Vec<AgentTaskSnapshot>,
     pub usage: SessionUsageSnapshot,
 }
 

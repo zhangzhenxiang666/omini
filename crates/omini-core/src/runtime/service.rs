@@ -1,7 +1,7 @@
 use super::capabilities::CapabilityStore;
 use crate::engine::QueryEngine;
 use crate::mcp::McpManager;
-use crate::subagents::RuntimeSubagentRunner;
+use crate::subagents::{AgentTaskCompletion, AgentTaskSupervisor};
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
@@ -12,10 +12,9 @@ use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicI64};
-use tokio::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::sync::mpsc;
 
 pub(crate) struct RuntimeCapabilityHandles {
     pub(crate) mcp_manager: Arc<McpManager>,
@@ -46,6 +45,7 @@ pub struct AgentRuntimeDeps {
     pub llm_context_version: i64,
     pub usage: SessionUsageSnapshot,
     pub active_profile: ActiveProfile,
+    pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
 }
 
 #[derive(Debug)]
@@ -54,6 +54,10 @@ pub(super) enum RunStart {
     UserMessage,
     /// 启动前将最新 runtime 消息写入 LLM 上下文，将 UI-only display 消息写入 UI 历史。
     SplitDisplayMessage { display_message: DisplayMessage },
+    /// 由待持久化的 Agent task completion 启动；落库前禁止请求 provider。
+    PendingAgentTaskNotification,
+    /// 通知已在上一个 query 的终止边界持久化，只需继续请求 provider。
+    PersistedAgentTaskNotification,
 }
 
 impl RunStart {
@@ -61,6 +65,8 @@ impl RunStart {
         match self {
             Self::UserMessage => "user_message",
             Self::SplitDisplayMessage { .. } => "split_display_message",
+            Self::PendingAgentTaskNotification => "pending_agent_task_notification",
+            Self::PersistedAgentTaskNotification => "persisted_agent_task_notification",
         }
     }
 }
@@ -98,8 +104,9 @@ pub struct AgentRuntime {
     pub(super) mcp_manager: Arc<McpManager>,
     /// runtime 是否已在 query 前等待过 MCP 启动。
     pub(super) mcp_initialized: bool,
-    /// runtime 侧的子代理生命周期服务。
-    pub(super) subagent_runner: Arc<RuntimeSubagentRunner>,
+    /// 长期存活的后台 task supervisor，不依赖前台运行生命周期。
+    pub(super) task_supervisor: Arc<AgentTaskSupervisor>,
+    pub(super) task_completion_rx: mpsc::UnboundedReceiver<AgentTaskCompletion>,
     /// runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
     pub(super) capabilities: Arc<CapabilityStore>,
     /// 取消标志，用于 CancelRun。
@@ -140,6 +147,7 @@ impl AgentRuntime {
             llm_context_version,
             usage,
             active_profile,
+            agent_tasks,
         } = deps;
         let llm_client = LlmClient::new(
             settings.endpoint,
@@ -147,7 +155,6 @@ impl AgentRuntime {
             settings.base_url.clone(),
         );
         let tool_registry = Arc::new(crate::tools::create_main_registry());
-        let subagent_runner = Arc::new(RuntimeSubagentRunner);
         let mcp_manager = handles.mcp_manager;
         let capabilities = handles.capabilities;
         let subagent_registry = capabilities.subagent_registry();
@@ -168,6 +175,20 @@ impl AgentRuntime {
             dirs::home_dir(),
             permission_sources,
         ));
+        let query_engine = QueryEngine::new(Arc::clone(&permission_engine));
+        let active_profile = Arc::new(RwLock::new(active_profile));
+        let thread_usage = Arc::new(Mutex::new(usage));
+        let (task_completion_tx, task_completion_rx) = mpsc::unbounded_channel();
+        let task_supervisor = AgentTaskSupervisor::new(
+            event_tx.clone(),
+            persistence_tx.clone(),
+            task_completion_tx,
+            query_engine.pending_tool_pauses(),
+            query_engine.permission_engine(),
+            Arc::clone(&active_profile),
+            Arc::clone(&thread_usage),
+            agent_tasks,
+        );
 
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToServerEvent::warning(format!(
@@ -202,11 +223,12 @@ impl AgentRuntime {
             tool_registry,
             mcp_manager,
             mcp_initialized: false,
-            subagent_runner,
+            task_supervisor,
+            task_completion_rx,
             capabilities,
-            query_engine: QueryEngine::new(permission_engine),
-            active_profile: Arc::new(RwLock::new(active_profile)),
-            thread_usage: Arc::new(Mutex::new(usage)),
+            query_engine,
+            active_profile,
+            thread_usage,
         }
     }
 
@@ -237,10 +259,13 @@ mod tests {
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{ModelEntry, ModelTiers, ProviderConfig, Settings, UserConfig};
     use omini_domain::config::ProviderEndpointKind;
-    use omini_domain::display::{HistoryItem, UserDraft};
+    use omini_domain::display::{
+        AgentTaskNotification, AgentTaskNotificationItem, HistoryItem, UserDraft,
+    };
     use omini_domain::events::{
-        CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview, PlanApprovalAction,
-        PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+        AgentTaskStatus, CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview,
+        PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
+        ToolPauseResponse,
     };
     use omini_domain::message::{ContentBlock, Role};
     use omini_domain::usage::Usage;
@@ -384,6 +409,7 @@ mod tests {
             llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
+            agent_tasks: Vec::new(),
         };
         let runtime = AgentRuntime::new(channels, deps);
         (runtime, event_rx)
@@ -417,6 +443,7 @@ mod tests {
             llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
+            agent_tasks: Vec::new(),
         };
         let runtime = AgentRuntime::new(channels, deps);
         (runtime, event_rx, persistence_rx)
@@ -570,6 +597,7 @@ mod tests {
             llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
+            agent_tasks: Vec::new(),
         };
         let mut runtime = AgentRuntime::new(channels, deps);
         drain_events(&mut event_rx);
@@ -1002,6 +1030,7 @@ mod tests {
             llm_context_version: 1,
             usage: SessionUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
+            agent_tasks: Vec::new(),
         };
         let mut runtime = AgentRuntime::new(channels, deps);
 
@@ -1444,6 +1473,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_notification_is_visible_only_after_successful_persistence_ack() {
+        for persistence_result in [Ok(()), Err("database unavailable".to_string())] {
+            let root = unique_temp_root("task-notification-ack");
+            let cwd = root.join("workspace");
+            std::fs::create_dir_all(&cwd).expect("failed to create cwd");
+            let config = test_user_config();
+            let project = ProjectsDir::new(&root)
+                .for_storage_key("test-project", &config)
+                .expect("failed to create project dir");
+            let settings = settings_for_cwd(&config, &cwd);
+            let (runtime, mut event_rx, mut persistence_rx) =
+                runtime_for_thread_with_persistence(settings, project);
+            drain_events(&mut event_rx);
+            let (engine_tx, engine_rx) = mpsc::channel(4);
+            let processor = runtime
+                .spawn_event_processor(
+                    engine_rx,
+                    ActiveProfile::Main,
+                    Arc::clone(&runtime.active_profile),
+                    empty_tool_pause_resolver(),
+                )
+                .await;
+            let notification = AgentTaskNotification {
+                tasks: vec![AgentTaskNotificationItem {
+                    task_id: "task_1".to_string(),
+                    agent: "general".to_string(),
+                    title: "Test".to_string(),
+                    status: AgentTaskStatus::Completed,
+                }],
+                created_at: chrono::Utc::now(),
+            };
+            let (ack, result) = tokio::sync::oneshot::channel();
+            engine_tx
+                .send(EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+                    notification: notification.clone(),
+                    llm_message: Message::from_user_text("task completed".to_string()),
+                    task_ids: vec!["task_1".to_string()],
+                    ack,
+                })
+                .await
+                .unwrap();
+
+            let RuntimePersistenceEvent::InsertAgentTaskNotification { ack, .. } =
+                persistence_rx.recv().await.unwrap()
+            else {
+                panic!("expected task notification persistence event");
+            };
+            assert!(event_rx.try_recv().is_err());
+            let should_succeed = persistence_result.is_ok();
+            ack.send(persistence_result).unwrap();
+            assert_eq!(result.await.unwrap().is_ok(), should_succeed);
+            if should_succeed {
+                assert!(matches!(
+                    event_rx.recv().await,
+                    Some(RuntimeToServerEvent::UserMessageInjected {
+                        item: HistoryItem::AgentTaskNotification(saved),
+                        client_echo_id: None,
+                    }) if saved == notification
+                ));
+            } else {
+                tokio::task::yield_now().await;
+                assert!(event_rx.try_recv().is_err());
+            }
+            drop(engine_tx);
+            processor.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn split_tool_result_history_writes_image_only_to_llm_context() {
         ensure_test_persistence().await;
 
@@ -1530,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_events_update_main_and_subagent_session_totals() {
+    async fn usage_events_update_main_session_totals() {
         ensure_test_persistence().await;
 
         let root = unique_temp_root("usage-events");
@@ -1548,8 +1646,6 @@ mod tests {
         let parent_session_id = runtime.thread_id.clone();
         drain_events(&mut event_rx);
         while persistence_rx.try_recv().is_ok() {}
-
-        let subagent_session_id = Uuid::new_v4().to_string();
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
@@ -1570,23 +1666,10 @@ mod tests {
             }))
             .await
             .expect("usage event should send");
-        engine_tx
-            .send(EngineToRuntimeEvent::SubagentUsageRecorded {
-                thread_id: subagent_session_id.clone(),
-                usage: Usage {
-                    prompt_tokens: 7,
-                    completion_tokens: 8,
-                    cached_tokens: 4,
-                },
-            })
-            .await
-            .expect("subagent usage event should send");
         drop(engine_tx);
         processor.await.expect("processor should finish");
 
         let mut saw_parent_usage = false;
-        let mut saw_subagent_usage = false;
-        let mut saw_parent_subagent_usage = false;
         while let Ok(event) = persistence_rx.try_recv() {
             match event {
                 RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage }
@@ -1596,26 +1679,10 @@ mod tests {
                     assert_eq!(usage.cached_tokens, 3);
                     saw_parent_usage = true;
                 }
-                RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage }
-                    if thread_id == subagent_session_id =>
-                {
-                    assert_eq!(usage.total_tokens(), 15);
-                    assert_eq!(usage.cached_tokens, 4);
-                    saw_subagent_usage = true;
-                }
-                RuntimePersistenceEvent::RecordParentSubagentUsage { thread_id, usage }
-                    if thread_id == parent_session_id =>
-                {
-                    assert_eq!(usage.total_tokens(), 15);
-                    assert_eq!(usage.cached_tokens, 4);
-                    saw_parent_subagent_usage = true;
-                }
                 _ => {}
             }
         }
         assert!(saw_parent_usage);
-        assert!(saw_subagent_usage);
-        assert!(saw_parent_subagent_usage);
 
         let mut last_usage = None;
         while let Ok(event) = event_rx.try_recv() {
@@ -1625,7 +1692,7 @@ mod tests {
         }
         let snapshot = last_usage.expect("usage snapshot should be emitted");
         assert_eq!(snapshot.current_context_tokens, 15);
-        assert_eq!(snapshot.total_tokens, 30);
-        assert_eq!(snapshot.total_cached_tokens, 7);
+        assert_eq!(snapshot.total_tokens, 15);
+        assert_eq!(snapshot.total_cached_tokens, 3);
     }
 }

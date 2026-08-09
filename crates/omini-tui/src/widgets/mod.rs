@@ -379,6 +379,31 @@ pub fn render_tool(
     lines
 }
 
+pub fn render_get_task(
+    tool_use: &ToolUseBlock,
+    task: Option<(&str, &str)>,
+    pending: bool,
+) -> Vec<Line<'static>> {
+    let task_label = task
+        .map(|(agent, title)| format!("{agent} · {title}"))
+        .unwrap_or_else(|| {
+            tool_use
+                .input
+                .get("task_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("<unknown>")
+                .to_string()
+        });
+
+    let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
+    vec![Line::from(vec![
+        Span::raw("· "),
+        Span::styled("GetTask(", title_style),
+        Span::raw(task_label),
+        Span::styled(")", title_style),
+    ])]
+}
+
 fn compact_waiting_tool_lines(
     tool_use: &ToolUseBlock,
     tool_pause_active: bool,
@@ -864,5 +889,27 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::CROSSED_OUT)
         );
+    }
+
+    #[test]
+    fn get_task_renders_agent_and_title() {
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "get_task".to_string(),
+            input: std::collections::HashMap::from([(
+                "task_id".to_string(),
+                serde_json::json!("task_1"),
+            )]),
+        };
+
+        let lines = render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
+
+        assert_eq!(plain(&lines[0]), "· GetTask(explorer · Find entrypoints)");
+        assert_eq!(lines[0].spans[2].style, Style::default());
+
+        let pending_lines =
+            render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), true);
+        assert_eq!(pending_lines[0].spans[2].style, Style::default());
+        assert!(pending_lines[0].spans[1].style.fg.is_some());
     }
 }

@@ -1,6 +1,9 @@
 use omini_domain as domain;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
+use std::collections::HashMap;
+
+pub const MAX_AGENT_STREAM_SNAPSHOT_BYTES: usize = 64 * 1024;
 
 #[derive(Clone)]
 pub struct SequencedRuntimeEvent {
@@ -27,10 +30,23 @@ pub struct RuntimeReplayBuffer {
     latest_session_title: Option<SequencedRuntimeEvent>,
     latest_thinking_display: Option<SequencedRuntimeEvent>,
     latest_agent_management: Option<SequencedRuntimeEvent>,
+    // Agent task 流不依赖前台运行生命周期，并按 task ID 相互隔离。
+    agent_streams: HashMap<String, AgentStreamReplay>,
+}
+
+#[derive(Default)]
+struct AgentStreamReplay {
+    events: Vec<SequencedRuntimeEvent>,
+    delta_bytes: usize,
+    truncated: bool,
 }
 
 impl RuntimeReplayBuffer {
     pub fn record(&mut self, event: SequencedRuntimeEvent) {
+        if let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &event.event.event {
+            self.record_agent_event(envelope.task_id.clone(), event);
+            return;
+        }
         // replay buffer 只保存“重连后需要补发”的运行中尾部事件，落盘内容交给 snapshot。
         match event.event.kind() {
             "compact_summary_started" => {
@@ -117,7 +133,12 @@ impl RuntimeReplayBuffer {
                 + usize::from(self.pending_plan_approval.is_some())
                 + usize::from(self.latest_session_title.is_some())
                 + usize::from(self.latest_thinking_display.is_some())
-                + usize::from(self.latest_agent_management.is_some()),
+                + usize::from(self.latest_agent_management.is_some())
+                + self
+                    .agent_streams
+                    .values()
+                    .map(|stream| stream.events.len())
+                    .sum::<usize>(),
         );
         replay.extend(self.pending_prefix.iter().cloned());
         if let Some(run_started) = &self.run_started {
@@ -139,6 +160,9 @@ impl RuntimeReplayBuffer {
         }
         if let Some(event) = &self.latest_agent_management {
             replay.push(event.clone());
+        }
+        for stream in self.agent_streams.values() {
+            replay.extend(stream.events.iter().cloned());
         }
         replay.sort_by_key(|event| event.seq);
         replay
@@ -206,6 +230,78 @@ impl RuntimeReplayBuffer {
         self.current_tail.clear();
         self.clear_compact_tail();
         self.pending_plan_approval = None;
+        // Agent task 流拥有独立生命周期，收到 RunFinished 时仍需保留。
+    }
+
+    fn record_agent_event(&mut self, task_id: String, event: SequencedRuntimeEvent) {
+        let payload = match &event.event.event {
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) => envelope.payload.clone(),
+            _ => return,
+        };
+        if matches!(payload, domain::events::AgentTaskEvent::Finished { .. }) {
+            self.agent_streams.remove(&task_id);
+            return;
+        }
+        let stream = self.agent_streams.entry(task_id).or_default();
+        match payload {
+            domain::events::AgentTaskEvent::Started { .. } => {
+                stream.events.clear();
+                stream.delta_bytes = 0;
+                stream.truncated = false;
+                stream.events.push(event);
+            }
+            domain::events::AgentTaskEvent::TurnStarted => {
+                stream.events.retain(|entry| {
+                    matches!(
+                        &entry.event.event,
+                        client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                            if matches!(envelope.payload, domain::events::AgentTaskEvent::Started { .. })
+                    )
+                });
+                stream.delta_bytes = 0;
+                stream.truncated = false;
+                stream.events.push(event);
+            }
+            domain::events::AgentTaskEvent::ThinkingDelta { delta } => {
+                push_agent_delta(stream, event, delta, true);
+            }
+            domain::events::AgentTaskEvent::TextDelta { delta } => {
+                push_agent_delta(stream, event, delta, false);
+            }
+            domain::events::AgentTaskEvent::MessageCommitted { message, .. } => {
+                if message.role == domain::message::Role::Assistant {
+                    stream.events.retain(|entry| {
+                        !matches!(
+                            &entry.event.event,
+                            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                                if matches!(
+                                    envelope.payload,
+                                    domain::events::AgentTaskEvent::ThinkingDelta { .. }
+                                        | domain::events::AgentTaskEvent::TextDelta { .. }
+                                        | domain::events::AgentTaskEvent::ToolUse { .. }
+                                )
+                        )
+                    });
+                } else if message
+                    .content
+                    .iter()
+                    .any(domain::message::ContentBlock::is_tool_result)
+                {
+                    stream.events.retain(|entry| {
+                        !matches!(
+                            &entry.event.event,
+                            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                                if matches!(envelope.payload, domain::events::AgentTaskEvent::ToolResult { .. })
+                        )
+                    });
+                }
+                stream.delta_bytes = agent_delta_bytes(&stream.events);
+            }
+            domain::events::AgentTaskEvent::ToolUse { .. }
+            | domain::events::AgentTaskEvent::ToolResult { .. }
+            | domain::events::AgentTaskEvent::TurnEnded => stream.events.push(event),
+            domain::events::AgentTaskEvent::Finished { .. } => unreachable!(),
+        }
     }
 
     fn clear_compact_tail(&mut self) {
@@ -364,6 +460,110 @@ fn push_delta_block(blocks: &mut Vec<domain::message::ContentBlock>, delta: &str
     }
 }
 
+fn push_agent_delta(
+    stream: &mut AgentStreamReplay,
+    event: SequencedRuntimeEvent,
+    delta: String,
+    thinking: bool,
+) {
+    let merged = stream.events.last_mut().is_some_and(|last| {
+        let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &mut last.event.event
+        else {
+            return false;
+        };
+        match (&mut envelope.payload, thinking) {
+            (domain::events::AgentTaskEvent::ThinkingDelta { delta: current }, true)
+            | (domain::events::AgentTaskEvent::TextDelta { delta: current }, false) => {
+                current.push_str(&delta);
+                true
+            }
+            _ => false,
+        }
+    });
+    if !merged {
+        stream.events.push(event);
+    }
+    stream.delta_bytes = stream.delta_bytes.saturating_add(delta.len());
+    truncate_agent_stream(stream);
+}
+
+fn truncate_agent_stream(stream: &mut AgentStreamReplay) {
+    let mut excess = stream
+        .delta_bytes
+        .saturating_sub(MAX_AGENT_STREAM_SNAPSHOT_BYTES);
+    if excess == 0 {
+        return;
+    }
+    stream.truncated = true;
+    for event in &mut stream.events {
+        if excess == 0 {
+            break;
+        }
+        let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &mut event.event.event
+        else {
+            continue;
+        };
+        let delta = match &mut envelope.payload {
+            domain::events::AgentTaskEvent::ThinkingDelta { delta }
+            | domain::events::AgentTaskEvent::TextDelta { delta } => delta,
+            _ => continue,
+        };
+        if delta.len() <= excess {
+            excess -= delta.len();
+            delta.clear();
+        } else {
+            let mut boundary = excess;
+            while boundary < delta.len() && !delta.is_char_boundary(boundary) {
+                boundary += 1;
+            }
+            delta.drain(..boundary);
+            excess = 0;
+        }
+    }
+    stream.events.retain(|event| {
+        let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &event.event.event else {
+            return true;
+        };
+        match &envelope.payload {
+            domain::events::AgentTaskEvent::ThinkingDelta { delta }
+            | domain::events::AgentTaskEvent::TextDelta { delta } => !delta.is_empty(),
+            _ => true,
+        }
+    });
+    stream.delta_bytes = agent_delta_bytes(&stream.events);
+    if let Some(envelope) = stream.events.iter_mut().find_map(|event| {
+        let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &mut event.event.event
+        else {
+            return None;
+        };
+        matches!(
+            envelope.payload,
+            domain::events::AgentTaskEvent::ThinkingDelta { .. }
+                | domain::events::AgentTaskEvent::TextDelta { .. }
+        )
+        .then_some(envelope)
+    }) {
+        envelope.truncated = true;
+    }
+}
+
+fn agent_delta_bytes(events: &[SequencedRuntimeEvent]) -> usize {
+    events
+        .iter()
+        .filter_map(|event| {
+            let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &event.event.event
+            else {
+                return None;
+            };
+            match &envelope.payload {
+                domain::events::AgentTaskEvent::ThinkingDelta { delta }
+                | domain::events::AgentTaskEvent::TextDelta { delta } => Some(delta.len()),
+                _ => None,
+            }
+        })
+        .sum()
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -403,6 +603,28 @@ mod tests {
                 ),
                 _ => panic!("unsupported delta test event kind: {kind}"),
             }),
+        }
+    }
+
+    fn agent_event(
+        seq: u64,
+        task_id: &str,
+        payload: domain::events::AgentTaskEvent,
+    ) -> SequencedRuntimeEvent {
+        SequencedRuntimeEvent {
+            seq,
+            event: client_proto::RuntimeEvent::new(
+                client_proto::TypedRuntimeEvent::AgentTaskEvent(
+                    domain::events::AgentTaskEventEnvelope {
+                        task_id: task_id.to_string(),
+                        thread_id: format!("thread_{task_id}"),
+                        parent_task_id: None,
+                        owner_thread_id: "owner".to_string(),
+                        truncated: false,
+                        payload,
+                    },
+                ),
+            ),
         }
     }
 
@@ -458,7 +680,7 @@ mod tests {
                 client_proto::SessionSnapshotEvent {
                     session_id: Some("s1".to_string()),
                     messages: Vec::new(),
-                    subagents: Vec::new(),
+                    agent_tasks: Vec::new(),
                     usage: domain::events::SessionUsageSnapshot::default(),
                 },
             ),
@@ -509,7 +731,7 @@ mod tests {
             active_profile: domain::events::ActiveProfile::Main,
             title,
             messages,
-            subagents: Vec::new(),
+            agent_tasks: Vec::new(),
             usage: domain::events::SessionUsageSnapshot::default(),
         }
     }
@@ -930,5 +1152,126 @@ mod tests {
         buffer.record(sequenced(4, "session_snapshot"));
 
         assert!(buffer.replay().is_empty());
+    }
+
+    #[test]
+    fn agent_stream_survives_parent_run_finished_and_tasks_stay_isolated() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(agent_event(
+            1,
+            "one",
+            domain::events::AgentTaskEvent::TextDelta {
+                delta: "first".to_string(),
+            },
+        ));
+        buffer.record(agent_event(
+            2,
+            "two",
+            domain::events::AgentTaskEvent::ThinkingDelta {
+                delta: "second".to_string(),
+            },
+        ));
+        buffer.record(sequenced(3, "run_finished"));
+
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 2);
+        assert!(matches!(
+            &replay[0].event.event,
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                if envelope.task_id == "one"
+                    && matches!(
+                        &envelope.payload,
+                        domain::events::AgentTaskEvent::TextDelta { delta } if delta == "first"
+                    )
+        ));
+        assert!(matches!(
+            &replay[1].event.event,
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                if envelope.task_id == "two"
+                    && matches!(
+                        &envelope.payload,
+                        domain::events::AgentTaskEvent::ThinkingDelta { delta } if delta == "second"
+                    )
+        ));
+    }
+
+    #[test]
+    fn agent_stream_merges_deltas_and_committed_message_trims_them() {
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(agent_event(
+            1,
+            "one",
+            domain::events::AgentTaskEvent::TextDelta {
+                delta: "hel".to_string(),
+            },
+        ));
+        buffer.record(agent_event(
+            2,
+            "one",
+            domain::events::AgentTaskEvent::TextDelta {
+                delta: "lo".to_string(),
+            },
+        ));
+
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 1);
+        assert!(matches!(
+            &replay[0].event.event,
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                if matches!(
+                    &envelope.payload,
+                    domain::events::AgentTaskEvent::TextDelta { delta } if delta == "hello"
+                )
+        ));
+
+        buffer.record(agent_event(
+            3,
+            "one",
+            domain::events::AgentTaskEvent::MessageCommitted {
+                message: domain::message::Message::new(
+                    domain::message::Role::Assistant,
+                    vec![domain::message::ContentBlock::from_text(
+                        "hello".to_string(),
+                    )],
+                ),
+                persist_llm_history: true,
+            },
+        ));
+        assert!(buffer.replay().iter().all(|entry| !matches!(
+            &entry.event.event,
+            client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
+                if matches!(
+                    envelope.payload,
+                    domain::events::AgentTaskEvent::TextDelta { .. }
+                        | domain::events::AgentTaskEvent::ThinkingDelta { .. }
+                )
+        )));
+    }
+
+    #[test]
+    fn agent_stream_keeps_utf8_safe_tail_with_truncation_marker() {
+        let mut buffer = RuntimeReplayBuffer::default();
+        let text = "界".repeat(MAX_AGENT_STREAM_SNAPSHOT_BYTES);
+
+        buffer.record(agent_event(
+            1,
+            "one",
+            domain::events::AgentTaskEvent::TextDelta { delta: text },
+        ));
+
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 1);
+        let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &replay[0].event.event
+        else {
+            panic!("expected agent task event");
+        };
+        let domain::events::AgentTaskEvent::TextDelta { delta } = &envelope.payload else {
+            panic!("expected text delta");
+        };
+        assert!(envelope.truncated);
+        assert!(delta.len() <= MAX_AGENT_STREAM_SNAPSHOT_BYTES);
+        assert!(std::str::from_utf8(delta.as_bytes()).is_ok());
     }
 }

@@ -51,6 +51,7 @@ impl QueryState {
         QueryResult {
             turns: self.turns,
             finish_reason: self.finish_reason,
+            follow_up: false,
         }
     }
 }

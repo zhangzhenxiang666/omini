@@ -7,8 +7,10 @@
 
 use crate::store::{self, Database};
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem};
-use omini_domain::events::{SubagentSnapshot, SubagentStatus};
+use omini_domain::display::{
+    AgentTaskNotification, DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem,
+};
+use omini_domain::events::{AgentTaskInfo, AgentTaskSnapshot};
 use omini_domain::message::{Message, Role};
 
 /// 加载一个会话的消息历史，跳过无法解析的损坏记录以保证会话仍可打开。
@@ -69,6 +71,16 @@ pub(crate) async fn load_messages(
             continue;
         }
 
+        if sm.kind == "agent_task_notification" {
+            match serde_json::from_str::<AgentTaskNotification>(&content) {
+                Ok(notification) => messages.push(HistoryItem::AgentTaskNotification(notification)),
+                Err(error) => {
+                    tracing::warn!(thread_id, error = %error, "failed to parse agent task notification");
+                }
+            }
+            continue;
+        }
+
         let role = match sm.role.as_str() {
             "user" => Role::User,
             "assistant" => Role::Assistant,
@@ -96,47 +108,54 @@ pub(crate) async fn load_messages(
 }
 
 /// 加载父会话下的子 agent 历史，并恢复成已完成的 snapshot。
-pub(crate) async fn load_subagents_for_thread(
+pub(crate) async fn load_agent_tasks_for_thread(
     db: &Database,
     thread_id: &str,
     project: &ProjectDir,
-) -> Vec<SubagentSnapshot> {
-    let sessions = match db.list_child_threads(thread_id).await {
-        Ok(sessions) => sessions,
+) -> Vec<AgentTaskSnapshot> {
+    let tasks = match db.list_agent_tasks(thread_id).await {
+        Ok(tasks) => tasks,
         Err(error) => {
-            tracing::warn!(thread_id, error = %error, "failed to load subagents for thread");
+            tracing::warn!(thread_id, error = %error, "failed to load agent tasks for thread");
             return Vec::new();
         }
     };
 
-    let mut subagents = Vec::with_capacity(sessions.len());
-    for session in sessions {
-        let Some(parent_session_id) = session.parent_thread_id.clone() else {
-            continue;
-        };
-        let Some(spawn_tool_use_id) = session.spawn_tool_use_id.clone() else {
-            continue;
-        };
-        let thread_dir = project.thread(&session.id);
-        // 子代理运行态不随 daemon 存活，这里从子会话历史恢复成 completed snapshot。
-        let messages = load_messages(db, &session.id, &thread_dir)
+    let mut snapshots = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let thread_dir = project.thread(&task.agent_thread_id);
+        let messages = load_messages(db, &task.agent_thread_id, &thread_dir)
             .await
             .into_iter()
             .filter_map(|item| match item {
                 HistoryItem::Message(message) => Some(message),
-                HistoryItem::Display(_) | HistoryItem::Plan(_) | HistoryItem::Summary(_) => None,
+                HistoryItem::Display(_)
+                | HistoryItem::Plan(_)
+                | HistoryItem::Summary(_)
+                | HistoryItem::AgentTaskNotification(_) => None,
             })
             .collect();
-        subagents.push(SubagentSnapshot {
-            session_id: session.id,
-            parent_session_id,
-            spawn_tool_use_id,
-            agent_label: session
-                .agent_label
-                .unwrap_or_else(|| "Subagent".to_string()),
-            status: SubagentStatus::Completed,
+        snapshots.push(AgentTaskSnapshot {
+            task: AgentTaskInfo {
+                task_id: task.task_id,
+                thread_id: task.agent_thread_id,
+                parent_task_id: task.parent_task_id,
+                owner_thread_id: task.owner_thread_id,
+                parent_thread_id: task.parent_thread_id,
+                spawn_tool_use_id: task.spawn_tool_use_id,
+                agent: task.agent_name,
+                title: task.title,
+                depth: task.depth,
+                execution_mode: task.execution_mode,
+                status: task.status,
+                result: task.result,
+                created_at: task.created_at,
+                updated_at: task.updated_at,
+                completed_at: task.completed_at,
+                notification_delivered: task.notification_delivered,
+            },
             messages,
         });
     }
-    subagents
+    snapshots
 }

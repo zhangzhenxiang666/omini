@@ -95,11 +95,11 @@ pub(super) async fn handle_runtime_event(
     if let RuntimeToUiEvent::SessionSnapshot {
         session_id,
         messages,
-        subagents,
+        agent_tasks,
         usage,
     } = event
     {
-        state.apply_session_snapshot(session_id, messages, subagents, usage);
+        state.apply_session_snapshot(session_id, messages, agent_tasks, usage);
     } else {
         let should_flush_queue = matches!(event, RuntimeToUiEvent::RunFinished);
         state.apply_event(event);
@@ -154,10 +154,10 @@ async fn handle_key_event(
     }
 
     if code == KeyCode::Esc
-        && matches!(
+        && (matches!(
             state.agent_status,
             AgentStatus::Working | AgentStatus::Thinking
-        )
+        ) || state.has_active_agent_tasks())
     {
         let _ = request_tx.send(ClientRequest::RunCancel).await;
         return true;
@@ -681,7 +681,7 @@ async fn handle_composer_key(
                     if let Some(request) = request_from_command_draft(state, draft) {
                         let _ = request_tx.send(request).await;
                     }
-                } else if state.is_run_active() && !state.manual_compact_running {
+                } else if state.is_main_query_active() && !state.manual_compact_running {
                     state.queued_user_inputs.push_back(draft);
                 } else {
                     state.clear_run_dividers();
@@ -701,6 +701,9 @@ async fn handle_composer_key(
                                 text: summary.markdown,
                             }
                         }
+                        omini_domain::display::HistoryItem::AgentTaskNotification(notification) => {
+                            UiMessage::AgentTaskNotification(notification)
+                        }
                     };
                     let client_echo_id = uuid::Uuid::new_v4().to_string();
                     state.push_optimistic_echo(ui_message, client_echo_id.clone());
@@ -712,7 +715,7 @@ async fn handle_composer_key(
                         .await;
                     state.scroll_offset = 0;
                     state.auto_scroll = true;
-                    state.agent_status = AgentStatus::Working;
+                    state.begin_main_query_submission();
                 }
             }
         }
@@ -863,8 +866,9 @@ mod tests {
     use super::*;
     use crate::state::InputMention;
     use crate::types::events::{
-        ActiveProfile, CommandKind, CommandSummary, EditPermissionPreview, PermissionPreview,
-        SubmittedPlan, ToolPauseRequest, UserInputOption, UserInputPreview, UserInputQuestion,
+        ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, CommandKind,
+        CommandSummary, EditPermissionPreview, PermissionPreview, SubmittedPlan, ToolPauseRequest,
+        UserInputOption, UserInputPreview, UserInputQuestion,
     };
     use chrono::Utc;
     use crossterm::event::KeyEvent;
@@ -960,6 +964,44 @@ mod tests {
             panic!("expected tool pause response");
         };
         response
+    }
+
+    #[tokio::test]
+    async fn idle_main_accepts_input_and_escape_cancels_active_agent_tasks() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "agent_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "owner".to_string(),
+            truncated: false,
+            payload: AgentTaskEvent::Started {
+                parent_thread_id: "owner".to_string(),
+                spawn_tool_use_id: "tool_1".to_string(),
+                agent: "general".to_string(),
+                title: "Background work".to_string(),
+                depth: 1,
+                execution_mode: AgentTaskExecutionMode::Background,
+            },
+        }));
+        assert_eq!(state.agent_status, AgentStatus::Idle);
+        let (tx, mut rx) = mpsc::channel(2);
+
+        handle_key_event(&mut state, KeyCode::Char('x'), KeyModifiers::NONE, &tx).await;
+        assert_eq!(state.input, "x");
+
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::ALT, &tx).await;
+        assert!(rx.try_recv().is_err());
+
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+        assert!(state.queued_user_inputs.is_empty());
+        assert!(matches!(
+            rx.recv().await,
+            Some(ClientRequest::RunSubmitUserInput { .. })
+        ));
+
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &tx).await;
+        assert!(matches!(rx.recv().await, Some(ClientRequest::RunCancel)));
     }
 
     #[tokio::test]

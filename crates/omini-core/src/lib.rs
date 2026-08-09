@@ -140,6 +140,13 @@ pub struct AgentCoreThread {
     _fanout_handle: JoinHandle<()>,
 }
 
+pub struct AgentCoreThreadLoad {
+    pub messages: Vec<Message>,
+    pub llm_context_version: i64,
+    pub usage: SessionUsageSnapshot,
+    pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
+}
+
 impl AgentCoreThread {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
@@ -152,10 +159,14 @@ impl AgentCoreThread {
         project: ProjectDir,
         thread_id: String,
         active_profile: ActiveProfile,
-        messages: Vec<Message>,
-        llm_context_version: i64,
-        usage: SessionUsageSnapshot,
+        load: AgentCoreThreadLoad,
     ) -> Result<Self, CoreError> {
+        let AgentCoreThreadLoad {
+            messages,
+            llm_context_version,
+            usage,
+            agent_tasks,
+        } = load;
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
         let (runtime_persistence_tx, runtime_persistence_rx) =
@@ -181,6 +192,7 @@ impl AgentCoreThread {
             llm_context_version,
             usage,
             active_profile,
+            agent_tasks,
         };
         let runtime = AgentRuntime::with_capability_handles(channels, deps, handles);
         let runtime_handle = runtime.run();

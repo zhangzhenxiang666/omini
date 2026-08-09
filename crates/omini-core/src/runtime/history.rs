@@ -38,6 +38,7 @@ pub(super) async fn persist_initial_user_message(
             )
             .await;
         }
+        RunStart::PendingAgentTaskNotification | RunStart::PersistedAgentTaskNotification => {}
     }
 }
 

@@ -9,11 +9,11 @@ pub use omini_domain::config::{
 };
 pub use omini_domain::display::HistoryItem;
 pub use omini_domain::events::{
-    ActiveProfile, CompactTrigger, PermissionPreview, PlanApprovalAction, PlanExecutionProfile,
-    SessionRuntimeState, SessionSummary, SessionUsage, SessionUsageSnapshot, SubagentFinishedEvent,
-    SubagentMessageEvent, SubagentSnapshot, SubagentStartedEvent, SubagentStatus,
-    SubagentToolResultEvent, SubagentToolUseEvent, SubmittedPlan, ToolPauseKind, ToolPauseRequest,
-    ToolPauseResponse,
+    ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
+    AgentTaskResult, AgentTaskSnapshot, AgentTaskStatus, CompactTrigger, MAX_AGENT_DEPTH,
+    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, SessionRuntimeState,
+    SessionSummary, SessionUsage, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
+    ToolPauseRequest, ToolPauseResponse,
 };
 pub use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 pub use omini_domain::subagents::{
@@ -186,11 +186,7 @@ pub enum TypedRuntimeEvent {
     /// 通过普通 runtime event 通道广播给所有客户端。TUI 收到后应重连到 `to` 的 ws;
     /// 旧 session 的 runtime 活动自然结束,由 server 的 reclaim 机制回收。
     SessionSwitched(SessionSwitchedEvent),
-    SubagentStarted(SubagentStartedEvent),
-    SubagentMessageProduced(SubagentMessageEvent),
-    SubagentToolUse(SubagentToolUseEvent),
-    SubagentToolResult(SubagentToolResultEvent),
-    SubagentFinished(SubagentFinishedEvent),
+    AgentTaskEvent(AgentTaskEventEnvelope),
 }
 
 impl TypedRuntimeEvent {
@@ -224,11 +220,7 @@ impl TypedRuntimeEvent {
             Self::CompactSummaryFailed(_) => "compact_summary_failed",
             Self::SessionSnapshot(_) => "session_snapshot",
             Self::SessionSwitched(_) => "session_switched",
-            Self::SubagentStarted(_) => "subagent_started",
-            Self::SubagentMessageProduced(_) => "subagent_message_produced",
-            Self::SubagentToolUse(_) => "subagent_tool_use",
-            Self::SubagentToolResult(_) => "subagent_tool_result",
-            Self::SubagentFinished(_) => "subagent_finished",
+            Self::AgentTaskEvent(_) => "agent_task_event",
         }
     }
 }
@@ -383,7 +375,7 @@ pub struct SessionSnapshotEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     pub messages: Vec<HistoryItem>,
-    pub subagents: Vec<SubagentSnapshot>,
+    pub agent_tasks: Vec<AgentTaskSnapshot>,
     pub usage: SessionUsageSnapshot,
 }
 
@@ -1140,6 +1132,29 @@ mod tests {
                     "type": "run_started"
                 }
             })
+        );
+    }
+
+    #[test]
+    fn agent_task_event_envelope_round_trips_with_stable_wire_shape() {
+        let event = RuntimeEvent::new(TypedRuntimeEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "thread_1".to_string(),
+            parent_task_id: Some("task_parent".to_string()),
+            owner_thread_id: "owner_1".to_string(),
+            truncated: false,
+            payload: AgentTaskEvent::TextDelta {
+                delta: "hello".to_string(),
+            },
+        }));
+
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["event"]["type"], json!("agent_task_event"));
+        assert_eq!(value["event"]["payload"]["type"], json!("text_delta"));
+        assert_eq!(value["event"]["payload"]["delta"], json!("hello"));
+        assert_eq!(
+            serde_json::from_value::<RuntimeEvent>(value).unwrap(),
+            event
         );
     }
 
