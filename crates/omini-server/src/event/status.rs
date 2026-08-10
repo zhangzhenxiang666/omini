@@ -1,6 +1,4 @@
-use crate::event::bridge::{
-    session_runtime_skills_from_runtime_snapshot, tool_pause_event_kind_from_request,
-};
+use crate::event::bridge::session_runtime_skills_from_runtime_snapshot;
 use chrono::{DateTime, Utc};
 use omini_domain as domain;
 use omini_protocol as client_proto;
@@ -32,22 +30,13 @@ impl RuntimeToolActivity {
 /// 当前仍在等待客户端处理的暂停请求投影。
 #[derive(Debug, Clone)]
 struct RuntimePendingPause {
-    tool_use_id: String,
-    tool_name: String,
-    kind: client_proto::ToolPauseEventKind,
-    source_session_id: Option<String>,
-    source_agent_label: Option<String>,
+    request: client_proto::ToolPauseRequest,
+    sequence: u64,
 }
 
 impl RuntimePendingPause {
-    fn to_protocol(&self) -> client_proto::SessionRuntimePendingPause {
-        client_proto::SessionRuntimePendingPause {
-            tool_use_id: self.tool_use_id.clone(),
-            tool_name: self.tool_name.clone(),
-            kind: self.kind,
-            source_session_id: self.source_session_id.clone(),
-            source_agent_label: self.source_agent_label.clone(),
-        }
+    fn to_protocol(&self) -> client_proto::ToolPauseRequest {
+        self.request.clone()
     }
 }
 
@@ -68,6 +57,7 @@ pub struct RuntimeStatusProjection {
     query_paused_ms: u64,
     query_state: client_proto::SessionRuntimeState,
     pending_pauses: HashMap<String, RuntimePendingPause>,
+    next_pause_sequence: u64,
     pending_plan_approval: Option<client_proto::PlanSubmittedEvent>,
     active_tools: HashMap<String, RuntimeToolActivity>,
     agent_tasks: HashMap<String, RuntimeAgentTaskContext>,
@@ -148,12 +138,12 @@ impl RuntimeStatusProjection {
         session_id: &str,
         context: RuntimeStatusSnapshotContext,
     ) -> client_proto::SessionRuntimeStatus {
-        let mut pending_pauses = self
-            .pending_pauses
-            .values()
+        let mut pending_pauses = self.pending_pauses.values().collect::<Vec<_>>();
+        pending_pauses.sort_by_key(|pause| pause.sequence);
+        let pending_pauses = pending_pauses
+            .into_iter()
             .map(RuntimePendingPause::to_protocol)
             .collect::<Vec<_>>();
-        pending_pauses.sort_by(|left, right| left.tool_use_id.cmp(&right.tool_use_id));
 
         let mut active_tools = self
             .active_tools
@@ -187,7 +177,7 @@ impl RuntimeStatusProjection {
         self.query_paused_ms = 0;
         self.query_state = client_proto::SessionRuntimeState::Thinking;
         self.pending_pauses
-            .retain(|_, pause| pause.source_session_id.is_some());
+            .retain(|_, pause| pause.request.source_session_id.is_some());
         self.pending_plan_approval = None;
         self.active_tools
             .retain(|_, tool| tool.source_session_id.is_some());
@@ -200,7 +190,7 @@ impl RuntimeStatusProjection {
         self.query_paused_ms = 0;
         self.query_state = client_proto::SessionRuntimeState::Idle;
         self.pending_pauses
-            .retain(|_, pause| pause.source_session_id.is_some());
+            .retain(|_, pause| pause.request.source_session_id.is_some());
         self.pending_plan_approval = None;
         self.active_tools
             .retain(|_, tool| tool.source_session_id.is_some());
@@ -277,25 +267,27 @@ impl RuntimeStatusProjection {
         self.active_tools.remove(tool_use_id);
     }
 
-    fn record_tool_pause(
-        &mut self,
-        request: &client_proto::ToolPauseRequestedEvent,
-        now: DateTime<Utc>,
-    ) {
+    fn record_tool_pause(&mut self, request: &client_proto::ToolPauseRequest, now: DateTime<Utc>) {
         if self.query_started_at.is_some()
             && self.pending_pauses.is_empty()
             && self.query_pause_started_at.is_none()
         {
             self.query_pause_started_at = Some(now);
         }
+        let sequence = self
+            .pending_pauses
+            .get(&request.tool_use_id)
+            .map(|pause| pause.sequence)
+            .unwrap_or_else(|| {
+                let sequence = self.next_pause_sequence;
+                self.next_pause_sequence = self.next_pause_sequence.saturating_add(1);
+                sequence
+            });
         self.pending_pauses.insert(
             request.tool_use_id.clone(),
             RuntimePendingPause {
-                tool_use_id: request.tool_use_id.clone(),
-                tool_name: request.tool_name.clone(),
-                kind: tool_pause_event_kind_from_request(request),
-                source_session_id: request.source_session_id.clone(),
-                source_agent_label: request.source_agent_label.clone(),
+                request: request.clone(),
+                sequence,
             },
         );
     }
@@ -347,9 +339,13 @@ impl RuntimeStatusProjection {
                 self.agent_tasks.remove(&event.task_id);
                 self.active_tools
                     .retain(|_, tool| tool.source_session_id.as_deref() != Some(&event.thread_id));
+                let had_pending_pauses = !self.pending_pauses.is_empty();
                 self.pending_pauses.retain(|_, pause| {
-                    pause.source_session_id.as_deref() != Some(&event.thread_id)
+                    pause.request.source_session_id.as_deref() != Some(&event.thread_id)
                 });
+                if had_pending_pauses && self.pending_pauses.is_empty() {
+                    self.resume_query_timer(now);
+                }
             }
             client_proto::AgentTaskEvent::TurnStarted
             | client_proto::AgentTaskEvent::ThinkingDelta { .. }
@@ -730,6 +726,59 @@ mod tests {
         let status = status_snapshot(&projection, started_at);
         assert_eq!(status.state, client_proto::SessionRuntimeState::Idle);
         assert!(status.activity.is_none());
+    }
+
+    #[test]
+    fn runtime_status_keeps_full_agent_pause_after_parent_run_finishes() {
+        let mut projection = RuntimeStatusProjection::default();
+        let now = Utc::now();
+        let pause = event_types::ToolPauseRequest {
+            tool_use_id: "agent_1:tool_1".to_string(),
+            preview_tool_use_id: Some("tool_1".to_string()),
+            tool_name: "bash".to_string(),
+            permission_source: None,
+            source_session_id: Some("agent_1".to_string()),
+            source_agent_label: Some("explorer".to_string()),
+            kind: event_types::ToolPauseKind::Permission(event_types::PermissionPreview::Custom {
+                tool_name: "bash".to_string(),
+                payload: serde_json::Map::from_iter([(
+                    "command".to_string(),
+                    serde_json::Value::String("pwd".to_string()),
+                )]),
+            }),
+        };
+
+        projection.record_event(&sequenced(1, "run_started").event, now);
+        projection.record_event(&sequenced(2, "run_finished").event, now);
+        projection.record_event(
+            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ToolPauseRequested(
+                pause.clone(),
+            )),
+            now,
+        );
+
+        let status = status_snapshot(&projection, now);
+        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.pending_pauses, vec![pause]);
+
+        projection.record_event(
+            &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::AgentTaskEvent(
+                client_proto::AgentTaskEventEnvelope {
+                    task_id: "task_1".to_string(),
+                    thread_id: "agent_1".to_string(),
+                    parent_task_id: None,
+                    owner_thread_id: "s1".to_string(),
+                    truncated: false,
+                    payload: client_proto::AgentTaskEvent::Finished {
+                        status: client_proto::AgentTaskStatus::Cancelled,
+                        result: None,
+                    },
+                },
+            )),
+            now,
+        );
+
+        assert!(status_snapshot(&projection, now).pending_pauses.is_empty());
     }
 
     #[test]

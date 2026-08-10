@@ -738,7 +738,10 @@ async fn run_connected_session(
                                         fetch_calibrated_runtime_status(http, &base).await
                                     {
                                         event_tx
-                                            .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                                            .send(RuntimeToUiEvent::RuntimeStatusSynced {
+                                                status,
+                                                restore_pending_pauses: false,
+                                            })
                                             .await
                                             .map_err(|_| "TUI event receiver closed".to_string())?;
                                     }
@@ -803,7 +806,10 @@ async fn handle_server_text(
         }
         protocol::ServerEnvelope::RuntimeStatus { status } => {
             event_tx
-                .send(RuntimeToUiEvent::RuntimeStatusSynced { status })
+                .send(RuntimeToUiEvent::RuntimeStatusSynced {
+                    status,
+                    restore_pending_pauses: true,
+                })
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(HandleOutcome::SawRuntimeStatus)
@@ -1892,13 +1898,20 @@ mod tests {
             .expect("envelope should serialize")
     }
 
-    fn pending_pause() -> protocol::SessionRuntimePendingPause {
-        protocol::SessionRuntimePendingPause {
+    fn pending_pause() -> protocol::ToolPauseRequest {
+        protocol::ToolPauseRequest {
             tool_use_id: "tool_1".to_string(),
+            preview_tool_use_id: None,
             tool_name: "bash".to_string(),
-            kind: protocol::ToolPauseEventKind::Permission,
+            permission_source: None,
             source_session_id: None,
             source_agent_label: None,
+            kind: omini_domain::events::ToolPauseKind::Permission(
+                omini_domain::events::PermissionPreview::Custom {
+                    tool_name: "bash".to_string(),
+                    payload: serde_json::Map::new(),
+                },
+            ),
         }
     }
 
@@ -2026,8 +2039,10 @@ mod tests {
         assert_eq!(outcome, HandleOutcome::SawRuntimeStatus);
         assert!(matches!(
             rx.recv().await,
-            Some(RuntimeToUiEvent::RuntimeStatusSynced { status })
-                if status.session_id == "session_1" && status.activity.is_some()
+            Some(RuntimeToUiEvent::RuntimeStatusSynced {
+                status,
+                restore_pending_pauses: true,
+            }) if status.session_id == "session_1" && status.activity.is_some()
         ));
     }
 

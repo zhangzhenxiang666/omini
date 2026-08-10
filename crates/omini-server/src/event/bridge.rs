@@ -580,23 +580,6 @@ fn typed_runtime_event_from_runtime_contract_event(
     }
 }
 
-fn tool_pause_kind_to_protocol(
-    kind: &domain::events::ToolPauseKind,
-) -> client_proto::ToolPauseEventKind {
-    match kind {
-        domain::events::ToolPauseKind::Permission(_) => {
-            client_proto::ToolPauseEventKind::Permission
-        }
-        domain::events::ToolPauseKind::UserInput(_) => client_proto::ToolPauseEventKind::UserInput,
-    }
-}
-
-pub fn tool_pause_event_kind_from_request(
-    request: &client_proto::ToolPauseRequestedEvent,
-) -> client_proto::ToolPauseEventKind {
-    tool_pause_kind_to_protocol(&request.kind)
-}
-
 fn notification_level_to_protocol(
     kind: domain::events::NotificationKind,
 ) -> client_proto::NotificationLevel {

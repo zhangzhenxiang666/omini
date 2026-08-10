@@ -119,13 +119,7 @@ fn query_runtime_status(
         }),
         pending_pauses: pending_pause_ids
             .iter()
-            .map(|tool_use_id| protocol::SessionRuntimePendingPause {
-                tool_use_id: (*tool_use_id).to_string(),
-                tool_name: "bash".to_string(),
-                kind: protocol::ToolPauseEventKind::Permission,
-                source_session_id: None,
-                source_agent_label: None,
-            })
+            .map(|tool_use_id| permission_pause(tool_use_id))
             .collect(),
         pending_plan_approval: None,
         active_tools: Vec::new(),
@@ -321,7 +315,10 @@ fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
     let status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 2_500, &["tool_1"]);
 
     state.apply_event(RuntimeToUiEvent::RunStarted);
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
     assert!(state.is_run_timer_paused());
@@ -335,11 +332,69 @@ fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
 }
 
 #[test]
+fn initial_runtime_status_restores_full_background_pause_without_activity() {
+    let mut state = UiState::new();
+    let mut status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 0, &[]);
+    status.activity = None;
+    let mut pause = permission_pause("agent_1:tool_1");
+    pause.preview_tool_use_id = Some("tool_1".to_string());
+    pause.source_session_id = Some("agent_1".to_string());
+    pause.source_agent_label = Some("explorer".to_string());
+    status.pending_pauses = vec![pause.clone()];
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(state.active_tool_pause(), Some(&pause));
+    assert_eq!(state.agent_status, AgentStatus::AwaitingInput);
+}
+
+#[test]
+fn calibration_status_does_not_restore_stale_pause() {
+    let mut state = UiState::new();
+    let status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 0, &["tool_1"]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: false,
+    });
+
+    assert!(state.active_tool_pause().is_none());
+}
+
+#[test]
+fn finished_subagent_removes_its_pending_pause() {
+    let mut state = UiState::new();
+    let mut pause = permission_pause("sub_1:tool_1");
+    pause.source_session_id = Some("sub_1".to_string());
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(pause));
+
+    state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        parent_task_id: None,
+        owner_thread_id: "parent".to_string(),
+        truncated: false,
+        payload: AgentTaskEvent::Finished {
+            status: AgentTaskStatus::Cancelled,
+            result: None,
+        },
+    }));
+
+    assert!(state.active_tool_pause().is_none());
+}
+
+#[test]
 fn runtime_status_sync_applies_thinking_state() {
     let mut state = UiState::new();
     let status = query_runtime_status(protocol::SessionRuntimeState::Thinking, 2_500, &[]);
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert_eq!(state.agent_status, AgentStatus::Thinking);
     assert!(!state.is_run_timer_paused());
@@ -353,7 +408,10 @@ fn idle_runtime_status_clears_main_query_while_background_task_remains_active() 
     let mut status = query_runtime_status(protocol::SessionRuntimeState::Idle, 0, &[]);
     status.activity = None;
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert_eq!(state.agent_status, AgentStatus::Idle);
     assert!(!state.is_main_query_active());
@@ -366,7 +424,10 @@ fn replayed_run_started_keeps_synced_elapsed_timer() {
     let mut state = UiState::new();
     let status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
     state.apply_event(RuntimeToUiEvent::RunStarted);
 
     let timer = state.run_timer.as_ref().expect("timer should stay synced");
@@ -380,7 +441,10 @@ fn runtime_status_sync_calibrates_compact_activity() {
     let mut state = UiState::new();
     let status = compact_runtime_status(1_200);
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert_eq!(state.agent_status, AgentStatus::Working);
     assert!(!state.manual_compact_running);
@@ -397,7 +461,10 @@ fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
     let mut state = UiState::new();
     let status = pending_plan_runtime_status("plan_1");
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert_eq!(
         state.plan_approval.as_ref().map(|plan| plan.id.as_str()),
@@ -427,7 +494,10 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
         },
     ];
 
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
 
     assert!(state.mention_autocomplete.visible);
     let candidates: Vec<_> = state
@@ -521,7 +591,10 @@ fn run_finished_divider_uses_synced_elapsed() {
     let status = query_runtime_status(protocol::SessionRuntimeState::Working, 3_000, &[]);
 
     state.apply_event(RuntimeToUiEvent::RunStarted);
-    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced { status });
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
     state.apply_event(RuntimeToUiEvent::RunFinished);
 
     let Some(UiMessage::RunDivider { elapsed }) = state.messages.last() else {

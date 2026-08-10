@@ -499,6 +499,9 @@ impl UiState {
                         if let Some(node) = self.subagents.get_mut(&event.thread_id) {
                             node.status = status;
                         }
+                        let removed_active =
+                            self.remove_tool_pauses_for_source_session(&event.thread_id);
+                        self.finish_tool_pause_removal(removed_active);
                         self.update_live_boundary();
                     }
                     AgentTaskEvent::TurnStarted
@@ -565,8 +568,11 @@ impl UiState {
                 self.status_bar.total_tokens = total_tokens;
                 self.status_bar.total_cached_tokens = total_cached_tokens;
             }
-            RuntimeToUiEvent::RuntimeStatusSynced { status } => {
-                self.apply_runtime_status_sync(status);
+            RuntimeToUiEvent::RuntimeStatusSynced {
+                status,
+                restore_pending_pauses,
+            } => {
+                self.apply_runtime_status_sync(status, restore_pending_pauses);
             }
             RuntimeToUiEvent::CompactSummaryStarted(event) => {
                 if event.trigger == CompactTrigger::Manual {

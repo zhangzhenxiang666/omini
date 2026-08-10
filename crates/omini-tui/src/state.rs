@@ -640,6 +640,15 @@ impl UiState {
         removed_active
     }
 
+    pub fn remove_tool_pauses_for_source_session(&mut self, source_session_id: &str) -> bool {
+        let removed_active = self
+            .active_tool_pause()
+            .is_some_and(|pause| pause.source_session_id.as_deref() == Some(source_session_id));
+        self.pending_tool_pauses
+            .retain(|pause| pause.source_session_id.as_deref() != Some(source_session_id));
+        removed_active
+    }
+
     pub fn tool_pause_for_tool_use(&self, tool_use_id: &str) -> Option<&ToolPauseRequest> {
         self.pending_tool_pauses.iter().find(|pause| {
             pause.source_agent_label.is_none() && pause_preview_tool_use_id(pause) == tool_use_id
@@ -765,7 +774,11 @@ impl UiState {
             .map(|timer| timer.elapsed_at(Instant::now()))
     }
 
-    pub fn apply_runtime_status_sync(&mut self, status: omini_protocol::SessionRuntimeStatus) {
+    pub fn apply_runtime_status_sync(
+        &mut self,
+        status: omini_protocol::SessionRuntimeStatus,
+        restore_pending_pauses: bool,
+    ) {
         let omini_protocol::SessionRuntimeStatus {
             active_profile,
             pending_plan_approval,
@@ -787,6 +800,9 @@ impl UiState {
             .set_candidates(agent_summaries_to_mention_candidates(subagent_sessions));
         self.update_input_autocomplete();
         self.sync_pending_plan_approval(pending_plan_approval);
+        if restore_pending_pauses {
+            self.sync_pending_tool_pauses(pending_pauses.clone());
+        }
 
         self.main_query_active = activity.as_ref().is_some_and(|activity| {
             activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
@@ -817,6 +833,17 @@ impl UiState {
         self.manual_compact_running = false;
         self.sync_run_timer(Duration::from_millis(activity.elapsed_ms), paused);
         self.agent_status = agent_status;
+    }
+
+    fn sync_pending_tool_pauses(&mut self, pending_pauses: Vec<omini_protocol::ToolPauseRequest>) {
+        self.pending_tool_pauses = pending_pauses.into();
+        if self.pending_tool_pauses.is_empty() {
+            self.reset_permission_drawer();
+            return;
+        }
+        self.prepare_active_tool_pause();
+        self.activity_status_title = None;
+        self.agent_status = AgentStatus::AwaitingInput;
     }
 
     fn sync_pending_plan_approval(&mut self, pending: Option<omini_protocol::PlanSubmittedEvent>) {

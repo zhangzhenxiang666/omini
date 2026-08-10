@@ -163,7 +163,7 @@ pub enum TypedRuntimeEvent {
     UsageTotalsChanged(UsageTotalsChangedEvent),
     ActiveProfileChanged(ActiveProfileChangedEvent),
     SessionTitleChanged(SessionTitleChangedEvent),
-    ToolPauseRequested(ToolPauseRequestedEvent),
+    ToolPauseRequested(ToolPauseRequest),
     PlanSubmitted(SubmittedPlan),
     PlanApprovalResolved(PlanApprovalResolvedEvent),
     AgentManagementUpdated {
@@ -293,15 +293,7 @@ pub struct GitBranchChangedEvent {
     pub branch: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ToolPauseEventKind {
-    Permission,
-    UserInput,
-}
-
 /// runtime 暂停等待客户端处理工具请求时广播的完整事件。
-pub type ToolPauseRequestedEvent = ToolPauseRequest;
 
 /// plan mode 中模型提交给客户端审批的计划内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -395,20 +387,6 @@ pub struct SessionRuntimeActivity {
     pub elapsed_ms: u64,
 }
 
-/// 当前会话仍在等待处理的工具暂停项。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimePendingPause {
-    pub tool_use_id: String,
-    pub tool_name: String,
-    pub kind: ToolPauseEventKind,
-    /// 暂停来自子 agent 时，这里标识源会话。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_session_id: Option<String>,
-    /// 暂停来自子 agent 时，这里提供人类可读的 agent 标签。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_agent_label: Option<String>,
-}
-
 /// 当前会话或子 agent 正在运行的工具调用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRuntimeTool {
@@ -484,7 +462,7 @@ pub struct SessionRuntimeMcpServer {
 }
 
 /// 会话运行态的完整协议快照，供新连接或状态轮询同步 UI。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRuntimeStatus {
     pub session_id: String,
     /// 当前会话顶层运行状态。
@@ -504,7 +482,7 @@ pub struct SessionRuntimeStatus {
     pub activity: Option<SessionRuntimeActivity>,
     /// 所有尚未被客户端响应的暂停请求。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub pending_pauses: Vec<SessionRuntimePendingPause>,
+    pub pending_pauses: Vec<ToolPauseRequest>,
     /// 当前等待客户端确认的计划；用于新连接恢复计划审批抽屉。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_plan_approval: Option<PlanSubmittedEvent>,
@@ -526,13 +504,13 @@ pub struct SessionRuntimeStatus {
 }
 
 /// 项目下多个活跃会话的运行态列表响应。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionStatusesResponse {
     pub statuses: Vec<SessionRuntimeStatus>,
 }
 
 /// 单个会话运行态查询响应。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRuntimeStatusResponse {
     pub status: SessionRuntimeStatus,
 }
@@ -1324,7 +1302,7 @@ mod tests {
 
     #[test]
     fn tool_pause_requested_event_carries_full_request() {
-        let event = TypedRuntimeEvent::ToolPauseRequested(ToolPauseRequestedEvent {
+        let event = TypedRuntimeEvent::ToolPauseRequested(ToolPauseRequest {
             tool_use_id: "tool_1".to_string(),
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),

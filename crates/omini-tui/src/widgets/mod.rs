@@ -398,9 +398,10 @@ pub fn render_get_task(
     let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
     vec![Line::from(vec![
         Span::raw("· "),
-        Span::styled("GetTask(", title_style),
+        Span::styled("GetTask", title_style),
+        Span::raw("("),
         Span::raw(task_label),
-        Span::styled(")", title_style),
+        Span::raw(")"),
     ])]
 }
 
@@ -905,11 +906,16 @@ mod tests {
         let lines = render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
 
         assert_eq!(plain(&lines[0]), "· GetTask(explorer · Find entrypoints)");
+        assert!(lines[0].spans[1].style.fg.is_some());
         assert_eq!(lines[0].spans[2].style, Style::default());
+        assert_eq!(lines[0].spans[3].style, Style::default());
+        assert_eq!(lines[0].spans[4].style, Style::default());
 
         let pending_lines =
             render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), true);
-        assert_eq!(pending_lines[0].spans[2].style, Style::default());
         assert!(pending_lines[0].spans[1].style.fg.is_some());
+        assert_eq!(pending_lines[0].spans[2].style, Style::default());
+        assert_eq!(pending_lines[0].spans[3].style, Style::default());
+        assert_eq!(pending_lines[0].spans[4].style, Style::default());
     }
 }

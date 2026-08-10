@@ -184,6 +184,7 @@ pub enum RuntimeToUiEvent {
     /// TUI 连接已有 session 后从 server status 同步当前 query 计时器。
     RuntimeStatusSynced {
         status: omini_protocol::SessionRuntimeStatus,
+        restore_pending_pauses: bool,
     },
     /// 当前会话快照已同步。
     SessionSnapshot {
