@@ -36,6 +36,61 @@ pub(crate) struct AgentTaskCompletion {
 }
 
 const BACKGROUND_TASK_MEMORY_LIMIT: usize = 30;
+const MAX_BACKGROUND_AGENT_TASKS: usize = 8;
+const MAX_SYNCHRONOUS_AGENT_TASKS: usize = 10;
+
+#[derive(Debug, Default)]
+struct ActiveTaskSlots {
+    background: usize,
+    synchronous: usize,
+}
+
+impl ActiveTaskSlots {
+    fn reserve(&mut self, execution_mode: AgentTaskExecutionMode) -> Result<(), String> {
+        let (active, limit, mode, tool_name) = match execution_mode {
+            AgentTaskExecutionMode::Background => (
+                &mut self.background,
+                MAX_BACKGROUND_AGENT_TASKS,
+                "background",
+                "spawn_agent",
+            ),
+            AgentTaskExecutionMode::Synchronous => (
+                &mut self.synchronous,
+                MAX_SYNCHRONOUS_AGENT_TASKS,
+                "synchronous",
+                "run_agent",
+            ),
+        };
+        if *active >= limit {
+            return Err(format!(
+                "{mode} agent task limit reached: at most {limit} tasks may run concurrently; wait for a task to finish or cancel one before calling {tool_name} again"
+            ));
+        }
+        *active += 1;
+        Ok(())
+    }
+
+    fn release(&mut self, execution_mode: AgentTaskExecutionMode) {
+        let active = match execution_mode {
+            AgentTaskExecutionMode::Background => &mut self.background,
+            AgentTaskExecutionMode::Synchronous => &mut self.synchronous,
+        };
+        *active = active
+            .checked_sub(1)
+            .expect("releasing unreserved agent task slot");
+    }
+}
+
+struct TaskSlotReservation {
+    supervisor: Arc<AgentTaskSupervisor>,
+    execution_mode: AgentTaskExecutionMode,
+}
+
+impl Drop for TaskSlotReservation {
+    fn drop(&mut self) {
+        self.supervisor.release_task_slot(self.execution_mode);
+    }
+}
 
 struct TaskEntry {
     info: AgentTaskInfo,
@@ -56,6 +111,7 @@ struct PreparedTask {
     warnings: Vec<String>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
+    slot: TaskSlotReservation,
 }
 
 /// 归属于主线程的长期服务，管理后台根 task 及其同步后代。
@@ -68,6 +124,7 @@ pub struct AgentTaskSupervisor {
     active_profile: Arc<RwLock<ActiveProfile>>,
     owner_usage: Arc<Mutex<SessionUsageSnapshot>>,
     tasks: Mutex<HashMap<String, TaskEntry>>,
+    active_task_slots: Mutex<ActiveTaskSlots>,
     idle_notify: Notify,
 }
 
@@ -125,6 +182,7 @@ impl AgentTaskSupervisor {
             active_profile,
             owner_usage,
             tasks: Mutex::new(tasks),
+            active_task_slots: Mutex::new(ActiveTaskSlots::default()),
             idle_notify: Notify::new(),
         });
         for task in initial_tasks.into_iter().filter(|task| {
@@ -316,6 +374,27 @@ impl AgentTaskSupervisor {
         }
     }
 
+    fn reserve_task_slot(
+        self: &Arc<Self>,
+        execution_mode: AgentTaskExecutionMode,
+    ) -> Result<TaskSlotReservation, String> {
+        self.active_task_slots
+            .lock()
+            .expect("agent task slot mutex poisoned")
+            .reserve(execution_mode)?;
+        Ok(TaskSlotReservation {
+            supervisor: Arc::clone(self),
+            execution_mode,
+        })
+    }
+
+    fn release_task_slot(&self, execution_mode: AgentTaskExecutionMode) {
+        self.active_task_slots
+            .lock()
+            .expect("agent task slot mutex poisoned")
+            .release(execution_mode);
+    }
+
     async fn prepare_task(
         self: &Arc<Self>,
         request: AgentTaskRequest,
@@ -347,6 +426,7 @@ impl AgentTaskSupervisor {
             depth,
         ));
         let settings = Arc::new(settings);
+        let slot = self.reserve_task_slot(execution_mode)?;
 
         let task_id = Uuid::new_v4().to_string();
         let thread_id = Uuid::new_v4().to_string();
@@ -468,6 +548,7 @@ impl AgentTaskSupervisor {
             warnings,
             cancelled,
             cancel_notify,
+            slot,
         })
     }
 
@@ -485,6 +566,7 @@ impl AgentTaskSupervisor {
             mut warnings,
             cancelled,
             cancel_notify,
+            slot: _slot,
         } = prepared;
         let task_span = tracing::debug_span!(
             "agent_task",
@@ -1184,6 +1266,52 @@ mod tests {
             pending_pauses,
             active_profile,
         )
+    }
+
+    #[test]
+    fn task_slots_enforce_per_mode_limits_and_release_after_drop() {
+        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            test_supervisor(Vec::new());
+        let mut background_slots = Vec::new();
+        for _ in 0..MAX_BACKGROUND_AGENT_TASKS {
+            background_slots.push(
+                supervisor
+                    .reserve_task_slot(AgentTaskExecutionMode::Background)
+                    .expect("background task should reserve a slot"),
+            );
+        }
+        let background_error =
+            match supervisor.reserve_task_slot(AgentTaskExecutionMode::Background) {
+                Ok(_) => panic!("background task above the limit should be rejected"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            background_error,
+            "background agent task limit reached: at most 8 tasks may run concurrently; wait for a task to finish or cancel one before calling spawn_agent again"
+        );
+
+        let mut synchronous_slots = Vec::new();
+        for _ in 0..MAX_SYNCHRONOUS_AGENT_TASKS {
+            synchronous_slots.push(
+                supervisor
+                    .reserve_task_slot(AgentTaskExecutionMode::Synchronous)
+                    .expect("synchronous task should reserve a slot"),
+            );
+        }
+        let synchronous_error =
+            match supervisor.reserve_task_slot(AgentTaskExecutionMode::Synchronous) {
+                Ok(_) => panic!("synchronous task above the limit should be rejected"),
+                Err(error) => error,
+            };
+        assert_eq!(
+            synchronous_error,
+            "synchronous agent task limit reached: at most 10 tasks may run concurrently; wait for a task to finish or cancel one before calling run_agent again"
+        );
+
+        drop(background_slots.pop());
+        supervisor
+            .reserve_task_slot(AgentTaskExecutionMode::Background)
+            .expect("released background slot should be reusable");
     }
 
     #[test]

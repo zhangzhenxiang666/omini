@@ -89,6 +89,10 @@ agent can receive `run_agent` when its own tool policy permits it; depth-2 agent
 cannot derive more agents. All tasks owned by a main thread share that thread's active
 profile, with the task's own allow/deny policy applied first.
 
+Each main-thread supervisor admits at most eight concurrent background tasks and ten
+concurrent synchronous tasks. A request above either limit is rejected as a tool error
+without creating a task or child thread.
+
 Agent tasks are child threads owned by the same project and main thread. `spawn_agent`
 creates durable task and child-thread records; model-facing APIs expose only task
 identity, status, and results, while protocol, persistence, and UI code keep ownership,

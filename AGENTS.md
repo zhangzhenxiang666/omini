@@ -14,15 +14,6 @@ Project instructions for coding agents working in this repository.
 - If your changes make imports, variables, functions, or tests unused, clean up only the unused code introduced by your changes.
 - For non-trivial work, define success criteria and verify them with the narrowest useful check.
 
-## GitHub Issue Workflow
-
-- For confirmed bug fixes, core-flow changes, cross-crate changes, and user-visible behavior changes, prefer creating or referencing a GitHub issue before implementing.
-- Assign the issue to the person doing the work before starting the fix when repository permissions allow it.
-- Use a focused branch name that includes the issue number, such as `fix/issue-1-cancel-llm-connect`.
-- Reference the issue in commits with `Refs #<issue-number>` while the fix is still being verified. Do not use `Closes #<issue-number>` or `Fixes #<issue-number>` until the fix is confirmed.
-- After the implementation is complete and the relevant verification commands have passed, use `Closes #<issue-number>` or `Fixes #<issue-number>` in the final commit or PR description so GitHub closes the issue automatically when the change lands. Do not close issues manually with `gh issue close` or the GitHub UI unless explicitly requested.
-- In the final summary for issue-driven work, include the issue number, fix branch name, and verification commands/results.
-
 ## Rust Style
 
 - Prefer absolute `use` paths for imports, such as `crate::...`, `omini_core::...`, `omini_protocol::...`, `omini_server::...`, `omini_tui::...`, `std::...`, or dependency crate paths.

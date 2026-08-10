@@ -293,8 +293,6 @@ pub struct GitBranchChangedEvent {
     pub branch: Option<String>,
 }
 
-/// runtime 暂停等待客户端处理工具请求时广播的完整事件。
-
 /// plan mode 中模型提交给客户端审批的计划内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlanSubmittedEvent {
