@@ -296,7 +296,7 @@ impl ToolExecutionContext {
             preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
             permission_source,
-            source_session_id: self
+            source_thread_id: self
                 .runtime
                 .as_ref()
                 .map(|runtime| runtime.thread_id.clone()),
@@ -345,7 +345,7 @@ impl ToolExecutionContext {
             preview_tool_use_id: preview_tool_use_id(&self.pause_id, &self.tool_use_id),
             tool_name: self.tool_name.clone(),
             permission_source: None,
-            source_session_id: self
+            source_thread_id: self
                 .runtime
                 .as_ref()
                 .map(|runtime| runtime.thread_id.clone()),
@@ -877,7 +877,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_search_default_path_uses_session_cwd() {
+    fn normalize_search_default_path_uses_thread_cwd() {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({ "query": "needle" });
 
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_bash_relative_workdir_uses_session_cwd() {
+    fn normalize_bash_relative_workdir_uses_thread_cwd() {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({
             "command": "cargo check",
@@ -903,7 +903,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_file_tool_relative_file_path_uses_session_cwd() {
+    fn normalize_file_tool_relative_file_path_uses_thread_cwd() {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({ "file_path": "src/lib.rs" });
 

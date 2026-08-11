@@ -32,11 +32,11 @@ pub enum InteractionStep {
         /// 打开面板时正在使用的 model id
         active_model: String,
     },
-    /// 会话选择
-    Session {
-        sessions: Vec<crate::types::events::SessionSummary>,
+    /// 线程选择
+    Thread {
+        threads: Vec<crate::types::events::ThreadSummary>,
         /// 原始全量列表（用于过滤后恢复）
-        all_sessions: Vec<crate::types::events::SessionSummary>,
+        all_threads: Vec<crate::types::events::ThreadSummary>,
         /// 当前搜索关键词
         search: String,
         selected: usize,

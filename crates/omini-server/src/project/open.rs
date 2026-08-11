@@ -8,7 +8,7 @@ impl ProjectManager {
         project: client_proto::ProjectSummary,
     ) -> Result<client_proto::OpenProjectResponse, CoreError> {
         let settings = self.fresh_settings_with_state()?;
-        let sessions = self.list_threads().await?.sessions;
+        let threads = self.list_threads().await?.threads;
         let context_window = settings.current_model_config().map(|model| model.limit);
         let mcp_server_count = settings
             .mcp_servers
@@ -49,7 +49,7 @@ impl ProjectManager {
 
         Ok(client_proto::OpenProjectResponse {
             project,
-            sessions,
+            threads,
             active_provider: settings.active_provider.clone(),
             model: settings.model.clone(),
             thinking_effort: settings.thinking_effort,

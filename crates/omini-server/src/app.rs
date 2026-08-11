@@ -63,7 +63,7 @@ pub fn router(manager: Arc<GlobalDaemonManager>, shutdown: ShutdownTrigger) -> R
 
 fn v1_routes() -> Router<AppState> {
     Router::new()
-        // 守护进程级接口不绑定具体项目或会话。
+        // 守护进程级接口不绑定具体项目或线程。
         .route("/health", get(routes::health::daemon_health))
         .route("/shutdown", post(routes::shutdown::shutdown_daemon))
         .route("/clients", post(routes::clients::register_client))
@@ -106,34 +106,34 @@ fn project_routes() -> Router<AppState> {
             "/agents/{agent_id}",
             delete(routes::agents::delete_project_agent),
         )
-        // 会话列表和创建作用在项目层级，具体会话操作继续挂在 session_id 下。
+        // 线程列表和创建作用在项目层级，具体线程操作继续挂在 thread_id 下。
         .route(
-            "/sessions",
-            get(routes::sessions::list_sessions).post(routes::sessions::create_session),
+            "/threads",
+            get(routes::threads::list_threads).post(routes::threads::create_thread),
         )
         .route(
-            "/sessions/statuses",
-            get(routes::sessions::list_session_statuses),
+            "/threads/statuses",
+            get(routes::threads::list_thread_statuses),
         )
-        .nest("/sessions/{session_id}", session_routes())
+        .nest("/threads/{thread_id}", thread_routes())
 }
 
-fn session_routes() -> Router<AppState> {
+fn thread_routes() -> Router<AppState> {
     Router::new()
         // WebSocket 订阅承载快照、历史 replay、运行时事件和控制权变化。
-        .route("/events", get(routes::sessions::session_events))
-        .route("/status", get(routes::sessions::session_status))
+        .route("/events", get(routes::threads::thread_events))
+        .route("/status", get(routes::threads::thread_status))
         .merge(controller_routes())
-        .merge(session_configuration_routes())
-        .merge(session_lifecycle_routes())
+        .merge(thread_configuration_routes())
+        .merge(thread_lifecycle_routes())
         .merge(capability_routes())
         .merge(run_routes())
-        // 附件只登记会话内引用，具体使用由后续 run input 决定。
+        // 附件只登记线程内引用，具体使用由后续 run input 决定。
         .route("/attachments", post(routes::attachments::upload_attachment))
 }
 
 fn controller_routes() -> Router<AppState> {
-    // controller 接口只变更会话控制权，不直接驱动 core 运行。
+    // controller 接口只变更线程控制权，不直接驱动 core 运行。
     Router::new()
         .route(
             "/controller/claim",
@@ -149,45 +149,45 @@ fn controller_routes() -> Router<AppState> {
         )
 }
 
-fn session_configuration_routes() -> Router<AppState> {
+fn thread_configuration_routes() -> Router<AppState> {
     // 配置类 mutation 在 handler 内区分自动接管和严格 controller 门禁。
     Router::new()
-        .route("/models", get(routes::sessions::list_models))
-        .route("/model", post(routes::sessions::set_model))
+        .route("/models", get(routes::threads::list_models))
+        .route("/model", post(routes::threads::set_model))
         .route(
             "/thinking-effort",
-            post(routes::sessions::set_thinking_effort),
+            post(routes::threads::set_thinking_effort),
         )
-        .route("/profile", post(routes::sessions::set_profile))
-        .route("/profile/toggle", post(routes::sessions::toggle_profile))
+        .route("/profile", post(routes::threads::set_profile))
+        .route("/profile/toggle", post(routes::threads::toggle_profile))
         .route(
             "/thinking-display",
-            post(routes::sessions::set_thinking_display),
+            post(routes::threads::set_thinking_display),
         )
 }
 
-fn session_lifecycle_routes() -> Router<AppState> {
-    // 这些操作改变当前会话的打开、创建或展示状态，不直接提交 run。
+fn thread_lifecycle_routes() -> Router<AppState> {
+    // 这些操作改变当前线程的打开、创建或展示状态，不直接提交 run。
     Router::new()
-        .route("/open", post(routes::sessions::open_session))
-        .route("/rename", post(routes::sessions::rename_thread))
-        .route("/compact", post(routes::sessions::compact_context))
+        .route("/open", post(routes::threads::open_thread))
+        .route("/rename", post(routes::threads::rename_thread))
+        .route("/compact", post(routes::threads::compact_context))
 }
 
 fn capability_routes() -> Router<AppState> {
-    // 子代理和技能是当前项目/会话的可用能力清单。
+    // 子代理和技能是当前项目/线程的可用能力清单。
     Router::new()
         .route(
             "/agents",
-            get(routes::agents::list_session_agents).post(routes::agents::save_session_agent),
+            get(routes::agents::list_thread_agents).post(routes::agents::save_thread_agent),
         )
         .route(
             "/agents/generate",
-            post(routes::agents::generate_session_agent),
+            post(routes::agents::generate_thread_agent),
         )
         .route(
             "/agents/{agent_id}",
-            delete(routes::agents::delete_session_agent),
+            delete(routes::agents::delete_thread_agent),
         )
         .route("/skills", get(routes::skills::list_skills))
         .route("/skills/{skill_name}", get(routes::skills::get_skill))

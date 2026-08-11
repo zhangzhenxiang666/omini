@@ -84,12 +84,12 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
     state.startup_has_project_instructions = open.has_project_instructions;
     state.show_thinking_blocks = open.show_thinking_blocks;
     state.status_bar.context_window = open.context_window;
-    state.startup_recent_sessions = open
-        .sessions
+    state.startup_recent_threads = open
+        .threads
         .clone()
         .into_iter()
-        .map(client::session_summary_from_protocol)
-        .filter(|session| !session.title.trim().is_empty())
+        .map(client::thread_summary_from_protocol)
+        .filter(|thread| !thread.title.trim().is_empty())
         .take(6)
         .collect();
     state.autocomplete.all_commands = crate::command::commands_with_runtime_skills(

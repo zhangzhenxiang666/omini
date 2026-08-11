@@ -164,18 +164,18 @@ impl UiState {
                     active_model: current_model.clone(),
                 })
             }
-            InteractionRequest::SessionSelection { sessions } => {
-                let mut sorted = sessions.clone();
+            InteractionRequest::ThreadSelection { threads } => {
+                let mut sorted = threads.clone();
                 sorted.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
-                let all_sessions = sorted.clone();
+                let all_threads = sorted.clone();
                 let selected = self
-                    .current_session_id
+                    .current_thread_id
                     .as_ref()
                     .and_then(|id| sorted.iter().position(|s| s.id == *id))
                     .unwrap_or(0);
-                Some(InteractionStep::Session {
-                    sessions: sorted,
-                    all_sessions,
+                Some(InteractionStep::Thread {
+                    threads: sorted,
+                    all_threads,
                     search: String::new(),
                     selected,
                 })
@@ -475,8 +475,8 @@ impl UiState {
                             event.thread_id.clone(),
                             SubagentNode {
                                 task_id: event.task_id,
-                                session_id: event.thread_id,
-                                parent_session_id: parent_thread_id,
+                                thread_id: event.thread_id,
+                                parent_thread_id,
                                 spawn_tool_use_id,
                                 agent_label: agent,
                                 title,
@@ -500,7 +500,7 @@ impl UiState {
                             node.status = status;
                         }
                         let removed_active =
-                            self.remove_tool_pauses_for_source_session(&event.thread_id);
+                            self.remove_tool_pauses_for_source_thread(&event.thread_id);
                         self.finish_tool_pause_removal(removed_active);
                         self.update_live_boundary();
                     }
@@ -641,34 +641,34 @@ impl UiState {
             RuntimeToUiEvent::ActiveProfileChanged(profile) => {
                 self.status_bar.active_profile = profile;
             }
-            RuntimeToUiEvent::SessionTitleChanged { title } => {
-                self.current_session_title = title.clone();
-                // WebSocket 是 session-scoped 的，事件来源 session 就是
-                // TUI 当前的 current_session_id；用它去同步两个 session
+            RuntimeToUiEvent::ThreadTitleChanged { title } => {
+                self.current_thread_title = title.clone();
+                // WebSocket 是 thread-scoped 的，事件来源 thread 就是
+                // TUI 当前的 current_thread_id；用它去同步两个 thread
                 // 列表缓存里对应条目的 title。
-                let Some(current_session_id) = self.current_session_id.clone() else {
+                let Some(current_thread_id) = self.current_thread_id.clone() else {
                     return;
                 };
                 if let Some(title) = title {
-                    for session in self.startup_recent_sessions.iter_mut() {
-                        if session.id == current_session_id {
-                            session.title = title.clone();
+                    for thread in self.startup_recent_threads.iter_mut() {
+                        if thread.id == current_thread_id {
+                            thread.title = title.clone();
                         }
                     }
-                    if let Some(InteractionStep::Session {
-                        sessions,
-                        all_sessions,
+                    if let Some(InteractionStep::Thread {
+                        threads,
+                        all_threads,
                         ..
                     }) = self.interaction_step.as_mut()
                     {
-                        for session in sessions.iter_mut() {
-                            if session.id == current_session_id {
-                                session.title = title.clone();
+                        for thread in threads.iter_mut() {
+                            if thread.id == current_thread_id {
+                                thread.title = title.clone();
                             }
                         }
-                        for session in all_sessions.iter_mut() {
-                            if session.id == current_session_id {
-                                session.title = title.clone();
+                        for thread in all_threads.iter_mut() {
+                            if thread.id == current_thread_id {
+                                thread.title = title.clone();
                             }
                         }
                     }
@@ -728,16 +728,16 @@ impl UiState {
                         .push(UiMessage::Notification(Notification::info(message)));
                 }
             }
-            // SessionSnapshot 由 TUI 主循环直接处理，此处无需匹配
-            RuntimeToUiEvent::SessionSnapshot { .. } => {}
+            // ThreadSnapshot 由 TUI 主循环直接处理，此处无需匹配
+            RuntimeToUiEvent::ThreadSnapshot { .. } => {}
         }
     }
 
     fn finish_subagent_for_tool_result(&mut self, result: &ToolResultBlock) {
-        let Some(session_id) = self.subagents_by_tool_use.get(&result.tool_use_id) else {
+        let Some(thread_id) = self.subagents_by_tool_use.get(&result.tool_use_id) else {
             return;
         };
-        let Some(node) = self.subagents.get_mut(session_id) else {
+        let Some(node) = self.subagents.get_mut(thread_id) else {
             return;
         };
         if node.status != AgentTaskStatus::Running {
@@ -759,18 +759,18 @@ impl UiState {
         };
     }
 
-    pub fn apply_session_snapshot(
+    pub fn apply_thread_snapshot(
         &mut self,
-        session_id: Option<String>,
+        thread_id: Option<String>,
         messages: Vec<HistoryItem>,
         subagents: Vec<AgentTaskSnapshot>,
-        usage: crate::types::events::SessionUsageSnapshot,
+        usage: crate::types::events::ThreadUsageSnapshot,
     ) {
         self.show_start_screen = false;
-        self.current_session_id = session_id;
-        if self.current_session_id.is_none() {
-            // 「新建会话」前的 blank 状态：把 title 缓存也清空,避免残留上一个 session 的 title。
-            self.current_session_title = None;
+        self.current_thread_id = thread_id;
+        if self.current_thread_id.is_none() {
+            // 「新建线程」前的 blank 状态：把 title 缓存也清空,避免残留上一个 thread 的 title。
+            self.current_thread_title = None;
         }
         self.messages = UiMessage::from_history_items(messages);
         self.pending_client_echoes.clear();
@@ -784,8 +784,8 @@ impl UiState {
         for subagent in subagents {
             let node = SubagentNode::from(subagent);
             self.subagents_by_tool_use
-                .insert(node.spawn_tool_use_id.clone(), node.session_id.clone());
-            self.subagents.insert(node.session_id.clone(), node);
+                .insert(node.spawn_tool_use_id.clone(), node.thread_id.clone());
+            self.subagents.insert(node.thread_id.clone(), node);
         }
         self.pending_assistant = None;
         self.pending_proposed_plan = None;
@@ -893,7 +893,7 @@ mod tests {
     use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
     use crate::types::events::{
         CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
-        CompactSummaryFinishedEvent, CompactTrigger, SessionSummary,
+        CompactSummaryFinishedEvent, CompactTrigger, ThreadSummary,
     };
     use chrono::{Duration, Utc};
     use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
@@ -923,8 +923,8 @@ mod tests {
         }
     }
 
-    fn session_summary(id: &str, updated_at: chrono::DateTime<Utc>) -> SessionSummary {
-        SessionSummary {
+    fn thread_summary(id: &str, updated_at: chrono::DateTime<Utc>) -> ThreadSummary {
+        ThreadSummary {
             id: id.to_string(),
             title: id.to_string(),
             model: "test-model".to_string(),
@@ -993,33 +993,33 @@ mod tests {
     }
 
     #[test]
-    fn session_selection_sorts_by_updated_at_descending() {
+    fn thread_selection_sorts_by_updated_at_descending() {
         let now = Utc::now();
         let mut state = UiState::new();
-        let request = InteractionRequest::SessionSelection {
-            sessions: vec![
-                session_summary("middle", now - Duration::minutes(1)),
-                session_summary("oldest", now - Duration::minutes(2)),
-                session_summary("newest", now),
+        let request = InteractionRequest::ThreadSelection {
+            threads: vec![
+                thread_summary("middle", now - Duration::minutes(1)),
+                thread_summary("oldest", now - Duration::minutes(2)),
+                thread_summary("newest", now),
             ],
         };
 
         state.open_interaction_request(&request);
 
-        let Some(InteractionStep::Session {
-            sessions,
-            all_sessions,
+        let Some(InteractionStep::Thread {
+            threads,
+            all_threads,
             ..
         }) = state.interaction_step
         else {
-            panic!("expected session selection interaction");
+            panic!("expected thread selection interaction");
         };
-        let ids = sessions
+        let ids = threads
             .iter()
-            .map(|session| session.id.as_str())
+            .map(|thread| thread.id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["newest", "middle", "oldest"]);
-        assert_eq!(sessions, all_sessions);
+        assert_eq!(threads, all_threads);
     }
 
     #[test]
@@ -1189,7 +1189,7 @@ mod tests {
             CompactSummaryDeltaEvent {
                 trigger: CompactTrigger::Manual,
                 delta: "first ".to_string(),
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1197,7 +1197,7 @@ mod tests {
             CompactSummaryDeltaEvent {
                 trigger: CompactTrigger::Manual,
                 delta: "second".to_string(),
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1217,14 +1217,14 @@ mod tests {
 
         state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
             trigger: CompactTrigger::Manual,
-            session_id: Some("session".to_string()),
+            thread_id: Some("thread".to_string()),
             agent_label: None,
         }));
         state.apply_event(RuntimeToUiEvent::CompactSummaryDelta(
             CompactSummaryDeltaEvent {
                 trigger: CompactTrigger::Manual,
                 delta: "new".to_string(),
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1244,7 +1244,7 @@ mod tests {
                 trigger: CompactTrigger::Manual,
                 summary: "final summary".to_string(),
                 after_tokens: 250,
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1262,7 +1262,7 @@ mod tests {
 
         state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
             trigger: CompactTrigger::Manual,
-            session_id: Some("session".to_string()),
+            thread_id: Some("thread".to_string()),
             agent_label: None,
         }));
 
@@ -1275,7 +1275,7 @@ mod tests {
                 trigger: CompactTrigger::Manual,
                 summary: "final summary".to_string(),
                 after_tokens: 250,
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1296,7 +1296,7 @@ mod tests {
                 trigger: CompactTrigger::Manual,
                 summary: String::new(),
                 after_tokens: 250,
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1316,7 +1316,7 @@ mod tests {
                 trigger: CompactTrigger::Auto,
                 summary: "final summary".to_string(),
                 after_tokens: 250,
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1329,7 +1329,7 @@ mod tests {
         let mut state = UiState::new();
         state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
             trigger: CompactTrigger::Manual,
-            session_id: Some("session".to_string()),
+            thread_id: Some("thread".to_string()),
             agent_label: None,
         }));
 
@@ -1337,7 +1337,7 @@ mod tests {
             CompactSummaryFailedEvent {
                 trigger: CompactTrigger::Manual,
                 message: "nope".to_string(),
-                session_id: Some("session".to_string()),
+                thread_id: Some("thread".to_string()),
                 agent_label: None,
             },
         ));
@@ -1399,8 +1399,8 @@ mod tests {
             "sub-1".to_string(),
             SubagentNode {
                 task_id: "task-1".to_string(),
-                session_id: "sub-1".to_string(),
-                parent_session_id: "main".to_string(),
+                thread_id: "sub-1".to_string(),
+                parent_thread_id: "main".to_string(),
                 spawn_tool_use_id: "tool-1".to_string(),
                 agent_label: "worker".to_string(),
                 title: "Work".to_string(),

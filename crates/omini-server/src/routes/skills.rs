@@ -8,17 +8,17 @@ use crate::daemon::GlobalDaemonManager;
 use crate::event::bridge::{
     skill_response_from_runtime_skill_detail, skills_response_from_runtime_skill_summaries,
 };
-use crate::routes::{ApiResult, api_error, require_daemon_session};
+use crate::routes::{ApiResult, api_error, require_daemon_thread};
 
-/// 列出当前会话可用的技能。
+/// 列出当前线程可用的技能。
 #[axum::debug_handler]
 pub async fn list_skills(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
 ) -> ApiResult<protocol::SkillsResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     Ok(Json(skills_response_from_runtime_skill_summaries(
-        session.list_skills(),
+        thread.list_skills(),
     )))
 }
 
@@ -26,10 +26,10 @@ pub async fn list_skills(
 #[axum::debug_handler]
 pub async fn get_skill(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id, skill_name)): Path<(String, String, String)>,
+    Path((project_id, thread_id, skill_name)): Path<(String, String, String)>,
 ) -> ApiResult<protocol::SkillResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    thread
         .get_skill(&skill_name)
         .map(skill_response_from_runtime_skill_detail)
         .map(Json)

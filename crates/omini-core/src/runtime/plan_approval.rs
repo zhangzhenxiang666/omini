@@ -33,9 +33,9 @@ impl AgentRuntime {
                 .await;
                 self.process_run(RunStart::UserMessage).await;
             }
-            // Server 路由层在收到此 action 时已自行 fork 新 session 并广播
-            // SessionSwitched；core 这里只关闭原 thread 的审批抽屉，不改状态。
-            PlanApprovalAction::ApproveInNewSession { .. } => {
+            // Server 路由层在收到此 action 时已自行 fork 新 thread 并广播
+            // ThreadSwitched；core 这里只关闭原 thread 的审批抽屉，不改状态。
+            PlanApprovalAction::ApproveInNewThread { .. } => {
                 self.send_plan_approval_resolved(plan_id, action).await;
             }
         }

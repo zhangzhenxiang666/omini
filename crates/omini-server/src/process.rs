@@ -50,7 +50,7 @@ pub fn run_daemon_process(options: ProcessOptions) -> Result<(), Box<dyn std::er
     runtime.block_on(run())
 }
 
-/// 加载全局配置后进入真正的 HTTP daemon；这里不处理客户端会话语义。
+/// 加载全局配置后进入真正的 HTTP daemon；这里不处理客户端线程语义。
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = OminiRoot::init()?;
     let config = root.load_config()?;

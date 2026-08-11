@@ -1,6 +1,6 @@
 use super::register_selectable_lines;
-use super::session_list::relative_time;
 use super::text::truncate_str;
+use super::thread_list::relative_time;
 use crate::state::UiState;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::CommandKind;
@@ -123,7 +123,7 @@ fn project_overview_rows(state: &UiState, right_width: usize) -> Vec<Vec<Span<'s
 
     // 计算时间列最大显示宽度
     let max_time_width = state
-        .startup_recent_sessions
+        .startup_recent_threads
         .iter()
         .take(6)
         .map(|s| UnicodeWidthStr::width(relative_time(s.updated_at).as_str()))
@@ -136,15 +136,15 @@ fn project_overview_rows(state: &UiState, right_width: usize) -> Vec<Vec<Span<'s
         .saturating_sub(2);
 
     let mut rows = state
-        .startup_recent_sessions
+        .startup_recent_threads
         .iter()
         .take(6)
-        .map(|session| {
-            let time = relative_time(session.updated_at);
+        .map(|thread| {
+            let time = relative_time(thread.updated_at);
             let time_width = UnicodeWidthStr::width(time.as_str());
             // 左对齐时间列
             let time_padded = format!("{}{}", time, " ".repeat(max_time_width - time_width));
-            let title = truncate_str(session.title.trim(), title_max_width);
+            let title = truncate_str(thread.title.trim(), title_max_width);
             vec![
                 Span::styled(time_padded, label_style()),
                 Span::styled("  ", muted_value_style()),

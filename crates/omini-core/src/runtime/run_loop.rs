@@ -176,7 +176,7 @@ impl AgentRuntime {
 
     /// 处理一次完整的用户请求，可能包含多轮 LLM 调用。
     ///
-    /// `AgentRuntime` 始终绑定一个已存在的 session，所以这里只需刷新 `updated_at`
+    /// `AgentRuntime` 始终绑定一个已存在的 thread，所以这里只需刷新 `updated_at`
     /// 然后进入 query loop；不再生成 UUID、建目录或写 title —— 这些都交由 server。
     pub(super) async fn process_run(&mut self, mut start: RunStart) {
         loop {

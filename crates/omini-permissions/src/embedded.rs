@@ -1,7 +1,7 @@
 //! 编译时嵌入的 `.rules` 文件 + `LazyLock` 全局预编译策略。
 //!
 //! 三个内嵌规则文件通过 `include_str!` 在编译时嵌入，首次访问时解析一次，
-//! 后续所有 session 共享 `&EmbeddedBashPolicy` 引用，零 clone。
+//! 后续所有 thread 共享 `&EmbeddedBashPolicy` 引用，零 clone。
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -13,7 +13,7 @@ static EMBEDDED_DENY_RAW: &str = include_str!("embedded_rules/deny.rules");
 static EMBEDDED_ASK_RAW: &str = include_str!("embedded_rules/ask.rules");
 static EMBEDDED_ALLOW_RAW: &str = include_str!("embedded_rules/allow.rules");
 
-/// 全局共享的内嵌 bash 策略。首次访问时解析一次，后续所有 session 共享引用，零 clone。
+/// 全局共享的内嵌 bash 策略。首次访问时解析一次，后续所有 thread 共享引用，零 clone。
 pub(crate) struct EmbeddedBashPolicy {
     pub deny_by_cmd: HashMap<String, Vec<BashRule>>,
     pub ask_by_cmd: HashMap<String, Vec<BashRule>>,

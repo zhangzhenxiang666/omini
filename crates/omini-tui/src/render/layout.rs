@@ -20,8 +20,8 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     state.clear_selectable_screen_lines();
     render_background(frame, area);
 
-    if let Some(InteractionStep::Session { .. }) = &state.interaction_step {
-        super::render_session_list(state, frame, area);
+    if let Some(InteractionStep::Thread { .. }) = &state.interaction_step {
+        super::render_thread_list(state, frame, area);
         crate::selection::apply_selection_overlay(state, frame.buffer_mut());
         return;
     }

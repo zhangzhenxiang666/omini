@@ -1,7 +1,7 @@
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
+use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
@@ -73,7 +73,7 @@ pub(super) struct ModelSelection<'a> {
 pub(super) struct RuntimeSinks<'a> {
     pub(super) event_tx: &'a mpsc::Sender<RuntimeToServerEvent>,
     pub(super) persistence_tx: &'a mpsc::Sender<RuntimePersistenceEvent>,
-    pub(super) usage_state: &'a Arc<Mutex<SessionUsageSnapshot>>,
+    pub(super) usage_state: &'a Arc<Mutex<ThreadUsageSnapshot>>,
 }
 
 pub(super) async fn apply_model_selection(
@@ -221,7 +221,7 @@ pub(super) async fn apply_thinking_effort(
 
 async fn send_usage_snapshot(
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     settings: &Settings,
 ) {
     let context_window = current_context_window(settings);

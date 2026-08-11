@@ -172,7 +172,7 @@ impl AgentRuntime {
                             tracing::debug!(
                                 tool_use_id = %req.tool_use_id,
                                 tool_name = %req.tool_name,
-                                source_thread_id = ?req.source_session_id,
+                                source_thread_id = ?req.source_thread_id,
                                 source_agent_label = ?req.source_agent_label,
                                 pause_kind = ?req.kind,
                                 "tool pause requested"
@@ -236,7 +236,7 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                             tracing::debug!(
                                 trigger = %event.trigger,
-                                compact_thread_id = ?event.session_id,
+                                compact_thread_id = ?event.thread_id,
                                 agent_label = ?event.agent_label,
                                 "compact summary started"
                             );
@@ -252,7 +252,7 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                             tracing::debug!(
                                 trigger = %event.trigger,
-                                compact_thread_id = ?event.session_id,
+                                compact_thread_id = ?event.thread_id,
                                 agent_label = ?event.agent_label,
                                 summary_chars = event.summary.chars().count(),
                                 after_tokens = event.after_tokens,
@@ -272,7 +272,7 @@ impl AgentRuntime {
                         EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                             tracing::warn!(
                                 trigger = %event.trigger,
-                                compact_thread_id = ?event.session_id,
+                                compact_thread_id = ?event.thread_id,
                                 agent_label = ?event.agent_label,
                                 message = %event.message,
                                 "compact summary failed"

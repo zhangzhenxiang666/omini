@@ -983,7 +983,7 @@ fn build_compact_summary_message(
     trigger: CompactTrigger,
 ) -> String {
     let mut text = format!(
-        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n{}",
+        "This thread is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n{}",
         format_compact_summary(raw_summary)
     );
     if recent_preserved {
@@ -1080,7 +1080,7 @@ async fn forward_compact_summary_deltas(
                 CompactSummaryDeltaEvent {
                     trigger,
                     delta,
-                    session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
+                    thread_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                     agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
                 },
             ))
@@ -1398,7 +1398,7 @@ fn compact_event(
 ) -> CompactEvent {
     CompactEvent {
         trigger,
-        session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
+        thread_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
         agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
     }
 }
@@ -1429,7 +1429,7 @@ async fn emit_compact_shrink_finished(
                 after_tokens: outcome.after_tokens,
                 before_messages: outcome.before_messages,
                 after_messages: outcome.after_messages,
-                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
+                thread_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))
@@ -1462,7 +1462,7 @@ async fn emit_compact_summary_finished(
                 trigger,
                 summary,
                 after_tokens,
-                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
+                thread_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))
@@ -1480,7 +1480,7 @@ async fn emit_compact_summary_failed(
             CompactSummaryFailedEvent {
                 trigger,
                 message,
-                session_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
+                thread_id: runtime_context.map(|runtime| runtime.thread_id.clone()),
                 agent_label: runtime_context.and_then(|runtime| runtime.agent_label.clone()),
             },
         ))

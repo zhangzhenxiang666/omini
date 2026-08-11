@@ -58,7 +58,7 @@ struct UserBashPolicy {
 
 /// 运行时权限决策引擎。
 ///
-/// 持有 per-session 的工具规则和用户 bash 规则，通过全局引用访问编译时内嵌策略。
+/// 持有 per-thread 的工具规则和用户 bash 规则，通过全局引用访问编译时内嵌策略。
 #[derive(Debug, Clone)]
 pub struct PermissionEngine {
     pub(crate) cwd: PathBuf,

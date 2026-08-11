@@ -1,4 +1,4 @@
-//! HTTP handler 的共享错误转换、鉴权和会话查找工具。
+//! HTTP handler 的共享错误转换、鉴权和线程查找工具。
 
 use crate::daemon::{GlobalDaemonManager, ProjectError};
 use crate::project::{ProjectManager, ThreadError};
@@ -15,9 +15,9 @@ pub mod controllers;
 pub mod health;
 pub mod projects;
 pub mod runs;
-pub mod sessions;
 pub mod shutdown;
 pub mod skills;
+pub mod threads;
 
 const CLIENT_ID_HEADER: &str = "x-omini-client-id";
 
@@ -60,23 +60,23 @@ pub async fn require_project(
         .map_err(project_error)
 }
 
-pub async fn require_session(
+pub async fn require_thread(
     manager: &ProjectManager,
-    session_id: &str,
+    thread_id: &str,
 ) -> Result<Arc<ThreadRuntime>, ApiError> {
     manager
-        .get_or_load_thread(session_id)
+        .get_or_load_thread(thread_id)
         .await
-        .map_err(session_lookup_error)
+        .map_err(thread_lookup_error)
 }
 
-pub async fn require_daemon_session(
+pub async fn require_daemon_thread(
     manager: &GlobalDaemonManager,
     project_id: &str,
-    session_id: &str,
+    thread_id: &str,
 ) -> Result<Arc<ThreadRuntime>, ApiError> {
     let project = require_project(manager, project_id).await?;
-    require_session(&project, session_id).await
+    require_thread(&project, thread_id).await
 }
 
 pub fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
@@ -94,39 +94,39 @@ pub fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
 }
 
 pub async fn ensure_controller(
-    session: &ThreadRuntime,
+    thread: &ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
-    if session.is_controller(client_id).await {
+    if thread.is_controller(client_id).await {
         // 严格 mutation 只允许当前 controller 执行;新架构下 runtime 启动即
-        // 加载,SessionRuntime 一旦从 manager 拿到就已经持有完整 messages /
+        // 加载,ThreadRuntime 一旦从 manager 拿到就已经持有完整 messages /
         // usage,不再需要等待 hydrate。
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "not_controller",
-            "This client is observing the session and cannot mutate it",
+            "This client is observing the thread and cannot mutate it",
         ))
     }
 }
 
 pub async fn ensure_connected_controller(
-    session: &ThreadRuntime,
+    thread: &ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), ApiError> {
     let client_id = client_id_from_headers(headers)?;
     // 运行相关用户动作必须来自已连接 WebSocket 的客户端；请求会先接管 controller，
     // 再进入 core，由 controller 语义负责冲突裁决。
-    if !session.is_client_connected(client_id).await {
+    if !thread.is_client_connected(client_id).await {
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "client_not_connected",
-            "This client is not connected to the session event stream",
+            "This client is not connected to the thread event stream",
         ));
     }
-    if session
+    if thread
         .takeover_controller(client_id.to_string())
         .await
         .is_none()
@@ -134,7 +134,7 @@ pub async fn ensure_connected_controller(
         return Err(api_error(
             StatusCode::FORBIDDEN,
             "client_not_connected",
-            "This client is not connected to the session event stream",
+            "This client is not connected to the thread event stream",
         ));
     }
     // 已连接客户端可以接管;runtime 已就绪,直接通过。
@@ -171,12 +171,12 @@ pub fn project_error(error: ProjectError) -> ApiError {
     }
 }
 
-fn session_lookup_error(error: ThreadError) -> ApiError {
+fn thread_lookup_error(error: ThreadError) -> ApiError {
     match error {
         ThreadError::NotFound => api_error(
             StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session does not exist",
+            "thread_not_found",
+            "Thread does not exist",
         ),
         ThreadError::Core(error) => core_error(error),
     }
@@ -205,11 +205,11 @@ mod tests {
     }
 
     #[test]
-    fn core_error_maps_missing_session_to_not_found() {
+    fn core_error_maps_missing_thread_to_not_found() {
         let error = core_error(omini_core::CoreError::ThreadNotFound);
 
         assert_eq!(error.0, StatusCode::NOT_FOUND);
-        assert_eq!(error.1.0.code, "session_not_found");
+        assert_eq!(error.1.0.code, "thread_not_found");
     }
 
     #[test]

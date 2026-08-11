@@ -37,7 +37,7 @@ mod tool_pause;
 /// - `thread_messages` 是从当前 `llm_messages` context version 加载、
 ///   最终交给 core/LLM 的消息；`build` 不再过滤或合并。
 pub struct ThreadRuntimeInputs {
-    snapshot: domain::events::LoadedSession,
+    snapshot: domain::events::LoadedThread,
     thread_messages: Vec<domain::message::Message>,
     llm_context_version: i64,
 }
@@ -53,17 +53,17 @@ pub struct ThreadRuntime {
     project: ProjectDir,
     // 创建 runtime 时的项目配置快照；server 用它补充 snapshot/status 中的只读信息。
     settings: Settings,
-    // session 元数据、消息、usage 和 core persistence event 的 SQLite 存储。
+    // thread 元数据、消息、usage 和 core persistence event 的 SQLite 存储。
     db: Arc<Database>,
     // core runtime 事件经过本地 seq 编号后的广播流，WebSocket 订阅和 replay 去重都用它。
     runtime_event_tx: broadcast::Sender<SequencedRuntimeEvent>,
-    // server 本地产生的协议事件入口，例如 session title 变更；fanout 会统一编号和广播。
+    // server 本地产生的协议事件入口，例如 thread title 变更；fanout 会统一编号和广播。
     server_event_inbox_tx: mpsc::UnboundedSender<client_proto::RuntimeEvent>,
     // 当前连接的 client 集合和 controller 归属；HTTP mutation 会用它做控制权检查。
     presence: Mutex<presence::ClientPresence>,
     // 尚未 resolve 的 tool pause id 集合；resolve API 用它保证幂等并防止重复点击。
     pending_tool_pauses: Arc<Mutex<HashSet<String>>>,
-    // 从 runtime 事件流派生的轻量状态投影，供 session status API 快速读取。
+    // 从 runtime 事件流派生的轻量状态投影，供 thread status API 快速读取。
     status_projection: Arc<Mutex<RuntimeStatusProjection>>,
     // 当前工作目录的 git 分支缓存；fanout task 在 TurnEnded 后更新，status API 查询用。
     git_branch: Arc<Mutex<Option<String>>>,
@@ -81,7 +81,7 @@ pub struct ThreadRuntime {
 
 impl ThreadRuntimeInputs {
     pub fn new(
-        snapshot: domain::events::LoadedSession,
+        snapshot: domain::events::LoadedThread,
         thread_messages: Vec<domain::message::Message>,
         llm_context_version: i64,
     ) -> Self {

@@ -5,7 +5,7 @@ use crate::event::bridge::{
 };
 use crate::routes::{
     ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
-    ensure_controller, require_daemon_session, require_project, require_session,
+    ensure_controller, require_daemon_thread, require_project, require_thread,
 };
 use crate::ws;
 use axum::Json;
@@ -17,60 +17,60 @@ use omini_protocol as client_proto;
 use serde::Deserialize;
 use std::sync::Arc;
 
-/// 列出指定项目下的会话。
+/// 列出指定项目下的线程。
 #[axum::debug_handler]
-pub async fn list_sessions(
+pub async fn list_threads(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
-) -> ApiResult<client_proto::SessionsResponse> {
+) -> ApiResult<client_proto::ThreadsResponse> {
     let project = require_project(&manager, &project_id).await?;
     project.list_threads().await.map(Json).map_err(core_error)
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub(crate) struct SessionStatusQuery {
+pub(crate) struct ThreadStatusQuery {
     #[serde(default)]
     status: Option<String>,
 }
 
-/// 列出指定项目下当前活跃会话的运行状态。
+/// 列出指定项目下当前活跃线程的运行状态。
 #[axum::debug_handler]
-pub async fn list_session_statuses(
+pub async fn list_thread_statuses(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
-    Query(query): Query<SessionStatusQuery>,
-) -> ApiResult<client_proto::SessionStatusesResponse> {
+    Query(query): Query<ThreadStatusQuery>,
+) -> ApiResult<client_proto::ThreadStatusesResponse> {
     let project = require_project(&manager, &project_id).await?;
     let filter = parse_status_filter(query.status.as_deref())?;
     Ok(Json(project.list_thread_statuses(filter.as_deref()).await))
 }
 
-/// 获取当前活跃会话的运行状态。
+/// 获取当前活跃线程的运行状态。
 #[axum::debug_handler]
-pub async fn session_status(
+pub async fn thread_status(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
-) -> ApiResult<client_proto::SessionRuntimeStatusResponse> {
+    Path((project_id, thread_id)): Path<(String, String)>,
+) -> ApiResult<client_proto::ThreadRuntimeStatusResponse> {
     let project = require_project(&manager, &project_id).await?;
-    let status = if let Some(session) = project.cached_thread(&session_id) {
-        session.runtime_status()
+    let status = if let Some(thread) = project.cached_thread(&thread_id) {
+        thread.runtime_status()
     } else {
         return Err(api_error(
             StatusCode::NOT_FOUND,
-            "session_status_not_found",
-            "Session is not currently active",
+            "thread_status_not_found",
+            "Thread is not currently active",
         ));
     };
-    Ok(Json(client_proto::SessionRuntimeStatusResponse { status }))
+    Ok(Json(client_proto::ThreadRuntimeStatusResponse { status }))
 }
 
-/// 在指定项目下创建一个新会话。
+/// 在指定项目下创建一个新线程。
 #[axum::debug_handler]
-pub async fn create_session(
+pub async fn create_thread(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
-    Json(request): Json<client_proto::CreateSessionRequest>,
-) -> ApiResult<client_proto::CreateSessionResponse> {
+    Json(request): Json<client_proto::CreateThreadRequest>,
+) -> ApiResult<client_proto::CreateThreadResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
         .create_thread(request)
@@ -79,157 +79,157 @@ pub async fn create_session(
         .map_err(core_error)
 }
 
-/// 列出当前会话可切换的模型。
+/// 列出当前线程可切换的模型。
 #[axum::debug_handler]
 pub async fn list_models(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
 ) -> ApiResult<client_proto::ModelsResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     Ok(Json(models_response_from_runtime_snapshot(
-        session.list_models(),
+        thread.list_models(),
     )))
 }
 
-/// 设置当前会话使用的模型。
+/// 设置当前线程使用的模型。
 #[axum::debug_handler]
 pub async fn set_model(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<client_proto::SetModelRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .set_model(set_model_command_from_protocol_request(request))
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 设置当前会话的思考强度。
+/// 设置当前线程的思考强度。
 #[axum::debug_handler]
 pub async fn set_thinking_effort(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<client_proto::SetThinkingEffortRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .set_thinking_effort(set_thinking_effort_command_from_protocol_request(request))
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 设置当前会话的活跃供应商配置。
+/// 设置当前线程的活跃供应商配置。
 #[axum::debug_handler]
 pub async fn set_profile(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<client_proto::SetActiveProfileRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .set_active_profile(set_active_profile_command_from_protocol_request(request))
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 在当前会话中切换活跃供应商配置。
+/// 在当前线程中切换活跃供应商配置。
 #[axum::debug_handler]
 pub async fn toggle_profile(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .toggle_active_profile()
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 设置当前会话是否显示思考内容。
+/// 设置当前线程是否显示思考内容。
 #[axum::debug_handler]
 pub async fn set_thinking_display(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<client_proto::SetThinkingDisplayRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .set_thinking_display(request)
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 加载并打开指定的已有会话。
+/// 加载并打开指定的已有线程。
 #[axum::debug_handler]
-pub async fn open_session(
+pub async fn open_thread(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<client_proto::OpenSessionRequest>,
+    Json(request): Json<client_proto::OpenThreadRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_controller(&session, &headers).await?;
-    // target session 的 runtime 已经在 `require_daemon_session` 阶段被
-    // `manager.session(...)` 同步加载好,这里不再需要额外的 ensure_loaded。
-    let _ = require_daemon_session(&manager, &project_id, &request.session_id).await?;
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_controller(&thread, &headers).await?;
+    // target thread 的 runtime 已经在 `require_daemon_thread` 阶段被
+    // `manager.thread(...)` 同步加载好,这里不再需要额外的 ensure_loaded。
+    let _ = require_daemon_thread(&manager, &project_id, &request.thread_id).await?;
     Ok(Json(client_proto::AckResponse::ok()))
 }
 
-/// 重命名当前会话。
+/// 重命名当前线程。
 #[axum::debug_handler]
 pub async fn rename_thread(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<client_proto::RenameSessionRequest>,
+    Json(request): Json<client_proto::RenameThreadRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_controller_claimed(&session, &headers).await?;
-    let title = normalize_session_title(request.title)?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_controller_claimed(&thread, &headers).await?;
+    let title = normalize_thread_title(request.title)?;
+    thread
         .rename_thread(title)
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 对当前会话上下文执行压缩。
+/// 对当前线程上下文执行压缩。
 #[axum::debug_handler]
 pub async fn compact_context(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<client_proto::CompactContextRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
-    let session = require_daemon_session(&manager, &project_id, &session_id).await?;
-    ensure_connected_controller(&session, &headers).await?;
-    session
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    thread
         .compact_context(request.instructions)
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 建立当前会话的事件 WebSocket 订阅。
+/// 建立当前线程的事件 WebSocket 订阅。
 #[axum::debug_handler]
-pub async fn session_events(
+pub async fn thread_events(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
@@ -242,10 +242,10 @@ pub async fn session_events(
         Ok(project) => project,
         Err(error) => return error.into_response(),
     };
-    match require_session(&project, &session_id).await {
-        Ok(session) => ws
+    match require_thread(&project, &thread_id).await {
+        Ok(thread) => ws
             .on_upgrade(move |socket| {
-                ws::handle_socket(socket, project, session, session_id, client_id)
+                ws::handle_socket(socket, project, thread, thread_id, client_id)
             })
             .into_response(),
         Err(error) => error.into_response(),
@@ -253,27 +253,27 @@ pub async fn session_events(
 }
 
 async fn ensure_controller_claimed(
-    session: &crate::thread::ThreadRuntime,
+    thread: &crate::thread::ThreadRuntime,
     headers: &HeaderMap,
 ) -> Result<(), crate::routes::ApiError> {
     let client_id = client_id_from_headers(headers)?;
-    if session.is_controller(client_id).await {
+    if thread.is_controller(client_id).await {
         Ok(())
     } else {
         Err(api_error(
             StatusCode::FORBIDDEN,
             "not_controller",
-            "This client is observing the session and cannot mutate it",
+            "This client is observing the thread and cannot mutate it",
         ))
     }
 }
 
-fn normalize_session_title(title: String) -> Result<String, crate::routes::ApiError> {
+fn normalize_thread_title(title: String) -> Result<String, crate::routes::ApiError> {
     let title = title.trim();
     if title.is_empty() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
-            "invalid_session_title",
+            "invalid_thread_title",
             "请提供新名称，用法: /rename <新名称>",
         ));
     }
@@ -282,7 +282,7 @@ fn normalize_session_title(title: String) -> Result<String, crate::routes::ApiEr
 
 fn parse_status_filter(
     status: Option<&str>,
-) -> Result<Option<Vec<client_proto::SessionRuntimeState>>, crate::routes::ApiError> {
+) -> Result<Option<Vec<client_proto::ThreadRuntimeState>>, crate::routes::ApiError> {
     let Some(status) = status.map(str::trim).filter(|status| !status.is_empty()) else {
         return Ok(None);
     };
@@ -298,13 +298,13 @@ fn parse_status_filter(
     Ok(Some(states))
 }
 
-fn parse_runtime_state(value: &str) -> Option<client_proto::SessionRuntimeState> {
+fn parse_runtime_state(value: &str) -> Option<client_proto::ThreadRuntimeState> {
     match value {
-        "idle" => Some(client_proto::SessionRuntimeState::Idle),
-        "working" => Some(client_proto::SessionRuntimeState::Working),
-        "thinking" => Some(client_proto::SessionRuntimeState::Thinking),
-        "waiting" => Some(client_proto::SessionRuntimeState::Waiting),
-        "compacting" => Some(client_proto::SessionRuntimeState::Compacting),
+        "idle" => Some(client_proto::ThreadRuntimeState::Idle),
+        "working" => Some(client_proto::ThreadRuntimeState::Working),
+        "thinking" => Some(client_proto::ThreadRuntimeState::Thinking),
+        "waiting" => Some(client_proto::ThreadRuntimeState::Waiting),
+        "compacting" => Some(client_proto::ThreadRuntimeState::Compacting),
         _ => None,
     }
 }
@@ -313,7 +313,7 @@ fn invalid_status_filter(value: &str) -> crate::routes::ApiError {
     api_error(
         StatusCode::BAD_REQUEST,
         "invalid_status_filter",
-        format!("Invalid session status filter: {value}"),
+        format!("Invalid thread status filter: {value}"),
     )
 }
 
@@ -322,8 +322,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalize_session_title_trims_and_limits_length() {
-        let title = normalize_session_title(format!("  {}  ", "a".repeat(400)))
+    fn normalize_thread_title_trims_and_limits_length() {
+        let title = normalize_thread_title(format!("  {}  ", "a".repeat(400)))
             .expect("title should normalize");
 
         assert_eq!(title.len(), 300);
@@ -331,11 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn normalize_session_title_rejects_blank_title() {
-        let error = normalize_session_title("   ".to_string()).expect_err("title should reject");
+    fn normalize_thread_title_rejects_blank_title() {
+        let error = normalize_thread_title("   ".to_string()).expect_err("title should reject");
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1.0.code, "invalid_session_title");
+        assert_eq!(error.1.0.code, "invalid_thread_title");
     }
 
     #[test]
@@ -345,8 +345,8 @@ mod tests {
         assert_eq!(
             states,
             Some(vec![
-                client_proto::SessionRuntimeState::Idle,
-                client_proto::SessionRuntimeState::Working,
+                client_proto::ThreadRuntimeState::Idle,
+                client_proto::ThreadRuntimeState::Working,
             ])
         );
     }

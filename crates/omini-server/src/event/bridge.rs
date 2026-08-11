@@ -94,12 +94,12 @@ pub fn skill_response_from_runtime_skill_detail(
     }
 }
 
-pub fn session_runtime_skills_from_runtime_snapshot(
+pub fn thread_runtime_skills_from_runtime_snapshot(
     skills: Vec<runtime_contract::thread::RuntimeSkillSnapshot>,
-) -> Vec<client_proto::SessionRuntimeSkill> {
+) -> Vec<client_proto::ThreadRuntimeSkill> {
     skills
         .into_iter()
-        .map(|skill| client_proto::SessionRuntimeSkill {
+        .map(|skill| client_proto::ThreadRuntimeSkill {
             name: skill.name,
             description: skill.description,
             short_description: skill.short_description,
@@ -315,10 +315,10 @@ fn runtime_skill_source_kind_to_protocol(
 
 fn runtime_capability_status_to_protocol(
     status: runtime_contract::thread::RuntimeCapabilityStatus,
-) -> client_proto::SessionRuntimeCapabilityStatus {
+) -> client_proto::ThreadRuntimeCapabilityStatus {
     match status {
         runtime_contract::thread::RuntimeCapabilityStatus::Available => {
-            client_proto::SessionRuntimeCapabilityStatus::Available
+            client_proto::ThreadRuntimeCapabilityStatus::Available
         }
     }
 }
@@ -355,41 +355,41 @@ pub fn models_response_from_settings(settings: &Settings) -> client_proto::Model
     }
 }
 
-/// 将数据库会话记录压缩成协议层会话摘要。
-pub fn session_summary_from_store_record(
-    session: store_model::Thread,
-) -> client_proto::SessionSummary {
-    client_proto::SessionSummary {
-        id: session.id,
-        title: session.title.unwrap_or_default(),
-        model: session.model,
-        provider: session.provider,
-        created_at: session.created_at,
-        updated_at: session.updated_at,
+/// 将数据库线程记录压缩成协议层线程摘要。
+pub fn thread_summary_from_store_record(
+    thread: store_model::Thread,
+) -> client_proto::ThreadSummary {
+    client_proto::ThreadSummary {
+        id: thread.id,
+        title: thread.title.unwrap_or_default(),
+        model: thread.model,
+        provider: thread.provider,
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
         runtime_state: None,
     }
 }
 
-/// 从首条用户输入生成默认会话标题。
-pub fn fallback_session_title_from_user_input(input: &client_proto::UserInput) -> Option<String> {
+/// 从首条用户输入生成默认线程标题。
+pub fn fallback_thread_title_from_user_input(input: &client_proto::UserInput) -> Option<String> {
     let title = input.text.trim();
     (!title.is_empty()).then(|| title.chars().take(300).collect())
 }
 
 /// 将持久化 snapshot 转成一组 runtime 事件供 TUI 恢复 UI。
-pub fn protocol_events_from_loaded_session_snapshot(
-    snapshot: domain::events::LoadedSession,
+pub fn protocol_events_from_loaded_thread_snapshot(
+    snapshot: domain::events::LoadedThread,
     context_window: Option<u32>,
     active_profile: domain::events::ActiveProfile,
 ) -> Result<Vec<client_proto::RuntimeEvent>, omini_core::CoreError> {
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
     // snapshot 投影由 server 自己生成,不走 core 内部事件通道 —— title 也用
-    // server-side helper 直接构造,绕开 `runtime_contract::RuntimeToServerEvent::SessionTitleChanged`。
-    // `SessionSnapshot` 同样在 server 端直接构造 `client_proto::TypedRuntimeEvent`,
+    // server-side helper 直接构造,绕开 `runtime_contract::RuntimeToServerEvent::ThreadTitleChanged`。
+    // `ThreadSnapshot` 同样在 server 端直接构造 `client_proto::TypedRuntimeEvent`,
     // core 不再产生这条事件。
     let events = [
-        session_title_changed_protocol_event(snapshot.title),
+        thread_title_changed_protocol_event(snapshot.title),
         runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::ModelChanged {
                 provider: snapshot.provider,
@@ -401,9 +401,9 @@ pub fn protocol_events_from_loaded_session_snapshot(
         runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::ActiveProfileChanged(active_profile),
         )?,
-        client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::SessionSnapshot(
-            client_proto::SessionSnapshotEvent {
-                session_id: Some(snapshot.session_id),
+        client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThreadSnapshot(
+            client_proto::ThreadSnapshotEvent {
+                thread_id: Some(snapshot.thread_id),
                 messages: snapshot.messages,
                 agent_tasks: snapshot.agent_tasks,
                 usage,
@@ -429,11 +429,11 @@ pub fn thinking_display_changed_protocol_event(show: bool) -> client_proto::Runt
     ))
 }
 
-/// Server 端直接构造的 session title 变更事件。新架构下 title 由 server 编排层
+/// Server 端直接构造的 thread title 变更事件。新架构下 title 由 server 编排层
 /// 负责,绕开 core 内部事件通道 —— 这里和 `thinking_display_changed_event` 对称。
-pub fn session_title_changed_protocol_event(title: Option<String>) -> client_proto::RuntimeEvent {
-    client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::SessionTitleChanged(
-        client_proto::SessionTitleChangedEvent { title },
+pub fn thread_title_changed_protocol_event(title: Option<String>) -> client_proto::RuntimeEvent {
+    client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThreadTitleChanged(
+        client_proto::ThreadTitleChangedEvent { title },
     ))
 }
 
@@ -532,7 +532,7 @@ fn typed_runtime_event_from_runtime_contract_event(
             client_proto::TypedRuntimeEvent::CompactSummaryStarted(
                 client_proto::CompactSummaryStartedEvent {
                     trigger: event.trigger,
-                    session_id: event.session_id,
+                    thread_id: event.thread_id,
                     agent_label: event.agent_label,
                 },
             )
@@ -542,7 +542,7 @@ fn typed_runtime_event_from_runtime_contract_event(
                 client_proto::CompactSummaryDeltaEvent {
                     trigger: event.trigger,
                     delta: event.delta,
-                    session_id: event.session_id,
+                    thread_id: event.thread_id,
                     agent_label: event.agent_label,
                 },
             )
@@ -553,7 +553,7 @@ fn typed_runtime_event_from_runtime_contract_event(
                     trigger: event.trigger,
                     summary: event.summary,
                     after_tokens: event.after_tokens,
-                    session_id: event.session_id,
+                    thread_id: event.thread_id,
                     agent_label: event.agent_label,
                 },
             )
@@ -563,7 +563,7 @@ fn typed_runtime_event_from_runtime_contract_event(
                 client_proto::CompactSummaryFailedEvent {
                     trigger: event.trigger,
                     message: event.message,
-                    session_id: event.session_id,
+                    thread_id: event.thread_id,
                     agent_label: event.agent_label,
                 },
             )
@@ -571,8 +571,8 @@ fn typed_runtime_event_from_runtime_contract_event(
         runtime_contract::RuntimeToServerEvent::AgentTaskEvent(event) => {
             client_proto::TypedRuntimeEvent::AgentTaskEvent(event)
         }
-        runtime_contract::RuntimeToServerEvent::SessionSwitched { from, to } => {
-            client_proto::TypedRuntimeEvent::SessionSwitched(client_proto::SessionSwitchedEvent {
+        runtime_contract::RuntimeToServerEvent::ThreadSwitched { from, to } => {
+            client_proto::TypedRuntimeEvent::ThreadSwitched(client_proto::ThreadSwitchedEvent {
                 from,
                 to,
             })
@@ -596,21 +596,20 @@ mod tests {
     use omini_domain as domain;
 
     #[test]
-    fn initial_session_title_from_input_trims_and_limits_text() {
+    fn initial_thread_title_from_input_trims_and_limits_text() {
         let input = client_proto::UserInput::plain(format!("  {}  ", "a".repeat(400)));
 
-        let title =
-            fallback_session_title_from_user_input(&input).expect("title should be present");
+        let title = fallback_thread_title_from_user_input(&input).expect("title should be present");
 
         assert_eq!(title.len(), 300);
         assert!(title.chars().all(|ch| ch == 'a'));
     }
 
     #[test]
-    fn initial_session_title_from_input_skips_blank_text() {
+    fn initial_thread_title_from_input_skips_blank_text() {
         let input = client_proto::UserInput::plain("   ");
 
-        assert_eq!(fallback_session_title_from_user_input(&input), None);
+        assert_eq!(fallback_thread_title_from_user_input(&input), None);
     }
 
     #[test]
@@ -656,10 +655,10 @@ mod tests {
     }
 
     #[test]
-    fn session_snapshot_events_replay_current_session_state() {
-        let events = protocol_events_from_loaded_session_snapshot(
-            domain::events::LoadedSession {
-                session_id: "s1".to_string(),
+    fn thread_snapshot_events_replay_current_thread_state() {
+        let events = protocol_events_from_loaded_thread_snapshot(
+            domain::events::LoadedThread {
+                thread_id: "s1".to_string(),
                 provider: "main".to_string(),
                 model: "test-model".to_string(),
                 thinking_effort: None,
@@ -669,7 +668,7 @@ mod tests {
                     domain::message::Message::from_user_text("hello".to_string()),
                 )],
                 agent_tasks: Vec::new(),
-                usage: domain::events::SessionUsageSnapshot {
+                usage: domain::events::ThreadUsageSnapshot {
                     current_context_tokens: 3,
                     total_tokens: 5,
                     total_cached_tokens: 1,
@@ -684,15 +683,15 @@ mod tests {
         assert_eq!(
             events.iter().map(|event| event.kind()).collect::<Vec<_>>(),
             vec![
-                "session_title_changed",
+                "thread_title_changed",
                 "model_changed",
                 "active_profile_changed",
-                "session_snapshot"
+                "thread_snapshot"
             ]
         );
         assert!(matches!(
             &events[0].event,
-            client_proto::TypedRuntimeEvent::SessionTitleChanged(event)
+            client_proto::TypedRuntimeEvent::ThreadTitleChanged(event)
                 if event.title.as_deref() == Some("hello")
         ));
         assert!(matches!(
@@ -707,8 +706,8 @@ mod tests {
         ));
         assert!(matches!(
             &events[3].event,
-            client_proto::TypedRuntimeEvent::SessionSnapshot(event)
-                if event.session_id.as_deref() == Some("s1")
+            client_proto::TypedRuntimeEvent::ThreadSnapshot(event)
+                if event.thread_id.as_deref() == Some("s1")
                     && event.usage.context_window == Some(1000)
                     && event.messages.len() == 1
         ));
@@ -742,7 +741,7 @@ mod tests {
                     trigger: domain::events::CompactTrigger::Manual,
                     summary: "summary".to_string(),
                     after_tokens: 42,
-                    session_id: Some("session_1".to_string()),
+                    thread_id: Some("thread_1".to_string()),
                     agent_label: None,
                 },
             ),
@@ -757,7 +756,7 @@ mod tests {
                     trigger: client_proto::CompactTrigger::Manual,
                     summary: "summary".to_string(),
                     after_tokens: 42,
-                    session_id: Some("session_1".to_string()),
+                    thread_id: Some("thread_1".to_string()),
                     agent_label: None,
                 },
             )

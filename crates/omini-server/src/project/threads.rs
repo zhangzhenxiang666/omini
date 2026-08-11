@@ -1,4 +1,4 @@
-use crate::event::bridge::session_summary_from_store_record;
+use crate::event::bridge::thread_summary_from_store_record;
 use crate::project::model_selection::{EffortSelection, ModelSelection};
 use crate::project::{ProjectManager, ThreadError};
 use crate::store::{self as store_model, Database};
@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 use tracing::Instrument;
 
 impl ProjectManager {
-    pub async fn list_threads(&self) -> Result<client_proto::SessionsResponse, CoreError> {
+    pub async fn list_threads(&self) -> Result<client_proto::ThreadsResponse, CoreError> {
         let runtime_states = {
             let threads = self.threads.lock().expect("threads lock poisoned");
             threads
@@ -24,29 +24,27 @@ impl ProjectManager {
                 .map(|(thread_id, thread)| (thread_id.clone(), thread.runtime_state()))
                 .collect::<HashMap<_, _>>()
         };
-        let sessions = self
+        let threads = self
             .db
             .list_threads(&self.project_id)
             .await
-            .map_err(|error| {
-                CoreError::persistence("failed to list sessions", error.to_string())
-            })?;
-        let sessions = session_summaries_with_runtime_states(sessions, &runtime_states);
-        Ok(client_proto::SessionsResponse { sessions })
+            .map_err(|error| CoreError::persistence("failed to list threads", error.to_string()))?;
+        let threads = thread_summaries_with_runtime_states(threads, &runtime_states);
+        Ok(client_proto::ThreadsResponse { threads })
     }
 
     pub async fn list_thread_statuses(
         &self,
-        filter: Option<&[client_proto::SessionRuntimeState]>,
-    ) -> client_proto::SessionStatusesResponse {
-        let mut sessions = {
+        filter: Option<&[client_proto::ThreadRuntimeState]>,
+    ) -> client_proto::ThreadStatusesResponse {
+        let mut threads = {
             let threads = self.threads.lock().expect("threads lock poisoned");
             threads.values().cloned().collect::<Vec<_>>()
         };
-        sessions.sort_by(|left, right| left.thread_id().cmp(right.thread_id()));
+        threads.sort_by(|left, right| left.thread_id().cmp(right.thread_id()));
 
         let mut statuses = Vec::new();
-        for thread in sessions {
+        for thread in threads {
             let status = thread.runtime_status();
             let include = filter
                 .map(|states| states.contains(&status.state))
@@ -56,13 +54,13 @@ impl ProjectManager {
             }
         }
 
-        client_proto::SessionStatusesResponse { statuses }
+        client_proto::ThreadStatusesResponse { statuses }
     }
 
     pub async fn create_thread(
         &self,
-        request: client_proto::CreateSessionRequest,
-    ) -> Result<client_proto::CreateSessionResponse, CoreError> {
+        request: client_proto::CreateThreadRequest,
+    ) -> Result<client_proto::CreateThreadResponse, CoreError> {
         let settings = self.settings_for_model_selection(
             ModelSelection::PartialOverlay {
                 provider: request.provider.as_deref(),
@@ -123,14 +121,14 @@ impl ProjectManager {
             .lock()
             .expect("threads lock poisoned")
             .insert(thread_id.clone(), runtime);
-        Ok(client_proto::CreateSessionResponse {
-            session_id: Some(thread_id),
+        Ok(client_proto::CreateThreadResponse {
+            thread_id: Some(thread_id),
         })
     }
 
-    /// 「在新会话中执行计划」审批通过后由 client 调用的 HTTP 路由触发的真正
+    /// 「在新线程中执行计划」审批通过后由 client 调用的 HTTP 路由触发的真正
     /// fork 路径：读 plan 文件 → 构造新 `ThreadRuntime` → 把 plan 包装为
-    /// user message 推给新 core → 向原 thread 广播外部 `SessionSwitched`。
+    /// user message 推给新 core → 向原 thread 广播外部 `ThreadSwitched`。
     ///
     /// 原 `ThreadRuntime` 不会被强制 shutdown；它由现有 reclaim 机制在所有 client
     /// 断开 + 投影 Idle 后自然回收。
@@ -148,7 +146,7 @@ impl ProjectManager {
             .join(format!("{plan_id}.md"));
         let plan_content = std::fs::read_to_string(&plan_path).map_err(|error| {
             CoreError::new(format!(
-                "failed to read plan file for forked session {}: {error}",
+                "failed to read plan file for forked thread {}: {error}",
                 plan_path.display()
             ))
         })?;
@@ -161,7 +159,7 @@ impl ProjectManager {
             .map_err(|error| {
                 CoreError::project_state("failed to create thread directory", error)
             })?;
-        // 新 thread 的 title 派生自源 thread，加上后缀以便在外部会话列表中区分。
+        // 新 thread 的 title 派生自源 thread，加上后缀以便在外部线程列表中区分。
         let source_title = self
             .db
             .get_thread(from_thread_id)
@@ -169,7 +167,7 @@ impl ProjectManager {
             .map_err(|error| {
                 CoreError::persistence("failed to load source thread title", error.to_string())
             })?
-            .and_then(|session| session.title)
+            .and_then(|thread| thread.title)
             .map(|title| title.trim().to_string())
             .filter(|title| !title.is_empty());
         let new_title = source_title
@@ -237,12 +235,12 @@ impl ProjectManager {
             .lock()
             .expect("threads lock poisoned")
             .insert(new_thread_id.clone(), runtime);
-        // 6. 通过原 thread 的 server_event_inbox_tx 广播外部 SessionSwitched，
+        // 6. 通过原 thread 的 server_event_inbox_tx 广播外部 ThreadSwitched，
         // 走普通 runtime event 通道,所有 ws loop 会向自己的客户端转发
-        // `TypedRuntimeEvent::SessionSwitched`。原 thread 已被 reclaim
+        // `TypedRuntimeEvent::ThreadSwitched`。原 thread 已被 reclaim
         // (无客户端连接)时跳过——没有接收者,推送无意义。
         if let Some(old) = self.cached_thread(from_thread_id) {
-            old.broadcast_session_switched(from_thread_id.to_string(), new_thread_id.clone());
+            old.broadcast_thread_switched(from_thread_id.to_string(), new_thread_id.clone());
         }
         Ok(new_thread_id)
     }
@@ -425,7 +423,7 @@ impl ProjectManager {
     }
 }
 
-/// 组装外部 `LoadedSession` 与内部 LLM context。
+/// 组装外部 `LoadedThread` 与内部 LLM context。
 ///
 /// UI 历史只从 `messages` 加载；LLM 只加载 `thread.llm_context_version`
 /// 指向的 `llm_messages` 快照，两个视角互不回退。
@@ -441,8 +439,8 @@ async fn load_thread_snapshot(
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
     let messages = crate::history::load_messages(db, thread_id, &thread_dir).await;
     let agent_tasks = crate::history::load_agent_tasks_for_thread(db, thread_id, project).await;
-    let snapshot = domain::events::LoadedSession {
-        session_id: thread.id.clone(),
+    let snapshot = domain::events::LoadedThread {
+        thread_id: thread.id.clone(),
         provider: thread.provider.clone(),
         model: thread.model.clone(),
         thinking_effort: settings.thinking_effort,
@@ -450,7 +448,7 @@ async fn load_thread_snapshot(
         title: thread.title.clone(),
         messages,
         agent_tasks,
-        usage: domain::events::SessionUsageSnapshot {
+        usage: domain::events::ThreadUsageSnapshot {
             current_context_tokens: thread.current_context_tokens,
             total_tokens: thread.total_tokens,
             total_cached_tokens: thread.total_cached_tokens,
@@ -468,14 +466,14 @@ async fn load_thread_snapshot(
     ))
 }
 
-fn session_summaries_with_runtime_states(
-    sessions: Vec<store_model::Thread>,
-    runtime_states: &HashMap<String, client_proto::SessionRuntimeState>,
-) -> Vec<client_proto::SessionSummary> {
-    sessions
+fn thread_summaries_with_runtime_states(
+    threads: Vec<store_model::Thread>,
+    runtime_states: &HashMap<String, client_proto::ThreadRuntimeState>,
+) -> Vec<client_proto::ThreadSummary> {
+    threads
         .into_iter()
-        .map(|session| {
-            let mut summary = session_summary_from_store_record(session);
+        .map(|thread| {
+            let mut summary = thread_summary_from_store_record(thread);
             summary.runtime_state = runtime_states.get(&summary.id).copied();
             summary
         })
@@ -495,50 +493,50 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
-    fn session_summaries_merge_loaded_runtime_states() {
-        let sessions = vec![test_thread("loaded"), test_thread("stored")];
+    fn thread_summaries_merge_loaded_runtime_states() {
+        let threads = vec![test_thread("loaded"), test_thread("stored")];
         let runtime_states = HashMap::from([(
             "loaded".to_string(),
-            client_proto::SessionRuntimeState::Working,
+            client_proto::ThreadRuntimeState::Working,
         )]);
 
-        let summaries = session_summaries_with_runtime_states(sessions, &runtime_states);
+        let summaries = thread_summaries_with_runtime_states(threads, &runtime_states);
 
         assert_eq!(
             summaries
                 .iter()
-                .find(|session| session.id == "loaded")
-                .and_then(|session| session.runtime_state),
-            Some(client_proto::SessionRuntimeState::Working)
+                .find(|thread| thread.id == "loaded")
+                .and_then(|thread| thread.runtime_state),
+            Some(client_proto::ThreadRuntimeState::Working)
         );
         assert_eq!(
             summaries
                 .iter()
-                .find(|session| session.id == "stored")
-                .and_then(|session| session.runtime_state),
+                .find(|thread| thread.id == "stored")
+                .and_then(|thread| thread.runtime_state),
             None
         );
     }
 
     #[tokio::test]
-    async fn new_and_restored_sessions_use_latest_config_without_hot_updating_cached_runtime() {
-        let temp = unique_temp_root("session-config-refresh");
+    async fn new_and_restored_threads_use_latest_config_without_hot_updating_cached_runtime() {
+        let temp = unique_temp_root("thread-config-refresh");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
 
-        let old_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest {
+        let old_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest {
                 provider: Some("openai".to_string()),
                 model: Some("fast".to_string()),
                 thinking_effort: None,
                 profile: None,
             })
             .await
-            .expect("old session should be created")
-            .session_id
-            .expect("session id should be returned");
+            .expect("old thread should be created")
+            .thread_id
+            .expect("thread id should be returned");
         let old_runtime = manager
-            .get_or_load_thread(&old_session_id)
+            .get_or_load_thread(&old_thread_id)
             .await
             .expect("old runtime should be cached");
         assert!(!has_provider(
@@ -553,31 +551,31 @@ mod tests {
             "anthropic"
         ));
 
-        let new_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest {
+        let new_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest {
                 provider: Some("anthropic".to_string()),
                 model: Some("claude-test".to_string()),
                 thinking_effort: Some(client_proto::ThinkingEffort::High),
                 profile: None,
             })
             .await
-            .expect("new session should use reloaded config")
-            .session_id
-            .expect("session id should be returned");
+            .expect("new thread should use reloaded config")
+            .thread_id
+            .expect("thread id should be returned");
         let new_record = manager
             .db
-            .get_thread(&new_session_id)
+            .get_thread(&new_thread_id)
             .await
-            .expect("new session should load")
-            .expect("new session should exist");
+            .expect("new thread should load")
+            .expect("new thread should exist");
         assert_eq!(new_record.provider, "anthropic");
         assert_eq!(new_record.model, "claude-test");
 
         let removed = manager
             .threads
             .lock()
-            .expect("sessions lock poisoned")
-            .remove(&old_session_id)
+            .expect("threads lock poisoned")
+            .remove(&old_thread_id)
             .expect("old runtime should be cached");
         removed
             .shutdown()
@@ -585,9 +583,9 @@ mod tests {
             .expect("old runtime should shut down");
 
         let restored = manager
-            .get_or_load_thread(&old_session_id)
+            .get_or_load_thread(&old_thread_id)
             .await
-            .expect("old session should restore");
+            .expect("old thread should restore");
         let restored_models = restored.list_models();
         assert!(has_provider(&restored_models.providers, "anthropic"));
         assert_eq!(restored_models.current_provider, "openai");
@@ -598,7 +596,7 @@ mod tests {
             .await
             .expect("restored runtime should shut down");
         let new_runtime = manager
-            .get_or_load_thread(&new_session_id)
+            .get_or_load_thread(&new_thread_id)
             .await
             .expect("new runtime should be cached");
         new_runtime
@@ -608,33 +606,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_session_if_idle_keeps_active_runtime_without_clients() {
+    async fn close_thread_if_idle_keeps_active_runtime_without_clients() {
         let temp = unique_temp_root("idle-active-runtime");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
-        let session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("session should create")
-            .session_id
-            .expect("session id should be returned");
-        let session = manager
-            .get_or_load_thread(&session_id)
+            .expect("thread should create")
+            .thread_id
+            .expect("thread id should be returned");
+        let thread = manager
+            .get_or_load_thread(&thread_id)
             .await
-            .expect("session should load");
-        session.record_runtime_event_for_test("run_started");
+            .expect("thread should load");
+        thread.record_runtime_event_for_test("run_started");
 
-        manager.close_thread_if_idle(&session_id, &session).await;
+        manager.close_thread_if_idle(&thread_id, &thread).await;
 
         assert!(
             manager
                 .threads
                 .lock()
-                .expect("sessions lock poisoned")
-                .contains_key(&session_id)
+                .expect("threads lock poisoned")
+                .contains_key(&thread_id)
         );
-        session.shutdown().await.expect("session should shut down");
+        thread.shutdown().await.expect("thread should shut down");
     }
 
     #[tokio::test]
@@ -643,44 +641,44 @@ mod tests {
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
-        let session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("session should create")
-            .session_id
-            .expect("session id should be returned");
-        let session = manager
-            .get_or_load_thread(&session_id)
+            .expect("thread should create")
+            .thread_id
+            .expect("thread id should be returned");
+        let thread = manager
+            .get_or_load_thread(&thread_id)
             .await
-            .expect("session should load");
-        session.record_runtime_event_for_test("run_started");
+            .expect("thread should load");
+        thread.record_runtime_event_for_test("run_started");
 
-        manager.close_thread_if_idle(&session_id, &session).await;
-        session.record_runtime_event_for_test("run_finished");
+        manager.close_thread_if_idle(&thread_id, &thread).await;
+        thread.record_runtime_event_for_test("run_finished");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         assert!(
             !manager
                 .threads
                 .lock()
-                .expect("sessions lock poisoned")
-                .contains_key(&session_id)
+                .expect("threads lock poisoned")
+                .contains_key(&thread_id)
         );
     }
 
     #[tokio::test]
-    async fn fork_session_for_plan_creates_new_runtime_and_broadcasts_session_switched() {
-        let temp = unique_temp_root("fork-session-for-plan");
+    async fn fork_thread_for_plan_creates_new_runtime_and_broadcasts_thread_switched() {
+        let temp = unique_temp_root("fork-thread-for-plan");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
 
-        let from_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let from_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("from session should be created")
-            .session_id
-            .expect("session id should be returned");
+            .expect("from thread should be created")
+            .thread_id
+            .expect("thread id should be returned");
 
         let plans_dir = project.path().join("plans");
         std::fs::create_dir_all(&plans_dir).expect("plans dir should be created");
@@ -690,61 +688,61 @@ mod tests {
         )
         .expect("plan file should be written");
 
-        let from_session = manager
-            .get_or_load_thread(&from_session_id)
+        let from_thread = manager
+            .get_or_load_thread(&from_thread_id)
             .await
-            .expect("from session should load");
-        let mut events = from_session.subscribe();
+            .expect("from thread should load");
+        let mut events = from_thread.subscribe();
 
-        let to_session_id = manager
+        let to_thread_id = manager
             .fork_thread_for_plan(
-                &from_session_id,
+                &from_thread_id,
                 "plan",
                 domain::events::PlanExecutionProfile::Main,
             )
             .await
             .expect("fork should succeed");
-        assert_ne!(to_session_id, from_session_id);
+        assert_ne!(to_thread_id, from_thread_id);
 
         {
-            let sessions = manager.threads.lock().expect("threads lock poisoned");
-            assert!(sessions.contains_key(&to_session_id));
-            assert!(sessions.contains_key(&from_session_id));
+            let threads = manager.threads.lock().expect("threads lock poisoned");
+            assert!(threads.contains_key(&to_thread_id));
+            assert!(threads.contains_key(&from_thread_id));
         }
 
         let event = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            recv_runtime_event_kind(&mut events, "session_switched"),
+            recv_runtime_event_kind(&mut events, "thread_switched"),
         )
         .await
-        .expect("session switch event should arrive within timeout");
-        let client_proto::TypedRuntimeEvent::SessionSwitched(client_proto::SessionSwitchedEvent {
+        .expect("thread switch event should arrive within timeout");
+        let client_proto::TypedRuntimeEvent::ThreadSwitched(client_proto::ThreadSwitchedEvent {
             from,
             to,
         }) = event.event.event
         else {
-            panic!("expected SessionSwitched typed event");
+            panic!("expected ThreadSwitched typed event");
         };
-        assert_eq!(from, from_session_id);
-        assert_eq!(to, to_session_id);
+        assert_eq!(from, from_thread_id);
+        assert_eq!(to, to_thread_id);
 
         let record = manager
             .db
-            .get_thread(&to_session_id)
+            .get_thread(&to_thread_id)
             .await
             .expect("db should load")
-            .expect("new session should be persisted");
-        assert_eq!(record.id, to_session_id);
+            .expect("new thread should be persisted");
+        assert_eq!(record.id, to_thread_id);
         assert_eq!(record.title.as_deref(), Some("(new from plan)"));
 
-        let to_session_dir = project.thread(&to_session_id);
+        let to_thread_dir = project.thread(&to_thread_id);
         let plan_text =
             omini_core::runtime::compacted_plan_context("# Approved plan\n\n1. Execute it.");
         let history = tokio::time::timeout(std::time::Duration::from_millis(500), async {
             loop {
                 let history = manager
                     .db
-                    .load_current_llm_messages(&to_session_id, &to_session_dir)
+                    .load_current_llm_messages(&to_thread_id, &to_thread_dir)
                     .await
                     .expect("new thread LLM context should load");
                 if !history.is_empty() {
@@ -767,21 +765,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_session_for_plan_appends_suffix_to_source_title() {
-        let temp = unique_temp_root("fork-session-for-plan-title");
+    async fn fork_thread_for_plan_appends_suffix_to_source_title() {
+        let temp = unique_temp_root("fork-thread-for-plan-title");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
 
-        let from_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let from_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("from session should be created")
-            .session_id
-            .expect("session id should be returned");
+            .expect("from thread should be created")
+            .thread_id
+            .expect("thread id should be returned");
         manager
             .db
-            .update_thread_title(&from_session_id, "refactor auth flow")
+            .update_thread_title(&from_thread_id, "refactor auth flow")
             .await
             .expect("source title should update");
 
@@ -789,9 +787,9 @@ mod tests {
         std::fs::create_dir_all(&plans_dir).expect("plans dir should be created");
         std::fs::write(plans_dir.join("plan.md"), "# plan\n").expect("plan file should be written");
 
-        let to_session_id = manager
+        let to_thread_id = manager
             .fork_thread_for_plan(
-                &from_session_id,
+                &from_thread_id,
                 "plan",
                 domain::events::PlanExecutionProfile::Main,
             )
@@ -800,10 +798,10 @@ mod tests {
 
         let record = manager
             .db
-            .get_thread(&to_session_id)
+            .get_thread(&to_thread_id)
             .await
             .expect("db should load")
-            .expect("new session should be persisted");
+            .expect("new thread should be persisted");
         assert_eq!(
             record.title.as_deref(),
             Some("refactor auth flow (new from plan)")
@@ -811,22 +809,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_session_for_plan_returns_error_when_plan_file_missing() {
-        let temp = unique_temp_root("fork-session-for-plan-missing");
+    async fn fork_thread_for_plan_returns_error_when_plan_file_missing() {
+        let temp = unique_temp_root("fork-thread-for-plan-missing");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
 
-        let from_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let from_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("from session should be created")
-            .session_id
-            .expect("session id should be returned");
+            .expect("from thread should be created")
+            .thread_id
+            .expect("thread id should be returned");
 
         let error = manager
             .fork_thread_for_plan(
-                &from_session_id,
+                &from_thread_id,
                 "plan",
                 domain::events::PlanExecutionProfile::Main,
             )
@@ -838,29 +836,29 @@ mod tests {
             "error message should mention read failure: {message}"
         );
 
-        let sessions = manager.threads.lock().expect("threads lock poisoned");
+        let threads = manager.threads.lock().expect("threads lock poisoned");
         assert_eq!(
-            sessions.len(),
+            threads.len(),
             1,
-            "only the original session should exist on failure"
+            "only the original thread should exist on failure"
         );
-        assert!(sessions.contains_key(&from_session_id));
+        assert!(threads.contains_key(&from_thread_id));
     }
 
     #[tokio::test]
-    async fn fork_session_for_plan_uses_server_assigned_id_with_no_extra_session_row() {
-        let temp = unique_temp_root("fork-session-for-plan-id");
+    async fn fork_thread_for_plan_uses_server_assigned_id_with_no_extra_thread_row() {
+        let temp = unique_temp_root("fork-thread-for-plan-id");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
         let project_id = manager.id().to_string();
 
-        let from_session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let from_thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("from session should be created")
-            .session_id
-            .expect("session id should be returned");
+            .expect("from thread should be created")
+            .thread_id
+            .expect("thread id should be returned");
 
         let baseline = manager
             .db
@@ -877,15 +875,15 @@ mod tests {
         )
         .expect("plan file should be written");
 
-        let to_session_id = manager
+        let to_thread_id = manager
             .fork_thread_for_plan(
-                &from_session_id,
+                &from_thread_id,
                 "plan",
                 domain::events::PlanExecutionProfile::Main,
             )
             .await
             .expect("fork should succeed");
-        assert_ne!(to_session_id, from_session_id);
+        assert_ne!(to_thread_id, from_thread_id);
 
         tokio::time::timeout(std::time::Duration::from_millis(500), async {
             loop {
@@ -902,28 +900,28 @@ mod tests {
             }
         })
         .await
-        .expect("new session should be persisted within timeout");
+        .expect("new thread should be persisted within timeout");
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let sessions = manager
+        let threads = manager
             .db
             .list_threads(&project_id)
             .await
             .expect("post-fork list should load");
         assert_eq!(
-            sessions.len(),
+            threads.len(),
             baseline + 1,
-            "fork must create exactly one additional session row, not a duplicate from the core"
+            "fork must create exactly one additional thread row, not a duplicate from the core"
         );
 
-        let new_session = sessions
+        let new_thread = threads
             .iter()
-            .find(|session| session.id == to_session_id)
-            .expect("new session should be in the DB list");
-        assert_eq!(new_session.id, to_session_id);
+            .find(|thread| thread.id == to_thread_id)
+            .expect("new thread should be in the DB list");
+        assert_eq!(new_thread.id, to_thread_id);
 
         assert!(
-            manager.cached_thread(&to_session_id).is_some(),
+            manager.cached_thread(&to_thread_id).is_some(),
             "new ThreadRuntime should be cached under the server-assigned id"
         );
     }

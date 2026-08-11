@@ -86,7 +86,7 @@ impl CoreError {
             Self::Internal { .. } => "core_error",
             Self::RuntimeClosed => "runtime_closed",
             Self::RuntimeLoadInterrupted => "runtime_load_interrupted",
-            Self::ThreadNotFound => "session_not_found",
+            Self::ThreadNotFound => "thread_not_found",
             Self::InvalidModelSelection { .. } => "invalid_model_selection",
             Self::Config { .. } => "config_error",
             Self::ProjectState { .. } => "project_state_error",

@@ -1,7 +1,7 @@
 use super::*;
 use crate::types::events::{
     AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    PermissionPreview, RuntimeToUiEvent, SessionUsageSnapshot, ToolPauseKind, ToolPauseRequest,
+    PermissionPreview, RuntimeToUiEvent, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
 };
 use chrono::Utc;
 use omini_domain::display::MentionKind;
@@ -91,7 +91,7 @@ fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
         preview_tool_use_id: None,
         tool_name: "bash".to_string(),
         permission_source: None,
-        source_session_id: None,
+        source_thread_id: None,
         source_agent_label: None,
         kind: ToolPauseKind::Permission(PermissionPreview::Custom {
             tool_name: "bash".to_string(),
@@ -101,19 +101,19 @@ fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
 }
 
 fn query_runtime_status(
-    state: protocol::SessionRuntimeState,
+    state: protocol::ThreadRuntimeState,
     elapsed_ms: u64,
     pending_pause_ids: &[&str],
-) -> protocol::SessionRuntimeStatus {
-    protocol::SessionRuntimeStatus {
-        session_id: "session_1".to_string(),
+) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
         state,
         active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
         connected_client_count: 1,
-        activity: Some(protocol::SessionRuntimeActivity {
-            kind: protocol::SessionRuntimeActivityKind::Query,
+        activity: Some(protocol::ThreadRuntimeActivity {
+            kind: protocol::ThreadRuntimeActivityKind::Query,
             started_at: Utc::now(),
             elapsed_ms,
         }),
@@ -125,21 +125,21 @@ fn query_runtime_status(
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagent_sessions: Vec::new(),
+        subagent_threads: Vec::new(),
         git_branch: None,
     }
 }
 
-fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
-    protocol::SessionRuntimeStatus {
-        session_id: "session_1".to_string(),
-        state: protocol::SessionRuntimeState::Compacting,
+fn compact_runtime_status(elapsed_ms: u64) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
+        state: protocol::ThreadRuntimeState::Compacting,
         active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
         connected_client_count: 1,
-        activity: Some(protocol::SessionRuntimeActivity {
-            kind: protocol::SessionRuntimeActivityKind::Compact,
+        activity: Some(protocol::ThreadRuntimeActivity {
+            kind: protocol::ThreadRuntimeActivityKind::Compact,
             started_at: Utc::now(),
             elapsed_ms,
         }),
@@ -148,15 +148,15 @@ fn compact_runtime_status(elapsed_ms: u64) -> protocol::SessionRuntimeStatus {
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagent_sessions: Vec::new(),
+        subagent_threads: Vec::new(),
         git_branch: None,
     }
 }
 
-fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus {
-    protocol::SessionRuntimeStatus {
-        session_id: "session_1".to_string(),
-        state: protocol::SessionRuntimeState::Idle,
+fn pending_plan_runtime_status(plan_id: &str) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
+        state: protocol::ThreadRuntimeState::Idle,
         active_profile: protocol::ActiveProfile::Main,
         loaded: true,
         controller_id: Some("client_1".to_string()),
@@ -171,7 +171,7 @@ fn pending_plan_runtime_status(plan_id: &str) -> protocol::SessionRuntimeStatus 
         active_tools: Vec::new(),
         skills: Vec::new(),
         mcp_servers: Vec::new(),
-        subagent_sessions: Vec::new(),
+        subagent_threads: Vec::new(),
         git_branch: None,
     }
 }
@@ -312,7 +312,7 @@ fn run_finished_appends_elapsed_divider_and_clears_timer() {
 #[test]
 fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
     let mut state = UiState::new();
-    let status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 2_500, &["tool_1"]);
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 2_500, &["tool_1"]);
 
     state.apply_event(RuntimeToUiEvent::RunStarted);
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
@@ -334,11 +334,11 @@ fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
 #[test]
 fn initial_runtime_status_restores_full_background_pause_without_activity() {
     let mut state = UiState::new();
-    let mut status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 0, &[]);
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 0, &[]);
     status.activity = None;
     let mut pause = permission_pause("agent_1:tool_1");
     pause.preview_tool_use_id = Some("tool_1".to_string());
-    pause.source_session_id = Some("agent_1".to_string());
+    pause.source_thread_id = Some("agent_1".to_string());
     pause.source_agent_label = Some("explorer".to_string());
     status.pending_pauses = vec![pause.clone()];
 
@@ -354,7 +354,7 @@ fn initial_runtime_status_restores_full_background_pause_without_activity() {
 #[test]
 fn calibration_status_does_not_restore_stale_pause() {
     let mut state = UiState::new();
-    let status = query_runtime_status(protocol::SessionRuntimeState::Waiting, 0, &["tool_1"]);
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 0, &["tool_1"]);
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -368,7 +368,7 @@ fn calibration_status_does_not_restore_stale_pause() {
 fn finished_subagent_removes_its_pending_pause() {
     let mut state = UiState::new();
     let mut pause = permission_pause("sub_1:tool_1");
-    pause.source_session_id = Some("sub_1".to_string());
+    pause.source_thread_id = Some("sub_1".to_string());
     state.apply_event(RuntimeToUiEvent::ToolPauseRequested(pause));
 
     state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
@@ -389,7 +389,7 @@ fn finished_subagent_removes_its_pending_pause() {
 #[test]
 fn runtime_status_sync_applies_thinking_state() {
     let mut state = UiState::new();
-    let status = query_runtime_status(protocol::SessionRuntimeState::Thinking, 2_500, &[]);
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Thinking, 2_500, &[]);
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -405,7 +405,7 @@ fn idle_runtime_status_clears_main_query_while_background_task_remains_active() 
     let mut state = UiState::new();
     state.apply_event(RuntimeToUiEvent::RunStarted);
     start_subagent(&mut state);
-    let mut status = query_runtime_status(protocol::SessionRuntimeState::Idle, 0, &[]);
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Idle, 0, &[]);
     status.activity = None;
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
@@ -422,7 +422,7 @@ fn idle_runtime_status_clears_main_query_while_background_task_remains_active() 
 #[test]
 fn replayed_run_started_keeps_synced_elapsed_timer() {
     let mut state = UiState::new();
-    let status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Working, 2_500, &[]);
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -478,8 +478,8 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
     let mut state = UiState::new();
     state.input = "@wo".to_string();
     state.cursor_char = 3;
-    let mut status = query_runtime_status(protocol::SessionRuntimeState::Working, 2_500, &[]);
-    status.subagent_sessions = vec![
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Working, 2_500, &[]);
+    status.subagent_threads = vec![
         AgentSummary {
             name: "explorer".to_string(),
             description: "Read-only codebase exploration agent.".to_string(),
@@ -588,7 +588,7 @@ fn plan_approval_resolved_closes_only_matching_plan() {
 #[test]
 fn run_finished_divider_uses_synced_elapsed() {
     let mut state = UiState::new();
-    let status = query_runtime_status(protocol::SessionRuntimeState::Working, 3_000, &[]);
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Working, 3_000, &[]);
 
     state.apply_event(RuntimeToUiEvent::RunStarted);
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
@@ -760,7 +760,7 @@ fn synchronous_agent_tool_result_finishes_subagent_state() {
 }
 
 #[test]
-fn session_snapshot_discards_subagent_transcript_in_tui_state() {
+fn thread_snapshot_discards_subagent_transcript_in_tui_state() {
     let mut state = UiState::new();
     let child_tool = ContentBlock::from_tool_use(
         "child_tool".to_string(),
@@ -768,14 +768,14 @@ fn session_snapshot_discards_subagent_transcript_in_tui_state() {
         std::collections::HashMap::new(),
     );
 
-    state.apply_session_snapshot(
+    state.apply_thread_snapshot(
         Some("parent".to_string()),
         Vec::new(),
         vec![subagent_snapshot(vec![Message::new(
             Role::Assistant,
             vec![child_tool],
         )])],
-        SessionUsageSnapshot::default(),
+        ThreadUsageSnapshot::default(),
     );
 
     assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());

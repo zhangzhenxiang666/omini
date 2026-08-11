@@ -701,7 +701,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "view_image".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(crate::types::events::PermissionPreview::Read(
                 crate::types::events::ReadPermissionPreview {

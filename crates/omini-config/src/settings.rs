@@ -39,7 +39,7 @@ pub struct ModelTierEntry {
 
 /// 完整的 `model_tiers` 配置块。
 ///
-/// 整块缺失 = 所有 tier 在解析时 fallback 到当前会话模型。
+/// 整块缺失 = 所有 tier 在解析时 fallback 到当前线程模型。
 /// 单独某个 slot 缺失 = 该 slot 解析时 fallback。
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -184,14 +184,14 @@ impl Settings {
 
     /// 解析指定档位应使用的 `(provider, model, thinking_effort)`。
     ///
-    /// 任一前置条件不满足时,fallback 到当前会话活跃 provider/model
+    /// 任一前置条件不满足时,fallback 到当前线程活跃 provider/model
     /// 并保留当前 `thinking_effort`,同时记录 `tracing::warn`:
     ///   1. `model_tiers` 未配置 / 该 tier slot 未配置;
     ///   2. tier.provider 不在 `self.providers`;
     ///   3. tier.model 不在该 provider.models;
     ///   4. target model 不支持 thinking → effort 归一化为 `None`。
     ///
-    /// 思考力度按 `effective_thinking_effort_for` 归一化,与主会话模型
+    /// 思考力度按 `effective_thinking_effort_for` 归一化,与主线程模型
     /// 选择行为一致。
     pub fn resolve_tier(&self, tier: ModelTier) -> (String, String, Option<ThinkingEffort>) {
         let entry = match self.model_tiers.get(tier) {
@@ -242,7 +242,7 @@ impl Settings {
             configured_model = configured_model.unwrap_or("-"),
             active_provider = %self.active_provider,
             active_model = %self.model,
-            "model tier resolution fell back to current session model",
+            "model tier resolution fell back to current thread model",
         );
         (
             self.active_provider.clone(),
@@ -489,7 +489,7 @@ pub struct UserConfig {
     pub compact: Option<CompactConfig>,
     #[serde(default)]
     pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 可选模型分级配置;缺失 = 所有 tier fallback 当前会话模型。
+    /// 可选模型分级配置;缺失 = 所有 tier fallback 当前线程模型。
     #[serde(default)]
     pub model_tiers: ModelTiers,
 }

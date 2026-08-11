@@ -38,16 +38,16 @@ impl ThreadRuntime {
         Ok(())
     }
 
-    /// 「在新会话中执行计划」审批通过后，server 端 fork 出新 ThreadRuntime，
-    /// 通过此方法向老 session 的 ws 广播 `SessionSwitched`,TUI 收到后断开旧
-    /// ws 并连接到新 session 的 ws。
-    pub fn broadcast_session_switched(&self, from: String, to: String) {
+    /// 「在新线程中执行计划」审批通过后，server 端 fork 出新 ThreadRuntime，
+    /// 通过此方法向老 thread 的 ws 广播 `ThreadSwitched`,TUI 收到后断开旧
+    /// ws 并连接到新 thread 的 ws。
+    pub fn broadcast_thread_switched(&self, from: String, to: String) {
         let event = match runtime_event_from_runtime_contract_event(
-            runtime_contract::RuntimeToServerEvent::SessionSwitched { from, to },
+            runtime_contract::RuntimeToServerEvent::ThreadSwitched { from, to },
         ) {
             Ok(event) => event,
             Err(error) => {
-                tracing::error!(error = %error, "failed to encode session switched event");
+                tracing::error!(error = %error, "failed to encode thread switched event");
                 return;
             }
         };

@@ -1087,7 +1087,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "write".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                 tool_name: "write".to_string(),
@@ -1116,7 +1116,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "view_image".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Read(
                 crate::types::events::ReadPermissionPreview {
@@ -1141,7 +1141,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "mcp__docs__search".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Mcp(
                 crate::types::events::McpPermissionPreview {
@@ -1257,7 +1257,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "ask_user".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::UserInput(crate::types::events::UserInputPreview {
                 questions: vec![crate::types::events::UserInputQuestion {
@@ -1295,7 +1295,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "ask_user".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::UserInput(crate::types::events::UserInputPreview {
                 questions: vec![crate::types::events::UserInputQuestion {
@@ -1378,7 +1378,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "search".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Search(
                 crate::types::events::SearchPermissionPreview {
@@ -1413,7 +1413,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Bash(
                 crate::types::events::BashPermissionPreview {

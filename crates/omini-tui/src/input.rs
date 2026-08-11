@@ -111,9 +111,9 @@ pub(super) async fn handle_interaction_key(
                 _ => true,
             }
         }
-        InteractionStep::Session {
-            sessions,
-            all_sessions,
+        InteractionStep::Thread {
+            threads,
+            all_threads,
             search,
             selected,
         } => match key {
@@ -122,14 +122,14 @@ pub(super) async fn handle_interaction_key(
                 true
             }
             KeyCode::Down => {
-                *selected = (*selected + 1).min(sessions.len().saturating_sub(1));
+                *selected = (*selected + 1).min(threads.len().saturating_sub(1));
                 true
             }
             KeyCode::Enter => {
-                if !sessions.is_empty() {
-                    let session_id = sessions[*selected].id.clone();
+                if !threads.is_empty() {
+                    let thread_id = threads[*selected].id.clone();
                     let _ = request_tx
-                        .send(ClientRequest::SessionOpen { session_id })
+                        .send(ClientRequest::ThreadOpen { thread_id })
                         .await;
                 }
                 true
@@ -137,12 +137,12 @@ pub(super) async fn handle_interaction_key(
             KeyCode::Char(c) => {
                 search.push(c);
                 let lower = search.to_lowercase();
-                let mut filtered: Vec<_> = all_sessions
+                let mut filtered: Vec<_> = all_threads
                     .iter()
                     .filter(|s| s.title.to_lowercase().contains(&lower))
                     .cloned()
                     .collect();
-                std::mem::swap(sessions, &mut filtered);
+                std::mem::swap(threads, &mut filtered);
                 *selected = 0;
                 true
             }
@@ -150,14 +150,14 @@ pub(super) async fn handle_interaction_key(
                 search.pop();
                 let lower = search.to_lowercase();
                 if lower.is_empty() {
-                    *sessions = all_sessions.clone();
+                    *threads = all_threads.clone();
                 } else {
-                    let mut filtered: Vec<_> = all_sessions
+                    let mut filtered: Vec<_> = all_threads
                         .iter()
                         .filter(|s| s.title.to_lowercase().contains(&lower))
                         .cloned()
                         .collect();
-                    std::mem::swap(sessions, &mut filtered);
+                    std::mem::swap(threads, &mut filtered);
                 }
                 *selected = 0;
                 true

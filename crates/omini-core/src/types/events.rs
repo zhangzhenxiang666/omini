@@ -63,23 +63,23 @@ pub enum EngineToRuntimeEvent {
 
     /// 工具需要暂停等待用户授权或输入
     ToolPauseRequested(Box<ToolPauseRequest>),
-    /// 当前 engine/session 的一轮 LLM usage。
+    /// 当前 engine/thread 的一轮 LLM usage。
     UsageRecorded(Usage),
-    /// 当前 engine/session 开始快速收缩上下文。
+    /// 当前 engine/thread 开始快速收缩上下文。
     CompactShrinkStarted(CompactEvent),
-    /// 当前 engine/session 完成快速收缩上下文。
+    /// 当前 engine/thread 完成快速收缩上下文。
     CompactShrinkFinished(CompactShrinkFinishedEvent),
-    /// 当前 engine/session 快速收缩上下文失败。
+    /// 当前 engine/thread 快速收缩上下文失败。
     CompactShrinkFailed(CompactShrinkFailedEvent),
-    /// 当前 engine/session 开始 LLM 压缩摘要。
+    /// 当前 engine/thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),
-    /// 当前 engine/session 正在流式输出压缩摘要。
+    /// 当前 engine/thread 正在流式输出压缩摘要。
     CompactSummaryDelta(CompactSummaryDeltaEvent),
-    /// 当前 engine/session 完成 LLM 压缩摘要。
+    /// 当前 engine/thread 完成 LLM 压缩摘要。
     CompactSummaryFinished(CompactSummaryFinishedEvent),
-    /// 当前 engine/session LLM 压缩摘要失败。
+    /// 当前 engine/thread LLM 压缩摘要失败。
     CompactSummaryFailed(CompactSummaryFailedEvent),
-    /// 当前 engine/session 的 LLM 摘要 usage。
+    /// 当前 engine/thread 的 LLM 摘要 usage。
     CompactSummaryUsageRecorded(Usage),
     /// 引擎出错
     Error(String),

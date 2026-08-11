@@ -3,7 +3,7 @@ use omini_domain::display::{HistoryItem, UserDraft};
 use omini_domain::events::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
-    SessionUsageSnapshot, SubmittedPlan, ToolPauseRequest, ToolPauseResponse,
+    SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest, ToolPauseResponse,
 };
 use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
@@ -65,7 +65,7 @@ pub enum RuntimeToServerEvent {
         thinking_effort: Option<ThinkingEffort>,
         context_window: Option<u32>,
     },
-    UsageChanged(SessionUsageSnapshot),
+    UsageChanged(ThreadUsageSnapshot),
     UsageTotalsChanged {
         total_tokens: i64,
         total_cached_tokens: i64,
@@ -92,9 +92,9 @@ pub enum RuntimeToServerEvent {
         action: PlanApprovalAction,
     },
     /// server 端 fork 出新 ThreadRuntime 后，作为原 thread 推送给客户端的
-    /// 外部会话切换通知。承载在普通 runtime 通道上，以便 ws 文本帧能直接编码为
-    /// `TypedRuntimeEvent::SessionSwitched`。
-    SessionSwitched {
+    /// 外部线程切换通知。承载在普通 runtime 通道上，以便 ws 文本帧能直接编码为
+    /// `TypedRuntimeEvent::ThreadSwitched`。
+    ThreadSwitched {
         from: String,
         to: String,
     },

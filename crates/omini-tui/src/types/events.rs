@@ -26,7 +26,7 @@ pub enum UiToRuntimeEvent {
     },
     /// 用户执行一条命令
     SendCommand(UserDraft),
-    /// 用户请求压缩当前会话上下文。
+    /// 用户请求压缩当前线程上下文。
     CompactContext { instructions: Option<String> },
     /// 用户请求调整 thinking effort。
     SetThinkingEffort(ThinkingEffort),
@@ -50,7 +50,7 @@ pub enum UiToRuntimeEvent {
         model: String,
         thinking_effort: Option<ThinkingEffort>,
     },
-    /// server 已完成 agent 文件变更，要求 runtime 刷新当前会话可用的 subagent 能力。
+    /// server 已完成 agent 文件变更，要求 runtime 刷新当前线程可用的 subagent 能力。
     SubagentRegistryChanged,
     /// 用户响应工具暂停请求
     ResolveToolPause {
@@ -113,23 +113,23 @@ pub enum EngineToRuntimeEvent {
     ToolPauseRequested(Box<ToolPauseRequest>),
     /// 模型提交了计划，runtime 已完成持久化
     PlanSubmitted(SubmittedPlan),
-    /// 当前 engine/session 的一轮 LLM usage。
+    /// 当前 engine/thread 的一轮 LLM usage。
     UsageRecorded(Usage),
-    /// 当前 engine/session 开始快速收缩上下文。
+    /// 当前 engine/thread 开始快速收缩上下文。
     CompactShrinkStarted(CompactEvent),
-    /// 当前 engine/session 完成快速收缩上下文。
+    /// 当前 engine/thread 完成快速收缩上下文。
     CompactShrinkFinished(CompactShrinkFinishedEvent),
-    /// 当前 engine/session 快速收缩上下文失败。
+    /// 当前 engine/thread 快速收缩上下文失败。
     CompactShrinkFailed(CompactShrinkFailedEvent),
-    /// 当前 engine/session 开始 LLM 压缩摘要。
+    /// 当前 engine/thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),
-    /// 当前 engine/session 正在流式输出压缩摘要。
+    /// 当前 engine/thread 正在流式输出压缩摘要。
     CompactSummaryDelta(CompactSummaryDeltaEvent),
-    /// 当前 engine/session 完成 LLM 压缩摘要。
+    /// 当前 engine/thread 完成 LLM 压缩摘要。
     CompactSummaryFinished(CompactSummaryFinishedEvent),
-    /// 当前 engine/session LLM 压缩摘要失败。
+    /// 当前 engine/thread LLM 压缩摘要失败。
     CompactSummaryFailed(CompactSummaryFailedEvent),
-    /// 当前 engine/session 的 LLM 摘要 usage。
+    /// 当前 engine/thread 的 LLM 摘要 usage。
     CompactSummaryUsageRecorded(Usage),
 
     /// 引擎出错
@@ -175,27 +175,27 @@ pub enum RuntimeToUiEvent {
         show: bool,
     },
     /// 当前会话 token usage 状态已变更。
-    UsageChanged(SessionUsageSnapshot),
+    UsageChanged(ThreadUsageSnapshot),
     /// 当前会话累计 token usage 已变更，但当前 context used 不应同步。
     UsageTotalsChanged {
         total_tokens: i64,
         total_cached_tokens: i64,
     },
-    /// TUI 连接已有 session 后从 server status 同步当前 query 计时器。
+    /// TUI 连接已有 thread 后从 server status 同步当前 query 计时器。
     RuntimeStatusSynced {
-        status: omini_protocol::SessionRuntimeStatus,
+        status: omini_protocol::ThreadRuntimeStatus,
         restore_pending_pauses: bool,
     },
-    /// 当前会话快照已同步。
-    SessionSnapshot {
-        session_id: Option<String>,
+    /// 当前线程快照已同步。
+    ThreadSnapshot {
+        thread_id: Option<String>,
         messages: Vec<HistoryItem>,
         agent_tasks: Vec<AgentTaskSnapshot>,
-        usage: SessionUsageSnapshot,
+        usage: ThreadUsageSnapshot,
     },
 
-    /// 会话标题变更（TUI 头部栏显示用）
-    SessionTitleChanged {
+    /// 线程标题变更（TUI 头部栏显示用）
+    ThreadTitleChanged {
         title: Option<String>,
     },
     /// 当前 profile 已变更
@@ -241,13 +241,13 @@ pub enum RuntimeToUiEvent {
     ToolUse(ToolUseBlock),
     /// 工具执行完成，产出结果
     ToolResult(ToolResultBlock),
-    /// 当前 session 开始 LLM 压缩摘要。
+    /// 当前 thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),
-    /// 当前 session 正在流式输出压缩摘要。
+    /// 当前 thread 正在流式输出压缩摘要。
     CompactSummaryDelta(CompactSummaryDeltaEvent),
-    /// 当前 session 完成 LLM 压缩摘要。
+    /// 当前 thread 完成 LLM 压缩摘要。
     CompactSummaryFinished(CompactSummaryFinishedEvent),
-    /// 当前 session LLM 压缩摘要失败。
+    /// 当前 thread LLM 压缩摘要失败。
     CompactSummaryFailed(CompactSummaryFailedEvent),
 
     /// 工具需要暂停等待用户授权或输入
@@ -485,8 +485,8 @@ pub enum InteractionRequest {
         current_provider: String,
         current_model: String,
     },
-    /// 会话选择：列出项目下所有会话
-    SessionSelection { sessions: Vec<SessionSummary> },
+    /// 线程选择：列出项目下所有线程
+    ThreadSelection { threads: Vec<ThreadSummary> },
     /// Agent 管理：列出、查看、创建、编辑、删除 subagent
     AgentManagement {
         records: Vec<AgentRecord>,

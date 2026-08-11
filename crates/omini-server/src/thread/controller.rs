@@ -87,11 +87,11 @@ impl ThreadRuntime {
         !presence.clients.is_empty()
     }
 
-    pub async fn client_role(&self, client_id: &str) -> client_proto::ClientSessionRole {
+    pub async fn client_role(&self, client_id: &str) -> client_proto::ClientThreadRole {
         if self.is_controller(client_id).await {
-            client_proto::ClientSessionRole::Controller
+            client_proto::ClientThreadRole::Controller
         } else {
-            client_proto::ClientSessionRole::Observer
+            client_proto::ClientThreadRole::Observer
         }
     }
 }

@@ -298,7 +298,7 @@ impl UiState {
         self.autocomplete.update(&self.input);
         if self.autocomplete.visible {
             if self.mention_autocomplete.visible {
-                self.mention_autocomplete.clear_session_cache();
+                self.mention_autocomplete.clear_cache();
             }
             self.mention_autocomplete.visible = false;
         } else {
@@ -325,7 +325,7 @@ impl UiState {
         {
             self.replace_range_with_image_attachment(start, end, path);
             self.mention_autocomplete.visible = false;
-            self.mention_autocomplete.clear_session_cache();
+            self.mention_autocomplete.clear_cache();
             self.autocomplete.visible = false;
             self.ensure_input_cursor_visible();
             return true;
@@ -353,7 +353,7 @@ impl UiState {
         self.cursor_char = start + new_len;
         self.ensure_input_cursor_visible();
         self.mention_autocomplete.visible = false;
-        self.mention_autocomplete.clear_session_cache();
+        self.mention_autocomplete.clear_cache();
         self.autocomplete.visible = false;
         true
     }
@@ -386,7 +386,7 @@ impl UiState {
 
     pub fn cancel_mention_autocomplete(&mut self) {
         self.mention_autocomplete.visible = false;
-        self.mention_autocomplete.clear_session_cache();
+        self.mention_autocomplete.clear_cache();
     }
 
     pub fn clear_input(&mut self) -> bool {
@@ -402,7 +402,7 @@ impl UiState {
         self.input_scroll_line = 0;
         self.autocomplete.visible = false;
         self.mention_autocomplete.visible = false;
-        self.mention_autocomplete.clear_session_cache();
+        self.mention_autocomplete.clear_cache();
         true
     }
 
@@ -419,7 +419,7 @@ impl UiState {
         self.input_scroll_line = 0;
         self.autocomplete.visible = false;
         self.mention_autocomplete.visible = false;
-        self.mention_autocomplete.clear_session_cache();
+        self.mention_autocomplete.clear_cache();
 
         let (text, mentions) = expand_paste_markers(text, mentions, paste_markers);
         Some(UserDraft {

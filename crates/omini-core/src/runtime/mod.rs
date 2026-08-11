@@ -21,7 +21,7 @@ use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::display::{DisplaySummary, UserDraft};
 use omini_domain::events::{
-    ActiveProfile, Notification, PlanApprovalAction, SessionUsageSnapshot, SubmittedPlan,
+    ActiveProfile, Notification, PlanApprovalAction, SubmittedPlan, ThreadUsageSnapshot,
     ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
 };
 use omini_domain::message::Message;
@@ -39,7 +39,7 @@ pub use service::AgentRuntimeChannels;
 pub use service::AgentRuntimeDeps;
 pub(crate) use service::RuntimeCapabilityHandles;
 
-/// 把已批准 plan 包装为新会话首条 user message 的公开入口,server 端 fork 时调用。
+/// 把已批准 plan 包装为新线程首条 user message 的公开入口,server 端 fork 时调用。
 ///
 /// 内部细节保留在私有 `plan` 模块里,只暴露此最小函数。
 pub fn compacted_plan_context(plan_content: &str) -> String {

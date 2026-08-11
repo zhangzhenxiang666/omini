@@ -1,4 +1,4 @@
-//! 会话级 WebSocket 事件流。
+//! 线程级 WebSocket 事件流。
 //!
 //! 这个模块负责把持久化 snapshot、运行中 replay、runtime fanout 和 controller 状态变化
 //! 统一编码成 `ServerEnvelope` 发给单个客户端连接。
@@ -10,21 +10,21 @@ use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// 处理单个客户端订阅会话事件流的 WebSocket 生命周期。
+/// 处理单个客户端订阅线程事件流的 WebSocket 生命周期。
 pub async fn handle_socket(
     socket: WebSocket,
     manager: Arc<ProjectManager>,
-    session: Arc<ThreadRuntime>,
-    session_id: String,
+    thread: Arc<ThreadRuntime>,
+    thread_id: String,
     client_id: String,
 ) {
     // 先订阅再登记连接，避免 controller 变化或 runtime 事件夹在连接建立过程中丢失。
-    let mut events = session.subscribe();
-    let mut controller_events = session.subscribe_controller();
+    let mut events = thread.subscribe();
+    let mut controller_events = thread.subscribe_controller();
     let mut replay_through = 0u64;
     let (mut write, mut read) = socket.split();
-    let controller_id = session.register_client_connection(client_id.clone()).await;
-    let mut role = session.client_role(&client_id).await;
+    let controller_id = thread.register_client_connection(client_id.clone()).await;
+    let mut role = thread.client_role(&client_id).await;
 
     // 新连接先拿到控制权状态和自己的角色，TUI 才能在后续快照到来前正确渲染输入态。
     let controller = ServerEnvelope::ControllerChanged {
@@ -40,13 +40,13 @@ pub async fn handle_socket(
 
     // snapshot 来自持久化历史,core 启动时已经把 messages / usage 灌好,这里
     // 发完 snapshot 后直接进入 replay 阶段,不需要再为 hydrate 等待。
-    match session.current_snapshot_events().await {
+    match thread.current_snapshot_events().await {
         Ok(events) => {
             for event in events {
                 let envelope = ServerEnvelope::Event { event };
                 if send_axum_envelope(&mut write, &envelope).await.is_err() {
-                    session.unregister_client_connection(&client_id).await;
-                    manager.close_thread_if_idle(&session_id, &session).await;
+                    thread.unregister_client_connection(&client_id).await;
+                    manager.close_thread_if_idle(&thread_id, &thread).await;
                     return;
                 }
             }
@@ -58,13 +58,13 @@ pub async fn handle_socket(
     }
 
     // replay 只包含运行中尚未被 snapshot 覆盖的尾部事件；记录 seq 用于过滤订阅流里的重复事件。
-    let replay_events = session.replay_events().await;
+    let replay_events = thread.replay_events().await;
     for event in replay_events {
         replay_through = replay_through.max(event.seq);
         let envelope = ServerEnvelope::Event { event: event.event };
         if send_axum_envelope(&mut write, &envelope).await.is_err() {
-            session.unregister_client_connection(&client_id).await;
-            manager.close_thread_if_idle(&session_id, &session).await;
+            thread.unregister_client_connection(&client_id).await;
+            manager.close_thread_if_idle(&thread_id, &thread).await;
             return;
         }
     }
@@ -72,11 +72,11 @@ pub async fn handle_socket(
     // 持久化 snapshot 只能恢复消息/配置；replay 可能包含 run_started 等生命周期事件，
     // 所以实时状态要在 replay 后同步，作为新连接初始化阶段的最终计时校准。
     let status = ServerEnvelope::RuntimeStatus {
-        status: session.runtime_status(),
+        status: thread.runtime_status(),
     };
     if send_axum_envelope(&mut write, &status).await.is_err() {
-        session.unregister_client_connection(&client_id).await;
-        manager.close_thread_if_idle(&session_id, &session).await;
+        thread.unregister_client_connection(&client_id).await;
+        manager.close_thread_if_idle(&thread_id, &thread).await;
         return;
     }
 
@@ -105,13 +105,13 @@ pub async fn handle_socket(
                             break;
                         }
                         // controller 变化不一定改变当前客户端角色，只有变化时才发角色事件。
-                        let next_role = session.client_role(&client_id).await;
+                        let next_role = thread.client_role(&client_id).await;
                         if next_role != role {
                             role = next_role;
                             let envelope = ServerEnvelope::ClientRoleChanged {
                                 client_id: client_id.clone(),
                                 role,
-                                controller_id: session.controller_id().await,
+                                controller_id: thread.controller_id().await,
                             };
                             if send_axum_envelope(&mut write, &envelope).await.is_err() {
                                 break;
@@ -151,8 +151,8 @@ pub async fn handle_socket(
         }
     }
 
-    session.unregister_client_connection(&client_id).await;
-    manager.close_thread_if_idle(&session_id, &session).await;
+    thread.unregister_client_connection(&client_id).await;
+    manager.close_thread_if_idle(&thread_id, &thread).await;
 }
 
 /// 将协议 envelope 序列化为 WebSocket 文本帧。

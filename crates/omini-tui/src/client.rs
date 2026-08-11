@@ -1,6 +1,6 @@
 use crate::types::events::{
     CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent, CompactSummaryFinishedEvent,
-    Notification, NotificationKind, RuntimeToUiEvent, SessionUsageSnapshot,
+    Notification, NotificationKind, RuntimeToUiEvent, ThreadUsageSnapshot,
 };
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol as protocol;
@@ -48,14 +48,14 @@ pub(crate) enum ClientRequest {
     ModelThinkingEffortSet {
         effort: protocol::ThinkingEffort,
     },
-    OpenSessionPicker,
-    SessionOpen {
-        session_id: String,
+    OpenThreadPicker,
+    ThreadOpen {
+        thread_id: String,
     },
-    SessionNew {
+    ThreadNew {
         profile: protocol::ActiveProfile,
     },
-    SessionRename {
+    ThreadRename {
         title: String,
     },
     ContextCompact {
@@ -134,56 +134,56 @@ async fn run_project_client(
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|err| format!("build HTTP client: {err}"))?;
-    let mut active_session_id: Option<String> = None;
+    let mut active_thread_id: Option<String> = None;
     let mut pending_requests: VecDeque<ClientRequest> = VecDeque::new();
     let mut blank_profile = protocol::ActiveProfile::Main;
-    // 每个活跃 session 只允许一次最新 daemon 地址重连；否则健康检查成功但 session
+    // 每个活跃 thread 只允许一次最新 daemon 地址重连；否则健康检查成功但 thread
     // 仍不可用时会在同一个断线点空转。
-    let mut refreshed_active_session = false;
+    let mut refreshed_active_thread = false;
 
     loop {
-        if let Some(session_id) = active_session_id.take() {
-            // 一次只维护一个活跃 session WebSocket；切换会话时结束旧 loop 再连接新 loop。
-            let mut session_initial_requests = std::mem::take(&mut pending_requests);
-            let disconnect = match run_connected_session(
+        if let Some(thread_id) = active_thread_id.take() {
+            // 一次只维护一个活跃 thread WebSocket；切换线程时结束旧 loop 再连接新 loop。
+            let mut thread_initial_requests = std::mem::take(&mut pending_requests);
+            let disconnect = match run_connected_thread(
                 &http,
                 &mut connection,
-                &session_id,
+                &thread_id,
                 &event_tx,
                 &mut request_rx,
-                &mut session_initial_requests,
+                &mut thread_initial_requests,
             )
             .await
             {
-                Ok(SessionLoop::Switch(next_session_id)) => {
-                    active_session_id = Some(next_session_id);
-                    refreshed_active_session = false;
+                Ok(ThreadLoop::Switch(next_thread_id)) => {
+                    active_thread_id = Some(next_thread_id);
+                    refreshed_active_thread = false;
                     continue;
                 }
-                Ok(SessionLoop::Blank(profile)) => {
-                    active_session_id = None;
+                Ok(ThreadLoop::Blank(profile)) => {
+                    active_thread_id = None;
                     blank_profile = profile;
-                    refreshed_active_session = false;
+                    refreshed_active_thread = false;
                     continue;
                 }
-                Ok(SessionLoop::Closed(reason)) | Err(reason) => reason,
+                Ok(ThreadLoop::Closed(reason)) | Err(reason) => reason,
             };
 
-            if refreshed_active_session {
+            if refreshed_active_thread {
                 // 已经用最新地址重连过一次，第二次断开就直接报告，避免隐藏真实不可恢复错误。
                 let _ = event_tx
                     .send(RuntimeToUiEvent::error(format!(
                         "Runtime client disconnected: {disconnect}"
                     )))
                     .await;
-                refreshed_active_session = false;
+                refreshed_active_thread = false;
             } else {
                 match reconnect_latest_daemon(&http, &mut connection).await {
                     Ok(()) => {
                         // 新 daemon 不认识旧 client_id；rediscovery 会重新注册并按 UUID open 项目。
-                        active_session_id = Some(session_id);
-                        pending_requests = session_initial_requests;
-                        refreshed_active_session = true;
+                        active_thread_id = Some(thread_id);
+                        pending_requests = thread_initial_requests;
+                        refreshed_active_thread = true;
                     }
                     Err(reconnect_err) => {
                         let _ = event_tx
@@ -191,7 +191,7 @@ async fn run_project_client(
                                 "Runtime client disconnected: {disconnect}; reconnect failed: {reconnect_err}"
                             )))
                             .await;
-                        refreshed_active_session = false;
+                        refreshed_active_thread = false;
                     }
                 }
             }
@@ -201,7 +201,7 @@ async fn run_project_client(
         let Some(request) = request_rx.recv().await else {
             break;
         };
-        // 没有活跃 session 时，项目级请求可以直接处理；会话级请求会先创建 session 再补发。
+        // 没有活跃 thread 时，项目级请求可以直接处理；线程级请求会先创建 thread 再补发。
         match handle_project_request(
             &http,
             &mut connection,
@@ -212,13 +212,10 @@ async fn run_project_client(
         .await?
         {
             ProjectAction::None => {}
-            ProjectAction::Connect {
-                session_id,
-                pending,
-            } => {
-                active_session_id = Some(session_id);
+            ProjectAction::Connect { thread_id, pending } => {
+                active_thread_id = Some(thread_id);
                 pending_requests = pending;
-                refreshed_active_session = false;
+                refreshed_active_thread = false;
             }
             ProjectAction::Shutdown => break,
         }
@@ -229,15 +226,15 @@ async fn run_project_client(
 
 enum ProjectAction {
     None,
-    // Connect 可能带一个待补发请求，用于“用户第一次输入时自动创建会话并立刻提交”。
+    // Connect 可能带一个待补发请求，用于“用户第一次输入时自动创建线程并立刻提交”。
     Connect {
-        session_id: String,
+        thread_id: String,
         pending: VecDeque<ClientRequest>,
     },
     Shutdown,
 }
 
-enum SessionLoop {
+enum ThreadLoop {
     Switch(String),
     Blank(protocol::ActiveProfile),
     Closed(String),
@@ -258,32 +255,29 @@ async fn handle_project_request(
 ) -> Result<ProjectAction, String> {
     match request {
         ClientRequest::RunSubmitUserInput { .. } | ClientRequest::ExpandSkillRun { .. } => {
-            let session_id = create_session(http, connection, *blank_profile, event_tx).await?;
+            let thread_id = create_thread(http, connection, *blank_profile, event_tx).await?;
             let mut pending = VecDeque::new();
             pending.push_back(request);
-            Ok(ProjectAction::Connect {
-                session_id,
-                pending,
-            })
+            Ok(ProjectAction::Connect { thread_id, pending })
         }
-        ClientRequest::OpenSessionPicker => {
-            let sessions: protocol::SessionsResponse =
-                get_json(http, &project_sessions_url(connection)).await?;
+        ClientRequest::OpenThreadPicker => {
+            let threads: protocol::ThreadsResponse =
+                get_json(http, &project_threads_url(connection)).await?;
             event_tx
                 .send(RuntimeToUiEvent::InteractionRequest(
-                    event_types_session_selection(sessions),
+                    event_types_thread_selection(threads),
                 ))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(ProjectAction::None)
         }
-        ClientRequest::SessionOpen { session_id } => Ok(ProjectAction::Connect {
-            session_id,
+        ClientRequest::ThreadOpen { thread_id } => Ok(ProjectAction::Connect {
+            thread_id,
             pending: VecDeque::new(),
         }),
-        ClientRequest::SessionNew { profile } => {
+        ClientRequest::ThreadNew { profile } => {
             *blank_profile = profile;
-            emit_blank_session(event_tx, connection).await?;
+            emit_blank_thread(event_tx, connection).await?;
             event_tx
                 .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
                 .await
@@ -421,16 +415,16 @@ async fn handle_project_request(
     }
 }
 
-async fn create_session(
+async fn create_thread(
     http: &reqwest::Client,
     connection: &ProjectConnection,
     profile: protocol::ActiveProfile,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
 ) -> Result<String, String> {
-    let response: protocol::CreateSessionResponse = post_json_without_client(
+    let response: protocol::CreateThreadResponse = post_json_without_client(
         http,
-        &project_sessions_url(connection),
-        &protocol::CreateSessionRequest {
+        &project_threads_url(connection),
+        &protocol::CreateThreadRequest {
             provider: Some(connection.open.active_provider.clone()),
             model: Some(connection.open.model.clone()),
             thinking_effort: connection.open.thinking_effort,
@@ -438,28 +432,28 @@ async fn create_session(
         },
     )
     .await?;
-    let session_id = response
-        .session_id
+    let thread_id = response
+        .thread_id
         .ok_or_else(|| "Server did not return a session id".to_string())?;
     event_tx
         .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
         .await
         .map_err(|_| "TUI event receiver closed".to_string())?;
-    Ok(session_id)
+    Ok(thread_id)
 }
 
-async fn emit_blank_session(
+async fn emit_blank_thread(
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     connection: &ProjectConnection,
 ) -> Result<(), String> {
     event_tx
-        .send(RuntimeToUiEvent::SessionSnapshot {
-            session_id: None,
+        .send(RuntimeToUiEvent::ThreadSnapshot {
+            thread_id: None,
             messages: Vec::new(),
             agent_tasks: Vec::new(),
-            usage: SessionUsageSnapshot {
+            usage: ThreadUsageSnapshot {
                 context_window: connection.open.context_window,
-                ..SessionUsageSnapshot::default()
+                ..ThreadUsageSnapshot::default()
             },
         })
         .await
@@ -536,14 +530,14 @@ async fn refresh_agent_management_panel(
 async fn save_agent(
     http: &reqwest::Client,
     connection: &ProjectConnection,
-    target_session_id: Option<&str>,
+    target_thread_id: Option<&str>,
     source_kind: protocol::AgentSourceKind,
     original_path: Option<PathBuf>,
     draft: protocol::AgentDraft,
 ) -> Result<(), String> {
     let _: protocol::AckResponse = post_json_without_client(
         http,
-        &project_agents_url_with_target(connection, target_session_id),
+        &project_agents_url_with_target(connection, target_thread_id),
         &protocol::SaveAgentRequest {
             source_kind,
             original_agent_id: original_path.map(|path| path.display().to_string()),
@@ -557,13 +551,13 @@ async fn save_agent(
 async fn delete_agent(
     http: &reqwest::Client,
     connection: &ProjectConnection,
-    target_session_id: Option<&str>,
+    target_thread_id: Option<&str>,
     path: PathBuf,
 ) -> Result<(), String> {
     send_empty_without_client(
         http,
         Method::DELETE,
-        &project_agent_url(connection, &path.display().to_string(), target_session_id),
+        &project_agent_url(connection, &path.display().to_string(), target_thread_id),
     )
     .await
 }
@@ -617,10 +611,10 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::OpenModelPicker => "model picker",
         ClientRequest::ModelSelect { .. } => "model select",
         ClientRequest::ModelThinkingEffortSet { .. } => "thinking effort",
-        ClientRequest::OpenSessionPicker => "sessions",
-        ClientRequest::SessionOpen { .. } => "session open",
-        ClientRequest::SessionNew { .. } => "new session",
-        ClientRequest::SessionRename { .. } => "rename",
+        ClientRequest::OpenThreadPicker => "sessions",
+        ClientRequest::ThreadOpen { .. } => "session open",
+        ClientRequest::ThreadNew { .. } => "new session",
+        ClientRequest::ThreadRename { .. } => "rename",
         ClientRequest::ContextCompact { .. } => "compact",
         ClientRequest::ToolPauseResolve { .. } => "tool pause",
         ClientRequest::PlanResolve { .. } => "plan approval",
@@ -634,17 +628,17 @@ fn request_name(request: &ClientRequest) -> &'static str {
     }
 }
 
-async fn run_connected_session(
+async fn run_connected_thread(
     http: &reqwest::Client,
     connection: &mut ProjectConnection,
-    session_id: &str,
+    thread_id: &str,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
     request_rx: &mut mpsc::Receiver<ClientRequest>,
     initial_requests: &mut VecDeque<ClientRequest>,
-) -> Result<SessionLoop, String> {
-    let base = session_base_url(connection, session_id);
+) -> Result<ThreadLoop, String> {
+    let base = thread_base_url(connection, thread_id);
     let url = format!(
-        "ws://{}/v1/projects/{}/sessions/{session_id}/events",
+        "ws://{}/v1/projects/{}/threads/{thread_id}/events",
         connection.addr, connection.project_id
     );
     let mut ws_request = url
@@ -667,27 +661,27 @@ async fn run_connected_session(
 
     while let Some(request) = initial_requests.pop_front() {
         match handle_local_request(
-            http, connection, session_id, &base, &client_id, request, event_tx,
+            http, connection, thread_id, &base, &client_id, request, event_tx,
         )
         .await?
         {
             LocalAction::None => {}
-            LocalAction::Switch(next_session_id) => {
-                // pending request 也可能是打开会话，出现时直接切到目标 session。
-                return Ok(SessionLoop::Switch(next_session_id));
+            LocalAction::Switch(next_thread_id) => {
+                // pending request 也可能是打开线程，出现时直接切到目标 thread。
+                return Ok(ThreadLoop::Switch(next_thread_id));
             }
-            LocalAction::Blank(profile) => return Ok(SessionLoop::Blank(profile)),
+            LocalAction::Blank(profile) => return Ok(ThreadLoop::Blank(profile)),
         }
     }
 
     loop {
         tokio::select! {
-            // 本地交互转成 HTTP 请求；如果请求要求切换会话，退出当前 WebSocket loop。
+            // 本地交互转成 HTTP 请求；如果请求要求切换线程，退出当前 WebSocket loop。
             Some(request) = request_rx.recv() => {
                 match handle_local_request(
                     http,
                     connection,
-                    session_id,
+                    thread_id,
                     &base,
                     &client_id,
                     request,
@@ -696,10 +690,10 @@ async fn run_connected_session(
                 .await
                 {
                     Ok(LocalAction::None) => {}
-                    Ok(LocalAction::Switch(next_session_id)) => {
-                        return Ok(SessionLoop::Switch(next_session_id));
+                    Ok(LocalAction::Switch(next_thread_id)) => {
+                        return Ok(ThreadLoop::Switch(next_thread_id));
                     }
-                    Ok(LocalAction::Blank(profile)) => return Ok(SessionLoop::Blank(profile)),
+                    Ok(LocalAction::Blank(profile)) => return Ok(ThreadLoop::Blank(profile)),
                     Err(err) => {
                         let _ = event_tx.send(RuntimeToUiEvent::error(err)).await;
                     }
@@ -708,7 +702,7 @@ async fn run_connected_session(
             // WebSocket 流只向 UI 注入 server 事件，连接控制帧在这里就地处理。
             message = read.next() => {
                 let Some(message) = message else {
-                    return Ok(SessionLoop::Closed("server event stream ended".to_string()));
+                    return Ok(ThreadLoop::Closed("server event stream ended".to_string()));
                 };
                 let message = message.map_err(|err| format!("read server message: {err}"))?;
                 match message {
@@ -721,8 +715,8 @@ async fn run_connected_session(
                                 thinking_effort,
                                 context_window,
                             } => {
-                                // 服务端发来的 ModelChanged 事件（如打开已有 session 时），
-                                // 同步更新 open snapshot，确保 /new 后创建新 session
+                                // 服务端发来的 ModelChanged 事件（如打开已有 thread 时），
+                                // 同步更新 open snapshot，确保 /new 后创建新 thread
                                 // 沿用正确的 provider/model/effort。
                                 connection.open.active_provider = provider;
                                 connection.open.model = model;
@@ -747,13 +741,13 @@ async fn run_connected_session(
                                     }
                                 }
                             }
-                            HandleOutcome::Switch(next_session_id) => {
-                                return Ok(SessionLoop::Switch(next_session_id));
+                            HandleOutcome::Switch(next_thread_id) => {
+                                return Ok(ThreadLoop::Switch(next_thread_id));
                             }
                         }
                     }
                     TungsteniteMessage::Close(_) => {
-                        return Ok(SessionLoop::Closed(
+                        return Ok(ThreadLoop::Closed(
                             "server closed the event stream".to_string(),
                         ));
                     }
@@ -778,10 +772,10 @@ async fn handle_server_text(
         .map_err(|err| format!("decode server envelope: {err}"))?
     {
         protocol::ServerEnvelope::Event { event } => {
-            // 「在新会话中执行计划」:server fork 出新 session 后通过普通 runtime
-            // 事件通道广播 SessionSwitched。复用具名 `Switch` 控制流——主循环
+            // 「在新线程中执行计划」:server fork 出新 thread 后通过普通 runtime
+            // 事件通道广播 ThreadSwitched。复用具名 `Switch` 控制流——主循环
             // 断开旧 ws 并按新 id 重建,不要把它当作普通 runtime 事件投递给 UI。
-            if let protocol::TypedRuntimeEvent::SessionSwitched(payload) = event.event {
+            if let protocol::TypedRuntimeEvent::ThreadSwitched(payload) = event.event {
                 return Ok(HandleOutcome::Switch(payload.to));
             }
             // ModelChanged 需要同步更新 open snapshot，在转发给 UI 之前先
@@ -827,7 +821,7 @@ enum HandleOutcome {
     PassThrough,
     /// 收到了 RuntimeStatus,主循环在初始化阶段据此校准一次 HTTP /status 查询。
     SawRuntimeStatus,
-    /// 收到 SessionSwitched,主循环断开旧 ws 并按新 id 重新连接。
+    /// 收到 ThreadSwitched,主循环断开旧 ws 并按新 id 重新连接。
     Switch(String),
     /// 收到 ModelChanged，主循环更新 open snapshot 保持与服务端同步。
     ModelChanged {
@@ -875,8 +869,8 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::ActiveProfileChanged(event) => {
             RuntimeToUiEvent::ActiveProfileChanged(event.profile)
         }
-        protocol::TypedRuntimeEvent::SessionTitleChanged(event) => {
-            RuntimeToUiEvent::SessionTitleChanged { title: event.title }
+        protocol::TypedRuntimeEvent::ThreadTitleChanged(event) => {
+            RuntimeToUiEvent::ThreadTitleChanged { title: event.title }
         }
         protocol::TypedRuntimeEvent::ToolPauseRequested(request) => {
             RuntimeToUiEvent::ToolPauseRequested(request)
@@ -912,7 +906,7 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::CompactSummaryStarted(event) => {
             RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
                 trigger: event.trigger,
-                session_id: event.session_id,
+                thread_id: event.thread_id,
                 agent_label: event.agent_label,
             })
         }
@@ -920,7 +914,7 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
             RuntimeToUiEvent::CompactSummaryDelta(CompactSummaryDeltaEvent {
                 trigger: event.trigger,
                 delta: event.delta,
-                session_id: event.session_id,
+                thread_id: event.thread_id,
                 agent_label: event.agent_label,
             })
         }
@@ -929,7 +923,7 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
                 trigger: event.trigger,
                 summary: event.summary,
                 after_tokens: event.after_tokens,
-                session_id: event.session_id,
+                thread_id: event.thread_id,
                 agent_label: event.agent_label,
             })
         }
@@ -937,12 +931,12 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
             RuntimeToUiEvent::CompactSummaryFailed(CompactSummaryFailedEvent {
                 trigger: event.trigger,
                 message: event.message,
-                session_id: event.session_id,
+                thread_id: event.thread_id,
                 agent_label: event.agent_label,
             })
         }
-        protocol::TypedRuntimeEvent::SessionSnapshot(event) => RuntimeToUiEvent::SessionSnapshot {
-            session_id: event.session_id,
+        protocol::TypedRuntimeEvent::ThreadSnapshot(event) => RuntimeToUiEvent::ThreadSnapshot {
+            thread_id: event.thread_id,
             messages: event.messages,
             agent_tasks: event.agent_tasks,
             usage: event.usage,
@@ -950,9 +944,9 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::AgentTaskEvent(event) => {
             RuntimeToUiEvent::AgentTaskEvent(event)
         }
-        // SessionSwitched 在 `handle_server_text` 拦截,不会流到这里。
-        protocol::TypedRuntimeEvent::SessionSwitched(_) => unreachable!(
-            "SessionSwitched 事件应被 handle_server_text 提前拦截为 HandleOutcome::Switch"
+        // ThreadSwitched 在 `handle_server_text` 拦截,不会流到这里。
+        protocol::TypedRuntimeEvent::ThreadSwitched(_) => unreachable!(
+            "ThreadSwitched 事件应被 handle_server_text 提前拦截为 HandleOutcome::Switch"
         ),
     }
 }
@@ -968,9 +962,9 @@ fn notification_kind_from_protocol(level: protocol::NotificationLevel) -> Notifi
 async fn fetch_calibrated_runtime_status(
     http: &reqwest::Client,
     base: &str,
-) -> Option<protocol::SessionRuntimeStatus> {
+) -> Option<protocol::ThreadRuntimeStatus> {
     let started_at = Instant::now();
-    let response: protocol::SessionRuntimeStatusResponse = timeout(
+    let response: protocol::ThreadRuntimeStatusResponse = timeout(
         Duration::from_secs(2),
         get_json(http, &format!("{base}/status")),
     )
@@ -984,9 +978,9 @@ async fn fetch_calibrated_runtime_status(
 }
 
 fn apply_runtime_status_latency(
-    mut status: protocol::SessionRuntimeStatus,
+    mut status: protocol::ThreadRuntimeStatus,
     latency: Duration,
-) -> protocol::SessionRuntimeStatus {
+) -> protocol::ThreadRuntimeStatus {
     // server 端 query timer 会扣掉等待工具授权/输入的暂停时间；暂停态不叠加客户端延迟，
     // 否则等待用户期间会被误算为工作耗时。
     if should_apply_runtime_status_latency(&status)
@@ -999,14 +993,14 @@ fn apply_runtime_status_latency(
     status
 }
 
-fn should_apply_runtime_status_latency(status: &protocol::SessionRuntimeStatus) -> bool {
+fn should_apply_runtime_status_latency(status: &protocol::ThreadRuntimeStatus) -> bool {
     status.activity.is_some()
         && status.pending_pauses.is_empty()
         && matches!(
             status.state,
-            protocol::SessionRuntimeState::Thinking
-                | protocol::SessionRuntimeState::Working
-                | protocol::SessionRuntimeState::Compacting
+            protocol::ThreadRuntimeState::Thinking
+                | protocol::ThreadRuntimeState::Working
+                | protocol::ThreadRuntimeState::Compacting
         )
 }
 
@@ -1091,13 +1085,13 @@ fn default_daemon_host() -> String {
 async fn handle_local_request(
     http: &reqwest::Client,
     connection: &mut ProjectConnection,
-    session_id: &str,
+    thread_id: &str,
     base: &str,
     client_id: &str,
     request: ClientRequest,
     event_tx: &mpsc::Sender<RuntimeToUiEvent>,
 ) -> Result<LocalAction, String> {
-    // 返回 Switch/Blank 表示该请求要求外层退出当前 session loop。
+    // 返回 Switch/Blank 表示该请求要求外层退出当前 thread loop。
     match request {
         ClientRequest::RunSubmitUserInput {
             input,
@@ -1173,7 +1167,7 @@ async fn handle_local_request(
             model,
             thinking_effort,
         } => {
-            // 1. 更新当前 session runtime
+            // 1. 更新当前 thread runtime
             post_json::<_, protocol::AckResponse>(
                 http,
                 &format!("{base}/model"),
@@ -1187,7 +1181,7 @@ async fn handle_local_request(
             .await?;
 
             // 2. 同步更新本地缓存的运行时配置（不写入 project/state.toml），
-            //    确保 /new 或 /clear 后创建的新 session 沿用本次选择的 model/provider
+            //    确保 /new 或 /clear 后创建的新 thread 沿用本次选择的 model/provider
             //    以及本地已有的 thinking_effort（若本次未指定则保留原值）。
             let config = protocol::ProjectRuntimeConfigResponse {
                 active_provider: provider,
@@ -1199,7 +1193,7 @@ async fn handle_local_request(
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
         ClientRequest::ModelThinkingEffortSet { effort } => {
-            // 1. 更新当前 session runtime
+            // 1. 更新当前 thread runtime
             post_json::<_, protocol::AckResponse>(
                 http,
                 &format!("{base}/thinking-effort"),
@@ -1209,7 +1203,7 @@ async fn handle_local_request(
             .await?;
 
             // 2. 同步更新本地缓存的运行时配置（不写入 project/state.toml），
-            //    确保 /new 或 /clear 后创建的新 session 沿用本次选择的 thinking effort。
+            //    确保 /new 或 /clear 后创建的新 thread 沿用本次选择的 thinking effort。
             let config = protocol::ProjectRuntimeConfigResponse {
                 active_provider: connection.open.active_provider.clone(),
                 model: connection.open.model.clone(),
@@ -1219,33 +1213,33 @@ async fn handle_local_request(
             };
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
-        ClientRequest::OpenSessionPicker => {
-            let sessions: protocol::SessionsResponse =
-                get_json(http, &project_sessions_url(connection)).await?;
+        ClientRequest::OpenThreadPicker => {
+            let threads: protocol::ThreadsResponse =
+                get_json(http, &project_threads_url(connection)).await?;
             event_tx
                 .send(RuntimeToUiEvent::InteractionRequest(
-                    event_types_session_selection(sessions),
+                    event_types_thread_selection(threads),
                 ))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
         }
-        ClientRequest::SessionOpen { session_id } => {
-            return Ok(LocalAction::Switch(session_id));
+        ClientRequest::ThreadOpen { thread_id } => {
+            return Ok(LocalAction::Switch(thread_id));
         }
-        ClientRequest::SessionNew { profile } => {
-            emit_blank_session(event_tx, connection).await?;
+        ClientRequest::ThreadNew { profile } => {
+            emit_blank_thread(event_tx, connection).await?;
             event_tx
                 .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             return Ok(LocalAction::Blank(profile));
         }
-        ClientRequest::SessionRename { title } => {
+        ClientRequest::ThreadRename { title } => {
             post_json::<_, protocol::AckResponse>(
                 http,
                 &format!("{base}/rename"),
                 client_id,
-                &protocol::RenameSessionRequest { title },
+                &protocol::RenameThreadRequest { title },
             )
             .await?;
         }
@@ -1290,7 +1284,7 @@ async fn handle_local_request(
             save_agent(
                 http,
                 connection,
-                Some(session_id),
+                Some(thread_id),
                 source_kind,
                 original_path,
                 draft,
@@ -1299,7 +1293,7 @@ async fn handle_local_request(
             refresh_agent_management_panel(http, connection, event_tx).await?;
         }
         ClientRequest::AgentDelete { path } => {
-            delete_agent(http, connection, Some(session_id), path).await?;
+            delete_agent(http, connection, Some(thread_id), path).await?;
             refresh_agent_management_panel(http, connection, event_tx).await?;
         }
         ClientRequest::AgentGenerate {
@@ -1368,9 +1362,9 @@ async fn handle_local_request(
     Ok(LocalAction::None)
 }
 
-fn project_sessions_url(connection: &ProjectConnection) -> String {
+fn project_threads_url(connection: &ProjectConnection) -> String {
     format!(
-        "http://{}/v1/projects/{}/sessions",
+        "http://{}/v1/projects/{}/threads",
         connection.addr, connection.project_id
     )
 }
@@ -1412,12 +1406,12 @@ fn project_agents_url(connection: &ProjectConnection) -> String {
 
 fn project_agents_url_with_target(
     connection: &ProjectConnection,
-    target_session_id: Option<&str>,
+    target_thread_id: Option<&str>,
 ) -> String {
     let url = project_agents_url(connection);
-    match target_session_id {
-        Some(session_id) => {
-            format!("{url}?target_session_id={}", percent_encode(session_id))
+    match target_thread_id {
+        Some(thread_id) => {
+            format!("{url}?target_thread_id={}", percent_encode(thread_id))
         }
         None => url,
     }
@@ -1430,23 +1424,23 @@ fn project_agent_generate_url(connection: &ProjectConnection) -> String {
 fn project_agent_url(
     connection: &ProjectConnection,
     agent_id: &str,
-    target_session_id: Option<&str>,
+    target_thread_id: Option<&str>,
 ) -> String {
     let url = format!(
         "{}/{}",
         project_agents_url(connection),
         percent_encode(agent_id)
     );
-    match target_session_id {
-        Some(session_id) => {
-            format!("{url}?target_session_id={}", percent_encode(session_id))
+    match target_thread_id {
+        Some(thread_id) => {
+            format!("{url}?target_thread_id={}", percent_encode(thread_id))
         }
         None => url,
     }
 }
 
-fn session_base_url(connection: &ProjectConnection, session_id: &str) -> String {
-    format!("{}/{}", project_sessions_url(connection), session_id)
+fn thread_base_url(connection: &ProjectConnection, thread_id: &str) -> String {
+    format!("{}/{}", project_threads_url(connection), thread_id)
 }
 
 async fn get_json<T>(http: &reqwest::Client, url: &str) -> Result<T, String>
@@ -1574,17 +1568,17 @@ pub(crate) fn thinking_effort_from_protocol(
     }
 }
 
-pub(crate) fn session_summary_from_protocol(
-    session: protocol::SessionSummary,
-) -> crate::types::events::SessionSummary {
-    crate::types::events::SessionSummary {
-        id: session.id,
-        title: session.title,
-        model: session.model,
-        provider: session.provider,
-        created_at: session.created_at,
-        updated_at: session.updated_at,
-        runtime_state: session.runtime_state,
+pub(crate) fn thread_summary_from_protocol(
+    thread: protocol::ThreadSummary,
+) -> crate::types::events::ThreadSummary {
+    crate::types::events::ThreadSummary {
+        id: thread.id,
+        title: thread.title,
+        model: thread.model,
+        provider: thread.provider,
+        created_at: thread.created_at,
+        updated_at: thread.updated_at,
+        runtime_state: thread.runtime_state,
     }
 }
 
@@ -1614,14 +1608,14 @@ pub(crate) fn skill_command_summary(
     }
 }
 
-fn event_types_session_selection(
-    sessions: protocol::SessionsResponse,
+fn event_types_thread_selection(
+    threads: protocol::ThreadsResponse,
 ) -> crate::types::events::InteractionRequest {
-    crate::types::events::InteractionRequest::SessionSelection {
-        sessions: sessions
-            .sessions
+    crate::types::events::InteractionRequest::ThreadSelection {
+        threads: threads
+            .threads
             .into_iter()
-            .map(session_summary_from_protocol)
+            .map(thread_summary_from_protocol)
             .collect(),
     }
 }
@@ -1863,16 +1857,16 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    fn query_runtime_status() -> protocol::SessionRuntimeStatus {
-        protocol::SessionRuntimeStatus {
-            session_id: "session_1".to_string(),
-            state: protocol::SessionRuntimeState::Working,
+    fn query_runtime_status() -> protocol::ThreadRuntimeStatus {
+        protocol::ThreadRuntimeStatus {
+            thread_id: "thread_1".to_string(),
+            state: protocol::ThreadRuntimeState::Working,
             active_profile: protocol::ActiveProfile::Main,
             loaded: true,
             controller_id: Some("client_1".to_string()),
             connected_client_count: 1,
-            activity: Some(protocol::SessionRuntimeActivity {
-                kind: protocol::SessionRuntimeActivityKind::Query,
+            activity: Some(protocol::ThreadRuntimeActivity {
+                kind: protocol::ThreadRuntimeActivityKind::Query,
                 started_at: Utc::now(),
                 elapsed_ms: 1_500,
             }),
@@ -1881,7 +1875,7 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagent_sessions: Vec::new(),
+            subagent_threads: Vec::new(),
             git_branch: None,
         }
     }
@@ -1893,7 +1887,7 @@ mod tests {
         .expect("envelope should serialize")
     }
 
-    fn runtime_status_envelope_text(status: protocol::SessionRuntimeStatus) -> String {
+    fn runtime_status_envelope_text(status: protocol::ThreadRuntimeStatus) -> String {
         serde_json::to_string(&protocol::ServerEnvelope::RuntimeStatus { status })
             .expect("envelope should serialize")
     }
@@ -1904,7 +1898,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: omini_domain::events::ToolPauseKind::Permission(
                 omini_domain::events::PermissionPreview::Custom {
@@ -1916,21 +1910,21 @@ mod tests {
     }
 
     #[test]
-    fn session_summary_mapping_preserves_runtime_state() {
+    fn thread_summary_mapping_preserves_runtime_state() {
         let now = Utc::now();
-        let summary = session_summary_from_protocol(protocol::SessionSummary {
-            id: "session_1".to_string(),
+        let summary = thread_summary_from_protocol(protocol::ThreadSummary {
+            id: "thread_1".to_string(),
             title: "hello".to_string(),
             model: "gpt-test".to_string(),
             provider: "openai".to_string(),
             created_at: now,
             updated_at: now,
-            runtime_state: Some(protocol::SessionRuntimeState::Compacting),
+            runtime_state: Some(protocol::ThreadRuntimeState::Compacting),
         });
 
         assert_eq!(
             summary.runtime_state,
-            Some(protocol::SessionRuntimeState::Compacting)
+            Some(protocol::ThreadRuntimeState::Compacting)
         );
     }
 
@@ -1970,9 +1964,9 @@ mod tests {
     #[test]
     fn runtime_status_latency_adjusts_compact_activity() {
         let mut status = query_runtime_status();
-        status.state = protocol::SessionRuntimeState::Compacting;
-        status.activity = Some(protocol::SessionRuntimeActivity {
-            kind: protocol::SessionRuntimeActivityKind::Compact,
+        status.state = protocol::ThreadRuntimeState::Compacting;
+        status.activity = Some(protocol::ThreadRuntimeActivity {
+            kind: protocol::ThreadRuntimeActivityKind::Compact,
             started_at: Utc::now(),
             elapsed_ms: 700,
         });
@@ -1988,7 +1982,7 @@ mod tests {
     #[test]
     fn runtime_status_latency_skips_waiting_or_pending_pause() {
         let mut waiting = query_runtime_status();
-        waiting.state = protocol::SessionRuntimeState::Waiting;
+        waiting.state = protocol::ThreadRuntimeState::Waiting;
         let waiting = apply_runtime_status_latency(waiting, Duration::from_millis(42));
         assert_eq!(
             waiting
@@ -2042,56 +2036,56 @@ mod tests {
             Some(RuntimeToUiEvent::RuntimeStatusSynced {
                 status,
                 restore_pending_pauses: true,
-            }) if status.session_id == "session_1" && status.activity.is_some()
+            }) if status.thread_id == "thread_1" && status.activity.is_some()
         ));
     }
 
     #[tokio::test]
-    async fn handle_server_text_decodes_session_snapshot_event() {
+    async fn handle_server_text_decodes_thread_snapshot_event() {
         let (tx, mut rx) = mpsc::channel(4);
 
         let outcome = handle_server_text(
-            &runtime_event_envelope_text(protocol::TypedRuntimeEvent::SessionSnapshot(
-                protocol::SessionSnapshotEvent {
-                    session_id: Some("session_1".to_string()),
+            &runtime_event_envelope_text(protocol::TypedRuntimeEvent::ThreadSnapshot(
+                protocol::ThreadSnapshotEvent {
+                    thread_id: Some("thread_1".to_string()),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
-                    usage: SessionUsageSnapshot::default(),
+                    usage: ThreadUsageSnapshot::default(),
                 },
             )),
             &tx,
         )
         .await
-        .expect("session changed should decode");
+        .expect("thread changed should decode");
 
         assert_eq!(outcome, HandleOutcome::PassThrough);
         assert!(matches!(
             rx.recv().await,
-            Some(RuntimeToUiEvent::SessionSnapshot { .. })
+            Some(RuntimeToUiEvent::ThreadSnapshot { .. })
         ));
     }
 
     #[tokio::test]
-    async fn handle_server_text_emits_session_switched() {
+    async fn handle_server_text_emits_thread_switched() {
         let (tx, mut rx) = mpsc::channel(4);
 
-        // SessionSwitched 现在嵌入在 RuntimeEvent 中(由 server 通过普通runtime 通道广播),不是独立的 ServerEnvelope 变体。
+        // ThreadSwitched 现在嵌入在 RuntimeEvent 中(由 server 通过普通runtime 通道广播),不是独立的 ServerEnvelope 变体。
         let envelope = serde_json::to_string(&protocol::ServerEnvelope::Event {
-            event: protocol::RuntimeEvent::new(protocol::TypedRuntimeEvent::SessionSwitched(
-                protocol::SessionSwitchedEvent {
-                    from: "session_old".to_string(),
-                    to: "session_new".to_string(),
+            event: protocol::RuntimeEvent::new(protocol::TypedRuntimeEvent::ThreadSwitched(
+                protocol::ThreadSwitchedEvent {
+                    from: "thread_old".to_string(),
+                    to: "thread_new".to_string(),
                 },
             )),
         })
-        .expect("session switched envelope should serialize");
+        .expect("thread switched envelope should serialize");
         let outcome = handle_server_text(&envelope, &tx)
             .await
-            .expect("session switched should decode");
+            .expect("thread switched should decode");
 
-        // 主循环据此返回 SessionLoop::Switch,触发 ws 重连到新 session。
-        assert_eq!(outcome, HandleOutcome::Switch("session_new".to_string()));
-        // SessionSwitched 不应混入 runtime 事件流。
+        // 主循环据此返回 ThreadLoop::Switch,触发 ws 重连到新 thread。
+        assert_eq!(outcome, HandleOutcome::Switch("thread_new".to_string()));
+        // ThreadSwitched 不应混入 runtime 事件流。
         assert!(rx.try_recv().is_err());
     }
 }

@@ -1,7 +1,7 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
     ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandSummary,
-    InteractionRequest, Notification, SessionSummary, SubmittedPlan, ToolPauseRequest,
+    InteractionRequest, Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::display::{
     AgentTaskNotification, DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft,
@@ -234,8 +234,8 @@ pub enum UiMessage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentNode {
     pub task_id: String,
-    pub session_id: String,
-    pub parent_session_id: String,
+    pub thread_id: String,
+    pub parent_thread_id: String,
     pub spawn_tool_use_id: String,
     pub agent_label: String,
     pub title: String,
@@ -248,8 +248,8 @@ impl From<AgentTaskSnapshot> for SubagentNode {
     fn from(snapshot: AgentTaskSnapshot) -> Self {
         Self {
             task_id: snapshot.task.task_id,
-            session_id: snapshot.task.thread_id,
-            parent_session_id: snapshot.task.parent_thread_id,
+            thread_id: snapshot.task.thread_id,
+            parent_thread_id: snapshot.task.parent_thread_id,
             spawn_tool_use_id: snapshot.task.spawn_tool_use_id,
             agent_label: snapshot.task.agent,
             title: snapshot.task.title,
@@ -320,9 +320,9 @@ pub struct StatusBar {
     pub active_profile: ActiveProfile,
     /// 最近一次请求的上下文 token 数。
     pub current_context_tokens: i64,
-    /// 当前会话历史累计 token 数。
+    /// 当前线程历史累计 token 数。
     pub total_tokens: i64,
-    /// 当前会话历史累计缓存命中 token 数。
+    /// 当前线程历史累计缓存命中 token 数。
     pub total_cached_tokens: i64,
     /// 当前模型上下文窗口。
     pub context_window: Option<u32>,
@@ -408,14 +408,14 @@ pub struct UiState {
     pub message_scroll_y: usize,
     /// 当前屏幕上可由鼠标拖选复制的文本行。
     pub selectable_screen_lines: Vec<SelectableScreenLine>,
-    /// TUI 刚启动、尚未进入任何会话/交互前展示的一次性启动页。
+    /// TUI 刚启动、尚未进入任何线程/交互前展示的一次性启动页。
     pub show_start_screen: bool,
     /// 启动时配置的 MCP server 数量，用于首屏项目仪表盘。
     pub startup_mcp_server_count: usize,
     /// 当前项目目录下是否存在非空 AGENTS.md，用于首屏项目仪表盘。
     pub startup_has_project_instructions: bool,
-    /// 启动时读取的最近会话，用于首屏提供可恢复的上下文线索。
-    pub startup_recent_sessions: Vec<SessionSummary>,
+    /// 启动时读取的最近线程，用于首屏提供可恢复的上下文线索。
+    pub startup_recent_threads: Vec<ThreadSummary>,
     /// 启动页中文提示，初始化时从静态列表随机选择一次。
     pub startup_tip: String,
     /// 鼠标拖选状态。
@@ -459,9 +459,9 @@ pub struct UiState {
     pub running_tools: HashSet<String>,
     /// 等待用户确认/输入的工具暂停队列，按到达顺序处理。
     pub pending_tool_pauses: VecDeque<ToolPauseRequest>,
-    /// 子 agent 视图模型，按 session id 存储完整消息。
+    /// 子 agent 视图模型，按 thread id 存储完整消息。
     pub subagents: HashMap<String, SubagentNode>,
-    /// 父 tool_use_id 到子 agent session id 的映射。
+    /// 父 tool_use_id 到子 agent thread id 的映射。
     pub subagents_by_tool_use: HashMap<String, String>,
     /// `messages` 中包含未完成工具（pending tool use）的第一条消息索引；
     /// 该索引及之后的消息不进缓存，每帧重新渲染（与 pending_assistant 同级），
@@ -503,10 +503,10 @@ pub struct UiState {
     pub autocomplete: CommandAutocomplete,
     /// @ mention 自动补全
     pub mention_autocomplete: MentionAutocomplete,
-    /// 当前会话标题（显示在头部栏）
-    pub current_session_title: Option<String>,
-    /// 当前会话 ID（新建或切换时设置）
-    pub current_session_id: Option<String>,
+    /// 当前线程标题（显示在头部栏）
+    pub current_thread_title: Option<String>,
+    /// 当前线程 ID（新建或切换时设置）
+    pub current_thread_id: Option<String>,
     /// 待处理的交互请求（非 None 时渲染选择页）
     pub interaction_request: Option<InteractionRequest>,
     /// 交互选择页的当前步骤与选中索引（TUI 本地状态）
@@ -547,7 +547,7 @@ impl UiState {
             show_start_screen: true,
             startup_mcp_server_count: 0,
             startup_has_project_instructions: false,
-            startup_recent_sessions: Vec::new(),
+            startup_recent_threads: Vec::new(),
             startup_tip: pick_start_screen_tip(),
             text_selection: None,
             is_selecting_text: false,
@@ -595,8 +595,8 @@ impl UiState {
                 ..CommandAutocomplete::default()
             },
             mention_autocomplete: MentionAutocomplete::default(),
-            current_session_title: None,
-            current_session_id: None,
+            current_thread_title: None,
+            current_thread_id: None,
             interaction_request: None,
             interaction_step: None,
             help_drawer: None,
@@ -640,12 +640,12 @@ impl UiState {
         removed_active
     }
 
-    pub fn remove_tool_pauses_for_source_session(&mut self, source_session_id: &str) -> bool {
+    pub fn remove_tool_pauses_for_source_thread(&mut self, source_thread_id: &str) -> bool {
         let removed_active = self
             .active_tool_pause()
-            .is_some_and(|pause| pause.source_session_id.as_deref() == Some(source_session_id));
+            .is_some_and(|pause| pause.source_thread_id.as_deref() == Some(source_thread_id));
         self.pending_tool_pauses
-            .retain(|pause| pause.source_session_id.as_deref() != Some(source_session_id));
+            .retain(|pause| pause.source_thread_id.as_deref() != Some(source_thread_id));
         removed_active
     }
 
@@ -776,13 +776,13 @@ impl UiState {
 
     pub fn apply_runtime_status_sync(
         &mut self,
-        status: omini_protocol::SessionRuntimeStatus,
+        status: omini_protocol::ThreadRuntimeStatus,
         restore_pending_pauses: bool,
     ) {
-        let omini_protocol::SessionRuntimeStatus {
+        let omini_protocol::ThreadRuntimeStatus {
             active_profile,
             pending_plan_approval,
-            subagent_sessions,
+            subagent_threads,
             activity,
             state,
             pending_pauses,
@@ -797,7 +797,7 @@ impl UiState {
         };
         self.status_bar.git_branch = git_branch;
         self.mention_autocomplete
-            .set_candidates(agent_summaries_to_mention_candidates(subagent_sessions));
+            .set_candidates(agent_summaries_to_mention_candidates(subagent_threads));
         self.update_input_autocomplete();
         self.sync_pending_plan_approval(pending_plan_approval);
         if restore_pending_pauses {
@@ -805,11 +805,11 @@ impl UiState {
         }
 
         self.main_query_active = activity.as_ref().is_some_and(|activity| {
-            activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
+            activity.kind == omini_protocol::ThreadRuntimeActivityKind::Query
         });
 
         let Some(activity) = activity else {
-            if state == omini_protocol::SessionRuntimeState::Idle {
+            if state == omini_protocol::ThreadRuntimeState::Idle {
                 self.manual_compact_running = false;
                 self.run_timer = None;
                 self.activity_status_title = None;
@@ -819,16 +819,15 @@ impl UiState {
         };
 
         let agent_status = match state {
-            omini_protocol::SessionRuntimeState::Idle => return,
-            omini_protocol::SessionRuntimeState::Thinking => AgentStatus::Thinking,
-            omini_protocol::SessionRuntimeState::Waiting => AgentStatus::AwaitingInput,
-            omini_protocol::SessionRuntimeState::Working
-            | omini_protocol::SessionRuntimeState::Compacting => AgentStatus::Working,
+            omini_protocol::ThreadRuntimeState::Idle => return,
+            omini_protocol::ThreadRuntimeState::Thinking => AgentStatus::Thinking,
+            omini_protocol::ThreadRuntimeState::Waiting => AgentStatus::AwaitingInput,
+            omini_protocol::ThreadRuntimeState::Working
+            | omini_protocol::ThreadRuntimeState::Compacting => AgentStatus::Working,
         };
         // RuntimeStatus 是连接同步事实；compact 可能由其它客户端发起，不能标记为本地 manual compact。
-        let paused = activity.kind == omini_protocol::SessionRuntimeActivityKind::Query
-            && (state == omini_protocol::SessionRuntimeState::Waiting
-                || !pending_pauses.is_empty());
+        let paused = activity.kind == omini_protocol::ThreadRuntimeActivityKind::Query
+            && (state == omini_protocol::ThreadRuntimeState::Waiting || !pending_pauses.is_empty());
 
         self.manual_compact_running = false;
         self.sync_run_timer(Duration::from_millis(activity.elapsed_ms), paused);
@@ -916,7 +915,7 @@ impl UiState {
     }
 
     /// 全量重建 `pending_tool_message_map` 并重算 `live_message_start`。
-    /// 仅在 `apply_session_snapshot`（中途连接 / 切换会话）时调用，O(n)。
+    /// 仅在 `apply_thread_snapshot`（中途连接 / 切换线程）时调用，O(n)。
     fn rebuild_pending_tool_map(&mut self) {
         self.pending_tool_message_map.clear();
         // 先收集所有已解析的 ToolResult id（跨消息匹配）。

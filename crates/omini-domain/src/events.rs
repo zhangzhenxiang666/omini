@@ -236,7 +236,7 @@ impl std::fmt::Display for CompactTrigger {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactEvent {
     pub trigger: CompactTrigger,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -244,7 +244,7 @@ pub struct CompactEvent {
 pub struct CompactSummaryDeltaEvent {
     pub trigger: CompactTrigger,
     pub delta: String,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -255,7 +255,7 @@ pub struct CompactShrinkFinishedEvent {
     pub after_tokens: usize,
     pub before_messages: usize,
     pub after_messages: usize,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -263,7 +263,7 @@ pub struct CompactShrinkFinishedEvent {
 pub struct CompactShrinkFailedEvent {
     pub trigger: CompactTrigger,
     pub message: String,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -272,7 +272,7 @@ pub struct CompactSummaryFinishedEvent {
     pub trigger: CompactTrigger,
     pub summary: String,
     pub after_tokens: usize,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -280,7 +280,7 @@ pub struct CompactSummaryFinishedEvent {
 pub struct CompactSummaryFailedEvent {
     pub trigger: CompactTrigger,
     pub message: String,
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub agent_label: Option<String>,
 }
 
@@ -308,17 +308,17 @@ pub enum PlanApprovalAction {
     Approve {
         profile: PlanExecutionProfile,
     },
-    /// 「在新会话中执行计划」:client 选此 action 时,server 路由层会直接读
-    /// plan 文件并 fork 新 `RuntimeSession`,不进入 core 的审批状态机;
+    /// 「在新线程中执行计划」:client 选此 action 时,server 路由层会直接读
+    /// plan 文件并 fork 新 `RuntimeThread`,不进入 core 的审批状态机;
     /// core 收到此 action 后只发出 resolved 事件关闭抽屉,状态保持。
-    ApproveInNewSession {
+    ApproveInNewThread {
         profile: PlanExecutionProfile,
     },
     ContinueDiscussing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSummary {
+pub struct ThreadSummary {
     pub id: String,
     pub title: String,
     pub model: String,
@@ -326,12 +326,12 @@ pub struct SessionSummary {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_state: Option<SessionRuntimeState>,
+    pub runtime_state: Option<ThreadRuntimeState>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeState {
+pub enum ThreadRuntimeState {
     #[default]
     Idle,
     Working,
@@ -341,7 +341,7 @@ pub enum SessionRuntimeState {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionUsageSnapshot {
+pub struct ThreadUsageSnapshot {
     pub current_context_tokens: i64,
     pub total_tokens: i64,
     pub total_cached_tokens: i64,
@@ -349,7 +349,7 @@ pub struct SessionUsageSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionUsage {
+pub struct ThreadUsage {
     pub current_context_tokens: i64,
     pub total_tokens: i64,
     pub total_cached_tokens: i64,
@@ -357,8 +357,8 @@ pub struct SessionUsage {
     pub context_window: Option<u32>,
 }
 
-impl From<SessionUsageSnapshot> for SessionUsage {
-    fn from(usage: SessionUsageSnapshot) -> Self {
+impl From<ThreadUsageSnapshot> for ThreadUsage {
+    fn from(usage: ThreadUsageSnapshot) -> Self {
         Self {
             current_context_tokens: usage.current_context_tokens,
             total_tokens: usage.total_tokens,
@@ -369,8 +369,8 @@ impl From<SessionUsageSnapshot> for SessionUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoadedSession {
-    pub session_id: String,
+pub struct LoadedThread {
+    pub thread_id: String,
     pub provider: String,
     pub model: String,
     pub thinking_effort: Option<ThinkingEffort>,
@@ -379,7 +379,7 @@ pub struct LoadedSession {
     pub title: Option<String>,
     pub messages: Vec<HistoryItem>,
     pub agent_tasks: Vec<AgentTaskSnapshot>,
-    pub usage: SessionUsageSnapshot,
+    pub usage: ThreadUsageSnapshot,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -391,7 +391,7 @@ pub struct ToolPauseRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_source: Option<PermissionSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_session_id: Option<String>,
+    pub source_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_label: Option<String>,
     pub kind: ToolPauseKind,
@@ -596,8 +596,8 @@ mod tests {
     }
 
     #[test]
-    fn session_summary_defaults_to_unloaded_runtime_state() {
-        let summary: SessionSummary = serde_json::from_value(json!({
+    fn thread_summary_defaults_to_unloaded_runtime_state() {
+        let summary: ThreadSummary = serde_json::from_value(json!({
             "id": "s1",
             "title": "hello",
             "model": "gpt-test",
@@ -611,16 +611,16 @@ mod tests {
     }
 
     #[test]
-    fn session_summary_serializes_runtime_state_when_loaded() {
+    fn thread_summary_serializes_runtime_state_when_loaded() {
         let now = Utc::now();
-        let summary = SessionSummary {
+        let summary = ThreadSummary {
             id: "s1".to_string(),
             title: "hello".to_string(),
             model: "gpt-test".to_string(),
             provider: "openai".to_string(),
             created_at: now,
             updated_at: now,
-            runtime_state: Some(SessionRuntimeState::Working),
+            runtime_state: Some(ThreadRuntimeState::Working),
         };
 
         assert_eq!(
@@ -707,8 +707,8 @@ mod tests {
     }
 
     #[test]
-    fn session_usage_omits_empty_context_window_for_protocol_overlay() {
-        let usage = SessionUsage::from(SessionUsageSnapshot {
+    fn thread_usage_omits_empty_context_window_for_protocol_overlay() {
+        let usage = ThreadUsage::from(ThreadUsageSnapshot {
             current_context_tokens: 1,
             total_tokens: 2,
             total_cached_tokens: 3,

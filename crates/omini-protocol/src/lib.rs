@@ -11,9 +11,9 @@ pub use omini_domain::display::HistoryItem;
 pub use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
     AgentTaskResult, AgentTaskSnapshot, AgentTaskStatus, CompactTrigger, MAX_AGENT_DEPTH,
-    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, SessionRuntimeState,
-    SessionSummary, SessionUsage, SessionUsageSnapshot, SubmittedPlan, ToolPauseKind,
-    ToolPauseRequest, ToolPauseResponse,
+    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, SubmittedPlan, ThreadRuntimeState,
+    ThreadSummary, ThreadUsage, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
+    ToolPauseResponse,
 };
 pub use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 pub use omini_domain::subagents::{
@@ -90,8 +90,8 @@ pub struct UpdateProjectRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpenProjectResponse {
     pub project: ProjectSummary,
-    /// 项目下可供 TUI 首屏展示或切换的会话列表。
-    pub sessions: Vec<SessionSummary>,
+    /// 项目下可供 TUI 首屏展示或切换的线程列表。
+    pub threads: Vec<ThreadSummary>,
     /// open 时当前生效的 provider key。
     pub active_provider: String,
     /// open 时当前生效的模型 ID。
@@ -117,7 +117,7 @@ pub struct OpenProjectResponse {
     pub git_branch: Option<String>,
 }
 
-/// 项目级运行配置更新后的快照；用于无活跃 session 的 TUI 状态同步。
+/// 项目级运行配置更新后的快照；用于无活跃 thread 的 TUI 状态同步。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRuntimeConfigResponse {
     pub active_provider: String,
@@ -159,10 +159,10 @@ pub enum TypedRuntimeEvent {
     Notification(NotificationEvent),
     ModelChanged(ModelChangedEvent),
     ThinkingDisplayChanged(ThinkingDisplayChangedEvent),
-    UsageChanged(SessionUsageSnapshot),
+    UsageChanged(ThreadUsageSnapshot),
     UsageTotalsChanged(UsageTotalsChangedEvent),
     ActiveProfileChanged(ActiveProfileChangedEvent),
-    SessionTitleChanged(SessionTitleChangedEvent),
+    ThreadTitleChanged(ThreadTitleChangedEvent),
     ToolPauseRequested(ToolPauseRequest),
     PlanSubmitted(SubmittedPlan),
     PlanApprovalResolved(PlanApprovalResolvedEvent),
@@ -181,11 +181,11 @@ pub enum TypedRuntimeEvent {
     CompactSummaryDelta(CompactSummaryDeltaEvent),
     CompactSummaryFinished(CompactSummaryFinishedEvent),
     CompactSummaryFailed(CompactSummaryFailedEvent),
-    SessionSnapshot(SessionSnapshotEvent),
-    /// 「在新会话中执行计划」审批通过后,server 在 fork 出新 RuntimeSession 后
+    ThreadSnapshot(ThreadSnapshotEvent),
+    /// 「在新线程中执行计划」审批通过后,server 在 fork 出新 RuntimeThread 后
     /// 通过普通 runtime event 通道广播给所有客户端。TUI 收到后应重连到 `to` 的 ws;
-    /// 旧 session 的 runtime 活动自然结束,由 server 的 reclaim 机制回收。
-    SessionSwitched(SessionSwitchedEvent),
+    /// 旧 thread 的 runtime 活动自然结束,由 server 的 reclaim 机制回收。
+    ThreadSwitched(ThreadSwitchedEvent),
     AgentTaskEvent(AgentTaskEventEnvelope),
 }
 
@@ -201,7 +201,7 @@ impl TypedRuntimeEvent {
             Self::UsageChanged(_) => "usage_changed",
             Self::UsageTotalsChanged(_) => "usage_totals_changed",
             Self::ActiveProfileChanged(_) => "active_profile_changed",
-            Self::SessionTitleChanged(_) => "session_title_changed",
+            Self::ThreadTitleChanged(_) => "thread_title_changed",
             Self::ToolPauseRequested(_) => "tool_pause_requested",
             Self::PlanSubmitted(_) => "plan_submitted",
             Self::PlanApprovalResolved(_) => "plan_approval_resolved",
@@ -218,19 +218,19 @@ impl TypedRuntimeEvent {
             Self::CompactSummaryDelta(_) => "compact_summary_delta",
             Self::CompactSummaryFinished(_) => "compact_summary_finished",
             Self::CompactSummaryFailed(_) => "compact_summary_failed",
-            Self::SessionSnapshot(_) => "session_snapshot",
-            Self::SessionSwitched(_) => "session_switched",
+            Self::ThreadSnapshot(_) => "thread_snapshot",
+            Self::ThreadSwitched(_) => "thread_switched",
             Self::AgentTaskEvent(_) => "agent_task_event",
         }
     }
 }
 
-/// 「在新会话中执行计划」触发 session 切换时广播的事件。
+/// 「在新线程中执行计划」触发 thread 切换时广播的事件。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSwitchedEvent {
-    /// 切换前的 session ID。
+pub struct ThreadSwitchedEvent {
+    /// 切换前的 thread ID。
     pub from: String,
-    /// 切换后的 session ID。
+    /// 切换后的 thread ID。
     pub to: String,
 }
 
@@ -251,7 +251,7 @@ pub struct NotificationEvent {
     pub details: Vec<String>,
 }
 
-/// 当前会话模型配置已变化。
+/// 当前线程模型配置已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelChangedEvent {
     pub provider: String,
@@ -262,28 +262,28 @@ pub struct ModelChangedEvent {
     pub context_window: Option<u32>,
 }
 
-/// 当前会话 thinking 块显示偏好已变化。
+/// 当前线程 thinking 块显示偏好已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThinkingDisplayChangedEvent {
     pub show: bool,
 }
 
-/// 当前会话累计 token usage 已变化。
+/// 当前线程累计 token usage 已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageTotalsChangedEvent {
     pub total_tokens: i64,
     pub total_cached_tokens: i64,
 }
 
-/// 当前会话活跃 profile 已变化。
+/// 当前线程活跃 profile 已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActiveProfileChangedEvent {
     pub profile: ActiveProfile,
 }
 
-/// 当前会话标题已变化。
+/// 当前线程标题已变化。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionTitleChangedEvent {
+pub struct ThreadTitleChangedEvent {
     pub title: Option<String>,
 }
 
@@ -314,103 +314,103 @@ pub struct RuntimeDeltaEvent {
     pub delta: String,
 }
 
-/// 当前 session 开始 LLM 压缩摘要。
+/// 当前 thread 开始 LLM 压缩摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactSummaryStartedEvent {
     pub trigger: CompactTrigger,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
 }
 
-/// 当前 session 正在流式输出压缩摘要。
+/// 当前 thread 正在流式输出压缩摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactSummaryDeltaEvent {
     pub trigger: CompactTrigger,
     pub delta: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
 }
 
-/// 当前 session 完成 LLM 压缩摘要。
+/// 当前 thread 完成 LLM 压缩摘要。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactSummaryFinishedEvent {
     pub trigger: CompactTrigger,
     pub summary: String,
     pub after_tokens: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
 }
 
-/// 当前 session LLM 压缩摘要失败。
+/// 当前 thread LLM 压缩摘要失败。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactSummaryFailedEvent {
     pub trigger: CompactTrigger,
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_label: Option<String>,
 }
 
-/// 会话快照统计事件，用于重连或首屏同步时恢复概要状态。
+/// 线程快照统计事件，用于重连或首屏同步时恢复概要状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSnapshotEvent {
-    /// 快照所属会话；旧事件可能不带该字段。
+pub struct ThreadSnapshotEvent {
+    /// 快照所属线程；旧事件可能不带该字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
     pub messages: Vec<HistoryItem>,
     pub agent_tasks: Vec<AgentTaskSnapshot>,
-    pub usage: SessionUsageSnapshot,
+    pub usage: ThreadUsageSnapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeActivityKind {
+pub enum ThreadRuntimeActivityKind {
     Query,
     Compact,
 }
 
-/// 当前会话正在执行的顶层活动及其计时信息。
+/// 当前线程正在执行的顶层活动及其计时信息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeActivity {
-    pub kind: SessionRuntimeActivityKind,
+pub struct ThreadRuntimeActivity {
+    pub kind: ThreadRuntimeActivityKind,
     pub started_at: DateTime<Utc>,
     /// 已运行时间，单位毫秒；query 活动会扣除等待客户端响应的暂停时长。
     pub elapsed_ms: u64,
 }
 
-/// 当前会话或子 agent 正在运行的工具调用。
+/// 当前线程或子 agent 正在运行的工具调用。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeTool {
+pub struct ThreadRuntimeTool {
     pub tool_use_id: String,
     pub tool_name: String,
     pub started_at: DateTime<Utc>,
     /// 已运行时间，单位毫秒。
     pub elapsed_ms: u64,
-    /// 工具来自子 agent 时，这里标识源会话。
+    /// 工具来自子 agent 时，这里标识源线程。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_session_id: Option<String>,
+    pub source_thread_id: Option<String>,
     /// 工具来自子 agent 时，这里提供人类可读的 agent 标签。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_agent_label: Option<String>,
 }
 
-/// 当前会话可见的 skill 运行态信息。
+/// 当前线程可见的 skill 运行态信息。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeSkill {
+pub struct ThreadRuntimeSkill {
     pub name: String,
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_description: Option<String>,
     pub source_kind: SkillSourceKind,
     pub directory: String,
-    pub status: SessionRuntimeCapabilityStatus,
+    pub status: ThreadRuntimeCapabilityStatus,
     pub disable_model_invocation: bool,
     pub user_invocable: bool,
 }
@@ -425,13 +425,13 @@ pub enum SkillSourceKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeCapabilityStatus {
+pub enum ThreadRuntimeCapabilityStatus {
     Available,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionRuntimeMcpStatus {
+pub enum ThreadRuntimeMcpStatus {
     Disabled,
     Connecting,
     Ready,
@@ -440,44 +440,44 @@ pub enum SessionRuntimeMcpStatus {
 
 /// MCP server 暴露给模型的单个工具。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeMcpTool {
+pub struct ThreadRuntimeMcpTool {
     pub name: String,
     /// 经过 daemon 去重后真正注册给模型使用的工具名。
     pub registered_name: String,
     pub description: String,
 }
 
-/// 当前会话可见的单个 MCP server 状态。
+/// 当前线程可见的单个 MCP server 状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRuntimeMcpServer {
+pub struct ThreadRuntimeMcpServer {
     pub name: String,
-    pub status: SessionRuntimeMcpStatus,
+    pub status: ThreadRuntimeMcpStatus,
     /// 最近一次连接或初始化失败原因；非失败状态通常为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tools: Vec<SessionRuntimeMcpTool>,
+    pub tools: Vec<ThreadRuntimeMcpTool>,
 }
 
-/// 会话运行态的完整协议快照，供新连接或状态轮询同步 UI。
+/// 线程运行态的完整协议快照，供新连接或状态轮询同步 UI。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionRuntimeStatus {
-    pub session_id: String,
-    /// 当前会话顶层运行状态。
-    pub state: SessionRuntimeState,
-    /// 当前会话使用的运行 profile。
+pub struct ThreadRuntimeStatus {
+    pub thread_id: String,
+    /// 当前线程顶层运行状态。
+    pub state: ThreadRuntimeState,
+    /// 当前线程使用的运行 profile。
     #[serde(default)]
     pub active_profile: ActiveProfile,
-    /// core 是否已完成该会话的加载和 hydrate。
+    /// core 是否已完成该线程的加载和 hydrate。
     pub loaded: bool,
-    /// 当前拥有会话控制权的客户端 ID；无人控制时为空。
+    /// 当前拥有线程控制权的客户端 ID；无人控制时为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub controller_id: Option<String>,
-    /// 当前订阅该会话事件流的客户端数量。
+    /// 当前订阅该线程事件流的客户端数量。
     pub connected_client_count: usize,
     /// 当前顶层活动；空表示没有正在运行或压缩的任务。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activity: Option<SessionRuntimeActivity>,
+    pub activity: Option<ThreadRuntimeActivity>,
     /// 所有尚未被客户端响应的暂停请求。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_pauses: Vec<ToolPauseRequest>,
@@ -486,31 +486,31 @@ pub struct SessionRuntimeStatus {
     pub pending_plan_approval: Option<PlanSubmittedEvent>,
     /// 当前仍在执行的工具调用。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub active_tools: Vec<SessionRuntimeTool>,
-    /// 当前会话可见的 skill 能力。
+    pub active_tools: Vec<ThreadRuntimeTool>,
+    /// 当前线程可见的 skill 能力。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub skills: Vec<SessionRuntimeSkill>,
-    /// 当前会话可见的 MCP server 能力和状态。
+    pub skills: Vec<ThreadRuntimeSkill>,
+    /// 当前线程可见的 MCP server 能力和状态。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<SessionRuntimeMcpServer>,
-    /// 当前会话可用的子 agent 能力列表。
+    pub mcp_servers: Vec<ThreadRuntimeMcpServer>,
+    /// 当前线程可用的子 agent 能力列表。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subagent_sessions: Vec<AgentSummary>,
+    pub subagent_threads: Vec<AgentSummary>,
     /// 当前工作目录的 git 分支；不在 git 仓库中时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
 }
 
-/// 项目下多个活跃会话的运行态列表响应。
+/// 项目下多个活跃线程的运行态列表响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionStatusesResponse {
-    pub statuses: Vec<SessionRuntimeStatus>,
+pub struct ThreadStatusesResponse {
+    pub statuses: Vec<ThreadRuntimeStatus>,
 }
 
-/// 单个会话运行态查询响应。
+/// 单个线程运行态查询响应。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionRuntimeStatusResponse {
-    pub status: SessionRuntimeStatus,
+pub struct ThreadRuntimeStatusResponse {
+    pub status: ThreadRuntimeStatus,
 }
 
 /// 用户输入在协议层携带语义化上下文引用，避免 TUI 把本地 mention 文本直接塞给 core。
@@ -629,7 +629,7 @@ impl AttachmentRef {
     }
 }
 
-/// 当前会话可用模型列表及正在使用的模型选择。
+/// 当前线程可用模型列表及正在使用的模型选择。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelsResponse {
     pub providers: Vec<ProviderInfo>,
@@ -637,7 +637,7 @@ pub struct ModelsResponse {
     pub current_model: String,
 }
 
-/// 设置当前会话 provider、模型和可选 thinking effort 的请求。
+/// 设置当前线程 provider、模型和可选 thinking effort 的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetModelRequest {
     pub provider: String,
@@ -646,19 +646,19 @@ pub struct SetModelRequest {
     pub thinking_effort: Option<ThinkingEffort>,
 }
 
-/// 设置当前会话 thinking effort 的请求。
+/// 设置当前线程 thinking effort 的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetThinkingEffortRequest {
     pub effort: ThinkingEffort,
 }
 
-/// 设置当前会话活跃 provider profile 的请求。
+/// 设置当前线程活跃 provider profile 的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetActiveProfileRequest {
     pub profile: ActiveProfile,
 }
 
-/// 设置当前会话 thinking 块显示偏好的请求。
+/// 设置当前线程 thinking 块显示偏好的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetThinkingDisplayRequest {
     /// 目标显示状态；为空时表示按当前偏好切换。
@@ -666,16 +666,16 @@ pub struct SetThinkingDisplayRequest {
     pub show: Option<bool>,
 }
 
-/// 项目下可见会话列表响应。
+/// 项目下可见线程列表响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionsResponse {
-    pub sessions: Vec<SessionSummary>,
+pub struct ThreadsResponse {
+    pub threads: Vec<ThreadSummary>,
 }
 
 /// TODO: 注意这里如果provider为Some但是model为None那么可能会出问题
-/// 创建会话时可覆盖项目默认运行配置。
+/// 创建线程时可覆盖项目默认运行配置。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateSessionRequest {
+pub struct CreateThreadRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -686,27 +686,27 @@ pub struct CreateSessionRequest {
     pub profile: Option<ActiveProfile>,
 }
 
-/// 创建会话后的响应；部分旧流程只清空当前会话，因此可能没有新 ID。
+/// 创建线程后的响应；部分旧流程只清空当前线程，因此可能没有新 ID。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateSessionResponse {
-    /// 新建会话 ID；旧的清空式创建流程中为空。
+pub struct CreateThreadResponse {
+    /// 新建线程 ID；旧的清空式创建流程中为空。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub thread_id: Option<String>,
 }
 
-/// 重命名当前会话的请求。
+/// 重命名当前线程的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RenameSessionRequest {
+pub struct RenameThreadRequest {
     pub title: String,
 }
 
-/// 打开项目中某个已有会话的请求。
+/// 打开项目中某个已有线程的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenSessionRequest {
-    pub session_id: String,
+pub struct OpenThreadRequest {
+    pub thread_id: String,
 }
 
-/// 请求压缩当前会话上下文，可携带用户补充指令。
+/// 请求压缩当前线程上下文，可携带用户补充指令。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompactContextRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,7 +815,7 @@ pub enum RunInputMode {
     Intervene,
 }
 
-/// 向会话提交用户输入或运行中插入输入的请求。
+/// 向线程提交用户输入或运行中插入输入的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubmitRunRequest {
     pub input: UserInput,
@@ -849,7 +849,7 @@ pub struct ResolvePlanRequest {
     pub action: PlanApprovalAction,
 }
 
-/// 客户端声明或接管会话控制权后的租约状态。
+/// 客户端声明或接管线程控制权后的租约状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControllerLease {
     pub client_id: String,
@@ -903,7 +903,7 @@ impl ProtocolError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ClientSessionRole {
+pub enum ClientThreadRole {
     Controller,
     Observer,
 }
@@ -915,13 +915,13 @@ pub enum ServerEnvelope {
     /// typed runtime 事件。
     Event { event: RuntimeEvent },
     /// 连接建立时的实时运行状态快照；补足持久化 snapshot 不包含的运行中状态。
-    RuntimeStatus { status: SessionRuntimeStatus },
-    /// 会话控制权发生变化。
+    RuntimeStatus { status: ThreadRuntimeStatus },
+    /// 线程控制权发生变化。
     ControllerChanged { controller_id: Option<String> },
     /// 当前连接的 controller/observer 角色发生变化。
     ClientRoleChanged {
         client_id: String,
-        role: ClientSessionRole,
+        role: ClientThreadRole,
         /// 变化后的控制者客户端 ID；无人控制时为空。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller_id: Option<String>,
@@ -987,22 +987,22 @@ mod tests {
     }
 
     #[test]
-    fn sessions_response_carries_runtime_state() {
+    fn threads_response_carries_runtime_state() {
         let now = Utc::now();
-        let response = SessionsResponse {
-            sessions: vec![SessionSummary {
+        let response = ThreadsResponse {
+            threads: vec![ThreadSummary {
                 id: "s1".to_string(),
                 title: "hello".to_string(),
                 model: "gpt-test".to_string(),
                 provider: "openai".to_string(),
                 created_at: now,
                 updated_at: now,
-                runtime_state: Some(SessionRuntimeState::Waiting),
+                runtime_state: Some(ThreadRuntimeState::Waiting),
             }],
         };
 
         assert_eq!(
-            serde_json::to_value(response).unwrap()["sessions"][0]["runtime_state"],
+            serde_json::to_value(response).unwrap()["threads"][0]["runtime_state"],
             json!("waiting")
         );
     }
@@ -1155,7 +1155,7 @@ mod tests {
             trigger: CompactTrigger::Manual,
             summary: "# Summary".to_string(),
             after_tokens: 42,
-            session_id: Some("session_1".to_string()),
+            thread_id: Some("thread_1".to_string()),
             agent_label: None,
         });
 
@@ -1166,7 +1166,7 @@ mod tests {
                 "trigger": "manual",
                 "summary": "# Summary",
                 "after_tokens": 42,
-                "session_id": "session_1"
+                "thread_id": "thread_1"
             })
         );
     }
@@ -1191,10 +1191,10 @@ mod tests {
     }
 
     #[test]
-    fn session_runtime_status_serializes_idle_snapshot() {
-        let status = SessionRuntimeStatus {
-            session_id: "s1".to_string(),
-            state: SessionRuntimeState::Idle,
+    fn thread_runtime_status_serializes_idle_snapshot() {
+        let status = ThreadRuntimeStatus {
+            thread_id: "s1".to_string(),
+            state: ThreadRuntimeState::Idle,
             active_profile: ActiveProfile::Main,
             loaded: false,
             controller_id: None,
@@ -1205,14 +1205,14 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagent_sessions: Vec::new(),
+            subagent_threads: Vec::new(),
             git_branch: None,
         };
 
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             json!({
-                "session_id": "s1",
+                "thread_id": "s1",
                 "state": "idle",
                 "active_profile": "main",
                 "loaded": false,
@@ -1222,10 +1222,10 @@ mod tests {
     }
 
     #[test]
-    fn session_runtime_status_serializes_pending_plan_approval() {
-        let status = SessionRuntimeStatus {
-            session_id: "s1".to_string(),
-            state: SessionRuntimeState::Idle,
+    fn thread_runtime_status_serializes_pending_plan_approval() {
+        let status = ThreadRuntimeStatus {
+            thread_id: "s1".to_string(),
+            state: ThreadRuntimeState::Idle,
             active_profile: ActiveProfile::Main,
             loaded: true,
             controller_id: None,
@@ -1240,14 +1240,14 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagent_sessions: Vec::new(),
+            subagent_threads: Vec::new(),
             git_branch: None,
         };
 
         assert_eq!(
             serde_json::to_value(status).unwrap(),
             json!({
-                "session_id": "s1",
+                "thread_id": "s1",
                 "state": "idle",
                 "active_profile": "main",
                 "loaded": true,
@@ -1262,10 +1262,10 @@ mod tests {
     }
 
     #[test]
-    fn session_runtime_status_serializes_subagent_sessions() {
-        let status = SessionRuntimeStatus {
-            session_id: "s1".to_string(),
-            state: SessionRuntimeState::Idle,
+    fn thread_runtime_status_serializes_subagent_threads() {
+        let status = ThreadRuntimeStatus {
+            thread_id: "s1".to_string(),
+            state: ThreadRuntimeState::Idle,
             active_profile: ActiveProfile::Main,
             loaded: true,
             controller_id: None,
@@ -1276,7 +1276,7 @@ mod tests {
             active_tools: Vec::new(),
             skills: Vec::new(),
             mcp_servers: Vec::new(),
-            subagent_sessions: vec![AgentSummary {
+            subagent_threads: vec![AgentSummary {
                 name: "explorer".to_string(),
                 description: "Read-only exploration agent.".to_string(),
                 short_description: None,
@@ -1289,7 +1289,7 @@ mod tests {
 
         assert!(value.get("subagents").is_none());
         assert_eq!(
-            value["subagent_sessions"],
+            value["subagent_threads"],
             json!([{
                 "name": "explorer",
                 "description": "Read-only exploration agent.",
@@ -1305,7 +1305,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: Some("session_1".to_string()),
+            source_thread_id: Some("thread_1".to_string()),
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                 tool_name: "bash".to_string(),
@@ -1327,7 +1327,7 @@ mod tests {
                         "payload": {}
                     }
                 },
-                "source_session_id": "session_1"
+                "source_thread_id": "thread_1"
             })
         );
     }
@@ -1336,7 +1336,7 @@ mod tests {
     fn client_role_changed_envelope_serializes_role_for_one_client() {
         let envelope = ServerEnvelope::ClientRoleChanged {
             client_id: "client_1".to_string(),
-            role: ClientSessionRole::Controller,
+            role: ClientThreadRole::Controller,
             controller_id: Some("client_1".to_string()),
         };
 
@@ -1352,10 +1352,10 @@ mod tests {
     }
 
     #[test]
-    fn session_switched_typed_event_round_trips() {
-        let event = TypedRuntimeEvent::SessionSwitched(SessionSwitchedEvent {
-            from: "session_old".to_string(),
-            to: "session_new".to_string(),
+    fn thread_switched_typed_event_round_trips() {
+        let event = TypedRuntimeEvent::ThreadSwitched(ThreadSwitchedEvent {
+            from: "thread_old".to_string(),
+            to: "thread_new".to_string(),
         });
 
         // 事件嵌入 RuntimeEvent 顶层,随 `ServerEnvelope::Event` 走普通 runtime 通道。
@@ -1365,9 +1365,9 @@ mod tests {
             value,
             json!({
                 "event": {
-                    "type": "session_switched",
-                    "from": "session_old",
-                    "to": "session_new"
+                    "type": "thread_switched",
+                    "from": "thread_old",
+                    "to": "thread_new"
                 }
             })
         );
@@ -1380,15 +1380,15 @@ mod tests {
     #[test]
     fn runtime_status_envelope_serializes_connection_state_snapshot() {
         let envelope = ServerEnvelope::RuntimeStatus {
-            status: SessionRuntimeStatus {
-                session_id: "s1".to_string(),
-                state: SessionRuntimeState::Compacting,
+            status: ThreadRuntimeStatus {
+                thread_id: "s1".to_string(),
+                state: ThreadRuntimeState::Compacting,
                 active_profile: ActiveProfile::Auto,
                 loaded: true,
                 controller_id: Some("client_1".to_string()),
                 connected_client_count: 2,
-                activity: Some(SessionRuntimeActivity {
-                    kind: SessionRuntimeActivityKind::Compact,
+                activity: Some(ThreadRuntimeActivity {
+                    kind: ThreadRuntimeActivityKind::Compact,
                     started_at: Utc::now(),
                     elapsed_ms: 250,
                 }),
@@ -1397,14 +1397,14 @@ mod tests {
                 active_tools: Vec::new(),
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
-                subagent_sessions: Vec::new(),
+                subagent_threads: Vec::new(),
                 git_branch: None,
             },
         };
         let value = serde_json::to_value(envelope).unwrap();
 
         assert_eq!(value["type"], "runtime_status");
-        assert_eq!(value["status"]["session_id"], "s1");
+        assert_eq!(value["status"]["thread_id"], "s1");
         assert_eq!(value["status"]["state"], "compacting");
         assert_eq!(value["status"]["activity"]["kind"], "compact");
     }

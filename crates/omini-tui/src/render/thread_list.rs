@@ -1,6 +1,6 @@
 use super::{line_width, pad_display_width, register_selectable_lines, truncate_str};
 use crate::state::{InteractionStep, UiState};
-use crate::types::events::SessionRuntimeState;
+use crate::types::events::ThreadRuntimeState;
 use chrono::{DateTime, Local, Utc};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -8,9 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
-    let Some(InteractionStep::Session {
-        sessions,
+pub(super) fn render_thread_list(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
+    let Some(InteractionStep::Thread {
+        threads,
         selected,
         search,
         ..
@@ -19,7 +19,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         return;
     };
 
-    let total = sessions.len();
+    let total = threads.len();
 
     // 布局：头部(1) + 内容(fill) + 分隔线(1) + 底部(1)
     let chunks = Layout::vertical([
@@ -73,7 +73,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
             row_backgrounds.push(None);
         }
         register_selectable_lines(state, content_area, &lines);
-        render_session_row_backgrounds(frame, content_area, &row_backgrounds);
+        render_thread_row_backgrounds(frame, content_area, &row_backgrounds);
         frame.render_widget(Paragraph::new(lines), content_area);
 
         // 分隔线（空）
@@ -126,10 +126,10 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         row_backgrounds.push(None);
     }
 
-    // 会话条目
+    // 线程条目
     for i in 0..max_visible {
         let actual_idx = scroll_off + i;
-        let session = &sessions[actual_idx];
+        let thread = &threads[actual_idx];
         let is_selected = actual_idx == selected;
 
         let bg = if is_selected {
@@ -147,9 +147,9 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
         };
 
         let prefix = if is_selected { "❯ " } else { "  " };
-        let time_str = pad_display_width(&relative_time(session.updated_at), time_col_w);
-        let status_marker = session_status_marker(session.runtime_state);
-        let msg = truncate_str(&session.title, max_msg_w);
+        let time_str = pad_display_width(&relative_time(thread.updated_at), time_col_w);
+        let status_marker = thread_status_marker(thread.runtime_state);
+        let msg = truncate_str(&thread.title, max_msg_w);
         let used_w = prefix_w
             + time_col_w
             + separator_w
@@ -203,7 +203,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     }
 
     register_selectable_lines(state, content_area, &lines);
-    render_session_row_backgrounds(frame, content_area, &row_backgrounds);
+    render_thread_row_backgrounds(frame, content_area, &row_backgrounds);
     frame.render_widget(Paragraph::new(lines), content_area);
 
     // ── 分隔线 ──
@@ -217,7 +217,7 @@ pub(super) fn render_session_list(state: &mut UiState, frame: &mut ratatui::Fram
     frame.render_widget(Paragraph::new(divider_line), divider_area);
 
     // ── 底部 ──
-    let footer_line = session_footer_line(content_w);
+    let footer_line = thread_footer_line(content_w);
     register_selectable_lines(state, footer_area, std::slice::from_ref(&footer_line));
     frame.render_widget(Paragraph::new(footer_line), footer_area);
 }
@@ -231,28 +231,28 @@ fn row_style(fg: Color, bg: Option<Color>) -> Style {
     }
 }
 
-fn session_status_marker(
-    runtime_state: Option<SessionRuntimeState>,
+fn thread_status_marker(
+    runtime_state: Option<ThreadRuntimeState>,
 ) -> Option<(&'static str, Color)> {
     match runtime_state {
         None => None,
-        Some(SessionRuntimeState::Idle) => Some(("●", Color::Rgb(0x66, 0xbb, 0x6a))),
-        Some(SessionRuntimeState::Thinking | SessionRuntimeState::Working) => {
+        Some(ThreadRuntimeState::Idle) => Some(("●", Color::Rgb(0x66, 0xbb, 0x6a))),
+        Some(ThreadRuntimeState::Thinking | ThreadRuntimeState::Working) => {
             Some(("●", Color::Rgb(0x64, 0x9f, 0xd5)))
         }
-        Some(SessionRuntimeState::Waiting) => Some(("●", Color::Rgb(0xd6, 0x8c, 0x45))),
-        Some(SessionRuntimeState::Compacting) => Some(("●", Color::Rgb(0xb0, 0x83, 0xd8))),
+        Some(ThreadRuntimeState::Waiting) => Some(("●", Color::Rgb(0xd6, 0x8c, 0x45))),
+        Some(ThreadRuntimeState::Compacting) => Some(("●", Color::Rgb(0xb0, 0x83, 0xd8))),
     }
 }
 
-fn session_footer_line(content_w: usize) -> Line<'static> {
+fn thread_footer_line(content_w: usize) -> Line<'static> {
     let base_style = Style::default().fg(Color::Rgb(0x8a, 0x8a, 0x8a));
     let legend = Line::from(vec![
         Span::styled("↑/↓ 选择 · Enter 确认 · Esc 返回 · 输入筛选 · ", base_style),
         Span::styled(
             "●",
             row_style(
-                session_status_marker(Some(SessionRuntimeState::Idle))
+                thread_status_marker(Some(ThreadRuntimeState::Idle))
                     .expect("idle status has marker")
                     .1,
                 None,
@@ -262,7 +262,7 @@ fn session_footer_line(content_w: usize) -> Line<'static> {
         Span::styled(
             "●",
             row_style(
-                session_status_marker(Some(SessionRuntimeState::Working))
+                thread_status_marker(Some(ThreadRuntimeState::Working))
                     .expect("working status has marker")
                     .1,
                 None,
@@ -272,7 +272,7 @@ fn session_footer_line(content_w: usize) -> Line<'static> {
         Span::styled(
             "●",
             row_style(
-                session_status_marker(Some(SessionRuntimeState::Waiting))
+                thread_status_marker(Some(ThreadRuntimeState::Waiting))
                     .expect("waiting status has marker")
                     .1,
                 None,
@@ -282,7 +282,7 @@ fn session_footer_line(content_w: usize) -> Line<'static> {
         Span::styled(
             "●",
             row_style(
-                session_status_marker(Some(SessionRuntimeState::Compacting))
+                thread_status_marker(Some(ThreadRuntimeState::Compacting))
                     .expect("compacting status has marker")
                     .1,
                 None,
@@ -301,7 +301,7 @@ fn session_footer_line(content_w: usize) -> Line<'static> {
     }
 }
 
-fn render_session_row_backgrounds(
+fn render_thread_row_backgrounds(
     frame: &mut ratatui::Frame,
     area: Rect,
     row_backgrounds: &[Option<Color>],

@@ -1,4 +1,4 @@
-use crate::event::bridge::session_runtime_skills_from_runtime_snapshot;
+use crate::event::bridge::thread_runtime_skills_from_runtime_snapshot;
 use chrono::{DateTime, Utc};
 use omini_domain as domain;
 use omini_protocol as client_proto;
@@ -10,18 +10,18 @@ struct RuntimeToolActivity {
     tool_use_id: String,
     tool_name: String,
     started_at: DateTime<Utc>,
-    source_session_id: Option<String>,
+    source_thread_id: Option<String>,
     source_agent_label: Option<String>,
 }
 
 impl RuntimeToolActivity {
-    fn to_protocol(&self, now: DateTime<Utc>) -> client_proto::SessionRuntimeTool {
-        client_proto::SessionRuntimeTool {
+    fn to_protocol(&self, now: DateTime<Utc>) -> client_proto::ThreadRuntimeTool {
+        client_proto::ThreadRuntimeTool {
             tool_use_id: self.tool_use_id.clone(),
             tool_name: self.tool_name.clone(),
             started_at: self.started_at,
             elapsed_ms: elapsed_ms(self.started_at, now),
-            source_session_id: self.source_session_id.clone(),
+            source_thread_id: self.source_thread_id.clone(),
             source_agent_label: self.source_agent_label.clone(),
         }
     }
@@ -46,7 +46,7 @@ struct RuntimeAgentTaskContext {
     agent_label: String,
 }
 
-/// 从 runtime 事件流增量推导出的会话运行态。
+/// 从 runtime 事件流增量推导出的线程运行态。
 #[derive(Debug, Default)]
 pub struct RuntimeStatusProjection {
     // active profile 不落入持久化消息；新连接只能从运行态投影拿到当前值。
@@ -55,7 +55,7 @@ pub struct RuntimeStatusProjection {
     compact_started_at: Option<DateTime<Utc>>,
     query_pause_started_at: Option<DateTime<Utc>>,
     query_paused_ms: u64,
-    query_state: client_proto::SessionRuntimeState,
+    query_state: client_proto::ThreadRuntimeState,
     pending_pauses: HashMap<String, RuntimePendingPause>,
     next_pause_sequence: u64,
     pending_plan_approval: Option<client_proto::PlanSubmittedEvent>,
@@ -63,7 +63,7 @@ pub struct RuntimeStatusProjection {
     agent_tasks: HashMap<String, RuntimeAgentTaskContext>,
 }
 
-/// 生成协议状态快照时由 session 层补充的外部上下文。
+/// 生成协议状态快照时由 thread 层补充的外部上下文。
 pub struct RuntimeStatusSnapshotContext {
     pub loaded: bool,
     pub controller_id: Option<String>,
@@ -71,7 +71,7 @@ pub struct RuntimeStatusSnapshotContext {
     pub skills: Vec<runtime_contract::thread::RuntimeSkillSnapshot>,
     // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
     pub mcp_servers: Vec<runtime_contract::mcp::RuntimeMcpServerSnapshot>,
-    pub subagent_sessions: Vec<client_proto::AgentSummary>,
+    pub subagent_threads: Vec<client_proto::AgentSummary>,
     pub now: DateTime<Utc>,
     pub git_branch: Option<String>,
 }
@@ -89,13 +89,13 @@ impl RuntimeStatusProjection {
             client_proto::TypedRuntimeEvent::ActiveProfileChanged(event) => {
                 self.active_profile = event.profile;
             }
-            client_proto::TypedRuntimeEvent::SessionTitleChanged(_)
+            client_proto::TypedRuntimeEvent::ThreadTitleChanged(_)
             | client_proto::TypedRuntimeEvent::ThinkingDisplayChanged(_)
             | client_proto::TypedRuntimeEvent::AgentManagementUpdated { .. } => {}
             // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
             client_proto::TypedRuntimeEvent::RunStarted => self.start_query(now),
             client_proto::TypedRuntimeEvent::RunFinished
-            | client_proto::TypedRuntimeEvent::SessionSnapshot(_) => self.clear_active_run(),
+            | client_proto::TypedRuntimeEvent::ThreadSnapshot(_) => self.clear_active_run(),
             client_proto::TypedRuntimeEvent::TurnStarted => self.mark_query_thinking(),
             client_proto::TypedRuntimeEvent::TextDelta(_) => self.mark_query_working(),
             client_proto::TypedRuntimeEvent::ThinkingDelta(_) => self.mark_query_thinking(),
@@ -135,9 +135,9 @@ impl RuntimeStatusProjection {
 
     pub fn to_protocol(
         &self,
-        session_id: &str,
+        thread_id: &str,
         context: RuntimeStatusSnapshotContext,
-    ) -> client_proto::SessionRuntimeStatus {
+    ) -> client_proto::ThreadRuntimeStatus {
         let mut pending_pauses = self.pending_pauses.values().collect::<Vec<_>>();
         pending_pauses.sort_by_key(|pause| pause.sequence);
         let pending_pauses = pending_pauses
@@ -152,8 +152,8 @@ impl RuntimeStatusProjection {
             .collect::<Vec<_>>();
         active_tools.sort_by(|left, right| left.tool_use_id.cmp(&right.tool_use_id));
 
-        client_proto::SessionRuntimeStatus {
-            session_id: session_id.to_string(),
+        client_proto::ThreadRuntimeStatus {
+            thread_id: thread_id.to_string(),
             state: self.state(),
             active_profile: self.active_profile,
             loaded: context.loaded,
@@ -163,9 +163,9 @@ impl RuntimeStatusProjection {
             pending_pauses,
             pending_plan_approval: self.pending_plan_approval.clone(),
             active_tools,
-            skills: session_runtime_skills_from_runtime_snapshot(context.skills),
+            skills: thread_runtime_skills_from_runtime_snapshot(context.skills),
             mcp_servers: mcp_servers_to_protocol(context.mcp_servers),
-            subagent_sessions: context.subagent_sessions,
+            subagent_threads: context.subagent_threads,
             git_branch: context.git_branch,
         }
     }
@@ -175,12 +175,12 @@ impl RuntimeStatusProjection {
         self.compact_started_at = None;
         self.query_pause_started_at = None;
         self.query_paused_ms = 0;
-        self.query_state = client_proto::SessionRuntimeState::Thinking;
+        self.query_state = client_proto::ThreadRuntimeState::Thinking;
         self.pending_pauses
-            .retain(|_, pause| pause.request.source_session_id.is_some());
+            .retain(|_, pause| pause.request.source_thread_id.is_some());
         self.pending_plan_approval = None;
         self.active_tools
-            .retain(|_, tool| tool.source_session_id.is_some());
+            .retain(|_, tool| tool.source_thread_id.is_some());
     }
 
     fn clear_active_run(&mut self) {
@@ -188,23 +188,23 @@ impl RuntimeStatusProjection {
         self.compact_started_at = None;
         self.query_pause_started_at = None;
         self.query_paused_ms = 0;
-        self.query_state = client_proto::SessionRuntimeState::Idle;
+        self.query_state = client_proto::ThreadRuntimeState::Idle;
         self.pending_pauses
-            .retain(|_, pause| pause.request.source_session_id.is_some());
+            .retain(|_, pause| pause.request.source_thread_id.is_some());
         self.pending_plan_approval = None;
         self.active_tools
-            .retain(|_, tool| tool.source_session_id.is_some());
+            .retain(|_, tool| tool.source_thread_id.is_some());
     }
 
     fn mark_query_working(&mut self) {
         if self.query_started_at.is_some() {
-            self.query_state = client_proto::SessionRuntimeState::Working;
+            self.query_state = client_proto::ThreadRuntimeState::Working;
         }
     }
 
     fn mark_query_thinking(&mut self) {
         if self.query_started_at.is_some() {
-            self.query_state = client_proto::SessionRuntimeState::Thinking;
+            self.query_state = client_proto::ThreadRuntimeState::Thinking;
         }
     }
 
@@ -212,14 +212,14 @@ impl RuntimeStatusProjection {
         &mut self,
         tool_use: &client_proto::ToolUseBlock,
         now: DateTime<Utc>,
-        source_session_id: Option<String>,
+        source_thread_id: Option<String>,
         source_agent_label: Option<String>,
     ) {
         self.record_tool(
             &tool_use.id,
             &tool_use.name,
             now,
-            source_session_id,
+            source_thread_id,
             source_agent_label,
         );
         self.mark_query_working();
@@ -230,14 +230,14 @@ impl RuntimeStatusProjection {
         tool_use_id: &str,
         tool_name: &str,
         now: DateTime<Utc>,
-        source_session_id: Option<String>,
+        source_thread_id: Option<String>,
         source_agent_label: Option<String>,
     ) -> RuntimeToolActivity {
         let tool = RuntimeToolActivity {
             tool_use_id: tool_use_id.to_string(),
             tool_name: tool_name.to_string(),
             started_at: now,
-            source_session_id,
+            source_thread_id,
             source_agent_label,
         };
         self.active_tools
@@ -257,7 +257,7 @@ impl RuntimeStatusProjection {
             tool_use_id: tool_use.id.clone(),
             tool_name: tool_use.name.clone(),
             started_at: now,
-            source_session_id: Some(thread_id.to_string()),
+            source_thread_id: Some(thread_id.to_string()),
             source_agent_label: agent_label,
         };
         self.active_tools.insert(activity_key, tool);
@@ -338,10 +338,10 @@ impl RuntimeStatusProjection {
             client_proto::AgentTaskEvent::Finished { .. } => {
                 self.agent_tasks.remove(&event.task_id);
                 self.active_tools
-                    .retain(|_, tool| tool.source_session_id.as_deref() != Some(&event.thread_id));
+                    .retain(|_, tool| tool.source_thread_id.as_deref() != Some(&event.thread_id));
                 let had_pending_pauses = !self.pending_pauses.is_empty();
                 self.pending_pauses.retain(|_, pause| {
-                    pause.request.source_session_id.as_deref() != Some(&event.thread_id)
+                    pause.request.source_thread_id.as_deref() != Some(&event.thread_id)
                 });
                 if had_pending_pauses && self.pending_pauses.is_empty() {
                     self.resume_query_timer(now);
@@ -355,29 +355,29 @@ impl RuntimeStatusProjection {
         }
     }
 
-    pub fn state(&self) -> client_proto::SessionRuntimeState {
+    pub fn state(&self) -> client_proto::ThreadRuntimeState {
         if self.compact_started_at.is_some() {
-            client_proto::SessionRuntimeState::Compacting
+            client_proto::ThreadRuntimeState::Compacting
         } else if !self.pending_pauses.is_empty() || self.pending_plan_approval.is_some() {
-            client_proto::SessionRuntimeState::Waiting
+            client_proto::ThreadRuntimeState::Waiting
         } else if self.query_started_at.is_some() {
             self.query_state
         } else {
-            client_proto::SessionRuntimeState::Idle
+            client_proto::ThreadRuntimeState::Idle
         }
     }
 
-    fn activity(&self, now: DateTime<Utc>) -> Option<client_proto::SessionRuntimeActivity> {
+    fn activity(&self, now: DateTime<Utc>) -> Option<client_proto::ThreadRuntimeActivity> {
         if let Some(started_at) = self.compact_started_at {
-            Some(client_proto::SessionRuntimeActivity {
-                kind: client_proto::SessionRuntimeActivityKind::Compact,
+            Some(client_proto::ThreadRuntimeActivity {
+                kind: client_proto::ThreadRuntimeActivityKind::Compact,
                 started_at,
                 elapsed_ms: elapsed_ms(started_at, now),
             })
         } else {
             self.query_started_at
-                .map(|started_at| client_proto::SessionRuntimeActivity {
-                    kind: client_proto::SessionRuntimeActivityKind::Query,
+                .map(|started_at| client_proto::ThreadRuntimeActivity {
+                    kind: client_proto::ThreadRuntimeActivityKind::Query,
                     started_at,
                     elapsed_ms: self.query_elapsed_ms(started_at, now),
                 })
@@ -388,7 +388,7 @@ impl RuntimeStatusProjection {
         self.active_profile
     }
 
-    /// 返回当前仍在运行中的子代理 session_id 集合，供 snapshot 恢复真实状态用。
+    /// 返回当前仍在运行中的子代理 thread_id 集合，供 snapshot 恢复真实状态用。
     pub fn has_active_agent_tasks(&self) -> bool {
         !self.agent_tasks.is_empty()
     }
@@ -415,7 +415,7 @@ impl RuntimeStatusProjection {
 // MCP status projection 留在 daemon 边界，避免 core 为运行态能力快照构造协议 DTO。
 fn mcp_servers_to_protocol(
     snapshots: Vec<runtime_contract::mcp::RuntimeMcpServerSnapshot>,
-) -> Vec<client_proto::SessionRuntimeMcpServer> {
+) -> Vec<client_proto::ThreadRuntimeMcpServer> {
     snapshots
         .into_iter()
         .map(runtime_mcp_server_to_protocol)
@@ -424,15 +424,15 @@ fn mcp_servers_to_protocol(
 
 fn runtime_mcp_server_to_protocol(
     snapshot: runtime_contract::mcp::RuntimeMcpServerSnapshot,
-) -> client_proto::SessionRuntimeMcpServer {
-    client_proto::SessionRuntimeMcpServer {
+) -> client_proto::ThreadRuntimeMcpServer {
+    client_proto::ThreadRuntimeMcpServer {
         name: snapshot.name,
         status: runtime_mcp_server_status_to_protocol(snapshot.status),
         last_error: snapshot.last_error,
         tools: snapshot
             .tools
             .into_iter()
-            .map(|tool| client_proto::SessionRuntimeMcpTool {
+            .map(|tool| client_proto::ThreadRuntimeMcpTool {
                 name: tool.name,
                 registered_name: tool.registered_name,
                 description: tool.description,
@@ -443,19 +443,19 @@ fn runtime_mcp_server_to_protocol(
 
 fn runtime_mcp_server_status_to_protocol(
     status: runtime_contract::mcp::RuntimeMcpServerStatus,
-) -> client_proto::SessionRuntimeMcpStatus {
+) -> client_proto::ThreadRuntimeMcpStatus {
     match status {
         runtime_contract::mcp::RuntimeMcpServerStatus::Disabled => {
-            client_proto::SessionRuntimeMcpStatus::Disabled
+            client_proto::ThreadRuntimeMcpStatus::Disabled
         }
         runtime_contract::mcp::RuntimeMcpServerStatus::Connecting => {
-            client_proto::SessionRuntimeMcpStatus::Connecting
+            client_proto::ThreadRuntimeMcpStatus::Connecting
         }
         runtime_contract::mcp::RuntimeMcpServerStatus::Ready => {
-            client_proto::SessionRuntimeMcpStatus::Ready
+            client_proto::ThreadRuntimeMcpStatus::Ready
         }
         runtime_contract::mcp::RuntimeMcpServerStatus::Failed => {
-            client_proto::SessionRuntimeMcpStatus::Failed
+            client_proto::ThreadRuntimeMcpStatus::Failed
         }
     }
 }
@@ -529,14 +529,14 @@ mod tests {
             "run_started" => client_proto::TypedRuntimeEvent::RunStarted,
             "run_finished" => client_proto::TypedRuntimeEvent::RunFinished,
             "turn_started" => client_proto::TypedRuntimeEvent::TurnStarted,
-            "session_snapshot" => client_proto::TypedRuntimeEvent::SessionSnapshot(
-                client_proto::SessionSnapshotEvent {
-                    session_id: Some("s1".to_string()),
+            "thread_snapshot" => {
+                client_proto::TypedRuntimeEvent::ThreadSnapshot(client_proto::ThreadSnapshotEvent {
+                    thread_id: Some("s1".to_string()),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
-                    usage: client_proto::SessionUsageSnapshot::default(),
-                },
-            ),
+                    usage: client_proto::ThreadUsageSnapshot::default(),
+                })
+            }
             _ => panic!("unsupported test event kind: {kind}"),
         })
     }
@@ -548,7 +548,7 @@ mod tests {
                 preview_tool_use_id: None,
                 tool_name: "bash".to_string(),
                 permission_source: None,
-                source_session_id: None,
+                source_thread_id: None,
                 source_agent_label: None,
                 kind: event_types::ToolPauseKind::Permission(
                     event_types::PermissionPreview::Custom {
@@ -574,7 +574,7 @@ mod tests {
     fn status_snapshot(
         projection: &RuntimeStatusProjection,
         now: DateTime<Utc>,
-    ) -> client_proto::SessionRuntimeStatus {
+    ) -> client_proto::ThreadRuntimeStatus {
         projection.to_protocol(
             "s1",
             RuntimeStatusSnapshotContext {
@@ -583,7 +583,7 @@ mod tests {
                 connected_client_count: 1,
                 skills: Vec::new(),
                 mcp_servers: Vec::new(),
-                subagent_sessions: Vec::new(),
+                subagent_threads: Vec::new(),
                 now,
                 git_branch: None,
             },
@@ -633,7 +633,7 @@ mod tests {
             now,
         );
         let status = status_snapshot(&projection, now);
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(
             status
                 .pending_plan_approval
@@ -667,10 +667,10 @@ mod tests {
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(42));
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Thinking);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Thinking);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.kind),
-            Some(client_proto::SessionRuntimeActivityKind::Query)
+            Some(client_proto::ThreadRuntimeActivityKind::Query)
         );
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -680,19 +680,19 @@ mod tests {
         projection.record_event(&sequenced(2, "turn_started").event, started_at);
         assert_eq!(
             status_snapshot(&projection, started_at).state,
-            client_proto::SessionRuntimeState::Thinking
+            client_proto::ThreadRuntimeState::Thinking
         );
 
         projection.record_event(&delta(3, "thinking_delta", "hmm").event, started_at);
         assert_eq!(
             status_snapshot(&projection, started_at).state,
-            client_proto::SessionRuntimeState::Thinking
+            client_proto::ThreadRuntimeState::Thinking
         );
 
         projection.record_event(&delta(4, "text_delta", "hello").event, started_at);
         assert_eq!(
             status_snapshot(&projection, started_at).state,
-            client_proto::SessionRuntimeState::Working
+            client_proto::ThreadRuntimeState::Working
         );
 
         projection.record_event(
@@ -700,7 +700,7 @@ mod tests {
             started_at + chrono::Duration::milliseconds(50),
         );
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(70));
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(status.pending_pauses.len(), 1);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -715,7 +715,7 @@ mod tests {
             &projection,
             started_at + chrono::Duration::milliseconds(120),
         );
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Working);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Working);
         assert!(status.pending_pauses.is_empty());
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -724,7 +724,7 @@ mod tests {
 
         projection.record_event(&sequenced(3, "run_finished").event, started_at);
         let status = status_snapshot(&projection, started_at);
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Idle);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Idle);
         assert!(status.activity.is_none());
     }
 
@@ -737,7 +737,7 @@ mod tests {
             preview_tool_use_id: Some("tool_1".to_string()),
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: Some("agent_1".to_string()),
+            source_thread_id: Some("agent_1".to_string()),
             source_agent_label: Some("explorer".to_string()),
             kind: event_types::ToolPauseKind::Permission(event_types::PermissionPreview::Custom {
                 tool_name: "bash".to_string(),
@@ -758,7 +758,7 @@ mod tests {
         );
 
         let status = status_snapshot(&projection, now);
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(status.pending_pauses, vec![pause]);
 
         projection.record_event(
@@ -797,7 +797,7 @@ mod tests {
         );
 
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(50));
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
             Some(10)
@@ -808,7 +808,7 @@ mod tests {
             started_at + chrono::Duration::milliseconds(60),
         );
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(70));
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Waiting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
             Some(10)
@@ -822,7 +822,7 @@ mod tests {
             &projection,
             started_at + chrono::Duration::milliseconds(100),
         );
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Working);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Working);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
             Some(30)
@@ -839,7 +839,7 @@ mod tests {
                 client_proto::TypedRuntimeEvent::CompactSummaryStarted(
                     client_proto::CompactSummaryStartedEvent {
                         trigger: client_proto::CompactTrigger::Manual,
-                        session_id: Some("s1".to_string()),
+                        thread_id: Some("s1".to_string()),
                         agent_label: None,
                     },
                 ),
@@ -848,10 +848,10 @@ mod tests {
         );
 
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(7));
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Compacting);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Compacting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.kind),
-            Some(client_proto::SessionRuntimeActivityKind::Compact)
+            Some(client_proto::ThreadRuntimeActivityKind::Compact)
         );
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -865,7 +865,7 @@ mod tests {
                         trigger: client_proto::CompactTrigger::Manual,
                         summary: "done".to_string(),
                         after_tokens: 1,
-                        session_id: Some("s1".to_string()),
+                        thread_id: Some("s1".to_string()),
                         agent_label: None,
                     },
                 ),
@@ -873,7 +873,7 @@ mod tests {
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Idle);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Idle);
         assert!(status.activity.is_none());
     }
 
@@ -907,7 +907,7 @@ mod tests {
                         description: "Search docs".to_string(),
                     }],
                 }],
-                subagent_sessions: vec![client_proto::AgentSummary {
+                subagent_threads: vec![client_proto::AgentSummary {
                     name: "explorer".to_string(),
                     description: "Read-only exploration agent.".to_string(),
                     short_description: None,
@@ -918,7 +918,7 @@ mod tests {
             },
         );
 
-        assert_eq!(status.state, client_proto::SessionRuntimeState::Idle);
+        assert_eq!(status.state, client_proto::ThreadRuntimeState::Idle);
         assert_eq!(status.skills.len(), 1);
         assert_eq!(
             status.skills[0].source_kind,
@@ -927,14 +927,14 @@ mod tests {
         assert_eq!(status.mcp_servers.len(), 1);
         assert_eq!(
             status.mcp_servers[0].status,
-            client_proto::SessionRuntimeMcpStatus::Ready
+            client_proto::ThreadRuntimeMcpStatus::Ready
         );
         assert_eq!(
             status.mcp_servers[0].tools[0].registered_name,
             "mcp__docs__search"
         );
-        assert_eq!(status.subagent_sessions.len(), 1);
-        assert_eq!(status.subagent_sessions[0].name, "explorer");
+        assert_eq!(status.subagent_threads.len(), 1);
+        assert_eq!(status.subagent_threads[0].name, "explorer");
     }
 
     #[test]
@@ -1000,13 +1000,13 @@ mod tests {
             started_at,
         );
         let status = status_snapshot(&projection, started_at);
-        assert!(status.subagent_sessions.is_empty());
+        assert!(status.subagent_threads.is_empty());
         let subagent_tool = status
             .active_tools
             .iter()
             .find(|tool| tool.tool_use_id == "sub_tool_1")
             .expect("subagent tool should be tracked as an active tool");
-        assert_eq!(subagent_tool.source_session_id.as_deref(), Some("agent_1"));
+        assert_eq!(subagent_tool.source_thread_id.as_deref(), Some("agent_1"));
         assert_eq!(
             subagent_tool.source_agent_label.as_deref(),
             Some("explorer")

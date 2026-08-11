@@ -83,17 +83,17 @@ impl MentionAutocomplete {
 
     pub fn set_cwd(&mut self, cwd: impl Into<PathBuf>) {
         self.cwd = cwd.into();
-        self.clear_session_cache();
+        self.clear_cache();
     }
 
-    pub fn clear_session_cache(&mut self) {
+    pub fn clear_cache(&mut self) {
         self.dir_cache.clear();
     }
 
     pub fn update(&mut self, input: &str, cursor_char: usize) {
         let Some(active) = active_mention(input, cursor_char) else {
             if self.visible {
-                self.clear_session_cache();
+                self.clear_cache();
             }
             self.visible = false;
             self.filtered.clear();
@@ -102,7 +102,7 @@ impl MentionAutocomplete {
         };
 
         if !self.visible {
-            self.clear_session_cache();
+            self.clear_cache();
         }
         let previous_query = self.query.clone();
         let previous_start = self.active_start;
@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_refreshes_after_new_mention_session() {
+    fn cache_refreshes_after_new_mention_cycle() {
         let root = temp_dir();
         fs::write(root.join("a.rs"), "").unwrap();
 

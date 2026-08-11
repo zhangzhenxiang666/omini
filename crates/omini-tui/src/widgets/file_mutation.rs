@@ -837,7 +837,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "edit".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Edit(EditPermissionPreview {
                 summary: "Edit".to_string(),

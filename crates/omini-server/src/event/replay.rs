@@ -17,7 +17,7 @@ pub struct SequencedRuntimeEvent {
 pub struct RuntimeReplayBuffer {
     // run_started 之前的用户注入事件先暂存，确保重连客户端能看到刚提交的输入。
     pending_prefix: Vec<SequencedRuntimeEvent>,
-    // run_started 是 replay 的锚点；run 结束或 session snapshot 后会清空。
+    // run_started 是 replay 的锚点；run 结束或 thread snapshot 后会清空。
     run_started: Option<SequencedRuntimeEvent>,
     // 当前 turn 尚未被持久化 snapshot 覆盖的尾部增量。
     current_tail: Vec<SequencedRuntimeEvent>,
@@ -27,7 +27,7 @@ pub struct RuntimeReplayBuffer {
     // 计划确认发生在 run_finished 后，不能依赖 run tail；保留到任一客户端完成确认。
     pending_plan_approval: Option<SequencedRuntimeEvent>,
     // server/core 的轻量 UI 状态事件不一定落在消息 snapshot 中；每类只保留最新值。
-    latest_session_title: Option<SequencedRuntimeEvent>,
+    latest_thread_title: Option<SequencedRuntimeEvent>,
     latest_thinking_display: Option<SequencedRuntimeEvent>,
     latest_agent_management: Option<SequencedRuntimeEvent>,
     // Agent task 流不依赖前台运行生命周期，并按 task ID 相互隔离。
@@ -74,8 +74,8 @@ impl RuntimeReplayBuffer {
                     self.pending_plan_approval = None;
                 }
             }
-            "session_title_changed" => {
-                self.latest_session_title = Some(event);
+            "thread_title_changed" => {
+                self.latest_thread_title = Some(event);
             }
             "thinking_display_changed" => {
                 self.latest_thinking_display = Some(event);
@@ -83,7 +83,7 @@ impl RuntimeReplayBuffer {
             "agent_management_updated" => {
                 self.latest_agent_management = Some(event);
             }
-            "session_snapshot" => {
+            "thread_snapshot" => {
                 if self.run_started.is_some() || self.compact_started.is_some() {
                     self.clear();
                 } else {
@@ -131,7 +131,7 @@ impl RuntimeReplayBuffer {
                 + usize::from(self.compact_started.is_some())
                 + self.compact_tail.len()
                 + usize::from(self.pending_plan_approval.is_some())
-                + usize::from(self.latest_session_title.is_some())
+                + usize::from(self.latest_thread_title.is_some())
                 + usize::from(self.latest_thinking_display.is_some())
                 + usize::from(self.latest_agent_management.is_some())
                 + self
@@ -152,7 +152,7 @@ impl RuntimeReplayBuffer {
             replay.push(compact_started.clone());
         }
         replay.extend(self.compact_tail.iter().cloned());
-        if let Some(event) = &self.latest_session_title {
+        if let Some(event) = &self.latest_thread_title {
             replay.push(event.clone());
         }
         if let Some(event) = &self.latest_thinking_display {
@@ -209,12 +209,12 @@ impl RuntimeReplayBuffer {
 
     pub fn record_snapshot(
         &mut self,
-        snapshot: &domain::events::LoadedSession,
+        snapshot: &domain::events::LoadedThread,
         thread_messages: &[domain::message::Message],
     ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
-        self.drop_session_title_in_snapshot(snapshot);
+        self.drop_thread_title_in_snapshot(snapshot);
         // LLM 级去重使用当前 context version 的 `llm_messages`，不使用 UI 集合。
         if self.current_assistant_tail_is_in_snapshot(thread_messages) {
             self.drop_current_assistant_tail();
@@ -354,19 +354,19 @@ impl RuntimeReplayBuffer {
         self.clear_compact_tail();
     }
 
-    fn drop_user_injections_in_snapshot(&mut self, snapshot: &domain::events::LoadedSession) {
+    fn drop_user_injections_in_snapshot(&mut self, snapshot: &domain::events::LoadedThread) {
         self.pending_prefix
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
         self.current_tail
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
     }
 
-    fn drop_session_title_in_snapshot(&mut self, snapshot: &domain::events::LoadedSession) {
-        let Some(event) = &self.latest_session_title else {
+    fn drop_thread_title_in_snapshot(&mut self, snapshot: &domain::events::LoadedThread) {
+        let Some(event) = &self.latest_thread_title else {
             return;
         };
-        if session_title_payload(&event.event) == Some(snapshot.title.as_ref()) {
-            self.latest_session_title = None;
+        if thread_title_payload(&event.event) == Some(snapshot.title.as_ref()) {
+            self.latest_thread_title = None;
         }
     }
 
@@ -396,7 +396,7 @@ impl RuntimeReplayBuffer {
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
 fn user_injection_is_in_snapshot(
     event: &SequencedRuntimeEvent,
-    snapshot: &domain::events::LoadedSession,
+    snapshot: &domain::events::LoadedThread,
 ) -> bool {
     let client_proto::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event
     else {
@@ -405,8 +405,8 @@ fn user_injection_is_in_snapshot(
     snapshot.messages.iter().any(|message| message == item)
 }
 
-fn session_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&String>> {
-    let client_proto::TypedRuntimeEvent::SessionTitleChanged(event) = &event.event else {
+fn thread_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&String>> {
+    let client_proto::TypedRuntimeEvent::ThreadTitleChanged(event) = &event.event else {
         return None;
     };
     Some(event.title.as_ref())
@@ -570,8 +570,8 @@ mod tests {
 
     use super::*;
     use crate::event::bridge::{
-        runtime_event_from_runtime_contract_event, session_title_changed_protocol_event,
-        thinking_display_changed_protocol_event,
+        runtime_event_from_runtime_contract_event, thinking_display_changed_protocol_event,
+        thread_title_changed_protocol_event,
     };
     use std::{collections::HashMap, path::PathBuf};
 
@@ -666,7 +666,7 @@ mod tests {
                     preview_tool_use_id: None,
                     tool_name: "bash".to_string(),
                     permission_source: None,
-                    source_session_id: None,
+                    source_thread_id: None,
                     source_agent_label: None,
                     kind: domain::events::ToolPauseKind::Permission(
                         domain::events::PermissionPreview::Custom {
@@ -676,14 +676,14 @@ mod tests {
                     ),
                 },
             ),
-            "session_snapshot" => client_proto::TypedRuntimeEvent::SessionSnapshot(
-                client_proto::SessionSnapshotEvent {
-                    session_id: Some("s1".to_string()),
+            "thread_snapshot" => {
+                client_proto::TypedRuntimeEvent::ThreadSnapshot(client_proto::ThreadSnapshotEvent {
+                    thread_id: Some("s1".to_string()),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
-                    usage: domain::events::SessionUsageSnapshot::default(),
-                },
-            ),
+                    usage: domain::events::ThreadUsageSnapshot::default(),
+                })
+            }
             _ => panic!("unsupported test event kind: {kind}"),
         })
     }
@@ -715,16 +715,16 @@ mod tests {
             .collect()
     }
 
-    fn snapshot(messages: Vec<domain::display::HistoryItem>) -> domain::events::LoadedSession {
+    fn snapshot(messages: Vec<domain::display::HistoryItem>) -> domain::events::LoadedThread {
         snapshot_with_title(None, messages)
     }
 
     fn snapshot_with_title(
         title: Option<String>,
         messages: Vec<domain::display::HistoryItem>,
-    ) -> domain::events::LoadedSession {
-        domain::events::LoadedSession {
-            session_id: "s1".to_string(),
+    ) -> domain::events::LoadedThread {
+        domain::events::LoadedThread {
+            thread_id: "s1".to_string(),
             provider: "main".to_string(),
             model: "test-model".to_string(),
             thinking_effort: None,
@@ -732,17 +732,17 @@ mod tests {
             title,
             messages,
             agent_tasks: Vec::new(),
-            usage: domain::events::SessionUsageSnapshot::default(),
+            usage: domain::events::ThreadUsageSnapshot::default(),
         }
     }
 
     fn persisted_message(
-        session_id: &str,
+        thread_id: &str,
         role: &str,
         blocks: Vec<domain::message::ContentBlock>,
     ) -> runtime_contract::RuntimePersistenceEvent {
         runtime_contract::RuntimePersistenceEvent::InsertMessage {
-            thread_id: session_id.to_string(),
+            thread_id: thread_id.to_string(),
             role: role.to_string(),
             model_ref: (role == "assistant").then(|| "test/model".to_string()),
             blocks,
@@ -765,10 +765,10 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
 
         // title 变化现在由 server 走自己的事件通道,replay buffer 收到的是协议层
-        // `TypedRuntimeEvent::SessionTitleChanged`,不再包成 `RuntimeToServerEvent`。
+        // `TypedRuntimeEvent::ThreadTitleChanged`,不再包成 `RuntimeToServerEvent`。
         buffer.record(sequenced_runtime_event(
             1,
-            session_title_changed_protocol_event(Some("old".to_string())),
+            thread_title_changed_protocol_event(Some("old".to_string())),
         ));
         buffer.record(SequencedRuntimeEvent {
             seq: 2,
@@ -782,7 +782,7 @@ mod tests {
         ));
         buffer.record(sequenced_runtime_event(
             4,
-            session_title_changed_protocol_event(Some("new".to_string())),
+            thread_title_changed_protocol_event(Some("new".to_string())),
         ));
 
         let replay = buffer.replay();
@@ -799,23 +799,23 @@ mod tests {
             vec![
                 "thinking_display_changed",
                 "agent_management_updated",
-                "session_title_changed"
+                "thread_title_changed"
             ]
         );
         assert!(matches!(
             &replay[2].event.event,
-            client_proto::TypedRuntimeEvent::SessionTitleChanged(event)
+            client_proto::TypedRuntimeEvent::ThreadTitleChanged(event)
                 if event.title.as_deref() == Some("new")
         ));
     }
 
     #[test]
-    fn replay_buffer_drops_session_title_recovered_by_snapshot() {
+    fn replay_buffer_drops_thread_title_recovered_by_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced_runtime_event(
             1,
-            session_title_changed_protocol_event(Some("hello".to_string())),
+            thread_title_changed_protocol_event(Some("hello".to_string())),
         ));
         buffer.record_snapshot(
             &snapshot_with_title(Some("hello".to_string()), Vec::new()),
@@ -878,7 +878,7 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "user_message_injected"));
-        buffer.record(sequenced(2, "session_snapshot"));
+        buffer.record(sequenced(2, "thread_snapshot"));
         buffer.record(sequenced(3, "run_started"));
 
         assert_eq!(
@@ -1099,7 +1099,7 @@ mod tests {
             runtime_contract::RuntimeToServerEvent::CompactSummaryStarted(
                 domain::events::CompactEvent {
                     trigger: domain::events::CompactTrigger::Manual,
-                    session_id: Some("s1".to_string()),
+                    thread_id: Some("s1".to_string()),
                     agent_label: None,
                 },
             ),
@@ -1110,7 +1110,7 @@ mod tests {
                 domain::events::CompactSummaryDeltaEvent {
                     trigger: domain::events::CompactTrigger::Manual,
                     delta: "partial".to_string(),
-                    session_id: Some("s1".to_string()),
+                    thread_id: Some("s1".to_string()),
                     agent_label: None,
                 },
             ),
@@ -1143,13 +1143,13 @@ mod tests {
     }
 
     #[test]
-    fn replay_buffer_clears_active_run_on_session_snapshot() {
+    fn replay_buffer_clears_active_run_on_thread_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "run_started"));
         buffer.record(sequenced(2, "turn_started"));
         buffer.record(delta(3, "text_delta", "hello"));
-        buffer.record(sequenced(4, "session_snapshot"));
+        buffer.record(sequenced(4, "thread_snapshot"));
 
         assert!(buffer.replay().is_empty());
     }

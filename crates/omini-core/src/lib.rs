@@ -15,7 +15,7 @@ use crate::runtime::AgentRuntime;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_domain::config::ProviderInfo;
-use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
+use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
 use omini_runtime_contract::project as project_types;
@@ -29,7 +29,7 @@ use tracing::Instrument;
 
 pub use crate::error::CoreError;
 pub use crate::title_generation::{TitleGenError, generate_thread_title};
-pub use omini_domain::title_generation::GeneratedSessionTitle;
+pub use omini_domain::title_generation::GeneratedThreadTitle;
 
 pub fn project_agents_snapshot(settings: &Settings) -> thread_types::AgentsSnapshot {
     let records = project_agent_records(&settings.cwd);
@@ -119,7 +119,7 @@ pub async fn generate_project_agent_draft(
 /// `RuntimeEvent` 编码由 `omini-server` 的 runtime adapter 负责。
 ///
 /// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
-/// session registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
+/// thread registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
 /// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
 pub struct AgentCoreThread {
     thread_id: String,
@@ -128,11 +128,11 @@ pub struct AgentCoreThread {
     // runtime 输出事件按 server-core 契约广播给 server。
     event_tx: broadcast::Sender<RuntimeToServerEvent>,
     persistence_rx: Mutex<Option<mpsc::Receiver<RuntimePersistenceEvent>>>,
-    // HTTP 查询和配置 mutation 需要读取当前会话配置快照；真正执行仍通过 request_tx 进入 runtime。
+    // HTTP 查询和配置 mutation 需要读取当前线程配置快照；真正执行仍通过 request_tx 进入 runtime。
     settings: Arc<RwLock<Settings>>,
-    // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前会话实际运行状态。
+    // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前线程实际运行状态。
     mcp_manager: Arc<crate::mcp::McpManager>,
-    // 与 runtime 共享同一个能力 store，保证只读状态反映当前 session 实际能力。
+    // 与 runtime 共享同一个能力 store，保证只读状态反映当前 thread 实际能力。
     capabilities: Arc<crate::runtime::CapabilityStore>,
     // agent runtime 主循环：消费 request_tx 输入并驱动模型、工具、权限和内部事件。
     _runtime_handle: JoinHandle<()>,
@@ -143,14 +143,14 @@ pub struct AgentCoreThread {
 pub struct AgentCoreThreadLoad {
     pub messages: Vec<Message>,
     pub llm_context_version: i64,
-    pub usage: SessionUsageSnapshot,
+    pub usage: ThreadUsageSnapshot,
     pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
 }
 
 impl AgentCoreThread {
     /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
     ///
-    /// 唯一的生产入口 `spawn_for_session_with_active_profile` 强制要求传入一个
+    /// 唯一的生产入口 `spawn_for_thread_with_active_profile` 强制要求传入一个
     /// 由 server 端已经预创建好的 `thread_id`（对应目录、DB 行都已存在），
     /// 并把持久化层的 messages / usage 一次性灌进 runtime,启动后 core 即处于
     /// "已加载"状态 —— 不再需要后续的 hydrate 事件。
@@ -417,7 +417,7 @@ impl AgentCoreThread {
 
     /// 向 runtime 投递一个已通过 server 校验的内部事件。
     ///
-    /// channel 关闭意味着对应会话的 runtime 已退出，调用方应把它视为 core 会话不可用。
+    /// channel 关闭意味着对应线程的 runtime 已退出，调用方应把它视为 core 线程不可用。
     async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
         tracing::trace!(
             thread_id = %self.thread_id,

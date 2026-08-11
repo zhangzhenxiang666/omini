@@ -41,7 +41,7 @@ The main dependency rules are:
   core rather than leaking through protocol or runtime-contract types.
 - Server persistence consumes `RuntimePersistenceEvent`; SQLite schema, transactions,
   and replay remain server concerns.
-- Server code uses core's public project/session capabilities instead of deep-linking
+- Server code uses core's public project/thread capabilities instead of deep-linking
   into skills, agent tasks, tools, or engine internals.
 
 ## Project Identity and Storage

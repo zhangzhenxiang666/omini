@@ -180,7 +180,7 @@ fn tool_pause_for_child_tool<'a>(
     tool_use_id: &str,
 ) -> Option<&'a ToolPauseRequest> {
     pending_tool_pauses.iter().find(|pause| {
-        pause.source_session_id.as_deref() == Some(node.session_id.as_str())
+        pause.source_thread_id.as_deref() == Some(node.thread_id.as_str())
             && pause_preview_tool_use_id(pause) == tool_use_id
     })
 }
@@ -427,8 +427,8 @@ mod tests {
         };
         let node = SubagentNode {
             task_id: "task-1".to_string(),
-            session_id: "subagent-1".to_string(),
-            parent_session_id: "main".to_string(),
+            thread_id: "subagent-1".to_string(),
+            parent_thread_id: "main".to_string(),
             spawn_tool_use_id: "spawn-1".to_string(),
             agent_label: "explorer".to_string(),
             title: "Explore".to_string(),
@@ -447,7 +447,7 @@ mod tests {
             preview_tool_use_id: Some("read-2".to_string()),
             tool_name: "read".to_string(),
             permission_source: None,
-            source_session_id: Some("subagent-1".to_string()),
+            source_thread_id: Some("subagent-1".to_string()),
             source_agent_label: Some("Explorer".to_string()),
             kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
                 file_path: "Cargo.toml".to_string(),
@@ -477,8 +477,8 @@ mod tests {
         };
         let node = SubagentNode {
             task_id: "task-1".to_string(),
-            session_id: "subagent-1".to_string(),
-            parent_session_id: "main".to_string(),
+            thread_id: "subagent-1".to_string(),
+            parent_thread_id: "main".to_string(),
             spawn_tool_use_id: "spawn-1".to_string(),
             agent_label: "explorer".to_string(),
             title: "Explore".to_string(),

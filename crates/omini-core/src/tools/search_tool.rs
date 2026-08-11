@@ -151,8 +151,8 @@ impl Tool for SearchTool {
         prepared: Self::Prepared,
         ctx: ToolExecutionContext,
     ) -> ToolResult {
-        let session_cwd = ctx.settings.cwd.clone();
-        execute_search(prepared, session_cwd).await
+        let thread_cwd = ctx.settings.cwd.clone();
+        execute_search(prepared, thread_cwd).await
     }
 }
 
@@ -161,7 +161,7 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
         return Err("query must not be empty in content mode".to_string());
     }
 
-    // 路径解析推迟到 execute_prepared，因为那里有 ctx.settings.cwd（session cwd），
+    // 路径解析推迟到 execute_prepared，因为那里有 ctx.settings.cwd（thread cwd），
     // 而 prepare 阶段只能用 std::env::current_dir()（守护进程下是 /tmp/omini，不对）。
     let raw_path = input.path.as_deref().and_then(|p| {
         let trimmed = p.trim();
@@ -185,13 +185,13 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
     })
 }
 
-async fn execute_search(prepared: PreparedSearch, session_cwd: PathBuf) -> ToolResult {
-    let output = match run_rg(&prepared, &session_cwd).await {
+async fn execute_search(prepared: PreparedSearch, thread_cwd: PathBuf) -> ToolResult {
+    let output = match run_rg(&prepared, &thread_cwd).await {
         Ok(output) => output,
         Err(e) => return ToolResult::error(e),
     };
 
-    let path_display = session_cwd.display().to_string();
+    let path_display = thread_cwd.display().to_string();
 
     if !output.status.success() {
         if prepared.mode == SearchMode::Content && output.status.code() == Some(1) {
@@ -268,16 +268,16 @@ async fn execute_search(prepared: PreparedSearch, session_cwd: PathBuf) -> ToolR
 
 async fn run_rg(
     prepared: &PreparedSearch,
-    session_cwd: &Path,
+    thread_cwd: &Path,
 ) -> Result<std::process::Output, String> {
     let rg_path = bundled_rg_path()?;
     let mut command = Command::new(&rg_path);
-    // 无条件将 rg 的 cwd 设置为 session cwd。
+    // 无条件将 rg 的 cwd 设置为 thread cwd。
     // 守护进程下 process cwd 是 /tmp/omini，不能用。
-    command.current_dir(session_cwd);
+    command.current_dir(thread_cwd);
     command.kill_on_drop(true);
 
-    // 搜索目标：raw_path 为 None 时搜索 "."（即 session cwd），否则使用用户指定的路径。
+    // 搜索目标：raw_path 为 None 时搜索 "."（即 thread cwd），否则使用用户指定的路径。
     // rg 会自动处理相对路径（相对于 cwd）和绝对路径。
     let search_target: OsString = prepared
         .raw_path

@@ -9,7 +9,7 @@ use std::sync::Arc;
 #[derive(Debug, Default, Deserialize)]
 pub struct AgentMutationQuery {
     #[serde(default)]
-    target_session_id: Option<String>,
+    target_thread_id: Option<String>,
 }
 
 /// 列出当前项目可用的子代理配置。
@@ -32,7 +32,7 @@ pub async fn save_project_agent(
 ) -> ApiResult<client_proto::AckResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
-        .save_agent(request, query.target_session_id.as_deref())
+        .save_agent(request, query.target_thread_id.as_deref())
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
@@ -47,13 +47,14 @@ pub async fn delete_project_agent(
 ) -> ApiResult<client_proto::AckResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
-        .delete_agent(&agent_id, query.target_session_id.as_deref())
+        .delete_agent(&agent_id, query.target_thread_id.as_deref())
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
 /// 根据请求内容同步生成新的子代理草稿。
+#[axum::debug_handler]
 pub async fn generate_project_agent(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
@@ -67,49 +68,50 @@ pub async fn generate_project_agent(
         .map_err(core_error)
 }
 
-/// 兼容旧 session 路由：列出项目 agent，不强制加载 runtime。
+/// 兼容旧 thread 路由：列出项目 agent，不强制加载 runtime。
 #[axum::debug_handler]
-pub async fn list_session_agents(
+pub async fn list_thread_agents(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, _session_id)): Path<(String, String)>,
+    Path((project_id, _thread_id)): Path<(String, String)>,
 ) -> ApiResult<client_proto::AgentsResponse> {
     let project = require_project(&manager, &project_id).await?;
     project.list_agents().map(Json).map_err(core_error)
 }
 
-/// 兼容旧 session 路由：把 session_id 作为目标刷新会话。
+/// 兼容旧 thread 路由：把 thread_id 作为目标刷新线程。
 #[axum::debug_handler]
-pub async fn save_session_agent(
+pub async fn save_thread_agent(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id)): Path<(String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     Json(request): Json<client_proto::SaveAgentRequest>,
 ) -> ApiResult<client_proto::AckResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
-        .save_agent(request, Some(&session_id))
+        .save_agent(request, Some(&thread_id))
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 兼容旧 session 路由：把 session_id 作为目标刷新会话。
+/// 兼容旧 thread 路由：把 thread_id 作为目标刷新线程。
 #[axum::debug_handler]
-pub async fn delete_session_agent(
+pub async fn delete_thread_agent(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, session_id, agent_id)): Path<(String, String, String)>,
+    Path((project_id, thread_id, agent_id)): Path<(String, String, String)>,
 ) -> ApiResult<client_proto::AckResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
-        .delete_agent(&agent_id, Some(&session_id))
+        .delete_agent(&agent_id, Some(&thread_id))
         .await
         .map(|_| Json(client_proto::AckResponse::ok()))
         .map_err(core_error)
 }
 
-/// 兼容旧 session 路由：生成不依赖 runtime/controller，直接返回草稿。
-pub async fn generate_session_agent(
+/// 兼容旧 thread 路由：生成不依赖 runtime/controller，直接返回草稿。
+#[axum::debug_handler]
+pub async fn generate_thread_agent(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, _session_id)): Path<(String, String)>,
+    Path((project_id, _thread_id)): Path<(String, String)>,
     Json(request): Json<client_proto::GenerateAgentRequest>,
 ) -> ApiResult<client_proto::GenerateAgentResponse> {
     let project = require_project(&manager, &project_id).await?;

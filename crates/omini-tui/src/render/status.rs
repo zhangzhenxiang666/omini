@@ -91,18 +91,18 @@ pub(super) fn render_footer(state: &mut UiState, frame: &mut ratatui::Frame, are
     };
 
     #[cfg(debug_assertions)]
-    let debug_session_id = state.current_session_id.as_deref();
+    let debug_thread_id = state.current_thread_id.as_deref();
     #[cfg(not(debug_assertions))]
-    let debug_session_id = None;
+    let debug_thread_id = None;
 
     let width = area.width as usize;
     let profile_hint = active_profile_hint(state, width);
     let left_width = left_status_budget(width, profile_hint.as_ref());
-    let debug_style = choose_debug_session_style(
+    let debug_style = choose_debug_thread_style(
         state,
         &model_thinking,
         &path_display,
-        debug_session_id,
+        debug_thread_id,
         left_width,
     );
     let left = build_left_status_line(state, &model_thinking, &path_display, debug_style);
@@ -160,7 +160,7 @@ fn trim_decimal_unit(value: f64, unit: &str) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DebugSessionStyle {
+enum DebugThreadStyle {
     Full,
     Short,
     Hidden,
@@ -170,7 +170,7 @@ fn build_left_status_line(
     state: &UiState,
     model_thinking: &str,
     path_display: &str,
-    debug_style: DebugSessionStyle,
+    debug_style: DebugThreadStyle,
 ) -> Line<'static> {
     let mut base_spans: Vec<Span<'static>> = vec![
         Span::raw(" "),
@@ -195,8 +195,8 @@ fn build_left_status_line(
     append_usage_spans(&state.status_bar, &mut base_spans);
 
     #[cfg(debug_assertions)]
-    append_debug_session_spans(
-        state.current_session_id.as_deref(),
+    append_debug_thread_spans(
+        state.current_thread_id.as_deref(),
         debug_style,
         &mut base_spans,
     );
@@ -220,21 +220,21 @@ fn build_left_status_line(
 }
 
 #[cfg(debug_assertions)]
-fn append_debug_session_spans(
-    session_id: Option<&str>,
-    debug_style: DebugSessionStyle,
+fn append_debug_thread_spans(
+    thread_id: Option<&str>,
+    debug_style: DebugThreadStyle,
     spans: &mut Vec<Span<'static>>,
 ) {
-    let Some(session_id) = session_id else {
+    let Some(thread_id) = thread_id else {
         return;
     };
     let label = match debug_style {
-        DebugSessionStyle::Full => session_id.to_string(),
-        DebugSessionStyle::Short => {
-            let short = session_id.chars().take(8).collect::<String>();
+        DebugThreadStyle::Full => thread_id.to_string(),
+        DebugThreadStyle::Short => {
+            let short = thread_id.chars().take(8).collect::<String>();
             format!("sid {short}")
         }
-        DebugSessionStyle::Hidden => return,
+        DebugThreadStyle::Hidden => return,
     };
     spans.extend([
         Span::styled(
@@ -245,25 +245,25 @@ fn append_debug_session_spans(
     ]);
 }
 
-fn choose_debug_session_style(
+fn choose_debug_thread_style(
     state: &UiState,
     model_thinking: &str,
     path_display: &str,
-    session_id: Option<&str>,
+    thread_id: Option<&str>,
     width: usize,
-) -> DebugSessionStyle {
-    if session_id.is_none() {
-        return DebugSessionStyle::Hidden;
+) -> DebugThreadStyle {
+    if thread_id.is_none() {
+        return DebugThreadStyle::Hidden;
     }
 
-    for style in [DebugSessionStyle::Full, DebugSessionStyle::Short] {
+    for style in [DebugThreadStyle::Full, DebugThreadStyle::Short] {
         let line = build_left_status_line(state, model_thinking, path_display, style);
         if line_width(&line) <= width {
             return style;
         }
     }
 
-    DebugSessionStyle::Hidden
+    DebugThreadStyle::Hidden
 }
 
 fn active_profile_hint(state: &UiState, width: usize) -> Option<Line<'static>> {
@@ -505,20 +505,20 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    fn debug_session_id_does_not_displace_plan_mode_hint() {
+    fn debug_thread_id_does_not_displace_plan_mode_hint() {
         let mut state = UiState::new();
         state.status_bar.active_profile = ActiveProfile::Plan;
         state.status_bar.model = "test-model".to_string();
         state.status_bar.cwd = "/tmp/project".into();
-        state.current_session_id = Some("12345678-1234-1234-1234-123456789abc".to_string());
+        state.current_thread_id = Some("12345678-1234-1234-1234-123456789abc".to_string());
         let width = 24;
         let plan_hint = active_profile_hint(&state, width);
         let left_width = left_status_budget(width, plan_hint.as_ref());
-        let debug_style = choose_debug_session_style(
+        let debug_style = choose_debug_thread_style(
             &state,
             "test-model",
             "/tmp/project",
-            state.current_session_id.as_deref(),
+            state.current_thread_id.as_deref(),
             left_width,
         );
         let line = compose_footer_line(

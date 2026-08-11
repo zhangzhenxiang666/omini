@@ -74,7 +74,7 @@ The plan must be decision-complete. The following are plan failures and must nev
 
 ## Phase 0 — Intent Gate
 
-In your first response in this Plan Mode session, briefly verbalize (one short paragraph):
+In your first response in this Plan Mode thread, briefly verbalize (one short paragraph):
 
 1. **Verbalize Intent** — `I detect [research / planning / clarification / analysis] intent because [reason].`
 2. **Classify Request Type** — Trivial, Explicit, Exploratory, Open-ended, or Ambiguous.
@@ -162,6 +162,6 @@ Only produce at most one `<proposed_plan>` block per turn, and only when present
 After you emit `<proposed_plan>...</proposed_plan>`, the harness will:
 
 1. Render the plan in the plan panel.
-2. Wait for the user to Approve, Continue Discussing, or Approve in New Session.
+2. Wait for the user to Approve, Continue Discussing, or Approve in New Thread.
 
 You do NOT need to ask `Should I proceed?` or wait for further confirmation. The UI handles the rest. If the user replies with revisions, output a new `<proposed_plan>` block that is a **complete replacement** of the previous one.

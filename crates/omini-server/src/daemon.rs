@@ -416,7 +416,7 @@ thinking = false
     }
 
     #[tokio::test]
-    async fn empty_cache_restores_project_and_sessions_by_uuid() {
+    async fn empty_cache_restores_project_and_threads_by_uuid() {
         let (temp, root, db) = test_manager("restart").await;
         let cwd = temp.0.join("cwd");
         fs::create_dir_all(&cwd).unwrap();
@@ -424,22 +424,22 @@ thinking = false
         let manager = GlobalDaemonManager::new(root, Arc::clone(&db));
         let project = register(&manager, &cwd, None).await;
         let loaded = manager.get_or_load_project(&project.id).await.unwrap();
-        let session_id = loaded
-            .create_thread(protocol::CreateSessionRequest {
+        let thread_id = loaded
+            .create_thread(protocol::CreateThreadRequest {
                 profile: Some(ActiveProfile::Main),
                 ..Default::default()
             })
             .await
             .unwrap()
-            .session_id
+            .thread_id
             .unwrap();
 
         let restarted = GlobalDaemonManager::new(OminiRoot::from_path(root_path), db);
         let opened = restarted.open_project(&project.id).await.unwrap();
 
         assert_eq!(opened.project.id, project.id);
-        assert_eq!(opened.sessions.len(), 1);
-        assert_eq!(opened.sessions[0].id, session_id);
+        assert_eq!(opened.threads.len(), 1);
+        assert_eq!(opened.threads[0].id, thread_id);
         assert!(opened.project.last_opened_at.is_some());
     }
 
@@ -453,11 +453,11 @@ thinking = false
         let manager = GlobalDaemonManager::new(root, Arc::clone(&db));
         let project = register(&manager, &old_cwd, Some("Custom name")).await;
         let loaded_before = manager.get_or_load_project(&project.id).await.unwrap();
-        let session_id = loaded_before
-            .create_thread(protocol::CreateSessionRequest::default())
+        let thread_id = loaded_before
+            .create_thread(protocol::CreateThreadRequest::default())
             .await
             .unwrap()
-            .session_id
+            .thread_id
             .unwrap();
 
         let relinked = manager
@@ -477,11 +477,7 @@ thinking = false
         assert_eq!(relinked.storage_key, project.storage_key);
         assert!(!Arc::ptr_eq(&loaded_before, &loaded_after));
         assert_eq!(
-            db.get_thread(&session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .project_id,
+            db.get_thread(&thread_id).await.unwrap().unwrap().project_id,
             project.id
         );
         assert!(temp.0.join("projects").join(&project.storage_key).is_dir());
@@ -497,14 +493,14 @@ thinking = false
         let manager = GlobalDaemonManager::new(root, db);
         let project = register(&manager, &old_cwd, None).await;
         let loaded = manager.get_or_load_project(&project.id).await.unwrap();
-        let session_id = loaded
-            .create_thread(protocol::CreateSessionRequest::default())
+        let thread_id = loaded
+            .create_thread(protocol::CreateThreadRequest::default())
             .await
             .unwrap()
-            .session_id
+            .thread_id
             .unwrap();
         loaded
-            .cached_thread(&session_id)
+            .cached_thread(&thread_id)
             .unwrap()
             .record_runtime_event_for_test("run_started");
 

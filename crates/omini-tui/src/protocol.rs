@@ -98,8 +98,8 @@ pub(crate) fn plan_approval_action_from_internal(
                 profile: plan_execution_profile_from_internal(profile),
             }
         }
-        event_types::PlanApprovalAction::ApproveInNewSession { profile } => {
-            omini_protocol::PlanApprovalAction::ApproveInNewSession {
+        event_types::PlanApprovalAction::ApproveInNewThread { profile } => {
+            omini_protocol::PlanApprovalAction::ApproveInNewThread {
                 profile: plan_execution_profile_from_internal(profile),
             }
         }

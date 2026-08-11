@@ -26,7 +26,7 @@ impl fmt::Display for TitleGenError {
 
 impl std::error::Error for TitleGenError {}
 
-/// 后台异步生成 session 标题。`Err(_)` 表示请求 / 流 / JSON 解析失败，
+/// 后台异步生成 thread 标题。`Err(_)` 表示请求 / 流 / JSON 解析失败，
 /// 调用方统一按 "保留兜底 title, 记 tracing::warn" 处理。
 pub async fn generate_thread_title(
     settings: &Settings,
@@ -52,7 +52,7 @@ pub async fn generate_thread_title(
         messages: &messages,
         model: &model,
         system_prompt: Some(
-            "You are a session title generator. \
+            "You are a thread title generator. \
              You output ONLY a valid JSON object with one \"title\" field. Nothing else.",
         ),
         tools: None,
@@ -65,7 +65,7 @@ pub async fn generate_thread_title(
     let mut stream = llm_client
         .invoke(request)
         .await
-        .map_err(|e| TitleGenError::Request(format!("generate session title failed: {e}")))?;
+        .map_err(|e| TitleGenError::Request(format!("generate thread title failed: {e}")))?;
     let mut text = String::new();
     while let Some(event) = stream.next().await {
         match event {
@@ -74,7 +74,7 @@ pub async fn generate_thread_title(
             Ok(_) => {}
             Err(e) => {
                 return Err(TitleGenError::Stream(format!(
-                    "generate session title stream failed: {e}"
+                    "generate thread title stream failed: {e}"
                 )));
             }
         }
@@ -86,7 +86,7 @@ pub async fn generate_thread_title(
 fn build_generate_title_prompt(user_input: &str) -> String {
     format!(
         "Generate a brief title that would help the user find this conversation later.\n\
-         The title is shown in session history lists and the start screen.\n\
+         The title is shown in thread history lists and the start screen.\n\
          \n\
          <rules>\n\
          - Use the same language as the user message you are summarizing\n\

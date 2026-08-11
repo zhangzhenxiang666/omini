@@ -6,7 +6,7 @@ short-description: "创建或更新 Omini 技能，将可复用工作流打包�
 
 # Skill Creator
 
-Use this skill to create or update an Omini skill. A skill is a directory with a required `SKILL.md` file and optional bundled resources that teach future Omini sessions a reusable workflow.
+Use this skill to create or update an Omini skill. A skill is a directory with a required `SKILL.md` file and optional bundled resources that teach future Omini threads a reusable workflow.
 
 ## Workflow
 

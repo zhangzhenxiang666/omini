@@ -3,14 +3,14 @@ use chrono::Utc;
 use omini_protocol as client_proto;
 
 impl ThreadRuntime {
-    pub fn runtime_state(&self) -> client_proto::SessionRuntimeState {
+    pub fn runtime_state(&self) -> client_proto::ThreadRuntimeState {
         self.status_projection
             .lock()
             .expect("status projection lock poisoned")
             .state()
     }
 
-    pub fn runtime_status(&self) -> client_proto::SessionRuntimeStatus {
+    pub fn runtime_status(&self) -> client_proto::ThreadRuntimeStatus {
         let (controller_id, connected_client_count) = {
             let presence = self.presence.lock().expect("presence lock poisoned");
             (presence.controller_id.clone(), presence.clients.len())
@@ -21,7 +21,7 @@ impl ThreadRuntime {
         let loaded = true;
         let skills = self.core.runtime_skills();
         let mcp_servers = self.core.runtime_mcp_servers();
-        let subagent_sessions = self.core.runtime_subagents();
+        let subagent_threads = self.core.runtime_subagents();
         let git_branch = self
             .git_branch
             .lock()
@@ -38,7 +38,7 @@ impl ThreadRuntime {
                     connected_client_count,
                     skills,
                     mcp_servers,
-                    subagent_sessions,
+                    subagent_threads,
                     now: Utc::now(),
                     git_branch,
                 },
@@ -46,7 +46,7 @@ impl ThreadRuntime {
     }
 
     pub fn is_reclaimable(&self) -> bool {
-        self.runtime_state() == client_proto::SessionRuntimeState::Idle
+        self.runtime_state() == client_proto::ThreadRuntimeState::Idle
             && !self
                 .status_projection
                 .lock()

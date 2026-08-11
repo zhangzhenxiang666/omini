@@ -5,7 +5,7 @@ pub(super) async fn record_total_usage_and_notify(
     usage: Usage,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
-    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
 ) {
     let _ = persistence_tx
         .send(RuntimePersistenceEvent::RecordThreadTotalUsage {
@@ -23,10 +23,10 @@ pub(super) async fn record_total_usage_and_notify(
 }
 
 pub(super) fn record_usage_snapshot(
-    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     usage: Usage,
     context_window: Option<u32>,
-) -> SessionUsageSnapshot {
+) -> ThreadUsageSnapshot {
     let mut snapshot = usage_state.lock().expect("thread usage lock poisoned");
     let total_tokens = usage_tokens_i64(usage);
     let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
@@ -38,10 +38,10 @@ pub(super) fn record_usage_snapshot(
 }
 
 pub(super) fn record_total_usage_snapshot(
-    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     usage: Usage,
     context_window: Option<u32>,
-) -> SessionUsageSnapshot {
+) -> ThreadUsageSnapshot {
     let mut snapshot = usage_state.lock().expect("thread usage lock poisoned");
     let total_tokens = usage_tokens_i64(usage);
     let cached_tokens = usage_usize_to_i64(usage.cached_tokens);
@@ -68,9 +68,9 @@ mod tests {
 
     #[test]
     fn concurrent_total_updates_preserve_main_context_usage() {
-        let usage_state = Arc::new(Mutex::new(SessionUsageSnapshot {
+        let usage_state = Arc::new(Mutex::new(ThreadUsageSnapshot {
             current_context_tokens: 77,
-            ..SessionUsageSnapshot::default()
+            ..ThreadUsageSnapshot::default()
         }));
         let usage = Usage {
             prompt_tokens: 1,

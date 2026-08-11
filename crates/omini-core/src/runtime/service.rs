@@ -6,7 +6,7 @@ use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::display::DisplayMessage;
-use omini_domain::events::{ActiveProfile, SessionUsageSnapshot};
+use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_domain::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
@@ -43,7 +43,7 @@ pub struct AgentRuntimeDeps {
     pub thread_dir: ThreadDir,
     pub messages: Vec<Message>,
     pub llm_context_version: i64,
-    pub usage: SessionUsageSnapshot,
+    pub usage: ThreadUsageSnapshot,
     pub active_profile: ActiveProfile,
     pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
 }
@@ -114,7 +114,7 @@ pub struct AgentRuntime {
     /// 当前活跃 profile，供 runtime 主循环和运行中事件处理器共享读取。
     pub(crate) active_profile: Arc<RwLock<ActiveProfile>>,
     /// 当前 thread 的 usage 快照；SQLite 落库由 server 处理。
-    pub(super) thread_usage: Arc<Mutex<SessionUsageSnapshot>>,
+    pub(super) thread_usage: Arc<Mutex<ThreadUsageSnapshot>>,
 }
 
 impl AgentRuntime {
@@ -372,7 +372,7 @@ mod tests {
 
     /// 为测试在 project 下建一个 thread，并返回其 id 与目录。
     ///
-    /// 新架构下 `AgentRuntime` 必须依赖一个已存在的 session,不再自己生成 UUID。
+    /// 新架构下 `AgentRuntime` 必须依赖一个已存在的 thread,不再自己生成 UUID。
     /// 测试中用这个 helper 模拟 server 的预创建行为,然后把结果传给 `AgentRuntime::new`。
     fn create_test_thread(project: &ProjectDir) -> (String, ThreadDir) {
         let thread_id = Uuid::new_v4().to_string();
@@ -407,7 +407,7 @@ mod tests {
             thread_dir,
             messages: Vec::new(),
             llm_context_version: 1,
-            usage: SessionUsageSnapshot::default(),
+            usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
@@ -441,7 +441,7 @@ mod tests {
             thread_dir,
             messages: Vec::new(),
             llm_context_version: 1,
-            usage: SessionUsageSnapshot::default(),
+            usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
@@ -455,7 +455,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                 tool_name: "bash".to_string(),
@@ -595,7 +595,7 @@ mod tests {
             thread_dir,
             messages: Vec::new(),
             llm_context_version: 1,
-            usage: SessionUsageSnapshot::default(),
+            usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
@@ -805,7 +805,7 @@ mod tests {
             runtime_for_thread_with_persistence(settings, project.clone());
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.thread_id.clone();
+        let thread_id = runtime.thread_id.clone();
         let expected_model_ref = format!(
             "{}/{}",
             runtime.settings.active_provider, runtime.settings.model
@@ -827,12 +827,12 @@ mod tests {
         let mut saw_plan_event = false;
         while let Ok(event) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertPlanMessage {
-                thread_id: event_session_id,
+                thread_id: event_thread_id,
                 plan: event_plan,
                 model_ref,
             } = event
             {
-                assert_eq!(event_session_id, session_id);
+                assert_eq!(event_thread_id, thread_id);
                 assert_eq!(event_plan.markdown, plan.markdown);
                 assert_eq!(model_ref, expected_model_ref);
                 saw_plan_event = true;
@@ -857,7 +857,7 @@ mod tests {
             runtime_for_thread_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.thread_id.clone();
+        let thread_id = runtime.thread_id.clone();
         runtime.set_active_profile(ActiveProfile::Plan);
 
         let original = Message::new(
@@ -869,7 +869,7 @@ mod tests {
         );
 
         history::persist_one(
-            &session_id,
+            &thread_id,
             original.clone(),
             ActiveProfile::Plan,
             "test/model",
@@ -895,7 +895,7 @@ mod tests {
                         "exactly one InsertMessage(kind=normal) should arrive"
                     );
                     normal_event = Some(RuntimePersistenceEvent::InsertMessage {
-                        thread_id: session_id.clone(),
+                        thread_id: thread_id.clone(),
                         role,
                         model_ref: Some("test/model".to_string()),
                         blocks,
@@ -951,7 +951,7 @@ mod tests {
             runtime_for_thread_with_persistence(settings, project);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.thread_id.clone();
+        let thread_id = runtime.thread_id.clone();
 
         let original = Message::new(
             Role::Assistant,
@@ -962,7 +962,7 @@ mod tests {
         );
 
         history::persist_one(
-            &session_id,
+            &thread_id,
             original.clone(),
             ActiveProfile::Main,
             "test/model",
@@ -1028,33 +1028,33 @@ mod tests {
             thread_dir,
             messages: Vec::new(),
             llm_context_version: 1,
-            usage: SessionUsageSnapshot::default(),
+            usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
         let mut runtime = AgentRuntime::new(channels, deps);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
-        let session_id = runtime.thread_id.clone();
+        let thread_id = runtime.thread_id.clone();
         let event = CompactSummaryFinishedEvent {
             trigger: CompactTrigger::Manual,
             summary: "# Summary\n\n- Keep this.".to_string(),
             after_tokens: 42,
-            session_id: Some(session_id.clone()),
+            thread_id: Some(thread_id.clone()),
             agent_label: None,
         };
 
-        persist_compact_summary_event(&session_id, &event, "test/model", &persistence_tx).await;
+        persist_compact_summary_event(&thread_id, &event, "test/model", &persistence_tx).await;
 
         let mut saw_summary_event = false;
         while let Ok(event_out) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertCompactSummaryMessage {
-                thread_id: event_session_id,
+                thread_id: event_thread_id,
                 summary,
                 model_ref,
             } = event_out
             {
-                assert_eq!(event_session_id, session_id);
+                assert_eq!(event_thread_id, thread_id);
                 assert_eq!(summary.markdown, event.summary);
                 assert_eq!(model_ref, "test/model");
                 saw_summary_event = true;
@@ -1184,13 +1184,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn approve_in_new_session_only_resolves_drawer_without_changing_state() {
-        // Server 路由层在收到 ApproveInNewSession 时会自行 fork 新 ThreadRuntime，
+    async fn approve_in_new_thread_only_resolves_drawer_without_changing_state() {
+        // Server 路由层在收到 ApproveInNewThread 时会自行 fork 新 ThreadRuntime，
         // core 收到此 action 后只能关闭审批抽屉,不能改 active_profile、注入 plan
         // 消息或启动 run(否则会和 server 的 fork 路径重复执行)。
         ensure_test_persistence().await;
 
-        let root = unique_temp_root("approve-in-new-session");
+        let root = unique_temp_root("approve-in-new-thread");
         let cwd = root.join("workspace");
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
@@ -1206,7 +1206,7 @@ mod tests {
         runtime
             .resolve_plan_approval(
                 "plan_1",
-                PlanApprovalAction::ApproveInNewSession {
+                PlanApprovalAction::ApproveInNewThread {
                     profile: PlanExecutionProfile::Main,
                 },
             )
@@ -1224,7 +1224,7 @@ mod tests {
                     assert_eq!(plan_id, "plan_1");
                     assert!(matches!(
                         action,
-                        PlanApprovalAction::ApproveInNewSession { .. }
+                        PlanApprovalAction::ApproveInNewThread { .. }
                     ));
                     saw_resolved = true;
                 }
@@ -1237,7 +1237,7 @@ mod tests {
         assert!(saw_resolved, "resolved event should be emitted");
         assert!(
             !saw_user_message,
-            "approve-in-new-session must not inject plan message into core"
+            "approve-in-new-thread must not inject plan message into core"
         );
     }
 
@@ -1414,7 +1414,7 @@ mod tests {
         let settings = settings_for_cwd(&config, &cwd);
         let (runtime, mut event_rx, mut persistence_rx) =
             runtime_for_thread_with_persistence(settings, project);
-        let session_id = runtime.thread_id.clone();
+        let thread_id = runtime.thread_id.clone();
         drain_events(&mut event_rx);
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
@@ -1454,12 +1454,12 @@ mod tests {
         let mut saw_persistence_event = false;
         while let Ok(event) = persistence_rx.try_recv() {
             if let RuntimePersistenceEvent::InsertMessage {
-                thread_id: event_session_id,
+                thread_id: event_thread_id,
                 role,
                 blocks,
                 ..
             } = event
-                && event_session_id == session_id
+                && event_thread_id == thread_id
                 && role == "user"
                 && blocks == message.content
             {
@@ -1555,7 +1555,7 @@ mod tests {
         let settings = settings_for_cwd(&config, &cwd);
         let (runtime, _event_rx, mut persistence_rx) =
             runtime_for_thread_with_persistence(settings, project);
-        let session_id = runtime.thread_id.clone();
+        let expected_thread_id = runtime.thread_id.clone();
 
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
@@ -1607,12 +1607,12 @@ mod tests {
             match event {
                 RuntimePersistenceEvent::AppendLlmMessage {
                     thread_id, message, ..
-                } if thread_id == session_id && message == llm_msg => {
+                } if thread_id == expected_thread_id && message == llm_msg => {
                     saw_llm_message = true;
                 }
                 RuntimePersistenceEvent::InsertMessage {
                     thread_id, blocks, ..
-                } if thread_id == session_id && blocks == display_msg.content => {
+                } if thread_id == expected_thread_id && blocks == display_msg.content => {
                     assert!(
                         !blocks
                             .iter()
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usage_events_update_main_session_totals() {
+    async fn usage_events_update_main_thread_totals() {
         ensure_test_persistence().await;
 
         let root = unique_temp_root("usage-events");
@@ -1642,8 +1642,8 @@ mod tests {
         let (mut runtime, mut event_rx, mut persistence_rx) =
             runtime_for_thread_with_persistence(settings, project);
 
-        runtime.messages = vec![Message::from_user_text("session body".to_string())];
-        let parent_session_id = runtime.thread_id.clone();
+        runtime.messages = vec![Message::from_user_text("thread body".to_string())];
+        let parent_thread_id = runtime.thread_id.clone();
         drain_events(&mut event_rx);
         while persistence_rx.try_recv().is_ok() {}
 
@@ -1673,7 +1673,7 @@ mod tests {
         while let Ok(event) = persistence_rx.try_recv() {
             match event {
                 RuntimePersistenceEvent::RecordThreadUsage { thread_id, usage }
-                    if thread_id == parent_session_id =>
+                    if thread_id == parent_thread_id =>
                 {
                     assert_eq!(usage.total_tokens(), 15);
                     assert_eq!(usage.cached_tokens, 3);

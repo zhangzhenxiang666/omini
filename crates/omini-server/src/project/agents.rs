@@ -13,17 +13,17 @@ use omini_runtime_contract as runtime_contract;
 impl ProjectManager {
     async fn refresh_target_thread_agents(
         &self,
-        target_session_id: Option<&str>,
+        target_thread_id: Option<&str>,
         records: Vec<domain::subagents::AgentRecord>,
     ) -> Result<(), CoreError> {
-        let Some(session_id) = target_session_id else {
+        let Some(thread_id) = target_thread_id else {
             return Ok(());
         };
-        let Some(session) = self.cached_thread(session_id) else {
+        let Some(thread) = self.cached_thread(thread_id) else {
             return Ok(());
         };
-        session.reload_subagent_registry().await?;
-        session.broadcast_agent_management_updated(records)
+        thread.reload_subagent_registry().await?;
+        thread.broadcast_agent_management_updated(records)
     }
 
     pub fn list_agents(&self) -> Result<client_proto::AgentsResponse, CoreError> {
@@ -36,7 +36,7 @@ impl ProjectManager {
     pub async fn save_agent(
         &self,
         request: client_proto::SaveAgentRequest,
-        target_session_id: Option<&str>,
+        target_thread_id: Option<&str>,
     ) -> Result<(), CoreError> {
         let update = omini_core::save_project_agent(
             &self.cwd,
@@ -46,14 +46,14 @@ impl ProjectManager {
                 draft: request.draft,
             },
         )?;
-        self.refresh_target_thread_agents(target_session_id, update.records)
+        self.refresh_target_thread_agents(target_thread_id, update.records)
             .await
     }
 
     pub async fn delete_agent(
         &self,
         agent_id: &str,
-        target_session_id: Option<&str>,
+        target_thread_id: Option<&str>,
     ) -> Result<(), CoreError> {
         let update = omini_core::delete_project_agent(
             &self.cwd,
@@ -61,7 +61,7 @@ impl ProjectManager {
                 agent_id: agent_id.to_string(),
             },
         )?;
-        self.refresh_target_thread_agents(target_session_id, update.records)
+        self.refresh_target_thread_agents(target_thread_id, update.records)
             .await
     }
 
@@ -126,27 +126,27 @@ mod tests {
             manager
                 .threads
                 .lock()
-                .expect("sessions lock poisoned")
+                .expect("threads lock poisoned")
                 .is_empty()
         );
     }
 
     #[tokio::test]
-    async fn save_agent_with_target_notifies_cached_session_agents() {
+    async fn save_agent_with_target_notifies_cached_thread_agents() {
         let temp = unique_temp_root("agent-save-target");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
-        let session_id = manager
-            .create_thread(client_proto::CreateSessionRequest::default())
+        let thread_id = manager
+            .create_thread(client_proto::CreateThreadRequest::default())
             .await
-            .expect("session should create")
-            .session_id
-            .expect("session id should be returned");
-        let session = manager
-            .get_or_load_thread(&session_id)
+            .expect("thread should create")
+            .thread_id
+            .expect("thread id should be returned");
+        let thread = manager
+            .get_or_load_thread(&thread_id)
             .await
-            .expect("session should load");
-        let mut events = session.subscribe();
+            .expect("thread should load");
+        let mut events = thread.subscribe();
 
         manager
             .save_agent(
@@ -163,7 +163,7 @@ mod tests {
                         model: None,
                     },
                 },
-                Some(&session_id),
+                Some(&thread_id),
             )
             .await
             .expect("agent should save");
@@ -175,7 +175,7 @@ mod tests {
             client_proto::TypedRuntimeEvent::AgentManagementUpdated { records }
                 if records.iter().any(|record| record.name == "target-helper")
         ));
-        session.shutdown().await.expect("session should shut down");
+        thread.shutdown().await.expect("thread should shut down");
     }
 
     #[tokio::test]

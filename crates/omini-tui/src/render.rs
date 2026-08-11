@@ -23,17 +23,16 @@ mod messages;
 mod permission_drawer;
 mod plan_approval_drawer;
 mod scroll;
-mod session_list;
 mod start_screen;
 mod status;
 mod subagent_tool;
 mod text;
 mod theme;
+mod thread_list;
 
 use assistant::{build_assistant_text_lines, build_llm_summary_lines, build_proposed_plan_lines};
 use messages::render_messages;
 use scroll::{ScrollableLine, scrollable_lines};
-use session_list::render_session_list;
 use start_screen::render_start_screen;
 use subagent_tool::render_subagent_tool;
 use text::{
@@ -41,6 +40,7 @@ use text::{
     styled_wrapped_display, styled_wrapped_text, truncate_str,
 };
 use theme::INPUT_BG;
+use thread_list::render_thread_list;
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     layout::render(state, frame);
@@ -53,7 +53,7 @@ mod tests {
     use crate::types::config::{ModelConfig, ThinkingEffort};
     use crate::types::events::{
         CommandKind, CommandSummary, PermissionPreview, ReadPermissionPreview, RuntimeToUiEvent,
-        SessionSummary, SessionUsageSnapshot, ToolPauseKind, ToolPauseRequest, UserInputOption,
+        ThreadSummary, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest, UserInputOption,
         UserInputPreview, UserInputQuestion,
     };
     use chrono::Utc;
@@ -85,8 +85,8 @@ mod tests {
             command_summary("commit-message", CommandKind::Skill),
         ];
         let now = Utc::now();
-        state.startup_recent_sessions = vec![SessionSummary {
-            id: "session-1".to_string(),
+        state.startup_recent_threads = vec![ThreadSummary {
+            id: "thread-1".to_string(),
             title: "Fix flaky CI".to_string(),
             model: "test-model".to_string(),
             provider: "test-provider".to_string(),
@@ -120,47 +120,47 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_renders_tail_runtime_state_markers() {
+    fn thread_picker_renders_tail_runtime_state_markers() {
         let backend = TestBackend::new(60, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         let now = Utc::now();
-        let sessions = vec![
-            session_summary("stored", "Stored only", None, now),
-            session_summary(
+        let threads = vec![
+            thread_summary("stored", "Stored only", None, now),
+            thread_summary(
                 "idle",
                 "Idle loaded",
-                Some(omini_protocol::SessionRuntimeState::Idle),
+                Some(omini_protocol::ThreadRuntimeState::Idle),
                 now,
             ),
-            session_summary(
+            thread_summary(
                 "thinking",
                 "Thinking loaded",
-                Some(omini_protocol::SessionRuntimeState::Thinking),
+                Some(omini_protocol::ThreadRuntimeState::Thinking),
                 now,
             ),
-            session_summary(
+            thread_summary(
                 "working",
                 "Working loaded",
-                Some(omini_protocol::SessionRuntimeState::Working),
+                Some(omini_protocol::ThreadRuntimeState::Working),
                 now,
             ),
-            session_summary(
+            thread_summary(
                 "waiting",
                 "Waiting loaded",
-                Some(omini_protocol::SessionRuntimeState::Waiting),
+                Some(omini_protocol::ThreadRuntimeState::Waiting),
                 now,
             ),
-            session_summary(
+            thread_summary(
                 "compacting",
                 "Compacting loaded",
-                Some(omini_protocol::SessionRuntimeState::Compacting),
+                Some(omini_protocol::ThreadRuntimeState::Compacting),
                 now,
             ),
         ];
-        state.interaction_step = Some(InteractionStep::Session {
-            sessions: sessions.clone(),
-            all_sessions: sessions,
+        state.interaction_step = Some(InteractionStep::Thread {
+            threads: threads.clone(),
+            all_threads: threads,
             search: String::new(),
             selected: 0,
         });
@@ -199,21 +199,21 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_truncates_titles_before_tail_status_column() {
+    fn thread_picker_truncates_titles_before_tail_status_column() {
         let backend = TestBackend::new(34, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         let now = Utc::now();
         let long_title = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
-        let sessions = vec![session_summary(
+        let threads = vec![thread_summary(
             "working",
             long_title,
-            Some(omini_protocol::SessionRuntimeState::Working),
+            Some(omini_protocol::ThreadRuntimeState::Working),
             now,
         )];
-        state.interaction_step = Some(InteractionStep::Session {
-            sessions: sessions.clone(),
-            all_sessions: sessions,
+        state.interaction_step = Some(InteractionStep::Thread {
+            threads: threads.clone(),
+            all_threads: threads,
             search: String::new(),
             selected: 0,
         });
@@ -233,11 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn start_screen_is_hidden_after_empty_session_change() {
+    fn start_screen_is_hidden_after_empty_thread_change() {
         let backend = TestBackend::new(100, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.apply_session_snapshot(None, vec![], vec![], SessionUsageSnapshot::default());
+        state.apply_thread_snapshot(None, vec![], vec![], ThreadUsageSnapshot::default());
 
         terminal.draw(|frame| render(&mut state, frame)).unwrap();
 
@@ -363,13 +363,13 @@ mod tests {
         }
     }
 
-    fn session_summary(
+    fn thread_summary(
         id: &str,
         title: &str,
-        runtime_state: Option<omini_protocol::SessionRuntimeState>,
+        runtime_state: Option<omini_protocol::ThreadRuntimeState>,
         now: chrono::DateTime<Utc>,
-    ) -> SessionSummary {
-        SessionSummary {
+    ) -> ThreadSummary {
+        ThreadSummary {
             id: id.to_string(),
             title: title.to_string(),
             model: "test-model".to_string(),
@@ -444,7 +444,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "read".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
                 file_path: "Cargo.toml".to_string(),
@@ -474,7 +474,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "read".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
                 file_path: "Cargo.toml".to_string(),
@@ -516,7 +516,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "read".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
                 file_path: "Cargo.toml".to_string(),
@@ -540,7 +540,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "ask_user".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::UserInput(UserInputPreview {
                 questions: vec![UserInputQuestion {

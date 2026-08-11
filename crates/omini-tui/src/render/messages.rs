@@ -598,7 +598,7 @@ fn render_single_ui_message(
                             let node = state
                                 .subagents_by_tool_use
                                 .get(&tu.id)
-                                .and_then(|session_id| state.subagents.get(session_id));
+                                .and_then(|thread_id| state.subagents.get(thread_id));
                             let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
                                 positions.first().and_then(|(mi, bi)| {
                                     if let ContentBlock::ToolResult(tr) =
@@ -761,7 +761,7 @@ fn render_pending_assistant_lines(
                     let node = state
                         .subagents_by_tool_use
                         .get(&tu.id)
-                        .and_then(|session_id| state.subagents.get(session_id));
+                        .and_then(|thread_id| state.subagents.get(thread_id));
                     let tr = tr_indices.get(&tu.id).and_then(|&bi| {
                         if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
                             Some(tr.clone())

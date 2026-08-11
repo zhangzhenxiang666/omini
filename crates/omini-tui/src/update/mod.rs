@@ -92,14 +92,14 @@ pub(super) async fn handle_runtime_event(
         return UpdateOutcome::exit();
     }
 
-    if let RuntimeToUiEvent::SessionSnapshot {
-        session_id,
+    if let RuntimeToUiEvent::ThreadSnapshot {
+        thread_id,
         messages,
         agent_tasks,
         usage,
     } = event
     {
-        state.apply_session_snapshot(session_id, messages, agent_tasks, usage);
+        state.apply_thread_snapshot(thread_id, messages, agent_tasks, usage);
     } else {
         let should_flush_queue = matches!(event, RuntimeToUiEvent::RunFinished);
         state.apply_event(event);
@@ -281,7 +281,7 @@ async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<Cli
     };
     let action = match state.plan_approval_selected.min(2) {
         0 => PlanApprovalAction::Approve { profile },
-        1 => PlanApprovalAction::ApproveInNewSession { profile },
+        1 => PlanApprovalAction::ApproveInNewThread { profile },
         _ => PlanApprovalAction::ContinueDiscussing,
     };
     state.plan_approval_selected = 0;
@@ -568,9 +568,9 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
             None
         }
         "model" => Some(ClientRequest::OpenModelPicker),
-        "sessions" | "resume" => Some(ClientRequest::OpenSessionPicker),
+        "sessions" | "resume" => Some(ClientRequest::OpenThreadPicker),
         "agents" => Some(ClientRequest::OpenAgentManager),
-        "new" | "clear" => Some(ClientRequest::SessionNew {
+        "new" | "clear" => Some(ClientRequest::ThreadNew {
             profile: protocol::active_profile_from_internal(state.status_bar.active_profile),
         }),
         "plan" => Some(ClientRequest::ProfileSet {
@@ -579,7 +579,7 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
         "compact" => Some(ClientRequest::ContextCompact {
             instructions: (!args.is_empty()).then_some(args),
         }),
-        "rename" => Some(ClientRequest::SessionRename { title: args }),
+        "rename" => Some(ClientRequest::ThreadRename { title: args }),
         "init" => {
             let mut input = protocol::user_input_from_draft(draft);
             let mut prompt = INIT_PROMPT.to_string();
@@ -881,7 +881,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                 tool_name: "bash".to_string(),
@@ -896,7 +896,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "edit".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::Permission(PermissionPreview::Edit(EditPermissionPreview {
                 summary: "Edit /tmp/demo.rs".to_string(),
@@ -921,7 +921,7 @@ mod tests {
             preview_tool_use_id: None,
             tool_name: "ask_user".to_string(),
             permission_source: None,
-            source_session_id: None,
+            source_thread_id: None,
             source_agent_label: None,
             kind: ToolPauseKind::UserInput(UserInputPreview {
                 questions: vec![UserInputQuestion {
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(plan_id, "20260521T000000Z-plan");
         assert_eq!(
             action,
-            omini_protocol::PlanApprovalAction::ApproveInNewSession {
+            omini_protocol::PlanApprovalAction::ApproveInNewThread {
                 profile: omini_protocol::PlanExecutionProfile::Main,
             }
         );

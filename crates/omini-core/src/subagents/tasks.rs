@@ -11,7 +11,7 @@ use omini_config::project::ThreadDir;
 use omini_config::{ProviderProfile, Settings};
 use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, AgentTaskStatus, MAX_AGENT_DEPTH, SessionUsageSnapshot, ToolPauseKind,
+    AgentTaskResult, AgentTaskStatus, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind,
     ToolPauseResponse,
 };
 use omini_domain::message::{ContentBlock, Message, Role};
@@ -122,7 +122,7 @@ pub struct AgentTaskSupervisor {
     pending_tool_pauses: PendingToolPauses,
     permission_engine: Arc<PermissionEngine>,
     active_profile: Arc<RwLock<ActiveProfile>>,
-    owner_usage: Arc<Mutex<SessionUsageSnapshot>>,
+    owner_usage: Arc<Mutex<ThreadUsageSnapshot>>,
     tasks: Mutex<HashMap<String, TaskEntry>>,
     active_task_slots: Mutex<ActiveTaskSlots>,
     idle_notify: Notify,
@@ -148,7 +148,7 @@ impl AgentTaskSupervisor {
         pending_tool_pauses: PendingToolPauses,
         permission_engine: Arc<PermissionEngine>,
         active_profile: Arc<RwLock<ActiveProfile>>,
-        owner_usage: Arc<Mutex<SessionUsageSnapshot>>,
+        owner_usage: Arc<Mutex<ThreadUsageSnapshot>>,
         initial_tasks: Vec<AgentTaskInfo>,
     ) -> Arc<Self> {
         let mut initial_tasks = initial_tasks
@@ -1201,7 +1201,7 @@ fn extract_final_text(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::tools::{PendingToolPause, PendingToolPauses};
-    use omini_domain::events::{PermissionPreview, SessionUsageSnapshot, ToolPauseRequest};
+    use omini_domain::events::{PermissionPreview, ThreadUsageSnapshot, ToolPauseRequest};
     use omini_domain::message::{ToolResultBlock, ToolUseBlock};
     use omini_domain::usage::Usage;
     use std::collections::HashMap;
@@ -1256,7 +1256,7 @@ mod tests {
             Arc::clone(&pending_pauses),
             Arc::new(PermissionEngine::empty("/tmp")),
             Arc::clone(&active_profile),
-            Arc::new(Mutex::new(SessionUsageSnapshot::default())),
+            Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
             initial_tasks,
         );
         (
@@ -1620,7 +1620,7 @@ mod tests {
                         preview_tool_use_id: Some(format!("tool_{index}")),
                         tool_name: "bash".to_string(),
                         permission_source: None,
-                        source_session_id: Some("agent-thread".to_string()),
+                        source_thread_id: Some("agent-thread".to_string()),
                         source_agent_label: Some("general".to_string()),
                         kind: ToolPauseKind::Permission(PermissionPreview::Custom {
                             tool_name: "bash".to_string(),
@@ -1658,7 +1658,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_usage_updates_agent_and_owner_totals_without_ui_compact_events() {
-        let owner_usage = SessionUsageSnapshot {
+        let owner_usage = ThreadUsageSnapshot {
             current_context_tokens: 77,
             total_tokens: 100,
             total_cached_tokens: 10,
@@ -1733,7 +1733,7 @@ mod tests {
                 pending_pauses,
                 Arc::new(PermissionEngine::empty("/tmp")),
                 Arc::new(RwLock::new(ActiveProfile::Main)),
-                Arc::new(Mutex::new(SessionUsageSnapshot::default())),
+                Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
                 Vec::new(),
             );
             let persistence = tokio::spawn(async move {

@@ -1,6 +1,6 @@
 //! 本地 daemon 的 HTTP/WebSocket transport 层。
 //!
-//! 这个 crate 负责持久化项目注册、按 UUID 懒加载、会话路由、控制权管理、事件 fanout
+//! 这个 crate 负责持久化项目注册、按 UUID 懒加载、线程路由、控制权管理、事件 fanout
 //! 和 SQLite 持久化；
 //! agent 执行逻辑仍由 `omini-core` 负责。
 

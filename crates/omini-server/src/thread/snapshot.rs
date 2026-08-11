@@ -1,4 +1,4 @@
-use crate::{event::bridge::protocol_events_from_loaded_session_snapshot, thread::ThreadRuntime};
+use crate::{event::bridge::protocol_events_from_loaded_thread_snapshot, thread::ThreadRuntime};
 use omini_core::CoreError;
 use omini_domain as domain;
 use omini_protocol as client_proto;
@@ -20,12 +20,12 @@ impl ThreadRuntime {
             .lock()
             .expect("status projection lock poisoned")
             .active_profile();
-        protocol_events_from_loaded_session_snapshot(snapshot, context_window, active_profile)
+        protocol_events_from_loaded_thread_snapshot(snapshot, context_window, active_profile)
     }
 
     async fn load_snapshot(
         &self,
-    ) -> Result<(domain::events::LoadedSession, Vec<domain::message::Message>), CoreError> {
+    ) -> Result<(domain::events::LoadedThread, Vec<domain::message::Message>), CoreError> {
         let thread = self
             .db
             .get_thread(&self.thread_id)
@@ -33,7 +33,7 @@ impl ThreadRuntime {
             .map_err(|error| CoreError::persistence("failed to load thread", error.to_string()))?
             .ok_or(CoreError::ThreadNotFound)?;
         let thread_dir = self.project.thread(&self.thread_id);
-        // DB → UI 视角:给 TUI 的 SessionSnapshotEvent 渲染 + user_injection 去重。
+        // DB → UI 视角:给 TUI 的 ThreadSnapshotEvent 渲染 + user_injection 去重。
         let messages = crate::history::load_messages(&self.db, &self.thread_id, &thread_dir).await;
         let agent_tasks =
             crate::history::load_agent_tasks_for_thread(&self.db, &self.thread_id, &self.project)
@@ -43,8 +43,8 @@ impl ThreadRuntime {
             .lock()
             .expect("status projection lock poisoned")
             .active_profile();
-        let snapshot = domain::events::LoadedSession {
-            session_id: thread.id,
+        let snapshot = domain::events::LoadedThread {
+            thread_id: thread.id,
             provider: thread.provider.clone(),
             model: thread.model.clone(),
             thinking_effort: {
@@ -59,7 +59,7 @@ impl ThreadRuntime {
             title: thread.title,
             messages,
             agent_tasks,
-            usage: client_proto::SessionUsageSnapshot {
+            usage: client_proto::ThreadUsageSnapshot {
                 current_context_tokens: thread.current_context_tokens,
                 total_tokens: thread.total_tokens,
                 total_cached_tokens: thread.total_cached_tokens,
@@ -76,7 +76,7 @@ impl ThreadRuntime {
         Ok((snapshot, thread_messages))
     }
 
-    fn context_window_for_snapshot(&self, snapshot: &domain::events::LoadedSession) -> Option<u32> {
+    fn context_window_for_snapshot(&self, snapshot: &domain::events::LoadedThread) -> Option<u32> {
         self.settings
             .providers
             .get(&snapshot.provider)
@@ -143,7 +143,7 @@ mod tests {
             .expect("settings should build")
     }
 
-    fn effective_session_thinking_effort(
+    fn effective_thread_thinking_effort(
         settings: &Settings,
         provider: &str,
         model: &str,
@@ -158,7 +158,7 @@ mod tests {
         let settings = test_settings("fast");
 
         assert_eq!(
-            effective_session_thinking_effort(&settings, "openai", "fast", Some("medium")),
+            effective_thread_thinking_effort(&settings, "openai", "fast", Some("medium")),
             None
         );
     }
@@ -168,15 +168,15 @@ mod tests {
         let settings = test_settings("reasoner");
 
         assert_eq!(
-            effective_session_thinking_effort(&settings, "openai", "reasoner", Some("high")),
+            effective_thread_thinking_effort(&settings, "openai", "reasoner", Some("high")),
             Some(ThinkingEffort::High)
         );
         assert_eq!(
-            effective_session_thinking_effort(&settings, "openai", "reasoner", Some("none")),
+            effective_thread_thinking_effort(&settings, "openai", "reasoner", Some("none")),
             Some(ThinkingEffort::None)
         );
         assert_eq!(
-            effective_session_thinking_effort(&settings, "openai", "reasoner", None),
+            effective_thread_thinking_effort(&settings, "openai", "reasoner", None),
             Some(ThinkingEffort::Medium)
         );
     }

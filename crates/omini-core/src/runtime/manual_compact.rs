@@ -13,7 +13,7 @@ impl AgentRuntime {
     pub(super) async fn handle_compact_context(&mut self, instructions: Option<String>) {
         if self.messages.is_empty() {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
-                "没有可压缩的会话历史".to_string(),
+                "没有可压缩的线程历史".to_string(),
             )))
             .await;
             return;
@@ -68,7 +68,7 @@ impl AgentRuntime {
                             tracing::debug!(outcome = ?outcome, "manual compact finished");
                             if compact_outcome_is_noop(&outcome) {
                                 let _ = event_tx.send(RuntimeToServerEvent::warning(
-                                    "当前会话历史还不需要压缩".to_string(),
+                                    "当前线程历史还不需要压缩".to_string(),
                                 )).await;
                             }
                         }
@@ -113,12 +113,12 @@ pub(super) async fn execute_manual_compact(
     input: ManualCompactInput<'_>,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
-    usage_state: &Arc<Mutex<SessionUsageSnapshot>>,
+    usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     cancel_token: compact::CompactCancelToken<'_>,
 ) -> Result<crate::runtime::compact::CompactOutcome, RuntimeError> {
     if messages.is_empty() {
         return Err(RuntimeError::InvalidRequest {
-            message: "没有可压缩的会话历史".to_string(),
+            message: "没有可压缩的线程历史".to_string(),
         });
     }
 
@@ -144,7 +144,7 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryStarted(event) => {
                         tracing::debug!(
                             trigger = %event.trigger,
-                            compact_thread_id = ?event.session_id,
+                            compact_thread_id = ?event.thread_id,
                             agent_label = ?event.agent_label,
                             "manual compact summary started"
                         );
@@ -160,7 +160,7 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryFinished(event) => {
                         tracing::debug!(
                             trigger = %event.trigger,
-                            compact_thread_id = ?event.session_id,
+                            compact_thread_id = ?event.thread_id,
                             agent_label = ?event.agent_label,
                             summary_chars = event.summary.chars().count(),
                             after_tokens = event.after_tokens,
@@ -180,7 +180,7 @@ pub(super) async fn execute_manual_compact(
                     EngineToRuntimeEvent::CompactSummaryFailed(event) => {
                         tracing::warn!(
                             trigger = %event.trigger,
-                            compact_thread_id = ?event.session_id,
+                            compact_thread_id = ?event.thread_id,
                             agent_label = ?event.agent_label,
                             message = %event.message,
                             "manual compact summary failed"

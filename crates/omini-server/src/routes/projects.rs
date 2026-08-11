@@ -65,7 +65,7 @@ pub async fn open_project(
         .map_err(project_error)
 }
 
-/// 列出项目默认可用模型；不需要已有 session。
+/// 列出项目默认可用模型；不需要已有 thread。
 #[axum::debug_handler]
 pub async fn list_models(
     State(manager): State<Arc<GlobalDaemonManager>>,
@@ -75,7 +75,7 @@ pub async fn list_models(
     project.list_models().map(Json).map_err(core_error)
 }
 
-/// 设置项目默认模型；后续新建 session 会继承该配置。
+/// 设置项目默认模型；后续新建 thread 会继承该配置。
 pub async fn set_model(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,
