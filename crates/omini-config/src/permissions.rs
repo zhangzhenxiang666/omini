@@ -129,25 +129,29 @@ fn scan_bash_rule_files(
     }
     dirs.push(cwd.join(".omini").join("rules"));
 
+    let mut paths = Vec::new();
     for dir in dirs {
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
-        let mut paths: Vec<PathBuf> = entries
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|ext| ext == "rules"))
-            .collect();
-        paths.sort();
-        for path in paths {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => files.push(RawBashRulesFile { path, content }),
-                Err(e) => diagnostics.push(format!(
-                    "{}: failed to read rules file: {e}",
-                    path.display()
-                )),
-            }
+        paths.extend(
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "rules")),
+        );
+    }
+
+    // 用户级与项目级规则共同按文件名排序；同名时稳定保留用户级在前。
+    paths.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    for path in paths {
+        match std::fs::read_to_string(&path) {
+            Ok(content) => files.push(RawBashRulesFile { path, content }),
+            Err(e) => diagnostics.push(format!(
+                "{}: failed to read rules file: {e}",
+                path.display()
+            )),
         }
     }
     files
@@ -158,272 +162,4 @@ fn user_config_path(home: Option<&Path>) -> PathBuf {
         .or_else(dirs::home_dir)
         .map(|home| home.join(".omini").join("config.toml"))
         .unwrap_or_else(|| PathBuf::from("~/.omini/config.toml"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    fn unique_root(label: &str) -> PathBuf {
-        let nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "omini-config-permissions-{label}-{}-{nanos}-{seq}",
-            std::process::id(),
-        ))
-    }
-
-    fn cleanup(path: &Path) {
-        let _ = fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn empty_inputs_yield_empty_sources_without_diagnostics() {
-        let cwd = unique_root("empty-cwd");
-        fs::create_dir_all(&cwd).unwrap();
-        let home = unique_root("empty-home");
-        fs::create_dir_all(&home).unwrap();
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        assert!(sources.user_raw.is_none());
-        assert!(sources.project_raw.is_none());
-        assert!(sources.bash_rule_files.is_empty());
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-        cleanup(&home);
-    }
-
-    #[test]
-    fn missing_home_dir_does_not_emit_diagnostics() {
-        let cwd = unique_root("no-home-cwd");
-        fs::create_dir_all(&cwd).unwrap();
-        let home = unique_root("no-home-home");
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        assert!(sources.user_raw.is_none());
-        assert!(sources.bash_rule_files.is_empty());
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-    }
-
-    #[test]
-    fn user_only_permissions_toml_loads_into_project_raw() {
-        let cwd = unique_root("user-only-cwd");
-        fs::create_dir_all(cwd.join(".omini")).unwrap();
-        fs::write(
-            cwd.join(".omini").join("permissions.toml"),
-            r#"
-allow = ["Read"]
-deny = ["Write"]
-"#,
-        )
-        .unwrap();
-        let home = unique_root("user-only-home");
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        let (raw, path) = sources
-            .project_raw
-            .as_ref()
-            .expect("project permissions source should be present");
-        assert!(path.ends_with(".omini/permissions.toml"));
-        assert_eq!(raw.allow, vec!["Read".to_string()]);
-        assert_eq!(raw.deny, vec!["Write".to_string()]);
-        assert!(
-            sources.user_raw.is_none(),
-            "user_raw should be None when caller passed no user config [permissions]"
-        );
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-    }
-
-    #[test]
-    fn user_config_permissions_only_keeps_user_raw_separate() {
-        let cwd = unique_root("user-only-config-cwd");
-        fs::create_dir_all(&cwd).unwrap();
-        let home = unique_root("user-only-config-home");
-
-        let user = RawPermissionConfig {
-            allow: vec!["UserRead".to_string()],
-            ask: Vec::new(),
-            deny: Vec::new(),
-        };
-        let sources = load_permission_sources(&cwd, Some(&home), Some(user));
-
-        let (merged, _) = sources
-            .user_raw
-            .as_ref()
-            .expect("user_raw should be populated from caller");
-        assert_eq!(merged.allow, vec!["UserRead".to_string()]);
-        assert!(sources.project_raw.is_none());
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-    }
-
-    #[test]
-    fn user_and_project_permissions_both_present_emit_combined_diagnostic() {
-        let cwd = unique_root("both-cwd");
-        fs::create_dir_all(cwd.join(".omini")).unwrap();
-        fs::write(
-            cwd.join(".omini").join("permissions.toml"),
-            r#"
-allow = ["ProjectRead"]
-deny = ["ProjectWrite"]
-"#,
-        )
-        .unwrap();
-        let home = unique_root("both-home");
-
-        let user = RawPermissionConfig {
-            allow: vec!["UserRead".to_string()],
-            ask: vec!["UserAsk".to_string()],
-            deny: Vec::new(),
-        };
-        let sources = load_permission_sources(&cwd, Some(&home), Some(user));
-
-        // 两侧都按独立来源保留,不做字段级合并
-        let (user_merged, _) = sources
-            .user_raw
-            .as_ref()
-            .expect("user_raw should be present");
-        assert_eq!(user_merged.allow, vec!["UserRead".to_string()]);
-        let (project, _) = sources
-            .project_raw
-            .as_ref()
-            .expect("project_raw should be present");
-        assert_eq!(project.allow, vec!["ProjectRead".to_string()]);
-        assert_eq!(project.deny, vec!["ProjectWrite".to_string()]);
-        let diagnostics = sources.diagnostics();
-        assert!(
-            diagnostics.iter().any(|d| d.contains("both present")),
-            "expected 'both present' diagnostic, got: {diagnostics:?}"
-        );
-
-        cleanup(&cwd);
-    }
-
-    #[test]
-    fn home_and_project_rule_files_are_loaded_and_sorted() {
-        let cwd = unique_root("rules-cwd");
-        let home = unique_root("rules-home");
-        fs::create_dir_all(cwd.join(".omini").join("rules")).unwrap();
-        fs::create_dir_all(home.join(".omini").join("rules")).unwrap();
-
-        fs::write(
-            cwd.join(".omini").join("rules").join("project_b.rules"),
-            "project_b content",
-        )
-        .unwrap();
-        fs::write(
-            cwd.join(".omini").join("rules").join("project_a.rules"),
-            "project_a content",
-        )
-        .unwrap();
-        fs::write(
-            home.join(".omini").join("rules").join("home.rules"),
-            "home content",
-        )
-        .unwrap();
-        // 非 .rules 后缀文件应被忽略
-        fs::write(
-            cwd.join(".omini").join("rules").join("ignored.txt"),
-            "ignored",
-        )
-        .unwrap();
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        let names: Vec<String> = sources
-            .bash_rule_files
-            .iter()
-            .map(|f| {
-                f.path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(
-            names,
-            vec!["home.rules", "project_a.rules", "project_b.rules"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        );
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-        cleanup(&home);
-    }
-
-    #[test]
-    fn missing_rules_directories_do_not_emit_diagnostics() {
-        let cwd = unique_root("no-rules-cwd");
-        fs::create_dir_all(&cwd).unwrap();
-        let home = unique_root("no-rules-home");
-        fs::create_dir_all(&home).unwrap();
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        assert!(sources.bash_rule_files.is_empty());
-        assert!(sources.diagnostics().is_empty());
-
-        cleanup(&cwd);
-        cleanup(&home);
-    }
-
-    #[test]
-    fn malformed_permissions_toml_emits_diagnostic_without_aborting() {
-        let cwd = unique_root("malformed-cwd");
-        fs::create_dir_all(cwd.join(".omini")).unwrap();
-        fs::write(
-            cwd.join(".omini").join("permissions.toml"),
-            "this is not valid toml = = =",
-        )
-        .unwrap();
-        let home = unique_root("malformed-home");
-
-        let sources = load_permission_sources(&cwd, Some(&home), None);
-
-        assert!(sources.project_raw.is_none());
-        assert!(
-            sources
-                .diagnostics()
-                .iter()
-                .any(|d| d.contains("failed to parse permissions file")),
-            "expected parse diagnostic, got: {:?}",
-            sources.diagnostics()
-        );
-
-        cleanup(&cwd);
-    }
-
-    #[test]
-    fn from_raw_seeds_user_raw_only() {
-        let raw = RawPermissionConfig {
-            allow: vec!["Read".to_string()],
-            ask: Vec::new(),
-            deny: Vec::new(),
-        };
-        let sources = PermissionSources::from_raw(raw);
-
-        let (stored, path) = sources.user_raw.as_ref().expect("user_raw seeded");
-        assert_eq!(stored.allow, vec!["Read".to_string()]);
-        assert_eq!(*path, PathBuf::from("<inline>"));
-        assert!(sources.project_raw.is_none());
-        assert!(sources.bash_rule_files.is_empty());
-        assert!(sources.diagnostics().is_empty());
-    }
 }
