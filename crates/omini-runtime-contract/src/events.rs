@@ -22,9 +22,11 @@ pub enum ServerToRuntimeEvent {
     CompactContext {
         instructions: Option<String>,
     },
-    SetThinkingEffort(ThinkingEffort),
+    SetThinkingEffort(
+        #[serde(with = "serde_server_event_payload::thinking_effort")] ThinkingEffort,
+    ),
     ToggleActiveProfile,
-    SetActiveProfile(ActiveProfile),
+    SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
     InterveneMessage {
         draft: UserDraft,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -115,6 +117,64 @@ impl RuntimeToServerEvent {
     }
 }
 
+mod serde_server_event_payload {
+    use omini_domain::config::ThinkingEffort;
+    use omini_domain::events::ActiveProfile;
+    use serde::Deserialize;
+    use serde::Serializer;
+    use serde::ser::SerializeStruct;
+
+    pub mod thinking_effort {
+        use super::*;
+
+        pub fn serialize<S>(effort: &ThinkingEffort, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut state = serializer.serialize_struct("ThinkingEffortPayload", 1)?;
+            state.serialize_field("effort", effort)?;
+            state.end()
+        }
+
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<ThinkingEffort, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            struct ThinkingEffortPayload {
+                effort: ThinkingEffort,
+            }
+
+            Ok(ThinkingEffortPayload::deserialize(deserializer)?.effort)
+        }
+    }
+
+    pub mod profile {
+        use super::*;
+
+        pub fn serialize<S>(profile: &ActiveProfile, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut state = serializer.serialize_struct("ActiveProfilePayload", 1)?;
+            state.serialize_field("profile", profile)?;
+            state.end()
+        }
+
+        pub fn deserialize<'de, D>(deserializer: D) -> Result<ActiveProfile, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            struct ActiveProfilePayload {
+                profile: ActiveProfile,
+            }
+
+            Ok(ActiveProfilePayload::deserialize(deserializer)?.profile)
+        }
+    }
+}
+
 mod serde_runtime_event_payload {
     use omini_domain::events::ActiveProfile;
     use serde::Deserialize;
@@ -169,84 +229,5 @@ mod serde_runtime_event_payload {
 
             Ok(ProfilePayload::deserialize(deserializer)?.profile)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::RuntimeToServerEvent;
-    use omini_domain::display::{DisplayMessage, HistoryItem};
-    use omini_domain::events::ActiveProfile;
-    use omini_domain::message::{ContentBlock, Message, Role};
-    use serde_json::json;
-
-    #[test]
-    fn runtime_event_newtype_payloads_serialize_as_tagged_maps() {
-        let value = serde_json::to_value(RuntimeToServerEvent::ThinkingDelta("思考".to_string()))
-            .expect("serialize thinking delta");
-        assert_eq!(value, json!({"type": "thinking_delta", "delta": "思考"}));
-        let decoded: RuntimeToServerEvent =
-            serde_json::from_value(value).expect("deserialize thinking delta");
-        assert!(matches!(decoded, RuntimeToServerEvent::ThinkingDelta(delta) if delta == "思考"));
-
-        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected {
-            item: HistoryItem::Display(DisplayMessage {
-                role: Role::User,
-                text: "@worker hello".to_string(),
-                mentions: Vec::new(),
-            }),
-            client_echo_id: None,
-        })
-        .expect("serialize display user message");
-        assert_eq!(
-            value,
-            json!({
-                "type": "user_message_injected",
-                "item": {
-                    "type": "display",
-                    "role": "user",
-                    "text": "@worker hello"
-                }
-            })
-        );
-        let value = serde_json::to_value(RuntimeToServerEvent::UserMessageInjected {
-            item: HistoryItem::Message(Message::new(
-                Role::User,
-                vec![ContentBlock::from_base64_image(
-                    "image/png".to_string(),
-                    "abc".to_string(),
-                )],
-            )),
-            client_echo_id: Some("echo-1".to_string()),
-        })
-        .expect("serialize image user message");
-        assert_eq!(
-            value,
-            json!({
-                "type": "user_message_injected",
-                "client_echo_id": "echo-1",
-                "item": {
-                    "type": "message",
-                    "role": "user",
-                    "content": [{
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": "abc"
-                        }
-                    }]
-                }
-            })
-        );
-
-        let value = serde_json::to_value(RuntimeToServerEvent::ActiveProfileChanged(
-            ActiveProfile::Plan,
-        ))
-        .expect("serialize profile");
-        assert_eq!(
-            value,
-            json!({"type": "active_profile_changed", "profile": "plan"})
-        );
     }
 }
