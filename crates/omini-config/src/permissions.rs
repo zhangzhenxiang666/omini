@@ -32,14 +32,14 @@ pub struct RawBashRulesFile {
 ///
 /// `user_raw` 是 `~/.omini/config.toml [permissions]` 与
 /// `<cwd>/.omini/config.toml [permissions]` 在 `UserConfig::merge_project_config`
-/// 阶段的合并结果;`project_raw` 是 `<cwd>/.omini/permissions.toml` 兼容入口
+/// 阶段的合并结果;`project_raw` 是 `<cwd>/.omini/permissions.toml`
 /// (若存在)。两者作为**独立来源**交给 `PermissionEngine`,由 engine 内部的
 /// stricter check 决定最终决策 — 不在来源层做字段级合并,以保持职责最小。
 #[derive(Debug, Clone, Default)]
 pub struct PermissionSources {
     /// 用户/项目 TOML `[permissions]` 的合并结果,带原始来源路径用于诊断。
     pub user_raw: Option<(RawPermissionConfig, PathBuf)>,
-    /// `<cwd>/.omini/permissions.toml` 兼容入口(若存在)。
+    /// `<cwd>/.omini/permissions.toml` 项目权限配置(若存在)。
     pub project_raw: Option<(RawPermissionConfig, PathBuf)>,
     /// `~/.omini/rules/*.rules` 与 `<cwd>/.omini/rules/*.rules` 的原始内容。
     pub bash_rule_files: Vec<RawBashRulesFile>,
@@ -234,7 +234,7 @@ deny = ["Write"]
         let (raw, path) = sources
             .project_raw
             .as_ref()
-            .expect("compat entry should be present");
+            .expect("project permissions source should be present");
         assert!(path.ends_with(".omini/permissions.toml"));
         assert_eq!(raw.allow, vec!["Read".to_string()]);
         assert_eq!(raw.deny, vec!["Write".to_string()]);
@@ -272,14 +272,14 @@ deny = ["Write"]
     }
 
     #[test]
-    fn user_and_compat_both_present_emit_combined_diagnostic() {
+    fn user_and_project_permissions_both_present_emit_combined_diagnostic() {
         let cwd = unique_root("both-cwd");
         fs::create_dir_all(cwd.join(".omini")).unwrap();
         fs::write(
             cwd.join(".omini").join("permissions.toml"),
             r#"
-allow = ["CompatRead"]
-deny = ["CompatWrite"]
+allow = ["ProjectRead"]
+deny = ["ProjectWrite"]
 "#,
         )
         .unwrap();
@@ -298,12 +298,12 @@ deny = ["CompatWrite"]
             .as_ref()
             .expect("user_raw should be present");
         assert_eq!(user_merged.allow, vec!["UserRead".to_string()]);
-        let (compat, _) = sources
+        let (project, _) = sources
             .project_raw
             .as_ref()
             .expect("project_raw should be present");
-        assert_eq!(compat.allow, vec!["CompatRead".to_string()]);
-        assert_eq!(compat.deny, vec!["CompatWrite".to_string()]);
+        assert_eq!(project.allow, vec!["ProjectRead".to_string()]);
+        assert_eq!(project.deny, vec!["ProjectWrite".to_string()]);
         let diagnostics = sources.diagnostics();
         assert!(
             diagnostics.iter().any(|d| d.contains("both present")),

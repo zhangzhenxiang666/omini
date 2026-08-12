@@ -1087,7 +1087,7 @@ mod tests {
 
         runtime
             .resolve_plan_approval(
-                "unused-plan-id",
+                "plan",
                 PlanApprovalAction::Approve {
                     profile: PlanExecutionProfile::Main,
                 },
@@ -1144,7 +1144,7 @@ mod tests {
 
         runtime
             .resolve_plan_approval(
-                "unused-plan-id",
+                "plan",
                 PlanApprovalAction::Approve {
                     profile: PlanExecutionProfile::Auto,
                 },
@@ -1169,13 +1169,13 @@ mod tests {
         let (mut runtime, mut event_rx) = runtime_for_thread(settings, project);
 
         runtime
-            .resolve_plan_approval("plan_1", PlanApprovalAction::ContinueDiscussing)
+            .resolve_plan_approval("plan", PlanApprovalAction::ContinueDiscussing)
             .await;
 
         let mut saw_resolved = false;
         while let Ok(event) = event_rx.try_recv() {
             if let RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } = event {
-                assert_eq!(plan_id, "plan_1");
+                assert_eq!(plan_id, "plan");
                 assert_eq!(action, PlanApprovalAction::ContinueDiscussing);
                 saw_resolved = true;
             }
@@ -1205,7 +1205,7 @@ mod tests {
 
         runtime
             .resolve_plan_approval(
-                "plan_1",
+                "plan",
                 PlanApprovalAction::ApproveInNewThread {
                     profile: PlanExecutionProfile::Main,
                 },
@@ -1221,7 +1221,7 @@ mod tests {
         while let Ok(event) = event_rx.try_recv() {
             match event {
                 RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => {
-                    assert_eq!(plan_id, "plan_1");
+                    assert_eq!(plan_id, "plan");
                     assert!(matches!(
                         action,
                         PlanApprovalAction::ApproveInNewThread { .. }

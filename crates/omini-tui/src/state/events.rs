@@ -1083,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn user_message_injected_without_client_echo_id_keeps_compatible_dedup() {
+    fn user_message_injected_without_client_echo_id_appends_different_message() {
         let mut state = UiState::new();
         let local = subagent_display_message("Review code changes");
         let runtime = subagent_display_message("subagent");

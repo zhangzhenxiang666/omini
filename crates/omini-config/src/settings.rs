@@ -804,7 +804,7 @@ impl PartialRawPermissionConfig {
         // 后续权限层（第三阶段）需要决定语义：
         //   1) 项目级整体替换（当前行为），
         //   2) 项目级附加到对应列表后再去重（注意 deny 永远 win），
-        //   3) 同时存在 .omini/permissions.toml 时的合并顺序 + diagnostic。
+        //   3) 同时存在项目 .omini/permissions.toml 时的合并顺序 + diagnostic。
         // 建议在迁出 permissions 来源发现/解析时一起决定，不要在配置层先拍板。
         if let Some(allow) = self.allow {
             base.allow = allow;

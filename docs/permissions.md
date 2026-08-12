@@ -7,7 +7,7 @@ Omini 支持多种方式来配置工具权限和 Bash 命令规则，实现精�
 | 来源 | 路径 | 说明 |
 | ------ | ------ | ------ |
 | 主配置段 | `~/.omini/config.toml` 的 `[permissions]` 段 | 全局工具权限规则 |
-| 项目权限文件 | `<project>/.omini/permissions.toml` | 项目级权限规则（兼容入口） |
+| 项目权限文件 | `<project>/.omini/permissions.toml` | 项目级权限规则 |
 | 用户 Bash 规则 | `~/.omini/rules/*.rules` | 全局 Bash 命令规则 |
 | 项目 Bash 规则 | `<project>/.omini/rules/*.rules` | 项目级 Bash 命令规则 |
 
@@ -76,9 +76,7 @@ deny > ask > allow
 
 ## permissions.toml 文件
 
-`permissions.toml` 是项目级的权限配置兼容入口，位于 `<project>/.omini/permissions.toml`。
-
-> **注意**：这个文件主要用于向后兼容。新项目应使用 `config.toml` 中的 `[permissions]` 段。
+`permissions.toml` 是项目级权限配置文件，位于 `<project>/.omini/permissions.toml`。
 
 ### 格式
 

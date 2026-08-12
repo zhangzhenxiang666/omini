@@ -140,8 +140,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("thread should create")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         let thread = manager
             .get_or_load_thread(&thread_id)
             .await

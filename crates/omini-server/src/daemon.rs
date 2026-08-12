@@ -431,8 +431,7 @@ thinking = false
             })
             .await
             .unwrap()
-            .thread_id
-            .unwrap();
+            .thread_id;
 
         let restarted = GlobalDaemonManager::new(OminiRoot::from_path(root_path), db);
         let opened = restarted.open_project(&project.id).await.unwrap();
@@ -457,8 +456,7 @@ thinking = false
             .create_thread(protocol::CreateThreadRequest::default())
             .await
             .unwrap()
-            .thread_id
-            .unwrap();
+            .thread_id;
 
         let relinked = manager
             .update_project(
@@ -497,8 +495,7 @@ thinking = false
             .create_thread(protocol::CreateThreadRequest::default())
             .await
             .unwrap()
-            .thread_id
-            .unwrap();
+            .thread_id;
         loaded
             .cached_thread(&thread_id)
             .unwrap()

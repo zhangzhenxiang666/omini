@@ -467,11 +467,6 @@ impl<'de> Deserialize<'de> for ToolPauseKind {
             "user_input" => serde_json::from_value(value)
                 .map(Self::UserInput)
                 .map_err(serde::de::Error::custom),
-            "bash" | "edit" | "write" | "read" | "search" | "mcp" | "custom" => {
-                serde_json::from_value(value)
-                    .map(Self::Permission)
-                    .map_err(serde::de::Error::custom)
-            }
             other => Err(serde::de::Error::custom(format!(
                 "unknown tool pause kind type '{other}'"
             ))),
@@ -666,19 +661,20 @@ mod tests {
     }
 
     #[test]
-    fn tool_pause_permission_deserializes_legacy_preview_type() {
-        let kind: ToolPauseKind = serde_json::from_value(json!({
+    fn tool_pause_permission_rejects_flat_preview_type() {
+        let error = serde_json::from_value::<ToolPauseKind>(json!({
             "type": "write",
             "summary": "Create file",
             "path": "/tmp/new.txt",
             "replacement_count": 0,
             "diff": ""
         }))
-        .unwrap();
+        .expect_err("flat permission preview should be rejected");
 
-        assert_eq!(
-            kind,
-            ToolPauseKind::Permission(PermissionPreview::Write(edit_preview()))
+        assert!(
+            error
+                .to_string()
+                .contains("unknown tool pause kind type 'write'")
         );
     }
 

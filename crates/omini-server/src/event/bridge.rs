@@ -403,7 +403,7 @@ pub fn protocol_events_from_loaded_thread_snapshot(
         )?,
         client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThreadSnapshot(
             client_proto::ThreadSnapshotEvent {
-                thread_id: Some(snapshot.thread_id),
+                thread_id: snapshot.thread_id,
                 messages: snapshot.messages,
                 agent_tasks: snapshot.agent_tasks,
                 usage,
@@ -707,7 +707,7 @@ mod tests {
         assert!(matches!(
             &events[3].event,
             client_proto::TypedRuntimeEvent::ThreadSnapshot(event)
-                if event.thread_id.as_deref() == Some("s1")
+                if event.thread_id == "s1"
                     && event.usage.context_window == Some(1000)
                     && event.messages.len() == 1
         ));
@@ -767,7 +767,7 @@ mod tests {
     fn plan_approval_resolved_is_typed() {
         let event = runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::PlanApprovalResolved {
-                plan_id: "plan_1".to_string(),
+                plan_id: "plan".to_string(),
                 action: domain::events::PlanApprovalAction::ContinueDiscussing,
             },
         )
@@ -778,7 +778,7 @@ mod tests {
             event.event,
             client_proto::TypedRuntimeEvent::PlanApprovalResolved(
                 client_proto::PlanApprovalResolvedEvent {
-                    plan_id: "plan_1".to_string(),
+                    plan_id: "plan".to_string(),
                     action: client_proto::PlanApprovalAction::ContinueDiscussing,
                 },
             )

@@ -119,7 +119,7 @@ pub async fn resolve_tool_pause(
 #[axum::debug_handler]
 pub async fn resolve_plan(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, plan_id)): Path<(String, String, String)>,
+    Path((project_id, thread_id)): Path<(String, String)>,
     headers: HeaderMap,
     Json(request): Json<protocol::ResolvePlanRequest>,
 ) -> ApiResult<protocol::AckResponse> {
@@ -132,14 +132,17 @@ pub async fn resolve_plan(
         // 等待用户重试。
         let project = require_project(&manager, &project_id).await?;
         project
-            .fork_thread_for_plan(&thread_id, &plan_id, profile)
+            .fork_thread_for_plan(&thread_id, profile)
             .await
             .map_err(core_error)?;
     }
     // core 收到 ApproveInNewThread 时只发出 resolved 事件关闭旧 thread
     // 的审批抽屉,不改 active_profile、不注入 plan 消息、不启动 run。
     thread
-        .resolve_plan(resolve_plan_command_from_protocol_request(plan_id, request))
+        .resolve_plan(resolve_plan_command_from_protocol_request(
+            "plan".to_string(),
+            request,
+        ))
         .await
         .map(|_| Json(protocol::AckResponse::ok()))
         .map_err(core_error)

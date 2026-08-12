@@ -175,20 +175,8 @@ fn thread_lifecycle_routes() -> Router<AppState> {
 }
 
 fn capability_routes() -> Router<AppState> {
-    // 子代理和技能是当前项目/线程的可用能力清单。
+    // 技能是当前线程的可用能力清单。
     Router::new()
-        .route(
-            "/agents",
-            get(routes::agents::list_thread_agents).post(routes::agents::save_thread_agent),
-        )
-        .route(
-            "/agents/generate",
-            post(routes::agents::generate_thread_agent),
-        )
-        .route(
-            "/agents/{agent_id}",
-            delete(routes::agents::delete_thread_agent),
-        )
         .route("/skills", get(routes::skills::list_skills))
         .route("/skills/{skill_name}", get(routes::skills::get_skill))
 }
@@ -202,7 +190,7 @@ fn run_routes() -> Router<AppState> {
             "/tool-pauses/{tool_use_id}/resolve",
             post(routes::runs::resolve_tool_pause),
         )
-        .route("/plans/{plan_id}/resolve", post(routes::runs::resolve_plan))
+        .route("/plans/plan/resolve", post(routes::runs::resolve_plan))
 }
 
 #[cfg(test)]

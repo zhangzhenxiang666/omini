@@ -531,7 +531,7 @@ mod tests {
             "turn_started" => client_proto::TypedRuntimeEvent::TurnStarted,
             "thread_snapshot" => {
                 client_proto::TypedRuntimeEvent::ThreadSnapshot(client_proto::ThreadSnapshotEvent {
-                    thread_id: Some("s1".to_string()),
+                    thread_id: "s1".to_string(),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
                     usage: client_proto::ThreadUsageSnapshot::default(),
@@ -623,7 +623,7 @@ mod tests {
         projection.record_event(
             &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::PlanSubmitted(
                 client_proto::SubmittedPlan {
-                    id: "plan_1".to_string(),
+                    id: "plan".to_string(),
                     title: "Plan".to_string(),
                     markdown: "# Plan".to_string(),
                     path: PathBuf::new(),
@@ -639,14 +639,14 @@ mod tests {
                 .pending_plan_approval
                 .as_ref()
                 .map(|plan| plan.plan_id.as_str()),
-            Some("plan_1")
+            Some("plan")
         );
 
         projection.record_event(
             &client_proto::RuntimeEvent::new(
                 client_proto::TypedRuntimeEvent::PlanApprovalResolved(
                     client_proto::PlanApprovalResolvedEvent {
-                        plan_id: "plan_1".to_string(),
+                        plan_id: "plan".to_string(),
                         action: client_proto::PlanApprovalAction::ContinueDiscussing,
                     },
                 ),

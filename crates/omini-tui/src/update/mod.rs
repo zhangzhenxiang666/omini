@@ -226,9 +226,9 @@ async fn handle_plan_approval_key(
     code: KeyCode,
     request_tx: &mpsc::Sender<ClientRequest>,
 ) {
-    let Some(plan) = state.plan_approval.as_ref() else {
+    if state.plan_approval.is_none() {
         return;
-    };
+    }
     match code {
         KeyCode::Up | KeyCode::Char('k') => {
             state.plan_approval_selected = state.plan_approval_selected.saturating_sub(1);
@@ -252,13 +252,11 @@ async fn handle_plan_approval_key(
             state.plan_approval_auto = !state.plan_approval_auto;
         }
         KeyCode::Esc => {
-            let plan_id = plan.id.clone();
             state.plan_approval = None;
             state.plan_approval_selected = 0;
             state.plan_approval_auto = false;
             let _ = request_tx
                 .send(ClientRequest::PlanResolve {
-                    plan_id,
                     action: omini_protocol::PlanApprovalAction::ContinueDiscussing,
                 })
                 .await;
@@ -271,7 +269,7 @@ async fn handle_plan_approval_key(
 }
 
 async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<ClientRequest>) {
-    let Some(plan) = state.plan_approval.take() else {
+    let Some(_) = state.plan_approval.take() else {
         return;
     };
     let profile = if state.plan_approval_auto {
@@ -288,7 +286,6 @@ async fn submit_plan_approval(state: &mut UiState, request_tx: &mpsc::Sender<Cli
     state.plan_approval_auto = false;
     let _ = request_tx
         .send(ClientRequest::PlanResolve {
-            plan_id: plan.id,
             action: protocol::plan_approval_action_from_internal(action),
         })
         .await;
@@ -949,7 +946,7 @@ mod tests {
 
     fn submitted_plan() -> SubmittedPlan {
         SubmittedPlan {
-            id: "20260521T000000Z-plan".to_string(),
+            id: "plan".to_string(),
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),
             path: PathBuf::from("/tmp/plan.md"),
@@ -1244,10 +1241,9 @@ mod tests {
 
         handle_plan_approval_key(&mut state, KeyCode::Enter, &tx).await;
 
-        let Some(ClientRequest::PlanResolve { plan_id, action }) = rx.recv().await else {
+        let Some(ClientRequest::PlanResolve { action }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
-        assert_eq!(plan_id, "20260521T000000Z-plan");
         assert_eq!(
             action,
             omini_protocol::PlanApprovalAction::ApproveInNewThread {
@@ -1268,7 +1264,7 @@ mod tests {
         assert!(state.plan_approval_auto);
         handle_plan_approval_key(&mut state, KeyCode::Char('1'), &tx).await;
 
-        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
+        let Some(ClientRequest::PlanResolve { action }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
         assert_eq!(
@@ -1290,7 +1286,7 @@ mod tests {
 
         handle_plan_approval_key(&mut state, KeyCode::Esc, &tx).await;
 
-        let Some(ClientRequest::PlanResolve { action, .. }) = rx.recv().await else {
+        let Some(ClientRequest::PlanResolve { action }) = rx.recv().await else {
             panic!("expected plan approval response");
         };
         assert_eq!(

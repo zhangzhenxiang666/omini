@@ -678,7 +678,7 @@ mod tests {
             ),
             "thread_snapshot" => {
                 client_proto::TypedRuntimeEvent::ThreadSnapshot(client_proto::ThreadSnapshotEvent {
-                    thread_id: Some("s1".to_string()),
+                    thread_id: "s1".to_string(),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
                     usage: domain::events::ThreadUsageSnapshot::default(),
@@ -852,7 +852,7 @@ mod tests {
         buffer.record(runtime_event(
             1,
             runtime_contract::RuntimeToServerEvent::PlanSubmitted(domain::events::SubmittedPlan {
-                id: "plan_1".to_string(),
+                id: "plan".to_string(),
                 title: "Plan".to_string(),
                 markdown: "# Plan".to_string(),
                 path: PathBuf::new(),
@@ -865,7 +865,7 @@ mod tests {
         buffer.record(runtime_event(
             2,
             runtime_contract::RuntimeToServerEvent::PlanApprovalResolved {
-                plan_id: "plan_1".to_string(),
+                plan_id: "plan".to_string(),
                 action: client_proto::PlanApprovalAction::ContinueDiscussing,
             },
         ));

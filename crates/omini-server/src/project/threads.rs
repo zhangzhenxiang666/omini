@@ -121,9 +121,7 @@ impl ProjectManager {
             .lock()
             .expect("threads lock poisoned")
             .insert(thread_id.clone(), runtime);
-        Ok(client_proto::CreateThreadResponse {
-            thread_id: Some(thread_id),
-        })
+        Ok(client_proto::CreateThreadResponse { thread_id })
     }
 
     /// 「在新线程中执行计划」审批通过后由 client 调用的 HTTP 路由触发的真正
@@ -135,15 +133,10 @@ impl ProjectManager {
     pub async fn fork_thread_for_plan(
         &self,
         from_thread_id: &str,
-        plan_id: &str,
         profile: client_proto::PlanExecutionProfile,
     ) -> Result<String, CoreError> {
         // 1. 读 plan 文件(由 client HTTP 路由直接调用,不在 core 审批流程中)。
-        let plan_path = self
-            .project
-            .path()
-            .join("plans")
-            .join(format!("{plan_id}.md"));
+        let plan_path = self.project.path().join("plans").join("plan.md");
         let plan_content = std::fs::read_to_string(&plan_path).map_err(|error| {
             CoreError::new(format!(
                 "failed to read plan file for forked thread {}: {error}",
@@ -533,8 +526,7 @@ mod tests {
             })
             .await
             .expect("old thread should be created")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         let old_runtime = manager
             .get_or_load_thread(&old_thread_id)
             .await
@@ -560,8 +552,7 @@ mod tests {
             })
             .await
             .expect("new thread should use reloaded config")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         let new_record = manager
             .db
             .get_thread(&new_thread_id)
@@ -615,8 +606,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("thread should create")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         let thread = manager
             .get_or_load_thread(&thread_id)
             .await
@@ -645,8 +635,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("thread should create")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         let thread = manager
             .get_or_load_thread(&thread_id)
             .await
@@ -677,8 +666,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("from thread should be created")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
 
         let plans_dir = project.path().join("plans");
         std::fs::create_dir_all(&plans_dir).expect("plans dir should be created");
@@ -695,11 +683,7 @@ mod tests {
         let mut events = from_thread.subscribe();
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                "plan",
-                domain::events::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
@@ -775,8 +759,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("from thread should be created")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
         manager
             .db
             .update_thread_title(&from_thread_id, "refactor auth flow")
@@ -788,11 +771,7 @@ mod tests {
         std::fs::write(plans_dir.join("plan.md"), "# plan\n").expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                "plan",
-                domain::events::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
 
@@ -809,25 +788,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fork_thread_for_plan_returns_error_when_plan_file_missing() {
+    async fn fork_thread_for_plan_ignores_timestamp_named_plan_file() {
         let temp = unique_temp_root("fork-thread-for-plan-missing");
         let cwd = temp.path.join("cwd");
-        let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
+        let (manager, project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
 
         let from_thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("from thread should be created")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
+
+        let plans_dir = project.path().join("plans");
+        std::fs::create_dir_all(&plans_dir).expect("plans dir should be created");
+        std::fs::write(plans_dir.join("20260521T000000Z-plan.md"), "# Old plan\n")
+            .expect("old plan file should be written");
 
         let error = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                "plan",
-                domain::events::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
             .await
             .expect_err("fork should fail when plan file missing");
         let message = error.message();
@@ -857,8 +836,7 @@ mod tests {
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("from thread should be created")
-            .thread_id
-            .expect("thread id should be returned");
+            .thread_id;
 
         let baseline = manager
             .db
@@ -876,11 +854,7 @@ mod tests {
         .expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                "plan",
-                domain::events::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);

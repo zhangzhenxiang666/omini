@@ -65,17 +65,6 @@ async fn forward_segments(
     }
 }
 
-pub(super) fn path(project: &ProjectDir, plan_id: &str) -> std::path::PathBuf {
-    let plans_dir = project.path().join("plans");
-    if plan_id == CURRENT_PLAN_ID {
-        plans_dir.join(CURRENT_PLAN_FILE)
-    } else {
-        // TODO(plan-path): 这里保留旧的时间戳计划文件名兼容。确认不再需要读取旧计划后，
-        // 可以改成忽略 plan_id 并始终返回 plans/plan.md。
-        plans_dir.join(format!("{plan_id}.md"))
-    }
-}
-
 /// 把已批准 plan 包装成新线程的首条 user message,server 端 fork 时使用。
 pub(crate) fn compacted_context(plan_content: &str) -> String {
     format!(
@@ -115,7 +104,7 @@ pub(super) async fn persist_latest(
     let created_at = Utc::now();
     let title = title_from_markdown(&markdown);
     let plans_dir = project.path().join("plans");
-    let path = path(project, CURRENT_PLAN_ID);
+    let path = plans_dir.join(CURRENT_PLAN_FILE);
 
     tokio::fs::create_dir_all(&plans_dir).await.map_err(|e| {
         format!(

@@ -361,9 +361,7 @@ pub struct CompactSummaryFailedEvent {
 /// 线程快照统计事件，用于重连或首屏同步时恢复概要状态。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadSnapshotEvent {
-    /// 快照所属线程；旧事件可能不带该字段。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
+    pub thread_id: String,
     pub messages: Vec<HistoryItem>,
     pub agent_tasks: Vec<AgentTaskSnapshot>,
     pub usage: ThreadUsageSnapshot,
@@ -686,12 +684,10 @@ pub struct CreateThreadRequest {
     pub profile: Option<ActiveProfile>,
 }
 
-/// 创建线程后的响应；部分旧流程只清空当前线程，因此可能没有新 ID。
+/// 创建线程后的响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateThreadResponse {
-    /// 新建线程 ID；旧的清空式创建流程中为空。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
+    pub thread_id: String,
 }
 
 /// 重命名当前线程的请求。
@@ -806,11 +802,10 @@ pub struct SkillResponse {
     pub skill: SkillDetail,
 }
 
-/// Submit 是普通用户回合；Intervene 用于运行中插入输入，默认保持旧客户端请求体兼容。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Submit 是普通用户回合；Intervene 用于运行中插入输入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunInputMode {
-    #[default]
     Submit,
     Intervene,
 }
@@ -822,13 +817,7 @@ pub struct SubmitRunRequest {
     /// 发起方客户端用于关联本地 optimistic echo 与 runtime echo 的一次性 token。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_echo_id: Option<String>,
-    /// 不传时按普通用户回合处理，以保持旧客户端兼容。
-    #[serde(default, skip_serializing_if = "is_submit_run_mode")]
     pub mode: RunInputMode,
-}
-
-fn is_submit_run_mode(mode: &RunInputMode) -> bool {
-    *mode == RunInputMode::Submit
 }
 
 /// 运行请求已被接受后的响应。
@@ -946,7 +935,8 @@ mod tests {
             json!({
                 "input": {
                     "text": "summarize this file"
-                }
+                },
+                "mode": "submit"
             })
         );
     }
@@ -965,9 +955,38 @@ mod tests {
                 "input": {
                     "text": "summarize this file"
                 },
-                "client_echo_id": "echo-1"
+                "client_echo_id": "echo-1",
+                "mode": "submit"
             })
         );
+    }
+
+    #[test]
+    fn submit_run_request_rejects_missing_mode() {
+        let error = serde_json::from_value::<SubmitRunRequest>(json!({
+            "input": {
+                "text": "summarize this file"
+            }
+        }))
+        .expect_err("run mode should be required");
+
+        assert!(error.to_string().contains("missing field `mode`"));
+    }
+
+    #[test]
+    fn thread_snapshot_rejects_missing_thread_id() {
+        let error = serde_json::from_value::<ThreadSnapshotEvent>(json!({
+            "messages": [],
+            "agent_tasks": [],
+            "usage": {
+                "current_context_tokens": 0,
+                "total_tokens": 0,
+                "total_cached_tokens": 0
+            }
+        }))
+        .expect_err("thread id should be required");
+
+        assert!(error.to_string().contains("missing field `thread_id`"));
     }
 
     #[test]
@@ -1174,7 +1193,7 @@ mod tests {
     #[test]
     fn plan_approval_resolved_event_uses_stable_semantic_fields() {
         let event = TypedRuntimeEvent::PlanApprovalResolved(PlanApprovalResolvedEvent {
-            plan_id: "plan_1".to_string(),
+            plan_id: "plan".to_string(),
             action: PlanApprovalAction::ContinueDiscussing,
         });
 
@@ -1182,7 +1201,7 @@ mod tests {
             serde_json::to_value(event).unwrap(),
             json!({
                 "type": "plan_approval_resolved",
-                "plan_id": "plan_1",
+                "plan_id": "plan",
                 "action": {
                     "type": "continue_discussing"
                 }
@@ -1233,7 +1252,7 @@ mod tests {
             activity: None,
             pending_pauses: Vec::new(),
             pending_plan_approval: Some(PlanSubmittedEvent {
-                plan_id: "plan_1".to_string(),
+                plan_id: "plan".to_string(),
                 title: "Plan".to_string(),
                 markdown: "# Plan".to_string(),
             }),
@@ -1253,7 +1272,7 @@ mod tests {
                 "loaded": true,
                 "connected_client_count": 1,
                 "pending_plan_approval": {
-                    "plan_id": "plan_1",
+                    "plan_id": "plan",
                     "title": "Plan",
                     "markdown": "# Plan"
                 }

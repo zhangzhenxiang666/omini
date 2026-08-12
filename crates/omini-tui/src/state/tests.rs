@@ -459,7 +459,7 @@ fn runtime_status_sync_calibrates_compact_activity() {
 #[test]
 fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
     let mut state = UiState::new();
-    let status = pending_plan_runtime_status("plan_1");
+    let status = pending_plan_runtime_status("plan");
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -468,7 +468,7 @@ fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
 
     assert_eq!(
         state.plan_approval.as_ref().map(|plan| plan.id.as_str()),
-        Some("plan_1")
+        Some("plan")
     );
     assert!(state.run_timer.is_none());
 }
@@ -566,7 +566,7 @@ fn agent_management_update_refreshes_subagent_mention_candidates() {
 fn plan_approval_resolved_closes_only_matching_plan() {
     let mut state = UiState::new();
 
-    state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan("plan_1")));
+    state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan("plan")));
     state.plan_approval_selected = 1;
     state.plan_approval_auto = true;
     state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
@@ -576,7 +576,7 @@ fn plan_approval_resolved_closes_only_matching_plan() {
     assert!(state.plan_approval.is_some());
 
     state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
-        plan_id: "plan_1".to_string(),
+        plan_id: "plan".to_string(),
         action: protocol::PlanApprovalAction::ContinueDiscussing,
     });
 

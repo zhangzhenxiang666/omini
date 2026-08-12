@@ -29,7 +29,7 @@ Omini 使用多种配置文件来控制行为，支持 **用户级** 和 **项�
 工具权限和 Bash 命令规则的配置，包括：
 
 - `[permissions]` 段的格式和语法
-- `permissions.toml` 兼容入口
+- `permissions.toml` 项目权限配置
 - `rules/*.rules` DSL 语法
 - Pattern 匹配规则
 - 大量实际示例

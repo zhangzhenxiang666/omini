@@ -66,7 +66,6 @@ pub(crate) enum ClientRequest {
         response: protocol::ToolPauseResponse,
     },
     PlanResolve {
-        plan_id: String,
         action: protocol::PlanApprovalAction,
     },
     OpenAgentManager,
@@ -432,9 +431,7 @@ async fn create_thread(
         },
     )
     .await?;
-    let thread_id = response
-        .thread_id
-        .ok_or_else(|| "Server did not return a session id".to_string())?;
+    let thread_id = response.thread_id;
     event_tx
         .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
         .await
@@ -936,7 +933,7 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
             })
         }
         protocol::TypedRuntimeEvent::ThreadSnapshot(event) => RuntimeToUiEvent::ThreadSnapshot {
-            thread_id: event.thread_id,
+            thread_id: Some(event.thread_id),
             messages: event.messages,
             agent_tasks: event.agent_tasks,
             usage: event.usage,
@@ -1264,10 +1261,10 @@ async fn handle_local_request(
             )
             .await?;
         }
-        ClientRequest::PlanResolve { plan_id, action } => {
+        ClientRequest::PlanResolve { action } => {
             post_json::<_, protocol::AckResponse>(
                 http,
-                &format!("{base}/plans/{plan_id}/resolve"),
+                &format!("{base}/plans/plan/resolve"),
                 client_id,
                 &protocol::ResolvePlanRequest { action },
             )
@@ -1857,6 +1854,56 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
+    #[test]
+    fn agent_urls_use_only_project_scope() {
+        let now = Utc::now();
+        let connection = ProjectConnection {
+            addr: "127.0.0.1:4317".parse().expect("address should parse"),
+            project_id: "project-1".to_string(),
+            client_id: "client-1".to_string(),
+            open: protocol::OpenProjectResponse {
+                project: protocol::ProjectSummary {
+                    id: "project-1".to_string(),
+                    name: "Project".to_string(),
+                    path: "/repo".to_string(),
+                    storage_key: "project-1".to_string(),
+                    path_status: protocol::ProjectPathStatus::Ready,
+                    created_at: now,
+                    updated_at: now,
+                    last_opened_at: Some(now),
+                },
+                threads: Vec::new(),
+                active_provider: "openai".to_string(),
+                model: "test".to_string(),
+                thinking_effort: None,
+                context_window: None,
+                mcp_server_count: 0,
+                has_project_instructions: false,
+                show_thinking_blocks: true,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                git_branch: None,
+            },
+        };
+
+        let urls = [
+            project_agents_url(&connection),
+            project_agents_url_with_target(&connection, Some("thread/1")),
+            project_agent_generate_url(&connection),
+            project_agent_url(&connection, "/tmp/agent.md", Some("thread/1")),
+        ];
+        assert_eq!(
+            urls,
+            [
+                "http://127.0.0.1:4317/v1/projects/project-1/agents",
+                "http://127.0.0.1:4317/v1/projects/project-1/agents?target_thread_id=thread%2F1",
+                "http://127.0.0.1:4317/v1/projects/project-1/agents/generate",
+                "http://127.0.0.1:4317/v1/projects/project-1/agents/%2Ftmp%2Fagent.md?target_thread_id=thread%2F1",
+            ]
+        );
+        assert!(urls.iter().all(|url| !url.contains("/threads/")));
+    }
+
     fn query_runtime_status() -> protocol::ThreadRuntimeStatus {
         protocol::ThreadRuntimeStatus {
             thread_id: "thread_1".to_string(),
@@ -2047,7 +2094,7 @@ mod tests {
         let outcome = handle_server_text(
             &runtime_event_envelope_text(protocol::TypedRuntimeEvent::ThreadSnapshot(
                 protocol::ThreadSnapshotEvent {
-                    thread_id: Some("thread_1".to_string()),
+                    thread_id: "thread_1".to_string(),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
                     usage: ThreadUsageSnapshot::default(),
