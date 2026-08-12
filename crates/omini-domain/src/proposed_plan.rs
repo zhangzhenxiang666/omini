@@ -149,18 +149,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_and_strips_complete_block() {
-        let text = "before\n<proposed_plan>\n- step\n</proposed_plan>\nafter";
+    fn complete_block_extracts_plan_and_preserves_normal_text() {
+        let input = "before\n<proposed_plan>\n- step\n</proposed_plan>\nafter";
 
-        assert_eq!(
-            extract_proposed_plan_text(text),
-            Some("- step\n".to_string())
-        );
-        assert_eq!(strip_proposed_plan_blocks(text), "before\nafter");
+        assert_eq!(extract_proposed_plan_text(input), Some("- step\n".into()));
+        assert_eq!(strip_proposed_plan_blocks(input), "before\nafter");
     }
 
     #[test]
-    fn streams_tags_split_across_chunks() {
+    fn empty_input_produces_no_segments_or_plan() {
+        let mut parser = ProposedPlanParser::new();
+
+        assert!(parser.push_str("").is_empty());
+        assert!(parser.finish().is_empty());
+        assert_eq!(extract_proposed_plan_text(""), None);
+        assert_eq!(strip_proposed_plan_blocks(""), "");
+    }
+
+    #[test]
+    fn empty_plan_is_distinguished_from_missing_plan() {
+        let input = "<proposed_plan>\n</proposed_plan>\n";
+
+        assert_eq!(extract_proposed_plan_text(input), Some(String::new()));
+        assert_eq!(strip_proposed_plan_blocks(input), "");
+    }
+
+    #[test]
+    fn tags_split_at_arbitrary_character_boundaries_match_single_chunk() {
+        let input = "开头\n<proposed_plan>\n- 步骤 α\n</proposed_plan>\n结尾";
+        let expected = parse_chunks(&[input]);
+
+        for boundary in input
+            .char_indices()
+            .map(|(index, _)| index)
+            .chain(std::iter::once(input.len()))
+        {
+            assert_eq!(
+                parse_chunks(&[&input[..boundary], &input[boundary..]]),
+                expected,
+                "different result at byte boundary {boundary}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_preserves_segment_order() {
         let mut parser = ProposedPlanParser::new();
         let mut segments = Vec::new();
         segments.extend(parser.push_str("Intro\n<proposed"));
@@ -181,72 +214,161 @@ mod tests {
     }
 
     #[test]
-    fn extracts_unclosed_plan_at_finish() {
-        let text = "<proposed_plan>\n- step\n";
+    fn unclosed_plan_is_returned_when_stream_finishes() {
+        let input = "<proposed_plan>\n- step\n";
+
+        assert_eq!(extract_proposed_plan_text(input), Some("- step\n".into()));
+        assert_eq!(strip_proposed_plan_blocks(input), "");
+    }
+
+    #[test]
+    fn malformed_and_embedded_open_tags_remain_normal_text() {
+        for input in [
+            "<proposed_plan extra>\n- step\n",
+            "before <proposed_plan>\n- step\n</proposed_plan>\nafter",
+            "Use `<proposed_plan>` as the wrapper.\n",
+        ] {
+            assert_eq!(strip_proposed_plan_blocks(input), input);
+            assert_eq!(extract_proposed_plan_text(input), None);
+        }
+    }
+
+    #[test]
+    fn indented_tag_lines_are_recognized() {
+        let input = "before\n  <proposed_plan>  \nplan\n\t</proposed_plan>\nafter";
+
+        assert_eq!(extract_proposed_plan_text(input), Some("plan\n".into()));
+        assert_eq!(strip_proposed_plan_blocks(input), "before\nafter");
+    }
+
+    #[test]
+    fn isolated_close_tag_remains_normal_text() {
+        let input = "before\n</proposed_plan>\nafter";
+
+        assert_eq!(extract_proposed_plan_text(input), None);
+        assert_eq!(strip_proposed_plan_blocks(input), input);
+    }
+
+    #[test]
+    fn tags_inside_backtick_and_tilde_fences_remain_content() {
+        for fence in ["```", "~~~~"] {
+            let input = format!(
+                "{fence}md\n<proposed_plan>\nfake\n</proposed_plan>\n{fence}\n\
+                 <proposed_plan>\nreal\n{fence}\n</proposed_plan>\n{fence}\n\
+                 </proposed_plan>\nafter"
+            );
+
+            assert_eq!(
+                extract_proposed_plan_text(&input),
+                Some(format!("real\n{fence}\n</proposed_plan>\n{fence}\n"))
+            );
+            assert_eq!(
+                strip_proposed_plan_blocks(&input),
+                format!("{fence}md\n<proposed_plan>\nfake\n</proposed_plan>\n{fence}\nafter")
+            );
+        }
+    }
+
+    #[test]
+    fn shorter_or_different_fence_does_not_close_active_fence() {
+        let input = concat!(
+            "````md\n",
+            "```\n",
+            "~~~\n",
+            "<proposed_plan>\n",
+            "````\n",
+            "<proposed_plan>\n",
+            "real\n",
+            "</proposed_plan>\n",
+        );
+
+        assert_eq!(extract_proposed_plan_text(input), Some("real\n".into()));
         assert_eq!(
-            extract_proposed_plan_text(text),
-            Some("- step\n".to_string())
+            strip_proposed_plan_blocks(input),
+            "````md\n```\n~~~\n<proposed_plan>\n````\n"
         );
     }
 
     #[test]
-    fn malformed_open_tag_stays_visible() {
-        let text = "<proposed_plan extra>\n- step\n";
-        assert_eq!(strip_proposed_plan_blocks(text), text);
-        assert_eq!(extract_proposed_plan_text(text), None);
+    fn crlf_input_preserves_plan_and_normal_line_endings() {
+        let input = "before\r\n<proposed_plan>\r\nplan\r\n</proposed_plan>\r\nafter";
+
+        assert_eq!(extract_proposed_plan_text(input), Some("plan\r\n".into()));
+        assert_eq!(strip_proposed_plan_blocks(input), "before\r\nafter");
     }
 
     #[test]
-    fn inline_tag_reference_stays_visible() {
-        let text = concat!(
+    fn multiple_blocks_are_all_stripped_and_last_plan_is_extracted() {
+        let input = concat!(
+            "before\n",
+            "<proposed_plan>\nfirst\n</proposed_plan>\n",
+            "between\n",
+            "<proposed_plan>\nsecond\n</proposed_plan>\n",
+            "after",
+        );
+
+        assert_eq!(extract_proposed_plan_text(input), Some("second\n".into()));
+        assert_eq!(strip_proposed_plan_blocks(input), "before\nbetween\nafter");
+    }
+
+    #[test]
+    fn parser_can_be_reused_after_finish() {
+        let mut parser = ProposedPlanParser::new();
+
+        assert_eq!(
+            parser.push_str("<proposed_plan>\nfirst"),
+            vec![ProposedPlanSegment::ProposedPlanStart]
+        );
+        assert_eq!(
+            parser.finish(),
+            vec![ProposedPlanSegment::ProposedPlanDelta("first".into())]
+        );
+        assert_eq!(
+            parser.push_str("normal\n"),
+            vec![ProposedPlanSegment::Normal("normal\n".into())]
+        );
+        assert!(parser.finish().is_empty());
+    }
+
+    #[test]
+    fn inline_reference_before_real_plan_remains_visible() {
+        let input = concat!(
             "Use `<proposed_plan>` as the wrapper.\n\n",
             "<proposed_plan>\n",
             "# Plan\n",
             "</proposed_plan>\n",
         );
 
+        assert_eq!(extract_proposed_plan_text(input), Some("# Plan\n".into()));
         assert_eq!(
-            extract_proposed_plan_text(text),
-            Some("# Plan\n".to_string())
-        );
-        assert_eq!(
-            strip_proposed_plan_blocks(text),
+            strip_proposed_plan_blocks(input),
             "Use `<proposed_plan>` as the wrapper.\n\n"
         );
     }
 
     #[test]
-    fn sentence_embedded_tag_is_not_a_plan_block() {
-        let text = "before <proposed_plan>\n- step\n</proposed_plan>\nafter";
+    fn tag_inside_plan_fence_is_emitted_as_plan_delta() {
+        let input = concat!(
+            "<proposed_plan>\n",
+            "```md\n",
+            "</proposed_plan>\n",
+            "```\n",
+            "</proposed_plan>\n",
+        );
 
-        assert_eq!(strip_proposed_plan_blocks(text), text);
-        assert_eq!(extract_proposed_plan_text(text), None);
+        assert_eq!(
+            extract_proposed_plan_text(input),
+            Some("```md\n</proposed_plan>\n```\n".into())
+        );
     }
 
-    #[test]
-    fn ignores_tags_inside_fenced_code_blocks() {
-        let text = concat!(
-            "```md\n",
-            "<proposed_plan>\n",
-            "# Fake\n",
-            "</proposed_plan>\n",
-            "```\n",
-            "<proposed_plan>\n",
-            "# Real\n",
-            "```rust\n",
-            "let tag = \"</proposed_plan>\";\n",
-            "```\n",
-            "</proposed_plan>\n",
-            "after",
-        );
-
-        assert_eq!(
-            extract_proposed_plan_text(text),
-            Some("# Real\n```rust\nlet tag = \"</proposed_plan>\";\n```\n".to_string())
-        );
-        assert_eq!(
-            strip_proposed_plan_blocks(text),
-            "```md\n<proposed_plan>\n# Fake\n</proposed_plan>\n```\nafter"
-        );
+    fn parse_chunks(chunks: &[&str]) -> Vec<ProposedPlanSegment> {
+        let mut parser = ProposedPlanParser::new();
+        let mut segments = Vec::new();
+        for chunk in chunks {
+            segments.extend(parser.push_str(chunk));
+        }
+        segments.extend(parser.finish());
+        segments
     }
 }
