@@ -51,3 +51,22 @@ fn group_by_first_command(rules: Vec<BashRule>) -> HashMap<String, Vec<BashRule>
     }
     map
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::bash_parser::parse_bash_rules_with_diagnostics;
+    use crate::embedded::{EMBEDDED_ALLOW_RAW, EMBEDDED_ASK_RAW, EMBEDDED_DENY_RAW};
+
+    #[test]
+    fn embedded_rule_documents_are_nonempty_and_parse_without_diagnostics() {
+        for (source, content) in [
+            ("<embedded:deny>", EMBEDDED_DENY_RAW),
+            ("<embedded:ask>", EMBEDDED_ASK_RAW),
+            ("<embedded:allow>", EMBEDDED_ALLOW_RAW),
+        ] {
+            let (rules, diagnostics) = parse_bash_rules_with_diagnostics(content, source);
+            assert!(!rules.is_empty(), "{source} must define at least one rule");
+            assert_eq!(diagnostics, Vec::<String>::new(), "{source}");
+        }
+    }
+}

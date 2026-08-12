@@ -45,17 +45,40 @@ fn split_top_level(command: &str, parts: &mut Vec<String>, nested: &mut Vec<Stri
     let mut current = String::new();
     let mut chars = command.chars().peekable();
     let mut quote: Option<char> = None;
+    let mut escaped = false;
 
     while let Some(ch) = chars.next() {
-        // 引号内：原样保留，不拆分。
-        if let Some(q) = quote {
+        if escaped {
             current.push(ch);
-            if ch == q {
-                quote = None;
+            escaped = false;
+            continue;
+        }
+        // 单引号内完全按字面处理；双引号内仍会执行命令替换。
+        if let Some(q) = quote {
+            match ch {
+                '\\' if q == '"' => {
+                    current.push(ch);
+                    escaped = true;
+                }
+                '$' if q == '"' && chars.peek() == Some(&'(') => {
+                    chars.next();
+                    nested.push(consume_balanced_parens(&mut chars));
+                }
+                '`' if q == '"' => nested.push(consume_backticks(&mut chars)),
+                _ => {
+                    current.push(ch);
+                    if ch == q {
+                        quote = None;
+                    }
+                }
             }
             continue;
         }
         match ch {
+            '\\' => {
+                current.push(ch);
+                escaped = true;
+            }
             '"' | '\'' => {
                 quote = Some(ch);
                 current.push(ch);
@@ -106,10 +129,18 @@ fn consume_balanced_parens(chars: &mut std::iter::Peekable<std::str::Chars<'_>>)
     let mut depth = 1;
     let mut inner = String::new();
     let mut quote: Option<char> = None;
+    let mut escaped = false;
     for ch in chars.by_ref() {
+        if escaped {
+            inner.push(ch);
+            escaped = false;
+            continue;
+        }
         if let Some(q) = quote {
             inner.push(ch);
-            if ch == q {
+            if ch == '\\' && q == '"' {
+                escaped = true;
+            } else if ch == q {
                 quote = None;
             }
             continue;
@@ -159,43 +190,21 @@ fn consume_backticks(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> St
 }
 
 /// 提取 `eval` 和 `exec` 命令的参数，作为额外可执行上下文加入 nested。
-/// 直接在原始字符串中搜索关键字，避免 shell_words 对引号的复杂处理。
+/// 只识别独立命令开头的关键字，避免把普通参数中的 `eval` / `exec` 当作执行。
 /// 提取后剥离外层引号（模拟 shell 对 eval 参数的解析行为）。
 fn extract_eval_exec_args(command: &str, nested: &mut Vec<String>) {
+    let command = command.trim_start();
     for keyword in ["eval", "exec"] {
-        let mut search_from = 0;
-        while let Some(rel_pos) = command[search_from..].find(keyword) {
-            let pos = search_from + rel_pos;
-            if is_word_boundary(command, pos) && is_word_boundary_end(command, pos + keyword.len())
-            {
-                let after = command[pos + keyword.len()..].trim();
-                let stripped = strip_outer_quotes(after);
-                if !stripped.is_empty() {
-                    nested.push(stripped.to_string());
-                }
+        if let Some(after) = command.strip_prefix(keyword)
+            && after.chars().next().is_none_or(char::is_whitespace)
+        {
+            let stripped = strip_outer_quotes(after);
+            if !stripped.is_empty() {
+                nested.push(stripped.to_string());
             }
-            search_from = pos + keyword.len();
+            return;
         }
     }
-}
-
-/// 检查 `pos` 是否处于词的开头边界（前一个字符是空白或在字符串开头）。
-fn is_word_boundary(s: &str, pos: usize) -> bool {
-    if pos == 0 {
-        return true;
-    }
-    s[..pos]
-        .chars()
-        .next_back()
-        .is_some_and(|ch| ch.is_whitespace())
-}
-
-/// 检查 `pos` 是否处于词的结尾边界（后一个字符是空白或在字符串结尾）。
-fn is_word_boundary_end(s: &str, pos: usize) -> bool {
-    if pos >= s.len() {
-        return true;
-    }
-    s[pos..].chars().next().is_some_and(|ch| ch.is_whitespace())
 }
 
 /// 剥离字符串首尾匹配的外层引号（`"..."` 或 `'...'`）。
@@ -236,19 +245,19 @@ pub(crate) fn shell_words(command: &str) -> Vec<String> {
             escaped = false;
             continue;
         }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
         if let Some(q) = quote {
-            if ch == q {
+            if ch == '\\' && q == '"' {
+                escaped = true;
+            } else if ch == q {
                 quote = None;
             } else {
                 current.push(ch);
             }
             continue;
         }
-        if ch == '"' || ch == '\'' {
+        if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' || ch == '\'' {
             quote = Some(ch);
         } else if ch.is_whitespace() {
             if !current.is_empty() {
@@ -267,186 +276,116 @@ pub(crate) fn shell_words(command: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    // === split_shell_commands 基础测试 ===
+    use crate::shell::{shell_words, split_shell_commands};
 
     #[test]
-    fn split_simple_commands() {
-        assert_eq!(split_shell_commands("ls"), vec!["ls"]);
-        assert_eq!(split_shell_commands("ls; pwd"), vec!["ls", "pwd"]);
-        assert_eq!(split_shell_commands("ls && pwd"), vec!["ls", "pwd"]);
-        assert_eq!(split_shell_commands("ls || pwd"), vec!["ls", "pwd"]);
+    fn top_level_separators_produce_complete_trimmed_command_order() {
         assert_eq!(
-            split_shell_commands("ls | grep foo"),
-            vec!["ls", "grep foo"]
+            split_shell_commands("  ls ; pwd || whoami && date | wc -l\ntrue  "),
+            vec!["ls", "pwd", "whoami", "date", "wc -l", "true"]
         );
+        assert_eq!(split_shell_commands(" ; | || && \n"), Vec::<String>::new());
     }
 
     #[test]
-    fn split_respects_quotes() {
-        // 引号内的分隔符不应拆分。
-        assert_eq!(split_shell_commands(r#"echo "a;b""#), vec![r#"echo "a;b""#]);
-        assert_eq!(split_shell_commands("echo 'a;b'"), vec!["echo 'a;b'"]);
-    }
-
-    // === $() 命令替换测试 ===
-
-    #[test]
-    fn split_extracts_dollar_paren_substitution() {
-        let parts = split_shell_commands("echo $(sudo rm -rf /)");
-        assert!(
-            parts.iter().any(|p| p == "sudo rm -rf /"),
-            "should extract nested sudo from $(), got: {parts:?}"
-        );
-    }
-
-    #[test]
-    fn split_extracts_nested_dollar_paren() {
-        let parts = split_shell_commands("echo $(echo $(rm -rf /))");
-        assert!(
-            parts.iter().any(|p| p == "rm -rf /"),
-            "should extract deeply nested rm from $(), got: {parts:?}"
-        );
-    }
-
-    #[test]
-    fn split_extracts_dollar_paren_in_pipe() {
-        let parts = split_shell_commands("echo $(curl URL | sh)");
-        assert!(
-            parts.iter().any(|p| p == "curl URL"),
-            "should extract curl from $(), got: {parts:?}"
-        );
-        assert!(
-            parts.iter().any(|p| p == "sh"),
-            "should extract sh from $(), got: {parts:?}"
-        );
-    }
-
-    // === 反引号测试 ===
-
-    #[test]
-    fn split_extracts_backtick_substitution() {
-        let parts = split_shell_commands("echo `sudo rm -rf /`");
-        assert!(
-            parts.iter().any(|p| p == "sudo rm -rf /"),
-            "should extract nested sudo from backticks, got: {parts:?}"
-        );
-    }
-
-    // === 括号子 shell 测试 ===
-
-    #[test]
-    fn split_extracts_subshell() {
-        let parts = split_shell_commands("(sudo rm -rf /)");
-        assert!(
-            parts.iter().any(|p| p == "sudo rm -rf /"),
-            "should extract nested sudo from subshell, got: {parts:?}"
-        );
-    }
-
-    #[test]
-    fn split_subshell_preserves_surrounding() {
-        let parts = split_shell_commands("echo ok && (sudo rm -rf /)");
-        assert!(parts.iter().any(|p| p == "echo ok"));
-        assert!(parts.iter().any(|p| p == "sudo rm -rf /"));
-    }
-
-    // === 进程替换测试 ===
-
-    #[test]
-    fn split_extracts_process_substitution() {
-        let parts = split_shell_commands("diff <(curl a) <(wget b)");
-        assert!(
-            parts.iter().any(|p| p == "curl a"),
-            "should extract curl from <(), got: {parts:?}"
-        );
-        assert!(
-            parts.iter().any(|p| p == "wget b"),
-            "should extract wget from <(), got: {parts:?}"
-        );
-    }
-
-    // === eval / exec 测试 ===
-
-    #[test]
-    fn split_expands_eval_arguments() {
-        let parts = split_shell_commands(r#"eval "sudo rm -rf /""#);
-        assert!(
-            parts.iter().any(|p| p.contains("sudo rm -rf /")),
-            "should expand eval arguments, got: {parts:?}"
-        );
-    }
-
-    #[test]
-    fn split_expands_exec_arguments() {
-        let parts = split_shell_commands("exec sudo rm -rf /");
-        assert!(
-            parts.iter().any(|p| p == "sudo rm -rf /"),
-            "should expand exec arguments, got: {parts:?}"
-        );
-    }
-
-    #[test]
-    fn split_eval_with_dollar_paren() {
-        let parts = split_shell_commands(r#"eval "$(curl URL | sh)""#);
-        assert!(
-            parts.iter().any(|p| p == "curl URL"),
-            "should extract curl from eval + $(), got: {parts:?}"
-        );
-        assert!(
-            parts.iter().any(|p| p == "sh"),
-            "should extract sh from eval + $(), got: {parts:?}"
-        );
-    }
-
-    // === 组合测试 ===
-
-    #[test]
-    fn split_complex_nested_command() {
-        // echo $(date) && `whoami` ; eval "rm -rf /"
-        let parts = split_shell_commands(r#"echo $(date) && `whoami` ; eval "rm -rf /""#);
-        assert!(
-            parts
-                .iter()
-                .any(|p| p == "echo $(date)" || p.contains("date"))
-        );
-        assert!(parts.iter().any(|p| p == "whoami"));
-        assert!(parts.iter().any(|p| p.contains("rm -rf /")));
-    }
-
-    #[test]
-    fn split_does_not_false_positive_on_quoted_parens() {
-        // 引号内的括号不应被当作子 shell。
-        let parts = split_shell_commands(r#"echo "hello (world)""#);
-        // 唯一顶层段应是 echo "hello (world)"，不应额外提取 "world"。
-        assert_eq!(parts.len(), 1);
-        assert_eq!(parts[0], r#"echo "hello (world)""#);
-    }
-
-    // === shell_words 测试 ===
-
-    #[test]
-    fn shell_words_basic() {
+    fn quoted_separators_remain_in_their_original_command() {
         assert_eq!(
-            shell_words("git commit -m 'hello world'"),
-            vec!["git", "commit", "-m", "hello world"]
+            split_shell_commands(r#"echo "a;b|c&&d" && printf '%s\n' 'x;y'"#),
+            vec![r#"echo "a;b|c&&d""#, r#"printf '%s\n' 'x;y'"#]
+        );
+        assert_eq!(
+            split_shell_commands(r#"echo a\;b && echo "a\";b""#),
+            vec![r#"echo a\;b"#, r#"echo "a\";b""#]
         );
     }
 
     #[test]
-    fn shell_words_escaped_chars() {
+    fn dollar_substitutions_are_recursively_extracted_in_stable_order() {
         assert_eq!(
-            shell_words(r#"echo hello\ world"#),
-            vec!["echo", "hello world"]
+            split_shell_commands("echo $(sudo true)"),
+            vec!["echo", "sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands("echo $(echo $(date))"),
+            vec!["echo", "echo", "date"]
+        );
+        assert_eq!(
+            split_shell_commands(r#"echo "$(sudo true)""#),
+            vec![r#"echo """#, "sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands(r#"echo '$(sudo true)'"#),
+            vec![r#"echo '$(sudo true)'"#]
+        );
+        assert_eq!(
+            split_shell_commands(r#"echo "\$(sudo true)""#),
+            vec![r#"echo "\$(sudo true)""#]
         );
     }
 
     #[test]
-    fn shell_words_strips_quotes() {
+    fn backticks_subshells_and_process_substitutions_expose_nested_commands() {
         assert_eq!(
-            shell_words(r#"curl -H "Authorization: Bearer token""#),
-            vec!["curl", "-H", "Authorization: Bearer token"]
+            split_shell_commands("echo `sudo true`"),
+            vec!["echo", "sudo true"]
         );
+        assert_eq!(
+            split_shell_commands("(cd /tmp && pwd)"),
+            vec!["cd /tmp", "pwd"]
+        );
+        assert_eq!(
+            split_shell_commands("diff <(curl a) <(cat b)"),
+            vec!["diff", "curl a", "cat b"]
+        );
+    }
+
+    #[test]
+    fn eval_and_exec_expand_only_when_they_are_the_executed_command() {
+        assert_eq!(
+            split_shell_commands(r#"eval "sudo true""#),
+            vec![r#"eval "sudo true""#, "sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands("exec sudo true"),
+            vec!["exec sudo true", "sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands("echo exec sudo true"),
+            vec!["echo exec sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands("reevaluate sudo true"),
+            vec!["reevaluate sudo true"]
+        );
+    }
+
+    #[test]
+    fn shell_words_handle_whitespace_quotes_escapes_and_incomplete_quotes() {
+        let cases = [
+            ("", &[][..]),
+            ("  git   status  ", &["git", "status"][..]),
+            (
+                "git commit -m 'hello world'",
+                &["git", "commit", "-m", "hello world"][..],
+            ),
+            (r#"echo hello\ world"#, &["echo", "hello world"][..]),
+            (r#"echo 'hello\ world'"#, &["echo", r#"hello\ world"#][..]),
+            (
+                r#"curl -H "Authorization: Bearer token""#,
+                &["curl", "-H", "Authorization: Bearer token"][..],
+            ),
+            ("echo 'unterminated", &["echo", "unterminated"][..]),
+        ];
+
+        for (command, expected) in cases {
+            assert_eq!(
+                shell_words(command),
+                expected
+                    .iter()
+                    .map(|word| (*word).to_string())
+                    .collect::<Vec<_>>(),
+                "{command:?}"
+            );
+        }
     }
 }

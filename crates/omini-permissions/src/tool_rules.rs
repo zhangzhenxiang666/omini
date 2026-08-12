@@ -70,6 +70,14 @@ fn parse_tool_rule(
             raw: value.to_string(),
         });
     };
+    if specifier.is_empty() {
+        diagnostics.push(format!(
+            "{}: ignored permission rule '{}': empty permission rule specifier",
+            source.as_deref().unwrap_or("<inline>"),
+            value
+        ));
+        return None;
+    }
 
     Some(ToolRule {
         tool,
@@ -125,6 +133,7 @@ pub(crate) fn normalize_tool_name(tool: &str) -> String {
         "Bash" | "bash" => "bash".to_string(),
         "Search" | "search" => "search".to_string(),
         "Read" | "read" => "read".to_string(),
+        "ViewImage" | "view_image" => "read".to_string(),
         "Edit" | "edit" => "edit".to_string(),
         "Write" | "write" => "write".to_string(),
         "Agent" | "agent" | "spawn_agent" | "run_agent" => "agent".to_string(),
@@ -208,16 +217,14 @@ pub(crate) fn extend_tool_rules(
 impl PermissionEngine {
     pub(crate) fn normalize_rule_path(&self, specifier: &str) -> PathMatcher {
         let raw = specifier.trim();
-        if let Some(rest) = raw.strip_prefix("//") {
-            PathMatcher::new(std::path::PathBuf::from("/").join(rest))
-        } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(rest) = raw.strip_prefix("~/") {
             let base = self
                 .home
                 .clone()
                 .unwrap_or_else(|| std::path::PathBuf::from("~"));
             PathMatcher::new(base.join(rest))
-        } else if let Some(rest) = raw.strip_prefix('/') {
-            PathMatcher::new(self.cwd.join(rest))
+        } else if raw.starts_with('/') {
+            PathMatcher::new(std::path::PathBuf::from(raw))
         } else if let Some(rest) = raw.strip_prefix("./") {
             PathMatcher::new(self.cwd.join(rest))
         } else {

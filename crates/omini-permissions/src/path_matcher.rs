@@ -26,10 +26,38 @@ impl PathMatcher {
 
 /// 将路径标准化为 `/` 分隔的字符串，兼容 Windows 反斜杠。
 pub(crate) fn normalize_path_string(path: &Path) -> String {
-    path.components()
+    normalize_lexically(path)
+        .components()
         .as_path()
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// 在不访问文件系统的情况下折叠 `.` 和 `..`，避免路径前缀与规则匹配被词法穿越绕过。
+pub(crate) fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::ffi::OsStr;
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized
+                    .file_name()
+                    .is_some_and(|name| name != OsStr::new(".."))
+                {
+                    normalized.pop();
+                } else if !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+    }
+    normalized
 }
 
 /// 通配符匹配：`*` 匹配任意字符序列，其余字符精确匹配。
@@ -112,7 +140,8 @@ pub(crate) fn read_path(
 
 /// 判断路径是否指向敏感文件（`.env`、私钥、SSH 配置、含 token/secret 的文件名等）。
 pub(crate) fn is_private_path(path: &Path) -> bool {
-    let normalized = normalize_path_string(path).to_ascii_lowercase();
+    let path = normalize_lexically(path);
+    let normalized = normalize_path_string(&path).to_ascii_lowercase();
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
