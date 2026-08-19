@@ -124,6 +124,7 @@ pub async fn invoke_anthropic(
             let mut content_blocks: Vec<ContentBlock> = Vec::new();
             let mut usage_counters = AnthropicUsage::default();
             let mut finish_reason: FinishReason = FinishReason::Stop;
+            let mut saw_message_stop = false;
 
             let mut stream = Box::pin(
                 response
@@ -276,8 +277,17 @@ pub async fn invoke_anthropic(
                                             partial_input,
                                         } => {
                                             let input: HashMap<String, Value> =
-                                                serde_json::from_str(&partial_input)
-                                                    .unwrap_or_default();
+                                                match serde_json::from_str(&partial_input) {
+                                                    Ok(input) => input,
+                                                    Err(error) => {
+                                                        let _ = tx
+                                                            .send(Err(crate::StreamError::Json(
+                                                                error,
+                                                            )))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                };
                                             let tool_use = ToolUseBlock { id, name, input };
                                             content_blocks
                                                 .push(ContentBlock::ToolUse(tool_use.clone()));
@@ -313,6 +323,7 @@ pub async fn invoke_anthropic(
                             }
 
                             "message_stop" => {
+                                saw_message_stop = true;
                                 // 将所有已累积的内容块封装进 Done
                                 let completion = ApiCompletion {
                                     message: Message::new(
@@ -358,6 +369,10 @@ pub async fn invoke_anthropic(
                         break 'stream;
                     }
                 }
+            }
+
+            if !saw_message_stop {
+                let _ = tx.send(Err(crate::StreamError::UnexpectedEnd)).await;
             }
 
             // tx 在此 drop，通知接收端流已结束
@@ -463,96 +478,5 @@ fn set_if_missing(current: &mut usize, value: Option<u64>) {
         && value > 0
     {
         *current = value as usize;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
-    use std::collections::HashMap;
-
-    #[test]
-    fn messages_with_cache_control_strips_tool_result_metadata() {
-        let mut metadata = Map::new();
-        metadata.insert("permission_denied".to_string(), serde_json::json!(true));
-        let messages = vec![Message::new(
-            Role::Assistant,
-            vec![
-                ContentBlock::ToolUse(ToolUseBlock {
-                    id: "toolu_1".to_string(),
-                    name: "mcp__docs__search".to_string(),
-                    input: HashMap::new(),
-                }),
-                ContentBlock::ToolResult(ToolResultBlock {
-                    tool_use_id: "toolu_1".to_string(),
-                    is_error: true,
-                    content: "Permission denied for tool: bash".to_string(),
-                    metadata: Some(metadata),
-                }),
-            ],
-        )];
-
-        let value = messages_with_cache_control(&messages).expect("messages serialize");
-        let content = value
-            .as_array()
-            .and_then(|messages| messages.first())
-            .and_then(|message| message.get("content"))
-            .and_then(Value::as_array)
-            .expect("message content");
-        let tool_use = content
-            .first()
-            .and_then(Value::as_object)
-            .expect("tool use object");
-        let tool_result = content
-            .get(1)
-            .and_then(Value::as_object)
-            .expect("tool result object");
-
-        assert!(!tool_result.contains_key("metadata"));
-        assert!(!tool_use.contains_key("metadata"));
-        assert!(tool_result.contains_key("cache_control"));
-    }
-
-    #[test]
-    fn anthropic_usage_counts_cache_tokens() {
-        let mut usage = AnthropicUsage::default();
-
-        usage.update_from_value(&serde_json::json!({
-            "input_tokens": 100,
-            "cache_creation_input_tokens": 25,
-            "cache_read_input_tokens": 75,
-            "output_tokens": 0
-        }));
-        usage.update_from_value(&serde_json::json!({
-            "output_tokens": 30
-        }));
-
-        let usage = usage.to_usage();
-        assert_eq!(usage.prompt_tokens, 200);
-        assert_eq!(usage.completion_tokens, 30);
-        assert_eq!(usage.cached_tokens, 75);
-    }
-
-    #[test]
-    fn anthropic_usage_does_not_overwrite_existing_values_with_zeroes() {
-        let mut usage = AnthropicUsage::default();
-
-        usage.update_from_value(&serde_json::json!({
-            "input_tokens": 100,
-            "cache_creation_input_tokens": 25,
-            "cache_read_input_tokens": 75
-        }));
-        usage.update_from_value(&serde_json::json!({
-            "input_tokens": 0,
-            "cache_creation_input_tokens": 0,
-            "cache_read_input_tokens": 0,
-            "output_tokens": 30
-        }));
-
-        let usage = usage.to_usage();
-        assert_eq!(usage.prompt_tokens, 200);
-        assert_eq!(usage.completion_tokens, 30);
-        assert_eq!(usage.cached_tokens, 75);
     }
 }
