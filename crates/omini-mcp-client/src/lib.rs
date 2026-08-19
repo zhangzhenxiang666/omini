@@ -825,7 +825,10 @@ mod tests {
             server_name: server_name.to_string(),
             server_tool_name: server_tool_name.to_string(),
             description: "test tool".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            }),
         }
     }
 
@@ -931,38 +934,49 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FakeClient {
+    struct CatalogClient {
         output: McpCallOutput,
         tools: Vec<RmcpTool>,
         resources: Vec<Resource>,
         resource_templates: Vec<ResourceTemplate>,
         prompts: Vec<Prompt>,
-        capabilities: Option<ServerCapabilities>,
+        failure: Option<CatalogStage>,
     }
 
-    impl Default for FakeClient {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum CatalogStage {
+        Tools,
+        Resources,
+        Templates,
+        Prompts,
+    }
+
+    impl Default for CatalogClient {
         fn default() -> Self {
             Self {
                 output: McpCallOutput {
-                    content: r#"{"content":[{"type":"text","text":"ok"}]}"#.to_string(),
+                    content: r#"{"content":[{"type":"text","text":"ok"}]}"#.into(),
                     is_error: false,
                 },
                 tools: Vec::new(),
                 resources: Vec::new(),
                 resource_templates: Vec::new(),
                 prompts: Vec::new(),
-                capabilities: None,
+                failure: None,
             }
         }
     }
 
     #[async_trait]
-    impl McpServerClient for FakeClient {
+    impl McpServerClient for CatalogClient {
         fn capabilities(&self) -> Option<ServerCapabilities> {
-            self.capabilities.clone()
+            None
         }
 
         async fn list_tools(&self) -> Result<Vec<RmcpTool>, String> {
+            if self.failure == Some(CatalogStage::Tools) {
+                return Err("tools unavailable".into());
+            }
             Ok(self.tools.clone())
         }
 
@@ -977,10 +991,16 @@ mod tests {
         }
 
         async fn list_resources(&self) -> Result<Vec<Resource>, String> {
+            if self.failure == Some(CatalogStage::Resources) {
+                return Err("resources unavailable".into());
+            }
             Ok(self.resources.clone())
         }
 
         async fn list_resource_templates(&self) -> Result<Vec<ResourceTemplate>, String> {
+            if self.failure == Some(CatalogStage::Templates) {
+                return Err("templates unavailable".into());
+            }
             Ok(self.resource_templates.clone())
         }
 
@@ -992,7 +1012,63 @@ mod tests {
         }
 
         async fn list_prompts(&self) -> Result<Vec<Prompt>, String> {
+            if self.failure == Some(CatalogStage::Prompts) {
+                return Err("prompts unavailable".into());
+            }
             Ok(self.prompts.clone())
+        }
+
+        async fn get_prompt(
+            &self,
+            name: &str,
+            arguments: Option<Map<String, Value>>,
+        ) -> Result<GetPromptResult, String> {
+            assert_eq!(name, "explain");
+            assert_eq!(
+                arguments,
+                Some(Map::from_iter([(
+                    "tone".into(),
+                    serde_json::json!("short")
+                )]))
+            );
+            Ok(GetPromptResult::new(vec![]))
+        }
+    }
+
+    struct RejectingClient;
+
+    #[async_trait]
+    impl McpServerClient for RejectingClient {
+        fn capabilities(&self) -> Option<ServerCapabilities> {
+            None
+        }
+
+        async fn list_tools(&self) -> Result<Vec<RmcpTool>, String> {
+            Err("tools unavailable".into())
+        }
+
+        async fn call_tool(
+            &self,
+            _server_tool_name: &str,
+            _arguments: Map<String, Value>,
+        ) -> Result<McpCallOutput, String> {
+            Err("tool call rejected".into())
+        }
+
+        async fn list_resources(&self) -> Result<Vec<Resource>, String> {
+            Err("resources unavailable".into())
+        }
+
+        async fn list_resource_templates(&self) -> Result<Vec<ResourceTemplate>, String> {
+            Err("templates unavailable".into())
+        }
+
+        async fn read_resource(&self, _uri: &str) -> Result<ReadResourceResult, String> {
+            Err("resource read rejected".into())
+        }
+
+        async fn list_prompts(&self) -> Result<Vec<Prompt>, String> {
+            Err("prompts unavailable".into())
         }
 
         async fn get_prompt(
@@ -1000,205 +1076,393 @@ mod tests {
             _name: &str,
             _arguments: Option<Map<String, Value>>,
         ) -> Result<GetPromptResult, String> {
-            Ok(GetPromptResult::new(vec![]))
+            Err("prompt read rejected".into())
+        }
+    }
+
+    fn all_capabilities() -> ServerCapabilities {
+        ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .build()
+    }
+
+    #[test]
+    fn tool_filter_resolves_allow_and_deny() {
+        let cases = [
+            (None, None, "read", true),
+            (Some(vec![]), None, "read", false),
+            (Some(vec!["read"]), None, "read", true),
+            (Some(vec!["read"]), None, "write", false),
+            (None, Some(vec!["write"]), "write", false),
+            (Some(vec!["write"]), Some(vec!["write"]), "write", false),
+        ];
+
+        // 白名单先收窄集合，黑名单再拥有最终否决权；空白名单因此禁用全部工具。
+        for (enabled, disabled, tool_name, expected) in cases {
+            let mut config = test_config();
+            config.enabled_tools =
+                enabled.map(|names| names.into_iter().map(str::to_string).collect::<Vec<_>>());
+            config.disabled_tools =
+                disabled.map(|names| names.into_iter().map(str::to_string).collect::<Vec<_>>());
+            assert_eq!(tool_allowed(&config, tool_name), expected);
         }
     }
 
     #[test]
-    fn tool_filter_applies_enabled_before_disabled() {
-        let config = McpServerConfig {
-            transport: McpServerTransportConfig::Stdio {
-                command: "server".to_string(),
-                args: Vec::new(),
-                env: None,
-                cwd: None,
-            },
-            enabled: true,
-            startup_timeout_sec: None,
-            tool_timeout_sec: None,
-            enabled_tools: Some(vec!["read".to_string(), "write".to_string()]),
-            disabled_tools: Some(vec!["write".to_string()]),
-        };
+    fn timeouts_reject_invalid_values() {
+        assert_eq!(
+            duration_from_secs(None, Duration::from_secs(9)),
+            Ok(Duration::from_secs(9))
+        );
+        assert_eq!(
+            duration_from_secs(Some(0.25), Duration::from_secs(9)),
+            Ok(Duration::from_millis(250))
+        );
 
-        assert!(tool_allowed(&config, "read"));
-        assert!(!tool_allowed(&config, "write"));
-        assert!(!tool_allowed(&config, "search"));
+        for value in [0.0, -0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = duration_from_secs(Some(value), Duration::from_secs(9))
+                .expect_err("non-positive or non-finite timeout must fail");
+            assert_eq!(
+                error,
+                format!("MCP timeout must be a positive finite number, got {value}")
+            );
+        }
+        let overflow = duration_from_secs(Some(f64::MAX), Duration::from_secs(9))
+            .expect_err("finite timeout outside Duration range must fail");
+        assert!(overflow.starts_with("cannot convert float seconds to Duration:"));
+    }
+
+    #[test]
+    fn remote_tools_are_normalized() {
+        let mut described = RmcpTool::new(
+            "search",
+            "  Search documentation  ",
+            Map::from_iter([
+                ("$schema".into(), serde_json::json!("draft")),
+                ("title".into(), serde_json::json!("Input")),
+                ("default".into(), serde_json::json!({})),
+                ("type".into(), serde_json::json!("object")),
+                (
+                    "properties".into(),
+                    serde_json::json!({
+                        "query": {
+                            "type": ["string", "null"],
+                            "format": "uri",
+                            "default": null
+                        },
+                        "options": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "properties": {
+                                "limit": {"type": "integer", "title": "Limit"}
+                            }
+                        }
+                    }),
+                ),
+            ]),
+        );
+        described.title = Some("Search title".into());
+
+        let spec = server_tool_from_rmcp("docs", described);
+
+        assert_eq!(
+            spec,
+            McpServerToolSpec {
+                server_name: "docs".into(),
+                server_tool_name: "search".into(),
+                description: "Search documentation".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "query": {"type": "string"},
+                        "options": {
+                            "type": "object",
+                            "additionalProperties": true,
+                            "properties": {
+                                "limit": {"type": "integer"}
+                            }
+                        }
+                    }
+                }),
+            }
+        );
+
+        let mut undescribed = remote_tool("read");
+        undescribed.description = Some(" \n\t ".into());
+        assert_eq!(
+            server_tool_from_rmcp("docs", undescribed).description,
+            "MCP tool `docs/read`."
+        );
     }
 
     #[tokio::test]
-    async fn catalog_loads_tools_resources_resource_templates_and_prompts() {
-        let client = FakeClient {
+    async fn catalog_loads_advertised_capabilities() {
+        let client = CatalogClient {
+            output: McpCallOutput {
+                content: "unused".into(),
+                is_error: false,
+            },
             tools: vec![remote_tool("search"), remote_tool("read")],
             resources: vec![resource("file:///docs.md", "docs")],
             resource_templates: vec![resource_template("file:///{path}", "file")],
             prompts: vec![Prompt::new("explain", Some("Explain"), None)],
-            capabilities: Some(
-                ServerCapabilities::builder()
-                    .enable_tools()
-                    .enable_resources()
-                    .enable_prompts()
-                    .build(),
-            ),
-            ..FakeClient::default()
+            failure: None,
         };
-        let capabilities = client.capabilities();
+        let mut config = test_config();
+        config.enabled_tools = Some(vec!["search".into(), "read".into()]);
+        config.disabled_tools = Some(vec!["read".into()]);
 
-        let catalog = load_catalog("docs", &test_config(), &client, capabilities.as_ref())
+        let catalog = load_catalog("docs", &config, &client, Some(&all_capabilities()))
             .await
-            .unwrap();
+            .expect("advertised catalogs should load");
 
-        assert_eq!(catalog.tools.len(), 2);
-        assert_eq!(catalog.resources.len(), 1);
-        assert_eq!(catalog.resource_templates.len(), 1);
-        assert_eq!(catalog.prompts.len(), 1);
-    }
-
-    #[test]
-    fn ready_server_tools_returns_all_ready_service_tools() {
-        let client_set = client_set_with_services(vec![
-            ready_service(
-                "docs",
-                Arc::new(FakeClient::default()),
-                McpCatalog {
-                    tools: vec![server_tool("docs", "search"), server_tool("docs", "read")],
-                    ..McpCatalog::default()
-                },
-            ),
-            ready_service(
-                "repo",
-                Arc::new(FakeClient::default()),
-                McpCatalog {
-                    tools: vec![server_tool("repo", "search")],
-                    ..McpCatalog::default()
-                },
-            ),
-        ]);
-
-        let mut tools = client_set
-            .ready_server_tools()
-            .into_iter()
-            .map(|tool| (tool.server_name, tool.server_tool_name))
-            .collect::<Vec<_>>();
-        tools.sort();
-
-        assert_eq!(
-            tools,
-            vec![
-                ("docs".to_string(), "read".to_string()),
-                ("docs".to_string(), "search".to_string()),
-                ("repo".to_string(), "search".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn snapshots_list_mcp_services_and_catalogs() {
-        let client_set = client_set_with_services(vec![
-            ready_service(
-                "docs",
-                Arc::new(FakeClient::default()),
-                McpCatalog {
-                    tools: vec![server_tool("docs", "search")],
-                    ..McpCatalog::default()
-                },
-            ),
-            failed_service("broken", "boom"),
-        ]);
-
-        let snapshots = client_set.snapshots();
-
-        assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].name, "broken");
-        assert_eq!(snapshots[0].status, McpServiceStatus::Failed);
-        assert_eq!(snapshots[0].last_error.as_deref(), Some("boom"));
-        assert!(snapshots[0].catalog.tools.is_empty());
-        assert_eq!(snapshots[1].name, "docs");
-        assert_eq!(snapshots[1].status, McpServiceStatus::Ready);
-        assert_eq!(snapshots[1].catalog.tools.len(), 1);
+        assert_eq!(catalog.tools, vec![server_tool("docs", "search")]);
+        assert_eq!(catalog.resources, client.resources);
+        assert_eq!(catalog.resource_templates, client.resource_templates);
+        assert_eq!(catalog.prompts, client.prompts);
     }
 
     #[tokio::test]
-    async fn client_set_routes_tool_calls_to_ready_client() {
-        let client_set = client_set_with_services(vec![ready_service(
-            "docs",
-            Arc::new(FakeClient {
-                output: McpCallOutput {
-                    content: r#"{"content":[{"type":"text","text":"ok"}]}"#.to_string(),
-                    is_error: false,
-                },
-                ..FakeClient::default()
-            }),
-            McpCatalog {
-                tools: vec![server_tool("docs", "search")],
-                ..McpCatalog::default()
-            },
-        )]);
-
-        let output = client_set
-            .call_tool(
-                "docs",
-                "search",
-                Map::from_iter([("query".to_string(), serde_json::json!("rust"))]),
-            )
+    async fn catalog_skips_unadvertised_capabilities() {
+        let catalog = load_catalog("docs", &test_config(), &RejectingClient, None)
             .await
-            .unwrap();
+            .expect("unadvertised capabilities should be skipped");
 
-        assert!(!output.is_error);
-        assert_eq!(
-            output.content,
-            r#"{"content":[{"type":"text","text":"ok"}]}"#
-        );
+        assert!(catalog.tools.is_empty());
+        assert!(catalog.resources.is_empty());
+        assert!(catalog.resource_templates.is_empty());
+        assert!(catalog.prompts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn catalog_propagates_loading_errors() {
+        for (stage, capabilities, expected) in [
+            (
+                CatalogStage::Tools,
+                ServerCapabilities::builder().enable_tools().build(),
+                "tools unavailable",
+            ),
+            (
+                CatalogStage::Resources,
+                ServerCapabilities::builder().enable_resources().build(),
+                "resources unavailable",
+            ),
+            (
+                CatalogStage::Templates,
+                ServerCapabilities::builder().enable_resources().build(),
+                "templates unavailable",
+            ),
+            (
+                CatalogStage::Prompts,
+                ServerCapabilities::builder().enable_prompts().build(),
+                "prompts unavailable",
+            ),
+        ] {
+            let client = CatalogClient {
+                failure: Some(stage),
+                ..CatalogClient::default()
+            };
+            assert_eq!(
+                load_catalog("docs", &test_config(), &client, Some(&capabilities))
+                    .await
+                    .expect_err("advertised catalog failure must propagate"),
+                expected
+            );
+        }
     }
 
     #[test]
-    fn resources_templates_and_prompts_stay_in_catalog() {
-        let client_set = client_set_with_services(vec![ready_service(
-            "docs",
-            Arc::new(FakeClient::default()),
-            McpCatalog {
-                tools: vec![server_tool("docs", "search")],
-                resources: vec![resource("file:///docs.md", "docs")],
-                resource_templates: vec![resource_template("file:///{path}", "file")],
-                prompts: vec![Prompt::new("explain", Some("Explain"), None)],
-            },
-        )]);
-
-        let catalog = client_set.catalog("docs").unwrap();
-
-        assert_eq!(catalog.tools.len(), 1);
-        assert_eq!(catalog.resources.len(), 1);
-        assert_eq!(catalog.resource_templates.len(), 1);
-        assert_eq!(catalog.prompts.len(), 1);
-    }
-
-    #[test]
-    fn failed_service_does_not_block_ready_service_tools() {
+    fn views_include_ready_and_failed() {
         let client_set = client_set_with_services(vec![
             ready_service(
                 "docs",
-                Arc::new(FakeClient::default()),
+                Arc::new(CatalogClient {
+                    output: McpCallOutput {
+                        content: r#"{"content":[{"type":"text","text":"ok"}]}"#.to_string(),
+                        is_error: false,
+                    },
+                    ..CatalogClient::default()
+                }),
                 McpCatalog {
-                    tools: vec![server_tool("docs", "search")],
-                    ..McpCatalog::default()
+                    tools: vec![server_tool("docs", "search"), server_tool("docs", "read")],
+                    resources: vec![resource("file:///docs.md", "docs")],
+                    resource_templates: vec![resource_template("file:///{path}", "file")],
+                    prompts: vec![Prompt::new("explain", Some("Explain"), None)],
                 },
             ),
             failed_service("broken", "boom"),
         ]);
 
-        assert_eq!(client_set.ready_server_tools().len(), 1);
         assert_eq!(
-            client_set.service_status("broken"),
-            Some(McpServiceStatus::Failed)
+            client_set.services(),
+            vec![
+                McpServiceSummary {
+                    name: "broken".into(),
+                    status: McpServiceStatus::Failed,
+                    last_error: Some("boom".into()),
+                },
+                McpServiceSummary {
+                    name: "docs".into(),
+                    status: McpServiceStatus::Ready,
+                    last_error: None,
+                },
+            ]
+        );
+
+        let snapshots = client_set.snapshots();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| (snapshot.name.as_str(), snapshot.status))
+                .collect::<Vec<_>>(),
+            vec![
+                ("broken", McpServiceStatus::Failed),
+                ("docs", McpServiceStatus::Ready),
+            ]
+        );
+        assert_eq!(snapshots[0].last_error.as_deref(), Some("boom"));
+        assert!(snapshots[0].catalog.tools.is_empty());
+        assert_eq!(
+            snapshots[1].catalog.tools,
+            vec![server_tool("docs", "search"), server_tool("docs", "read")]
+        );
+        assert_eq!(
+            snapshots[1].catalog.resources,
+            vec![resource("file:///docs.md", "docs")]
+        );
+        assert_eq!(
+            snapshots[1].catalog.resource_templates,
+            vec![resource_template("file:///{path}", "file")]
+        );
+        assert_eq!(
+            snapshots[1].catalog.prompts,
+            vec![Prompt::new("explain", Some("Explain"), None)]
+        );
+
+        let mut ready_tools = client_set.ready_server_tools();
+        ready_tools.sort_by(|left, right| left.server_tool_name.cmp(&right.server_tool_name));
+        assert_eq!(
+            ready_tools,
+            vec![server_tool("docs", "read"), server_tool("docs", "search")]
+        );
+        let catalog = client_set
+            .catalog("docs")
+            .expect("ready catalog should exist");
+        assert_eq!(catalog.tools, snapshots[1].catalog.tools);
+    }
+
+    #[tokio::test]
+    async fn ready_client_routes_calls() {
+        let client_set = client_set_with_services(vec![ready_service(
+            "docs",
+            Arc::new(CatalogClient {
+                output: McpCallOutput {
+                    content: r#"{"content":[{"type":"text","text":"ok"}]}"#.into(),
+                    is_error: false,
+                },
+                ..CatalogClient::default()
+            }),
+            McpCatalog::default(),
+        )]);
+
+        assert_eq!(
+            client_set
+                .call_tool(
+                    "docs",
+                    "search",
+                    Map::from_iter([("query".into(), serde_json::json!("rust"))]),
+                )
+                .await,
+            Ok(McpCallOutput {
+                content: r#"{"content":[{"type":"text","text":"ok"}]}"#.into(),
+                is_error: false,
+            })
+        );
+        let resource = client_set
+            .read_resource("docs", "file:///docs.md")
+            .await
+            .expect("resource call should be routed");
+        assert_eq!(
+            resource,
+            ReadResourceResult::new(vec![ResourceContents::text("content", "file:///docs.md",)])
+        );
+        assert_eq!(
+            client_set
+                .get_prompt(
+                    "docs",
+                    "explain",
+                    Some(Map::from_iter([(
+                        "tone".into(),
+                        serde_json::json!("short")
+                    )])),
+                )
+                .await,
+            Ok(GetPromptResult::new(vec![]))
+        );
+    }
+
+    #[tokio::test]
+    async fn ready_client_propagates_errors() {
+        let client_set = client_set_with_services(vec![ready_service(
+            "docs",
+            Arc::new(RejectingClient),
+            McpCatalog::default(),
+        )]);
+
+        assert_eq!(
+            client_set.call_tool("docs", "search", Map::new()).await,
+            Err("tool call rejected".into())
+        );
+        assert_eq!(
+            client_set.read_resource("docs", "file:///docs.md").await,
+            Err("resource read rejected".into())
+        );
+        assert_eq!(
+            client_set.get_prompt("docs", "explain", None).await,
+            Err("prompt read rejected".into())
         );
     }
 
     #[test]
-    fn call_output_marks_mcp_error_results_as_tool_errors() {
-        let result = CallToolResult::structured_error(serde_json::json!({"message": "failed"}));
+    fn call_results_preserve_error_flag() {
+        let cases = [
+            (
+                CallToolResult::structured(serde_json::json!({"answer": 42})),
+                false,
+                serde_json::json!({
+                    "content": [{"type": "text", "text": "{\"answer\":42}"}],
+                    "structuredContent": {"answer": 42},
+                    "isError": false
+                }),
+            ),
+            (
+                CallToolResult::structured_error(serde_json::json!({"message": "failed"})),
+                true,
+                serde_json::json!({
+                    "content": [{"type": "text", "text": "{\"message\":\"failed\"}"}],
+                    "structuredContent": {"message": "failed"},
+                    "isError": true
+                }),
+            ),
+            (
+                CallToolResult::default(),
+                false,
+                serde_json::json!({"content": []}),
+            ),
+        ];
 
-        let output = call_output_from_result(result);
+        for (result, expected_error, expected_content) in cases {
+            let output = call_output_from_result(result);
 
-        assert!(output.is_error);
-        assert!(output.content.contains("structuredContent"));
+            assert_eq!(output.is_error, expected_error);
+            assert_eq!(
+                serde_json::from_str::<Value>(&output.content)
+                    .expect("serialized tool output should be JSON"),
+                expected_content
+            );
+        }
     }
 }
