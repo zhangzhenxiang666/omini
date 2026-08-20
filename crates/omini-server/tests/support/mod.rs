@@ -285,3 +285,4 @@ fn spawn_daemon(root: &TestTempDir) -> Child {
         .spawn()
         .expect("daemon process should start")
 }
+pub mod store;

@@ -14,13 +14,13 @@ mod app;
 mod daemon;
 mod event;
 mod git;
-mod history;
+pub mod history;
 mod logging;
 pub mod process;
 mod project;
 mod routes;
 mod runtime_state;
-mod store;
+pub mod store;
 mod thread;
 mod ws;
 

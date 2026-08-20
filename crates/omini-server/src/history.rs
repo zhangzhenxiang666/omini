@@ -14,7 +14,7 @@ use omini_domain::events::{AgentTaskInfo, AgentTaskSnapshot};
 use omini_domain::message::{Message, Role};
 
 /// 加载一个线程的消息历史，跳过无法解析的损坏记录以保证线程仍可打开。
-pub(crate) async fn load_messages(
+pub async fn load_messages(
     db: &Database,
     thread_id: &str,
     thread_dir: &ThreadDir,
@@ -108,7 +108,7 @@ pub(crate) async fn load_messages(
 }
 
 /// 加载父线程下的子 agent 历史，并恢复成已完成的 snapshot。
-pub(crate) async fn load_agent_tasks_for_thread(
+pub async fn load_agent_tasks_for_thread(
     db: &Database,
     thread_id: &str,
     project: &ProjectDir,
