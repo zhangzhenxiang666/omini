@@ -69,6 +69,7 @@ impl ThreadRuntime {
     #[cfg(test)]
     pub(crate) fn record_runtime_event_for_test(&self, kind: &str) {
         use crate::event::replay::SequencedRuntimeEvent;
+        use chrono::TimeZone;
 
         let event = client_proto::RuntimeEvent::new(match kind {
             "run_started" => client_proto::TypedRuntimeEvent::RunStarted,
@@ -78,7 +79,12 @@ impl ThreadRuntime {
         self.status_projection
             .lock()
             .expect("status projection lock poisoned")
-            .record_event(&event, Utc::now());
+            .record_event(
+                &event,
+                Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
+                    .single()
+                    .expect("fixed test time should be valid"),
+            );
         let _ = self
             .runtime_event_tx
             .send(SequencedRuntimeEvent { seq: 0, event });

@@ -494,9 +494,16 @@ mod tests {
 
     use super::*;
     use crate::event::replay::SequencedRuntimeEvent;
+    use chrono::TimeZone;
     use omini_domain::events as event_types;
     use omini_domain::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::mcp::RuntimeMcpToolSnapshot;
+
+    fn fixed_time() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
+            .single()
+            .expect("fixed test time should be valid")
+    }
 
     fn sequenced(seq: u64, kind: &str) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
@@ -602,7 +609,7 @@ mod tests {
                     },
                 ),
             ),
-            Utc::now(),
+            fixed_time(),
         );
 
         assert_eq!(
@@ -610,7 +617,7 @@ mod tests {
             domain::events::ActiveProfile::Plan
         );
         assert_eq!(
-            status_snapshot(&projection, Utc::now()).active_profile,
+            status_snapshot(&projection, fixed_time()).active_profile,
             client_proto::ActiveProfile::Plan
         );
     }
@@ -618,7 +625,7 @@ mod tests {
     #[test]
     fn runtime_status_projection_tracks_pending_plan_approval() {
         let mut projection = RuntimeStatusProjection::default();
-        let now = Utc::now();
+        let now = fixed_time();
 
         projection.record_event(
             &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::PlanSubmitted(
@@ -663,7 +670,7 @@ mod tests {
     #[test]
     fn runtime_status_tracks_query_state_and_elapsed_time() {
         let mut projection = RuntimeStatusProjection::default();
-        let started_at = Utc::now();
+        let started_at = fixed_time();
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(42));
@@ -731,7 +738,7 @@ mod tests {
     #[test]
     fn runtime_status_keeps_full_agent_pause_after_parent_run_finishes() {
         let mut projection = RuntimeStatusProjection::default();
-        let now = Utc::now();
+        let now = fixed_time();
         let pause = event_types::ToolPauseRequest {
             tool_use_id: "agent_1:tool_1".to_string(),
             preview_tool_use_id: Some("tool_1".to_string()),
@@ -784,7 +791,7 @@ mod tests {
     #[test]
     fn runtime_status_resumes_elapsed_after_all_pending_pauses_finish() {
         let mut projection = RuntimeStatusProjection::default();
-        let started_at = Utc::now();
+        let started_at = fixed_time();
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         projection.record_event(
@@ -832,7 +839,7 @@ mod tests {
     #[test]
     fn runtime_status_tracks_compact_activity() {
         let mut projection = RuntimeStatusProjection::default();
-        let started_at = Utc::now();
+        let started_at = fixed_time();
 
         projection.record_event(
             &client_proto::RuntimeEvent::new(
@@ -880,7 +887,7 @@ mod tests {
     #[test]
     fn runtime_status_includes_capability_snapshots() {
         let projection = RuntimeStatusProjection::default();
-        let now = Utc::now();
+        let now = fixed_time();
         let status = projection.to_protocol(
             "s1",
             RuntimeStatusSnapshotContext {
@@ -940,7 +947,7 @@ mod tests {
     #[test]
     fn runtime_status_tracks_agent_task_tools_through_active_tools() {
         let mut projection = RuntimeStatusProjection::default();
-        let started_at = Utc::now();
+        let started_at = fixed_time();
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         projection.record_event(

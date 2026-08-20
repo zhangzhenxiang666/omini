@@ -1878,19 +1878,51 @@ fn extract_message_text(content_json: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use omini_domain::message::{ImageSource, ImageSourceType, TextBlock};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-    async fn temp_db() -> (Database, ProjectDir) {
-        let root = std::env::temp_dir().join(format!("omini-db-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        let db = Database::open(&root.join("omini.sqlite")).await.unwrap();
-        let now = Utc::now();
+    struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        fn new() -> Self {
+            let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "omini-server-store-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).expect("test root should be created");
+            Self { path }
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn fixed_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
+            .single()
+            .expect("fixed test time should be valid")
+    }
+
+    async fn temp_db() -> (Database, ProjectDir, TestRoot) {
+        let root = TestRoot::new();
+        let db = Database::open(&root.path.join("omini.sqlite"))
+            .await
+            .unwrap();
+        let now = fixed_time();
         db.create_project(&Project {
             id: TEST_PROJECT_ID.to_string(),
             name: "test project".to_string(),
-            path: root.join("cwd").display().to_string(),
+            path: root.path.join("cwd").display().to_string(),
             storage_key: "test-project".to_string(),
             created_at: now,
             updated_at: now,
@@ -1898,11 +1930,11 @@ mod tests {
         })
         .await
         .unwrap();
-        (db, ProjectDir::from_path(root.join("project")))
+        (db, ProjectDir::from_path(root.path.join("project")), root)
     }
 
     fn test_thread(id: &str) -> Thread {
-        let now = Utc::now();
+        let now = fixed_time();
         Thread {
             id: id.to_string(),
             project_id: TEST_PROJECT_ID.to_string(),
@@ -1924,7 +1956,7 @@ mod tests {
     }
 
     fn test_agent_task(task_id: &str, thread_id: &str, owner_thread_id: &str) -> AgentTaskInfo {
-        let now = Utc::now();
+        let now = fixed_time();
         AgentTaskInfo {
             task_id: task_id.to_string(),
             thread_id: thread_id.to_string(),
@@ -1946,7 +1978,7 @@ mod tests {
     }
 
     fn test_agent_thread(id: &str, parent_thread_id: &str) -> ThreadRecord {
-        let now = Utc::now();
+        let now = fixed_time();
         ThreadRecord {
             id: id.to_string(),
             parent_thread_id: Some(parent_thread_id.to_string()),
@@ -1968,7 +2000,7 @@ mod tests {
 
     #[test]
     fn runtime_child_thread_is_bound_to_server_project_id() {
-        let now = Utc::now();
+        let now = fixed_time();
         let runtime = ThreadRecord {
             id: "child".to_string(),
             parent_thread_id: Some("parent".to_string()),
@@ -1996,11 +2028,11 @@ mod tests {
 
     #[tokio::test]
     async fn llm_context_loads_only_current_version_and_keeps_old_version() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("t1").unwrap();
         db.create_thread(&test_thread("t1")).await.unwrap();
         let first = Message::from_user_text("old".to_string());
-        db.append_llm_message("t1", &first, Utc::now(), &project.thread("t1"))
+        db.append_llm_message("t1", &first, fixed_time(), &project.thread("t1"))
             .await
             .unwrap();
         let next = vec![
@@ -2008,7 +2040,7 @@ mod tests {
             first.clone(),
         ];
         assert_eq!(
-            db.replace_llm_context("t1", 1, &next, Utc::now(), &project.thread("t1"))
+            db.replace_llm_context("t1", 1, &next, fixed_time(), &project.thread("t1"))
                 .await
                 .unwrap(),
             2
@@ -2030,7 +2062,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_task_creation_is_atomic_and_startup_recovers_terminal_statuses() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("owner").unwrap();
         db.create_thread(&test_thread("owner")).await.unwrap();
         let initial = Message::from_user_text("do work".to_string());
@@ -2061,7 +2093,7 @@ mod tests {
         )
         .await
         .unwrap();
-        db.set_agent_tasks_cancelling(&["task_cancelling".to_string()], Utc::now())
+        db.set_agent_tasks_cancelling(&["task_cancelling".to_string()], fixed_time())
             .await
             .unwrap();
 
@@ -2102,7 +2134,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_task_notification_is_inserted_exactly_once() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("owner").unwrap();
         db.create_thread(&test_thread("owner")).await.unwrap();
         let task = test_agent_task("task_done", "agent_done", "owner");
@@ -2114,7 +2146,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let completed_at = Utc::now();
+        let completed_at = fixed_time();
         db.finish_agent_task(
             "task_done",
             AgentTaskStatus::Completed,
@@ -2131,7 +2163,7 @@ mod tests {
             Role::Assistant,
             vec![ContentBlock::from_text("before notification".to_string())],
         );
-        db.append_llm_message("owner", &before, Utc::now(), &project.thread("owner"))
+        db.append_llm_message("owner", &before, fixed_time(), &project.thread("owner"))
             .await
             .unwrap();
         let notification = omini_domain::display::AgentTaskNotification {
@@ -2159,7 +2191,7 @@ mod tests {
             Role::Assistant,
             vec![ContentBlock::from_text("after notification".to_string())],
         );
-        db.append_llm_message("owner", &after, Utc::now(), &project.thread("owner"))
+        db.append_llm_message("owner", &after, fixed_time(), &project.thread("owner"))
             .await
             .unwrap();
 
@@ -2195,7 +2227,7 @@ mod tests {
 
     #[tokio::test]
     async fn agent_compact_advances_llm_version_without_rewriting_ui_history() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("owner").unwrap();
         db.create_thread(&test_thread("owner")).await.unwrap();
         let initial = Message::from_user_text("do work".to_string());
@@ -2218,7 +2250,7 @@ mod tests {
                 "agent_compact",
                 1,
                 &compacted,
-                Utc::now(),
+                fixed_time(),
                 &project.thread("agent_compact"),
             )
             .await
@@ -2249,7 +2281,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_agent_usage_updates_totals_without_replacing_main_context_usage() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("owner").unwrap();
         db.create_thread(&test_thread("owner")).await.unwrap();
         let main_usage = Usage {
@@ -2283,7 +2315,7 @@ mod tests {
 
     #[tokio::test]
     async fn images_are_raw_assets_and_rehydrate_to_equivalent_blocks() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("t1").unwrap();
         db.create_thread(&test_thread("t1")).await.unwrap();
         let raw = b"not-really-a-png";
@@ -2295,7 +2327,7 @@ mod tests {
             },
         });
         let message = Message::new(Role::User, vec![image.clone()]);
-        db.append_llm_message("t1", &message, Utc::now(), &project.thread("t1"))
+        db.append_llm_message("t1", &message, fixed_time(), &project.thread("t1"))
             .await
             .unwrap();
         let loaded = db
@@ -2319,7 +2351,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_reuses_existing_media_asset() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("t1").unwrap();
         db.create_thread(&test_thread("t1")).await.unwrap();
         let image_message = Message::new(
@@ -2333,7 +2365,7 @@ mod tests {
             })],
         );
         let thread_dir = project.thread("t1");
-        db.append_llm_message("t1", &image_message, Utc::now(), &thread_dir)
+        db.append_llm_message("t1", &image_message, fixed_time(), &thread_dir)
             .await
             .unwrap();
         db.replace_llm_context(
@@ -2343,7 +2375,7 @@ mod tests {
                 Message::from_user_text("summary".to_string()),
                 image_message,
             ],
-            Utc::now(),
+            fixed_time(),
             &thread_dir,
         )
         .await
@@ -2366,14 +2398,14 @@ mod tests {
 
     #[tokio::test]
     async fn context_version_conflict_cleans_unreferenced_sidecars() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("t1").unwrap();
         db.create_thread(&test_thread("t1")).await.unwrap();
         let thread_dir = project.thread("t1");
         let message = Message::from_user_text("x".repeat(CONTENT_SIZE_THRESHOLD + 1));
 
         let error = db
-            .replace_llm_context("t1", 99, &[message], Utc::now(), &thread_dir)
+            .replace_llm_context("t1", 99, &[message], fixed_time(), &thread_dir)
             .await
             .unwrap_err();
 
@@ -2390,14 +2422,14 @@ mod tests {
 
     #[tokio::test]
     async fn large_compact_summary_uses_sidecar_and_keeps_model_snapshot() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("t1").unwrap();
         db.create_thread(&test_thread("t1")).await.unwrap();
         let summary = DisplaySummary {
             id: "summary-1".to_string(),
             title: "Compacted".to_string(),
             markdown: "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
-            created_at: Utc::now(),
+            created_at: fixed_time(),
         };
         db.apply_persistence_event(
             &RuntimePersistenceEvent::InsertCompactSummaryMessage {
@@ -2431,7 +2463,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_thread_tree_removes_rows_and_private_directories() {
-        let (db, project) = temp_db().await;
+        let (db, project, _root) = temp_db().await;
         project.create_thread("parent").unwrap();
         project.create_thread("child").unwrap();
         db.create_thread(&test_thread("parent")).await.unwrap();
@@ -2442,7 +2474,7 @@ mod tests {
         db.append_llm_message(
             "child",
             &Message::from_user_text("x".repeat(CONTENT_SIZE_THRESHOLD + 1)),
-            Utc::now(),
+            fixed_time(),
             &project.thread("child"),
         )
         .await
@@ -2458,8 +2490,8 @@ mod tests {
 
     #[test]
     fn threshold_is_strictly_greater_than_64_kib() {
-        let root = std::env::temp_dir().join(format!("omini-block-test-{}", Uuid::new_v4()));
-        let thread = ThreadDir::from_path(root);
+        let root = TestRoot::new();
+        let thread = ThreadDir::from_path(root.path.join("thread"));
         fs::create_dir_all(thread.path()).unwrap();
         let at_limit = ContentBlock::Text(TextBlock {
             text: "x".repeat(CONTENT_SIZE_THRESHOLD),

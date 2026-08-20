@@ -8,18 +8,6 @@ use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::path::Path;
 
-#[cfg(test)]
-pub fn submit_run_command_from_protocol_request(
-    request: client_proto::SubmitRunRequest,
-) -> runtime_contract::thread::SubmitRunCommand {
-    runtime_contract::thread::SubmitRunCommand {
-        draft: user_input_from_protocol(request.input, None)
-            .expect("uploaded attachments require a thread directory"),
-        client_echo_id: request.client_echo_id,
-        mode: run_input_mode_from_protocol(request.mode),
-    }
-}
-
 pub fn submit_run_command_from_protocol_request_for_thread(
     request: client_proto::SubmitRunRequest,
     thread_dir: &ThreadDir,
@@ -613,29 +601,34 @@ mod tests {
     }
 
     #[test]
-    fn submit_run_command_from_protocol_maps_input_and_mode() {
-        let command = submit_run_command_from_protocol_request(client_proto::SubmitRunRequest {
-            input: client_proto::UserInput {
-                text: "open @src/lib.rs".to_string(),
-                context_refs: Some(vec![
-                    client_proto::ContextRef::File {
-                        path: "src/lib.rs".to_string(),
-                        label: None,
-                    },
-                    client_proto::ContextRef::Url {
-                        url: "https://example.com".to_string(),
-                        label: None,
-                    },
-                ]),
-                attachments: Some(vec![client_proto::AttachmentRef::LocalPath {
-                    path: "/tmp/diagram.png".to_string(),
-                    mime_type: Some("image/png".to_string()),
-                    name: None,
-                }]),
+    fn submit_run_maps_input_with_thread_context() {
+        let thread_dir = ThreadDir::from_path("/tmp/omini-server-bridge-thread".into());
+        let command = submit_run_command_from_protocol_request_for_thread(
+            client_proto::SubmitRunRequest {
+                input: client_proto::UserInput {
+                    text: "open @src/lib.rs".to_string(),
+                    context_refs: Some(vec![
+                        client_proto::ContextRef::File {
+                            path: "src/lib.rs".to_string(),
+                            label: None,
+                        },
+                        client_proto::ContextRef::Url {
+                            url: "https://example.com".to_string(),
+                            label: None,
+                        },
+                    ]),
+                    attachments: Some(vec![client_proto::AttachmentRef::LocalPath {
+                        path: "/tmp/diagram.png".to_string(),
+                        mime_type: Some("image/png".to_string()),
+                        name: None,
+                    }]),
+                },
+                client_echo_id: Some("echo-1".to_string()),
+                mode: client_proto::RunInputMode::Intervene,
             },
-            client_echo_id: Some("echo-1".to_string()),
-            mode: client_proto::RunInputMode::Intervene,
-        });
+            &thread_dir,
+        )
+        .expect("local attachments do not require an existing file");
 
         assert_eq!(
             command.mode,

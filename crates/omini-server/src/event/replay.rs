@@ -566,7 +566,7 @@ fn agent_delta_bytes(events: &[SequencedRuntimeEvent]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
 
     use super::*;
     use crate::event::bridge::{
@@ -747,8 +747,14 @@ mod tests {
             model_ref: (role == "assistant").then(|| "test/model".to_string()),
             blocks,
             kind: "normal".to_string(),
-            created_at: chrono::Utc::now(),
+            created_at: fixed_time(),
         }
+    }
+
+    fn fixed_time() -> chrono::DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
+            .single()
+            .expect("fixed test time should be valid")
     }
 
     #[test]
@@ -856,7 +862,7 @@ mod tests {
                 title: "Plan".to_string(),
                 markdown: "# Plan".to_string(),
                 path: PathBuf::new(),
-                created_at: Utc::now(),
+                created_at: fixed_time(),
             }),
         ));
 

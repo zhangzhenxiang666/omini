@@ -198,12 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn route_tree_builds() {
-        let _ = v1_routes();
-    }
-
-    #[test]
-    fn shutdown_trigger_is_idempotent() {
+    fn shutdown_trigger_repeated_call_reports_single_delivery() {
         let (trigger, mut rx) = shutdown_channel();
 
         assert!(trigger.trigger());

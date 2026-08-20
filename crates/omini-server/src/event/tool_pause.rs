@@ -69,7 +69,8 @@ mod tests {
     use omini_domain::message::ToolResultBlock;
 
     #[test]
-    fn tool_pause_requested_event_adds_pending_resolution_id() {
+    fn pending_pauses_deduplicate_and_clear() {
+        let pending = Arc::new(Mutex::new(HashSet::new()));
         let event = runtime_contract::RuntimeToServerEvent::ToolPauseRequested(ToolPauseRequest {
             tool_use_id: "pause_1".to_string(),
             preview_tool_use_id: None,
@@ -82,24 +83,32 @@ mod tests {
             }),
         });
 
-        assert_eq!(
-            tool_pause_update(&event),
-            Some(ToolPauseUpdate::Add("pause_1".to_string()))
-        );
-    }
+        apply_tool_pause_update(&pending, &event);
+        apply_tool_pause_update(&pending, &event);
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert!(pending.lock().unwrap().contains("pause_1"));
 
-    #[test]
-    fn tool_result_event_removes_pending_resolution_id() {
-        let event = runtime_contract::RuntimeToServerEvent::ToolResult(ToolResultBlock {
+        let result = runtime_contract::RuntimeToServerEvent::ToolResult(ToolResultBlock {
             tool_use_id: "pause_1".to_string(),
             content: "done".to_string(),
             is_error: false,
             metadata: None,
         });
+        apply_tool_pause_update(&pending, &result);
 
-        assert_eq!(
-            tool_pause_update(&event),
-            Some(ToolPauseUpdate::Remove(vec!["pause_1".to_string()]))
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pending_pauses_ignore_unrelated_events() {
+        let pending = Arc::new(Mutex::new(HashSet::from(["pause_1".to_string()])));
+
+        apply_tool_pause_update(
+            &pending,
+            &runtime_contract::RuntimeToServerEvent::RunStarted,
         );
+
+        assert_eq!(pending.lock().unwrap().len(), 1);
+        assert!(pending.lock().unwrap().contains("pause_1"));
     }
 }

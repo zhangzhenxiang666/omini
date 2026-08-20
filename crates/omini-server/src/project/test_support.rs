@@ -1,7 +1,7 @@
 use crate::event::replay::SequencedRuntimeEvent;
 use crate::project::{ProjectManager, load_validated_config};
 use crate::store::{self as store_model, Database};
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use omini_config::OminiRoot;
 use omini_config::project::ProjectDir;
 use omini_protocol as client_proto;
@@ -11,6 +11,12 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 pub(super) const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+fn fixed_time() -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
+        .single()
+        .expect("fixed test time should be valid")
+}
 
 pub(super) struct TestRoot {
     pub(super) path: PathBuf,
@@ -73,27 +79,6 @@ thinking = true
     fs::write(root.join("config.toml"), content).expect("config should be written");
 }
 
-pub(super) fn write_project_config(cwd: &Path) {
-    let project_config_dir = cwd.join(".omini");
-    fs::create_dir_all(&project_config_dir).expect("project config dir should be created");
-    fs::write(
-        project_config_dir.join("config.toml"),
-        r#"
-[providers.anthropic]
-name = "Anthropic"
-endpoint = "anthropic"
-base_url = "https://project-anthropic.example"
-api_key = "project-anthropic-key"
-
-[providers.anthropic.models.claude-project]
-name = "Claude Project"
-limit = 4000
-thinking = true
-"#,
-    )
-    .expect("project config should be written");
-}
-
 pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectManager, ProjectDir) {
     write_config(root, false);
     fs::create_dir_all(cwd).expect("cwd should be created");
@@ -108,7 +93,7 @@ pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectMana
     let db = Database::open(&db_path)
         .await
         .expect("database should open");
-    let now = Utc::now();
+    let now = fixed_time();
     db.create_project(&store_model::Project {
         id: TEST_PROJECT_ID.to_string(),
         name: "test project".to_string(),
@@ -156,7 +141,7 @@ pub(super) async fn recv_runtime_event_kind(
 }
 
 pub(super) fn test_thread(id: &str) -> store_model::Thread {
-    let now = Utc::now();
+    let now = fixed_time();
     store_model::Thread {
         id: id.to_string(),
         project_id: TEST_PROJECT_ID.to_string(),

@@ -150,6 +150,19 @@ mod tests {
     }
 
     #[test]
+    fn controller_release_promotes_remaining_client() {
+        let mut presence = ClientPresence::default();
+        presence.register("client_1".to_string());
+        presence.register("client_2".to_string());
+
+        let (controller_id, changed) = presence.release("client_1");
+
+        assert!(changed);
+        assert_eq!(controller_id.as_deref(), Some("client_2"));
+        assert_eq!(presence.clients.get("client_1"), Some(&1));
+    }
+
+    #[test]
     fn repeated_connections_keep_client_online_until_last_disconnect() {
         let mut presence = ClientPresence::default();
         presence.register("client_1".to_string());
