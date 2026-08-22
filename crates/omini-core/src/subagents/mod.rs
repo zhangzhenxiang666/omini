@@ -805,9 +805,7 @@ Help in this project.
         );
         assert_eq!(general.tool_policy.allow, None);
         assert_eq!(general.tool_policy.deny, None);
-        // general 的 instructions 就是 agents/general.md 的全文
-        let expected = include_str!("agents/general.md");
-        assert_eq!(general.instructions, expected.trim());
+        assert_eq!(general.instructions, builtins::GENERAL_INSTRUCTIONS.trim());
         // Task Routing 段已删除(避免引导 subagent 再去用 explorer)
         assert!(!general.instructions.contains("## Task Routing"));
         assert!(

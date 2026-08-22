@@ -1,7 +1,7 @@
 use super::{AgentSource, AgentSpec, AgentToolPolicy};
 
 const EXPLORER_INSTRUCTIONS: &str = include_str!("agents/explorer.txt");
-const GENERAL_INSTRUCTIONS: &str = include_str!("agents/general.txt");
+pub(super) const GENERAL_INSTRUCTIONS: &str = include_str!("agents/general.txt");
 
 pub(super) fn built_in_agents() -> Vec<AgentSpec> {
     vec![explorer_agent(), general_agent()]
