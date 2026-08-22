@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 dirs.workspace = true
+indexmap.workspace = true
 omini-domain.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -13,3 +14,4 @@ thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true

@@ -259,8 +259,7 @@ mod tests {
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, ThreadDir};
-    use omini_config::{ModelEntry, ModelTiers, ProviderConfig, Settings, UserConfig};
-    use omini_domain::config::ProviderEndpointKind;
+    use omini_config::{RawConfig, ResolvedConfig, Settings};
     use omini_domain::display::{
         AgentTaskNotification, AgentTaskNotificationItem, HistoryItem, UserDraft,
     };
@@ -303,43 +302,26 @@ mod tests {
         dir
     }
 
-    fn test_user_config() -> UserConfig {
-        let mut models = HashMap::new();
-        models.insert(
-            "gpt-test".to_string(),
-            ModelEntry {
-                name: None,
-                limit: Some(256000),
-                thinking: Some(true),
-                input_modalities: None,
-                headers: None,
-                body: None,
-            },
-        );
+    fn test_user_config() -> ResolvedConfig {
+        toml::from_str::<RawConfig>(
+            r#"
+[providers.openai]
+name = "OpenAI"
+protocol = "openai"
+base_url = "https://openai.example"
+api_key = "test-key"
 
-        let mut providers = HashMap::new();
-        providers.insert(
-            "openai".to_string(),
-            ProviderConfig {
-                name: Some("OpenAI".to_string()),
-                endpoint: ProviderEndpointKind::OpenAI,
-                base_url: "https://openai.example".to_string(),
-                api_key: "test-key".to_string(),
-                models: Some(models),
-            },
-        );
+[providers.openai.models.gpt-test]
 
-        UserConfig {
-            providers,
-            language: None,
-            permissions: None,
-            compact: None,
-            mcp_servers: HashMap::new(),
-            model_tiers: ModelTiers::default(),
-        }
+thinking = true
+"#,
+        )
+        .expect("test config should parse")
+        .resolve()
+        .expect("test config should resolve")
     }
 
-    fn settings_for_cwd(config: &UserConfig, cwd: &Path) -> Settings {
+    fn settings_for_cwd(config: &ResolvedConfig, cwd: &Path) -> Settings {
         let mut settings = config
             .to_settings(None, None, None)
             .expect("failed to build settings");

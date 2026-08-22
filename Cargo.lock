@@ -1854,12 +1854,14 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "dirs",
+ "indexmap",
  "omini-domain",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1889,6 +1891,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-width",
+ "url",
  "uuid",
 ]
 
@@ -1948,6 +1951,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4029,6 +4033,7 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
+ "serde_derive",
 ]
 
 [[package]]

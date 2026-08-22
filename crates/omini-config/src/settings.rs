@@ -1,8 +1,8 @@
 use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind, ThinkingEffort};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use url::Url;
 
 /// Provider-neutral 抽象模型档位。
 ///
@@ -62,31 +62,6 @@ impl ModelTiers {
     }
 }
 
-/// Project overlay 使用的整体替换变体,语义与 `PartialCompactConfig` 一致:
-/// 项目级只声明需要覆盖的 slot,未声明的 slot 保留用户级。
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PartialModelTiers {
-    pub small: Option<ModelTierEntry>,
-    pub standard: Option<ModelTierEntry>,
-    pub large: Option<ModelTierEntry>,
-}
-
-impl PartialModelTiers {
-    /// 子表整体替换:任意 slot 存在就替换该 slot,其余保留 target 现状。
-    pub fn merge_into(self, target: &mut ModelTiers) {
-        if let Some(v) = self.small {
-            target.small = Some(v);
-        }
-        if let Some(v) = self.standard {
-            target.standard = Some(v);
-        }
-        if let Some(v) = self.large {
-            target.large = Some(v);
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawPermissionConfig {
     #[serde(default)]
@@ -102,14 +77,14 @@ pub struct ProviderProfile {
     pub name: String,
     pub endpoint: ProviderEndpointKind,
     pub api_key: String,
-    pub base_url: String,
+    pub base_url: Url,
     pub models: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Settings {
     pub api_key: String,
-    pub base_url: String,
+    pub base_url: Url,
     pub model: String,
     pub endpoint: ProviderEndpointKind,
     pub providers: HashMap<String, ProviderProfile>,
@@ -452,6 +427,32 @@ fn default_max_consecutive_failures() -> usize {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    #[error("provider id cannot be empty")]
+    InvalidProviderId,
+    #[error("model id cannot be empty for provider '{provider}'")]
+    InvalidModelId { provider: String },
+    #[error("provider '{provider}' must set '{field}'")]
+    MissingProviderField {
+        provider: String,
+        field: &'static str,
+    },
+    #[error("provider '{provider}' has an invalid base_url: {source}")]
+    InvalidBaseUrl {
+        provider: String,
+        source: url::ParseError,
+    },
+    #[error("model '{model}' for provider '{provider}' must have a non-zero context_window")]
+    InvalidContextWindow { provider: String, model: String },
+    #[error("environment variable '{0}' is required by config")]
+    MissingEnv(String),
+    #[error("unknown provider '{0}'")]
+    UnknownProvider(String),
+    #[error("unknown model '{model}' for provider '{provider}'")]
+    UnknownModel { provider: String, model: String },
+    #[error("routing references unknown provider '{0}'")]
+    UnknownRoutingProvider(String),
+    #[error("routing references unknown model '{model}' for provider '{provider}'")]
+    UnknownRoutingModel { provider: String, model: String },
     #[error("no providers configured")]
     NoActiveProvider,
     #[error("provider '{0}' has no models configured")]
@@ -479,365 +480,6 @@ pub enum ConfigError {
     TomlSer(#[from] toml::ser::Error),
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UserConfig {
-    pub providers: HashMap<String, ProviderConfig>,
-    pub language: Option<String>,
-    pub permissions: Option<RawPermissionConfig>,
-    pub compact: Option<CompactConfig>,
-    #[serde(default)]
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    /// 可选模型分级配置;缺失 = 所有 tier fallback 当前线程模型。
-    #[serde(default)]
-    pub model_tiers: ModelTiers,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderConfig {
-    pub name: Option<String>,
-    pub endpoint: ProviderEndpointKind,
-    pub base_url: String,
-    pub api_key: String,
-    pub models: Option<HashMap<String, ModelEntry>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ModelEntry {
-    pub name: Option<String>,
-    pub limit: Option<u32>,
-    pub thinking: Option<bool>,
-    pub input_modalities: Option<Vec<InputModality>>,
-    #[serde(default)]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub body: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PartialUserConfig {
-    #[serde(default)]
-    pub providers: HashMap<String, PartialProviderConfig>,
-    pub language: Option<String>,
-    pub permissions: Option<PartialRawPermissionConfig>,
-    pub compact: Option<PartialCompactConfig>,
-    #[serde(default)]
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    pub model_tiers: Option<PartialModelTiers>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PartialProviderConfig {
-    pub name: Option<String>,
-    pub endpoint: Option<ProviderEndpointKind>,
-    pub base_url: Option<String>,
-    pub api_key: Option<String>,
-    #[serde(default)]
-    pub models: HashMap<String, PartialModelEntry>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PartialModelEntry {
-    pub name: Option<String>,
-    pub limit: Option<u32>,
-    pub thinking: Option<bool>,
-    pub input_modalities: Option<Vec<InputModality>>,
-    #[serde(default)]
-    pub headers: Option<HashMap<String, String>>,
-    #[serde(default)]
-    pub body: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PartialRawPermissionConfig {
-    pub allow: Option<Vec<String>>,
-    pub ask: Option<Vec<String>>,
-    pub deny: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PartialCompactConfig {
-    pub enabled: Option<bool>,
-    pub preserve_recent: Option<usize>,
-    pub buffer_tokens: Option<usize>,
-    pub summary_output_tokens: Option<usize>,
-    pub max_consecutive_failures: Option<usize>,
-}
-
-impl UserConfig {
-    pub fn merge_project_config(&mut self, project: PartialUserConfig) -> Result<(), ConfigError> {
-        // TODO(#15): 当前合并是“整体吞下 + 字段级覆盖”，没有 diagnostics 也没有中间快照。
-        // 后续可以加：合并过程产出 diagnostic（被覆盖/被忽略字段、来源标记），
-        // 并在 validate() 失败时返回合并上下文（用户级/项目级路径、字段来源），
-        // 避免出现不可解释的“配置被静默改写”。
-        if let Some(language) = project.language {
-            self.language = Some(language);
-        }
-        if let Some(permissions) = project.permissions {
-            let base = self.permissions.take().unwrap_or_default();
-            self.permissions = Some(permissions.merge_into(base));
-        }
-        if let Some(compact) = project.compact {
-            let base = self.compact.take().unwrap_or_default();
-            self.compact = Some(compact.merge_into(base));
-        }
-        for (name, provider) in project.providers {
-            match self.providers.get_mut(&name) {
-                Some(base) => provider.merge_into(base),
-                None => {
-                    self.providers
-                        .insert(name.clone(), provider.into_provider_config(&name)?);
-                }
-            }
-        }
-        for (name, server) in project.mcp_servers {
-            // TODO(#15): 当前同名 mcp_server 整体覆盖（plan 中明确第一版不做
-            // transport 字段级混合，避免 command/url 半合并产生非法状态）。
-            // 后续可以在引入 trusted project 机制后，再考虑按 transport 字段
-            // 拆分合并并输出 diagnostic。
-            self.mcp_servers.insert(name, server);
-        }
-        if let Some(partial) = project.model_tiers {
-            partial.merge_into(&mut self.model_tiers);
-        }
-        Ok(())
-    }
-
-    pub fn to_settings(
-        &self,
-        active_provider: Option<&str>,
-        active_model: Option<&str>,
-        thinking_effort: Option<ThinkingEffort>,
-    ) -> Result<Settings, ConfigError> {
-        let active_name = active_provider
-            .and_then(|name| self.providers.get(name))
-            .map(|_| active_provider.unwrap())
-            .or_else(|| self.providers.keys().next().map(|s| s.as_str()))
-            .ok_or(ConfigError::NoActiveProvider)?;
-        let active = &self.providers[active_name];
-
-        let mut providers = HashMap::new();
-        for (name, pc) in &self.providers {
-            let models = pc
-                .models
-                .as_ref()
-                .map(|m| {
-                    m.iter()
-                        .map(|(id, entry)| ModelInfo {
-                            id: id.clone(),
-                            name: entry.name.clone(),
-                            limit: entry.limit.unwrap_or(256000),
-                            thinking: entry.thinking.unwrap_or(false),
-                            input_modalities: entry.input_modalities.clone(),
-                            extra_headers: entry.headers.clone(),
-                            extra_body: entry.body.clone(),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            providers.insert(
-                name.clone(),
-                ProviderProfile {
-                    name: pc.name.clone().unwrap_or_else(|| name.clone()),
-                    endpoint: pc.endpoint,
-                    api_key: pc.api_key.clone(),
-                    base_url: pc.base_url.clone(),
-                    models,
-                },
-            );
-        }
-
-        let first_model = providers[active_name]
-            .models
-            .first()
-            .map(|m| m.id.clone())
-            .unwrap_or_default();
-
-        let model = active_model
-            .filter(|m| providers[active_name].models.iter().any(|mc| mc.id == *m))
-            .unwrap_or(&first_model)
-            .to_string();
-
-        let mut settings = Settings {
-            api_key: active.api_key.clone(),
-            base_url: active.base_url.clone(),
-            model,
-            endpoint: active.endpoint,
-            providers,
-            active_provider: active_name.to_owned(),
-            system_prompt: None,
-            language: self.language.clone(),
-            max_turns: None,
-            cwd: std::env::current_dir()?,
-            thinking_effort,
-            permissions: self.permissions.clone(),
-            compact: self.compact.clone().unwrap_or_default(),
-            mcp_servers: self.mcp_servers.clone(),
-            model_tiers: self.model_tiers.clone(),
-        };
-        settings.normalize_current_thinking_effort();
-        Ok(settings)
-    }
-
-    pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.providers.is_empty() {
-            return Err(ConfigError::NoActiveProvider);
-        }
-        for (name, pc) in &self.providers {
-            let has_models = pc.models.as_ref().is_some_and(|m| !m.is_empty());
-            if !has_models {
-                return Err(ConfigError::NoModels(name.clone()));
-            }
-        }
-        Ok(())
-    }
-}
-
-impl PartialProviderConfig {
-    fn merge_into(self, base: &mut ProviderConfig) {
-        if let Some(name) = self.name {
-            base.name = Some(name);
-        }
-        if let Some(endpoint) = self.endpoint {
-            base.endpoint = endpoint;
-        }
-        if let Some(base_url) = self.base_url {
-            base.base_url = base_url;
-        }
-        if let Some(api_key) = self.api_key {
-            base.api_key = api_key;
-        }
-        if !self.models.is_empty() {
-            let models = base.models.get_or_insert_with(HashMap::new);
-            for (id, model) in self.models {
-                match models.get_mut(&id) {
-                    Some(base) => model.merge_into(base),
-                    None => {
-                        models.insert(id, model.into_model_entry());
-                    }
-                }
-            }
-        }
-    }
-
-    fn into_provider_config(self, provider: &str) -> Result<ProviderConfig, ConfigError> {
-        let endpoint = self
-            .endpoint
-            .ok_or_else(|| ConfigError::ProjectProviderFieldRequired {
-                provider: provider.to_string(),
-                field: "endpoint",
-            })?;
-        let base_url = self
-            .base_url
-            .ok_or_else(|| ConfigError::ProjectProviderFieldRequired {
-                provider: provider.to_string(),
-                field: "base_url",
-            })?;
-        let api_key = self
-            .api_key
-            .ok_or_else(|| ConfigError::ProjectProviderFieldRequired {
-                provider: provider.to_string(),
-                field: "api_key",
-            })?;
-        let models = if self.models.is_empty() {
-            None
-        } else {
-            Some(
-                self.models
-                    .into_iter()
-                    .map(|(id, model)| (id, model.into_model_entry()))
-                    .collect(),
-            )
-        };
-        Ok(ProviderConfig {
-            name: self.name,
-            endpoint,
-            base_url,
-            api_key,
-            models,
-        })
-    }
-}
-
-impl PartialModelEntry {
-    fn merge_into(self, base: &mut ModelEntry) {
-        if let Some(name) = self.name {
-            base.name = Some(name);
-        }
-        if let Some(limit) = self.limit {
-            base.limit = Some(limit);
-        }
-        if let Some(thinking) = self.thinking {
-            base.thinking = Some(thinking);
-        }
-        if let Some(input_modalities) = self.input_modalities {
-            base.input_modalities = Some(input_modalities);
-        }
-        if let Some(headers) = self.headers {
-            base.headers = Some(headers);
-        }
-        if let Some(body) = self.body {
-            base.body = Some(body);
-        }
-    }
-
-    fn into_model_entry(self) -> ModelEntry {
-        ModelEntry {
-            name: self.name,
-            limit: self.limit,
-            thinking: self.thinking,
-            input_modalities: self.input_modalities,
-            headers: self.headers,
-            body: self.body,
-        }
-    }
-}
-
-impl PartialRawPermissionConfig {
-    fn merge_into(self, mut base: RawPermissionConfig) -> RawPermissionConfig {
-        // TODO(#15): 当前 allow/ask/deny 任一字段被项目设置就直接整段覆盖，
-        // 不会做“用户级 + 项目级”合并/去重，也不会校验优先级。
-        // 后续权限层（第三阶段）需要决定语义：
-        //   1) 项目级整体替换（当前行为），
-        //   2) 项目级附加到对应列表后再去重（注意 deny 永远 win），
-        //   3) 同时存在项目 .omini/permissions.toml 时的合并顺序 + diagnostic。
-        // 建议在迁出 permissions 来源发现/解析时一起决定，不要在配置层先拍板。
-        if let Some(allow) = self.allow {
-            base.allow = allow;
-        }
-        if let Some(ask) = self.ask {
-            base.ask = ask;
-        }
-        if let Some(deny) = self.deny {
-            base.deny = deny;
-        }
-        base
-    }
-}
-
-impl PartialCompactConfig {
-    fn merge_into(self, mut base: CompactConfig) -> CompactConfig {
-        if let Some(enabled) = self.enabled {
-            base.enabled = enabled;
-        }
-        if let Some(preserve_recent) = self.preserve_recent {
-            base.preserve_recent = preserve_recent;
-        }
-        if let Some(buffer_tokens) = self.buffer_tokens {
-            base.buffer_tokens = buffer_tokens;
-        }
-        if let Some(summary_output_tokens) = self.summary_output_tokens {
-            base.summary_output_tokens = summary_output_tokens;
-        }
-        if let Some(max_consecutive_failures) = self.max_consecutive_failures {
-            base.max_consecutive_failures = max_consecutive_failures;
-        }
-        base
-    }
 }
 
 pub struct OminiRoot {
@@ -879,15 +521,12 @@ impl OminiRoot {
         self.path.join("omini.db")
     }
 
-    pub fn load_config(&self) -> Result<UserConfig, ConfigError> {
+    pub fn load_config(&self) -> Result<crate::RawConfig, ConfigError> {
         let path = self.config_path();
         load_toml_file(&path)
     }
 
-    pub fn load_project_config(
-        &self,
-        cwd: &Path,
-    ) -> Result<Option<PartialUserConfig>, ConfigError> {
+    pub fn load_project_config(&self, cwd: &Path) -> Result<Option<crate::RawConfig>, ConfigError> {
         let path = self.project_config_path(cwd);
         if !path.exists() {
             return Ok(None);
@@ -895,12 +534,8 @@ impl OminiRoot {
         load_toml_file(&path).map(Some)
     }
 
-    pub fn load_config_for_cwd(&self, cwd: &Path) -> Result<UserConfig, ConfigError> {
-        let mut config = self.load_config()?;
-        if let Some(project_config) = self.load_project_config(cwd)? {
-            config.merge_project_config(project_config)?;
-        }
-        Ok(config)
+    pub fn load_config_for_cwd(&self, cwd: &Path) -> Result<crate::ResolvedConfig, ConfigError> {
+        crate::load_resolved_config_for_cwd(self, cwd)
     }
 
     pub fn projects_dir(&self) -> crate::project::ProjectsDir {
@@ -910,7 +545,7 @@ impl OminiRoot {
     pub fn init_project(
         &self,
         storage_key: &str,
-        config: &UserConfig,
+        config: &crate::ResolvedConfig,
     ) -> Result<crate::project::ProjectDir, ConfigError> {
         self.projects_dir().for_storage_key(storage_key, config)
     }

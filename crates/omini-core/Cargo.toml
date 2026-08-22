@@ -26,6 +26,7 @@ toml.workspace = true
 tracing.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 reqwest.workspace = true

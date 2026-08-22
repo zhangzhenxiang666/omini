@@ -1523,7 +1523,7 @@ mod tests {
                 name: "Test".to_string(),
                 endpoint: ProviderEndpointKind::OpenAI,
                 api_key: String::new(),
-                base_url: String::new(),
+                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
                 models: vec![ModelInfo {
                     id: model.clone(),
                     name: None,
@@ -1538,7 +1538,7 @@ mod tests {
 
         Settings {
             api_key: String::new(),
-            base_url: String::new(),
+            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
             model,
             endpoint: ProviderEndpointKind::OpenAI,
             providers,

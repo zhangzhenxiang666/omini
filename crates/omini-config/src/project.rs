@@ -1,5 +1,4 @@
-use crate::settings::ConfigError;
-use crate::settings::UserConfig;
+use crate::{ConfigError, ResolvedConfig};
 use omini_domain::config::ThinkingEffort;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -8,10 +7,9 @@ use uuid::Uuid;
 
 const MAX_STORAGE_KEY_BYTES: usize = 240;
 
-/// Builds the stable directory name used below `~/.omini/projects`.
+/// 构造 `~/.omini/projects` 下使用的稳定目录名。
 ///
-/// The readable prefix is only diagnostic. The complete project UUID is the
-/// uniqueness boundary and is never truncated.
+/// 可读前缀仅用于诊断；完整项目 UUID 是唯一性边界，永不截断。
 pub fn storage_key(path: &Path, project_id: Uuid) -> String {
     let mut readable = path
         .to_string_lossy()
@@ -58,7 +56,7 @@ impl ProjectsDir {
     pub fn for_storage_key(
         &self,
         storage_key: &str,
-        config: &UserConfig,
+        config: &ResolvedConfig,
     ) -> Result<ProjectDir, ConfigError> {
         let project_path = self.path.join(storage_key);
         fs::create_dir_all(&project_path)?;
@@ -66,17 +64,11 @@ impl ProjectsDir {
 
         if !project.state_path().exists() {
             let now = chrono::Utc::now();
-            let default_provider = config.providers.keys().next().cloned();
-            let default_model = default_provider
-                .as_ref()
-                .and_then(|name| config.providers.get(name.as_str()))
-                .and_then(|pc| pc.models.as_ref())
-                .and_then(|models| models.keys().next())
-                .cloned();
+            let selection = config.first_selection();
 
             project.save_state(&ProjectState {
-                default_provider,
-                default_model,
+                default_provider: Some(selection.active_provider),
+                default_model: Some(selection.model),
                 thinking_effort: None,
                 show_thinking_blocks: true,
                 created_at: now,

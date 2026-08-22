@@ -446,7 +446,7 @@ mod tests {
     fn test_settings() -> Settings {
         Settings {
             api_key: "test-key".to_string(),
-            base_url: String::new(),
+            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
             model: "test-model".to_string(),
             endpoint: ProviderEndpointKind::OpenAI,
             providers: HashMap::new(),
@@ -481,7 +481,7 @@ mod tests {
         LlmClient::with_http_client(
             ProviderEndpointKind::OpenAI,
             "test-key".to_string(),
-            base_url,
+            url::Url::parse(&base_url).unwrap(),
             test_http_client(),
         )
     }

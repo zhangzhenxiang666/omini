@@ -319,7 +319,7 @@ pub fn models_response_from_settings(settings: &Settings) -> client_proto::Model
             id: id.clone(),
             name: provider.name.clone(),
             endpoint: provider.endpoint,
-            base_url: provider.base_url.clone(),
+            base_url: provider.base_url.to_string(),
             models: provider
                 .models
                 .iter()
@@ -329,8 +329,8 @@ pub fn models_response_from_settings(settings: &Settings) -> client_proto::Model
                     limit: model.limit,
                     thinking: model.thinking,
                     input_modalities: model.input_modalities.clone(),
-                    extra_headers: model.extra_headers.clone(),
-                    extra_body: model.extra_body.clone(),
+                    extra_headers: None,
+                    extra_body: None,
                 })
                 .collect(),
         })

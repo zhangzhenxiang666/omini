@@ -9,42 +9,46 @@ use reqwest::Method;
 const CONFIG_WITH_ANTHROPIC: &str = r#"
 [providers.openai]
 name = "OpenAI"
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://openai.example"
 api_key = "test-key"
 
 [providers.openai.models.fast]
 name = "Fast"
-limit = 1000
+context_window = 1000
+
 thinking = false
 
 [providers.openai.models.reasoner]
 name = "Reasoner"
-limit = 2000
+context_window = 2000
+
 thinking = true
 
 [providers.anthropic]
 name = "Anthropic"
-endpoint = "anthropic"
+protocol = "anthropic"
 base_url = "https://anthropic.example"
 api_key = "anthropic-key"
 
 [providers.anthropic.models.claude-test]
 name = "Claude Test"
-limit = 3000
+context_window = 3000
+
 thinking = true
 "#;
 
 const PROJECT_CONFIG: &str = r#"
 [providers.anthropic]
 name = "Anthropic"
-endpoint = "anthropic"
+protocol = "anthropic"
 base_url = "https://project-anthropic.example"
 api_key = "project-anthropic-key"
 
 [providers.anthropic.models.claude-project]
 name = "Claude Project"
-limit = 4000
+context_window = 4000
+
 thinking = true
 "#;
 

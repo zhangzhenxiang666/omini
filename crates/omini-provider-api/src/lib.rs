@@ -8,6 +8,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+use url::Url;
 
 pub mod anthropic;
 pub mod openai;
@@ -17,12 +18,12 @@ pub mod sse;
 pub struct LlmClient {
     http_client: &'static reqwest::Client,
     api_key: String,
-    base_url: String,
+    base_url: Url,
     protocol: ProviderType,
 }
 
 impl LlmClient {
-    pub fn new(protocol: ProviderType, api_key: String, base_url: String) -> Self {
+    pub fn new(protocol: ProviderType, api_key: String, base_url: Url) -> Self {
         Self {
             http_client: http_client(),
             api_key,
@@ -35,7 +36,7 @@ impl LlmClient {
     pub fn with_http_client(
         protocol: ProviderType,
         api_key: String,
-        base_url: String,
+        base_url: Url,
         http_client: &'static reqwest::Client,
     ) -> Self {
         Self {
@@ -47,7 +48,7 @@ impl LlmClient {
     }
 
     /// 命令系统切换模型时直接替换字段
-    pub fn switch(&mut self, protocol: ProviderType, api_key: String, base_url: String) {
+    pub fn switch(&mut self, protocol: ProviderType, api_key: String, base_url: Url) {
         self.protocol = protocol;
         self.api_key = api_key;
         self.base_url = base_url;
@@ -71,6 +72,14 @@ impl LlmClient {
             }
         }
     }
+}
+
+pub(crate) fn endpoint_url(base_url: &Url, endpoint: &str) -> Result<Url, url::ParseError> {
+    let mut base_url = base_url.clone();
+    if !base_url.path().ends_with('/') {
+        base_url.set_path(&format!("{}/", base_url.path()));
+    }
+    base_url.join(endpoint)
 }
 
 #[derive(Debug, Clone)]
@@ -115,6 +124,8 @@ pub enum ApiEvent {
 /// 请求阶段错误 —— Provider 内部据此判断是否重试（429、5xx 等）
 #[derive(Debug, Error)]
 pub enum RequestError {
+    #[error("invalid provider URL: {0}")]
+    Url(#[from] url::ParseError),
     /// HTTP 传输层错误（连接被拒绝、超时、TLS 等）
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -247,4 +258,18 @@ fn proxy_from_env() -> Option<String> {
         .or_else(|_| std::env::var("all_proxy"))
         .ok()
         .filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_url;
+    use url::Url;
+
+    #[test]
+    fn endpoint_url_preserves_base_path_without_duplicate_slashes() {
+        for base in ["https://api.example/v1", "https://api.example/v1/"] {
+            let endpoint = endpoint_url(&Url::parse(base).unwrap(), "chat/completions").unwrap();
+            assert_eq!(endpoint.as_str(), "https://api.example/v1/chat/completions");
+        }
+    }
 }

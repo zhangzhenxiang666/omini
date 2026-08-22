@@ -62,7 +62,7 @@ pub fn settings(cwd: &Path, image_input: bool) -> Settings {
             name: "Test".to_string(),
             endpoint: ProviderEndpointKind::OpenAI,
             api_key: String::new(),
-            base_url: "http://127.0.0.1:9".to_string(),
+            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
             models: vec![ModelInfo {
                 id: model.clone(),
                 name: None,
@@ -77,7 +77,7 @@ pub fn settings(cwd: &Path, image_input: bool) -> Settings {
     );
     Settings {
         api_key: String::new(),
-        base_url: "http://127.0.0.1:9".to_string(),
+        base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
         model,
         endpoint: ProviderEndpointKind::OpenAI,
         providers,

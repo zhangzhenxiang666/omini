@@ -54,7 +54,7 @@ impl Drop for TestTempDir {
 pub const MINIMAL_CONFIG: &str = r#"
 [providers.openai]
 name = "OpenAI"
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://openai.example"
 api_key = "test-key"
 

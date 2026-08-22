@@ -212,7 +212,7 @@ impl ToolExecutionContext {
                 name: "Test".to_string(),
                 endpoint: ProviderEndpointKind::OpenAI,
                 api_key: String::new(),
-                base_url: String::new(),
+                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
                 models: vec![ModelInfo {
                     id: "test-model".to_string(),
                     name: None,
@@ -230,7 +230,7 @@ impl ToolExecutionContext {
             tool_name: tool_name.to_string(),
             settings: Arc::new(Settings {
                 api_key: String::new(),
-                base_url: String::new(),
+                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
                 model: "test-model".to_string(),
                 endpoint: ProviderEndpointKind::OpenAI,
                 providers,

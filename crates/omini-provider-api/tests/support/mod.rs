@@ -108,7 +108,7 @@ pub fn client(protocol: ProviderEndpointKind, base_url: &str) -> LlmClient {
     LlmClient::with_http_client(
         protocol,
         "test-api-key".to_string(),
-        base_url.to_string(),
+        url::Url::parse(base_url).unwrap(),
         test_http_client(),
     )
 }

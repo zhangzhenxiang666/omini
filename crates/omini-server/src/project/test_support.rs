@@ -43,18 +43,20 @@ pub(super) fn write_config(root: &Path, include_extra_provider: bool) {
     let mut content = r#"
 [providers.openai]
 name = "OpenAI"
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://openai.example"
 api_key = "test-key"
 
 [providers.openai.models.fast]
 name = "Fast"
-limit = 1000
+context_window = 1000
+
 thinking = false
 
 [providers.openai.models.reasoner]
 name = "Reasoner"
-limit = 2000
+context_window = 2000
+
 thinking = true
 "#
     .to_string();
@@ -64,13 +66,14 @@ thinking = true
             r#"
 [providers.anthropic]
 name = "Anthropic"
-endpoint = "anthropic"
+protocol = "anthropic"
 base_url = "https://anthropic.example"
 api_key = "anthropic-key"
 
 [providers.anthropic.models.claude-test]
 name = "Claude Test"
-limit = 3000
+context_window = 3000
+
 thinking = true
 "#,
         );

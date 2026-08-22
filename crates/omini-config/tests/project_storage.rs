@@ -2,7 +2,7 @@ mod support;
 
 use chrono::{DateTime, Utc};
 use omini_config::project::{ProjectDir, ProjectState, ProjectsDir, storage_key};
-use omini_config::{ConfigError, UserConfig};
+use omini_config::{ConfigError, RawConfig, ResolvedConfig};
 use omini_domain::config::ThinkingEffort;
 use std::path::{Path, PathBuf};
 use support::TestTempDir;
@@ -12,11 +12,11 @@ fn fixed_time(value: &str) -> DateTime<Utc> {
     value.parse().expect("fixed timestamp should parse")
 }
 
-fn single_model_config() -> UserConfig {
-    toml::from_str(
+fn single_model_config() -> ResolvedConfig {
+    toml::from_str::<RawConfig>(
         r#"
 [providers.openai]
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://openai.example"
 api_key = "key"
 
@@ -24,6 +24,8 @@ api_key = "key"
 "#,
     )
     .expect("config fixture should parse")
+    .resolve()
+    .expect("config fixture should resolve")
 }
 
 #[test]

@@ -77,7 +77,7 @@ async fn llm_client_switch_changes_protocol_for_subsequent_requests() {
     llm_client.switch(
         ProviderEndpointKind::Anthropic,
         "second-key".into(),
-        anthropic.base_url().into(),
+        url::Url::parse(anthropic.base_url()).unwrap(),
     );
     let anthropic_events = llm_client
         .invoke(request(&messages))

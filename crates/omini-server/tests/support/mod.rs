@@ -14,18 +14,20 @@ static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 pub const TEST_CONFIG: &str = r#"
 [providers.openai]
 name = "OpenAI"
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://openai.example"
 api_key = "test-key"
 
 [providers.openai.models.fast]
 name = "Fast"
-limit = 1000
+context_window = 1000
+
 thinking = false
 
 [providers.openai.models.reasoner]
 name = "Reasoner"
-limit = 2000
+context_window = 2000
+
 thinking = true
 "#;
 

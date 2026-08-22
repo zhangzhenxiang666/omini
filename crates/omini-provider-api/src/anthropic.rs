@@ -1,6 +1,6 @@
 use crate::{
     ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, api_channel,
-    send_with_retry, sse::IntoSseStream,
+    endpoint_url, send_with_retry, sse::IntoSseStream,
 };
 use omini_domain::config::ThinkingEffort;
 use omini_domain::message::{ContentBlock, Message, Role, ToolUseBlock};
@@ -20,7 +20,7 @@ static ANTHROPIC_VERSION: (http::HeaderName, http::header::HeaderValue) = (
 pub async fn invoke_anthropic(
     http_client: &reqwest::Client,
     api_key: &str,
-    base_url: &str,
+    base_url: &url::Url,
     request: ApiRequest<'_>,
 ) -> Result<ApiStream, RequestError> {
     let mut map = Map::new();
@@ -81,7 +81,7 @@ pub async fn invoke_anthropic(
     }
 
     let body = Value::Object(map);
-    let url = format!("{}/v1/messages", base_url);
+    let url = endpoint_url(base_url, "v1/messages")?;
 
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(X_API_KEY.clone(), api_key.parse().unwrap());
@@ -99,8 +99,13 @@ pub async fn invoke_anthropic(
         }
     }
 
-    let response =
-        send_with_retry(|| http_client.post(&url).headers(headers.clone()).json(&body)).await?;
+    let response = send_with_retry(|| {
+        http_client
+            .post(url.clone())
+            .headers(headers.clone())
+            .json(&body)
+    })
+    .await?;
 
     let (tx, result_stream) = api_channel(256);
 

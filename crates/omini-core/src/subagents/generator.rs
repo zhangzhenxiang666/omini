@@ -34,10 +34,13 @@ pub async fn generate_agent_draft_checked_from_settings(
         settings.api_key.clone(),
         settings.base_url.clone(),
     );
+    let model_config = settings.current_model_config();
     generate_agent_draft_checked(
         &llm_client,
         &settings.model,
         settings.thinking_effort,
+        model_config.and_then(|model| model.extra_headers.as_ref()),
+        model_config.and_then(|model| model.extra_body.as_ref()),
         description,
     )
     .await
@@ -47,6 +50,8 @@ async fn generate_agent_draft_checked(
     llm_client: &LlmClient,
     model: &str,
     thinking_effort: Option<ThinkingEffort>,
+    extra_headers: Option<&std::collections::HashMap<String, String>>,
+    extra_body: Option<&serde_json::Map<String, serde_json::Value>>,
     description: &str,
 ) -> Result<GeneratedAgentDraft, GenerateAgentDraftError> {
     let prompt = build_generate_agent_prompt(description);
@@ -64,8 +69,8 @@ async fn generate_agent_draft_checked(
         max_tokens: Some(8192),
         temperature: Some(0.2),
         thinking_effort,
-        extra_headers: None,
-        extra_body: None,
+        extra_headers,
+        extra_body,
     };
     let mut stream = llm_client
         .invoke(request)

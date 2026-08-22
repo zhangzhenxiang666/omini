@@ -38,6 +38,13 @@ pub async fn generate_thread_title(
             "tier provider {provider_key} missing after resolve"
         ))
     })?;
+    let model_config = profile
+        .models
+        .iter()
+        .find(|candidate| candidate.id == model)
+        .ok_or_else(|| {
+            TitleGenError::Request(format!("tier model {model} missing after resolve"))
+        })?;
     let llm_client = LlmClient::new(
         profile.endpoint,
         profile.api_key.clone(),
@@ -59,8 +66,8 @@ pub async fn generate_thread_title(
         max_tokens: Some(TITLE_MAX_TOKENS),
         temperature: Some(0.2),
         thinking_effort,
-        extra_headers: None,
-        extra_body: None,
+        extra_headers: model_config.extra_headers.as_ref(),
+        extra_body: model_config.extra_body.as_ref(),
     };
     let mut stream = llm_client
         .invoke(request)

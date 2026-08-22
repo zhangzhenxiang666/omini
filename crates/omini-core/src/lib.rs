@@ -537,7 +537,7 @@ fn models_snapshot_from_settings(settings: &Settings) -> thread_types::ModelsSna
             id: id.clone(),
             name: provider.name.clone(),
             endpoint: provider.endpoint,
-            base_url: provider.base_url.clone(),
+            base_url: provider.base_url.to_string(),
             models: provider.models.clone(),
         })
         .collect::<Vec<_>>();

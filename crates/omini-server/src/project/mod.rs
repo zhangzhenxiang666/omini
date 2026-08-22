@@ -1,7 +1,9 @@
 //! 项目管理器，负责项目级别的状态维护以及 thread 的管理。
 
 use crate::{store::Database, thread::ThreadRuntime};
-use omini_config::{ConfigError, OminiRoot, UserConfig, project::ProjectDir};
+use omini_config::{
+    ConfigError, OminiRoot, ResolvedConfig, load_resolved_config_for_cwd, project::ProjectDir,
+};
 use omini_core::CoreError;
 use std::{
     collections::HashMap,
@@ -78,8 +80,6 @@ impl ProjectManager {
 pub fn load_validated_config(
     root: &OminiRoot,
     cwd: &std::path::Path,
-) -> Result<UserConfig, ConfigError> {
-    let config = root.load_config_for_cwd(cwd)?;
-    config.validate()?;
-    Ok(config)
+) -> Result<ResolvedConfig, ConfigError> {
+    load_resolved_config_for_cwd(root, cwd)
 }

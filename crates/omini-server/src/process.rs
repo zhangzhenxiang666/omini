@@ -53,8 +53,7 @@ pub fn run_daemon_process(options: ProcessOptions) -> Result<(), Box<dyn std::er
 /// 加载全局配置后进入真正的 HTTP daemon；这里不处理客户端线程语义。
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = OminiRoot::init()?;
-    let config = root.load_config()?;
-    config.validate()?;
+    omini_config::load_resolved_config_for_cwd(&root, &std::env::current_dir()?)?;
     crate::serve_daemon(root).await?;
     Ok(())
 }

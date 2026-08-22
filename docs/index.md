@@ -50,7 +50,7 @@ Omini 使用多种配置文件来控制行为，支持 **用户级** 和 **项�
 mkdir -p ~/.omini
 cat > ~/.omini/config.toml << 'EOF'
 [providers.openai]
-endpoint = "openai"
+protocol = "openai"
 base_url = "https://api.openai.com/v1"
 api_key = "sk-..."
 

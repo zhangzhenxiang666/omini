@@ -1,6 +1,6 @@
 use crate::{
     ApiCompletion, ApiEvent, ApiRequest, ApiStream, FinishReason, RequestError, StreamError,
-    api_channel, send_with_retry, sse::IntoSseStream,
+    api_channel, endpoint_url, send_with_retry, sse::IntoSseStream,
 };
 use omini_domain::config::ThinkingEffort;
 use omini_domain::message::{ContentBlock, Message, Role, ToolUseBlock};
@@ -14,7 +14,7 @@ use tracing::Instrument;
 pub async fn invoke_openai(
     http_client: &reqwest::Client,
     api_key: &str,
-    base_url: &str,
+    base_url: &url::Url,
     request: ApiRequest<'_>,
 ) -> Result<ApiStream, RequestError> {
     let mut map = Map::new();
@@ -72,7 +72,7 @@ pub async fn invoke_openai(
     }
 
     let body = Value::Object(map);
-    let url = format!("{}/chat/completions", base_url);
+    let url = endpoint_url(base_url, "chat/completions")?;
 
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -92,8 +92,13 @@ pub async fn invoke_openai(
         }
     }
 
-    let response =
-        send_with_retry(|| http_client.post(&url).headers(headers.clone()).json(&body)).await?;
+    let response = send_with_retry(|| {
+        http_client
+            .post(url.clone())
+            .headers(headers.clone())
+            .json(&body)
+    })
+    .await?;
 
     let (tx, result_stream) = api_channel(256);
 
