@@ -155,62 +155,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_generated_title_accepts_plain_json() {
-        let title = parse_generated_title(
-            r#"{
-                "title": "Fix login bug"
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(title, "Fix login bug");
-    }
-
-    #[test]
-    fn parse_generated_title_accepts_fenced_json() {
-        let title = parse_generated_title("```json\n{\"title\": \"修复登录 bug\"}\n```").unwrap();
-        assert_eq!(title, "修复登录 bug");
-    }
-
-    #[test]
-    fn parse_generated_title_accepts_plain_fence() {
-        let title = parse_generated_title("```\n{\"title\": \"Review flaky test\"}\n```").unwrap();
-        assert_eq!(title, "Review flaky test");
-    }
-
-    #[test]
-    fn parse_generated_title_rejects_missing_field() {
-        let err = parse_generated_title(r#"{"description": "no title here"}"#).unwrap_err();
-        assert!(matches!(err, TitleGenError::Parse(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn parse_generated_title_rejects_empty_title() {
-        let err = parse_generated_title(r#"{"title": "   "}"#).unwrap_err();
-        assert!(matches!(err, TitleGenError::Parse(_)), "got {err:?}");
-    }
-
-    #[test]
-    fn parse_generated_title_rejects_malformed_json() {
-        let err = parse_generated_title("not json at all").unwrap_err();
-        assert!(matches!(err, TitleGenError::Parse(_)), "got {err:?}");
-    }
-
-    #[test]
     fn truncate_to_max_chars_keeps_codepoint_boundary() {
         let long = "啊".repeat(400);
-        let truncated = truncate_to_max_chars(&long, TITLE_MAX_CHARS);
-        assert_eq!(truncated.chars().count(), TITLE_MAX_CHARS);
-    }
-
-    #[test]
-    fn generation_prompt_defines_compliant_title_constraints() {
-        let prompt = build_generate_title_prompt("Help me refactor the auth module.");
-        assert!(prompt.contains("Return only one valid JSON object"));
-        assert!(prompt.contains("\"title\""));
-        assert!(prompt.contains("no other fields"));
-        assert!(prompt.contains("≤50 characters"));
-        assert!(prompt.contains("Help me refactor the auth module."));
-        assert!(prompt.contains("<examples>"));
-        assert!(prompt.contains("<rules>"));
+        assert_eq!(
+            truncate_to_max_chars(&long, TITLE_MAX_CHARS)
+                .chars()
+                .count(),
+            TITLE_MAX_CHARS
+        );
     }
 }

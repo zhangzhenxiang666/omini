@@ -89,14 +89,21 @@ mod tests {
     fn resolving_unknown_tool_pause_is_idempotent() {
         let resolver = ToolPauseResolver::new(Arc::new(Mutex::new(HashMap::new())));
 
-        let result = resolver.resolve_tool_pause(
-            "toolu_done",
-            ToolPauseResponse::Permission {
-                approved: false,
-                note: None,
-            },
+        resolver
+            .resolve_tool_pause(
+                "toolu_done",
+                ToolPauseResponse::Permission {
+                    approved: false,
+                    note: None,
+                },
+            )
+            .expect("resolving an unknown pause should be harmless");
+        assert!(
+            resolver
+                .pending_tool_pauses
+                .lock()
+                .expect("pending pauses lock")
+                .is_empty()
         );
-
-        assert!(result.is_ok());
     }
 }

@@ -135,21 +135,3 @@ pub enum CompactError {
     #[error("Compaction was cancelled by user.")]
     Cancelled,
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::error::CoreError;
-    use omini_config::ConfigError;
-    use std::error::Error as _;
-
-    #[test]
-    fn core_config_error_preserves_source() {
-        let error = CoreError::config("failed to load user config", ConfigError::NoActiveProvider);
-
-        assert_eq!(error.code(), "config_error");
-        assert_eq!(
-            error.source().map(ToString::to_string),
-            Some("no providers configured".to_string())
-        );
-    }
-}

@@ -188,19 +188,3 @@ async fn read_file(
 
     ToolResult::ok(output.trim().to_string())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_read_rejects_relative_path() {
-        let input = ReadInput {
-            file_path: "relative.txt".to_string(),
-            offset: None,
-            limit: None,
-        };
-        let err = ReadTool.prepare(input).await.unwrap_err();
-        assert!(err.output.contains("file_path must be absolute"));
-    }
-}

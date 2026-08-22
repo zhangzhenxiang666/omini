@@ -186,7 +186,19 @@ fn prepare_search(input: SearchInput) -> Result<PreparedSearch, String> {
 }
 
 async fn execute_search(prepared: PreparedSearch, thread_cwd: PathBuf) -> ToolResult {
-    let output = match run_rg(&prepared, &thread_cwd).await {
+    let rg_path = match bundled_rg_path() {
+        Ok(path) => path,
+        Err(error) => return ToolResult::error(error),
+    };
+    execute_search_with_rg_path(prepared, thread_cwd, &rg_path).await
+}
+
+async fn execute_search_with_rg_path(
+    prepared: PreparedSearch,
+    thread_cwd: PathBuf,
+    rg_path: &Path,
+) -> ToolResult {
+    let output = match run_rg_with_path(&prepared, &thread_cwd, rg_path).await {
         Ok(output) => output,
         Err(e) => return ToolResult::error(e),
     };
@@ -266,12 +278,12 @@ async fn execute_search(prepared: PreparedSearch, thread_cwd: PathBuf) -> ToolRe
     }
 }
 
-async fn run_rg(
+async fn run_rg_with_path(
     prepared: &PreparedSearch,
     thread_cwd: &Path,
+    rg_path: &Path,
 ) -> Result<std::process::Output, String> {
-    let rg_path = bundled_rg_path()?;
-    let mut command = Command::new(&rg_path);
+    let mut command = Command::new(rg_path);
     // 无条件将 rg 的 cwd 设置为 thread cwd。
     // 守护进程下 process cwd 是 /tmp/omini，不能用。
     command.current_dir(thread_cwd);
@@ -536,6 +548,23 @@ mod tests {
         }
     }
 
+    fn test_rg_path() -> PathBuf {
+        let paths = std::env::var_os("PATH").expect("test environment should define PATH");
+        std::env::split_paths(&paths)
+            .map(|directory| directory.join(rg_binary_name()))
+            .find(|candidate| {
+                std::process::Command::new(candidate)
+                    .arg("--version")
+                    .output()
+                    .is_ok()
+            })
+            .expect("test environment must provide rg on PATH")
+    }
+
+    async fn execute_for_test(prepared: PreparedSearch, cwd: &Path) -> ToolResult {
+        execute_search_with_rg_path(prepared, cwd.to_path_buf(), &test_rg_path()).await
+    }
+
     #[test]
     fn bundled_rg_display_path_uses_install_layout() {
         let expected = if cfg!(windows) {
@@ -553,9 +582,7 @@ mod tests {
         write_file(&dir.path().join("src/lib.rs"), "alpha beta\n");
 
         let prepared = SearchTool.prepare(input("beta", dir.path())).await.unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert!(result.output.contains("Found 1 matches"));
@@ -578,9 +605,7 @@ mod tests {
             .prepare(input("gamma", dir.path()))
             .await
             .unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert_eq!(result.output, "(no matches)");
@@ -615,9 +640,7 @@ mod tests {
         write_file(&dir.path().join("many.txt"), &content);
 
         let prepared = SearchTool.prepare(input("hit", dir.path())).await.unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert!(result.output.contains("Found 150 matches"));
@@ -642,9 +665,7 @@ mod tests {
         search.mode = SearchMode::Files;
         search.include = Some("*.rs".to_string());
         let prepared = SearchTool.prepare(search).await.unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert!(result.output.contains("src/main.rs"));
@@ -661,9 +682,7 @@ mod tests {
             .prepare(input("alpha", dir.path()))
             .await
             .unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert!(result.output.contains("Found 2 matches"));
@@ -683,9 +702,7 @@ mod tests {
         write_file(&dir.path().join("big.txt"), &format!("{long}\n"));
 
         let prepared = SearchTool.prepare(input("a", dir.path())).await.unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         assert!(result.output.contains("..."));
@@ -703,9 +720,7 @@ mod tests {
             .prepare(input("[unclosed", dir.path()))
             .await
             .unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(result.is_error);
         assert!(result.output.contains("rg invalid pattern:"));
@@ -721,9 +736,7 @@ mod tests {
             .prepare(input("alpha", dir.path()))
             .await
             .unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         let metadata = result.metadata.as_ref().expect("metadata present");
@@ -750,9 +763,7 @@ mod tests {
             .prepare(input("unique_token", dir.path()))
             .await
             .unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
         assert!(!result.is_error);
         assert!(result.output.contains("src/lib.rs"));
         assert!(!result.output.contains(".git"));
@@ -763,9 +774,7 @@ mod tests {
         let mut files_search = input(".git", dir.path());
         files_search.mode = SearchMode::Files;
         let prepared_files = SearchTool.prepare(files_search).await.unwrap();
-        let result_files = SearchTool
-            .execute_prepared(prepared_files, ToolExecutionContext::test("search"))
-            .await;
+        let result_files = execute_for_test(prepared_files, dir.path()).await;
         assert!(!result_files.is_error);
         assert!(!result_files.output.contains(".git"));
     }
@@ -779,9 +788,7 @@ mod tests {
         let mut search = input(".rs", dir.path());
         search.mode = SearchMode::Files;
         let prepared = SearchTool.prepare(search).await.unwrap();
-        let result = SearchTool
-            .execute_prepared(prepared, ToolExecutionContext::test("search"))
-            .await;
+        let result = execute_for_test(prepared, dir.path()).await;
 
         assert!(!result.is_error);
         let metadata = result.metadata.as_ref().expect("metadata present");

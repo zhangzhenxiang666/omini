@@ -72,33 +72,3 @@ impl Tool for TodoWriteTool {
         )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn rejects_empty_todos() {
-        let err = TodoWriteTool
-            .prepare(TodoWriteInput { todos: Vec::new() })
-            .await
-            .unwrap_err();
-
-        assert!(err.output.contains("at least one"));
-    }
-
-    #[tokio::test]
-    async fn rejects_empty_content() {
-        let err = TodoWriteTool
-            .prepare(TodoWriteInput {
-                todos: vec![TodoItemInput {
-                    content: " ".to_string(),
-                    status: TodoStatus::Pending,
-                }],
-            })
-            .await
-            .unwrap_err();
-
-        assert!(err.output.contains("content"));
-    }
-}

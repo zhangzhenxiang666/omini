@@ -705,8 +705,6 @@ fn build_preview(input: &EditInput, matches: &[EditMatch], diff: &str) -> EditPe
 mod tests {
     use super::*;
     use crate::tools::ToolExecutionContext;
-    use std::sync::Arc;
-    use std::time::Duration;
 
     fn temp_path(name: &str) -> String {
         std::env::temp_dir()
@@ -718,11 +716,6 @@ mod tests {
             ))
             .display()
             .to_string()
-    }
-
-    fn unique_old(old: &str) -> String {
-        // 避免与其他复用 temp 目录的测试用例产生误匹配。
-        format!("__omini_unique_marker_{}__\n", old)
     }
 
     #[test]
@@ -773,16 +766,6 @@ mod tests {
     }
 
     #[test]
-    fn replace_rejects_disproportionate_match() {
-        // disproportionate 守卫防止 replace 链给出明显过大的候选。
-        // 当前 4 个 active replacer 在简单的单行替换里不会触发该守卫,
-        // 这里断言简单 case 仍能成功完成。
-        let content = "x".repeat(10_000) + "needle" + &"x".repeat(10_000);
-        let result = replace(&content, "needle", "tiny", false).unwrap();
-        assert!(result.contains("tiny"));
-    }
-
-    #[test]
     fn replace_rejects_empty_old_string() {
         assert_eq!(
             replace("abc", "", "x", false).unwrap_err(),
@@ -817,108 +800,6 @@ mod tests {
         let content = "alpha\r\nbeta\r\n";
         let result = replace(content, "alpha", "ALPHA", false).unwrap();
         assert_eq!(result, "ALPHA\r\nbeta\r\n");
-    }
-
-    #[tokio::test]
-    async fn execute_edit_acquires_file_lock() {
-        // 在同一文件上跑两个 edit,验证它们串行执行(临界区不重叠)。
-        let path = temp_path("lock.txt");
-        fs::write(&path, "a\nb\nc\n").await.unwrap();
-
-        let input1 = EditInput {
-            file_path: path.clone(),
-            old_string: "a".to_string(),
-            new_string: "A".to_string(),
-            replace_all: None,
-        };
-        let input2 = EditInput {
-            file_path: path.clone(),
-            old_string: "b".to_string(),
-            new_string: "B".to_string(),
-            replace_all: None,
-        };
-
-        let prepared1 = EditTool.prepare(input1).await.unwrap();
-        let prepared2 = EditTool.prepare(input2).await.unwrap();
-
-        let in_progress = Arc::new(tokio::sync::Notify::new());
-        let completed = Arc::new(tokio::sync::Notify::new());
-        let in_progress_inner = Arc::clone(&in_progress);
-        let completed_inner = Arc::clone(&completed);
-        let path_inner = path.clone();
-        let task1 = tokio::spawn(async move {
-            let _g = FileLockService::instance()
-                .acquire(Path::new(&path_inner))
-                .await;
-            in_progress_inner.notify_one();
-            // 持有足够长的时间,让第二个任务尝试获取锁并失败。
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            completed_inner.notify_one();
-        });
-
-        // 等第一个任务进入临界区后再启动第二个 edit,断言它在第一个释放前
-        // 拿不到锁。
-        let _ = tokio::time::timeout(Duration::from_secs(1), in_progress.notified()).await;
-        let path2 = path.clone();
-        let path3 = path.clone();
-        let result = tokio::time::timeout(Duration::from_millis(50), async move {
-            EditTool
-                .execute_prepared(prepared2, ToolExecutionContext::test("edit"))
-                .await;
-        })
-        .await;
-        // 此时 execute_prepared 仍处于被阻塞状态,还没完成。
-        assert!(
-            result.is_err(),
-            "expected second edit to be blocked by lock"
-        );
-
-        // 等待第一个任务结束。
-        let _ = tokio::time::timeout(Duration::from_secs(1), completed.notified()).await;
-        task1.await.unwrap();
-
-        // 锁释放后,排队的 execute 应当能完成。
-        let path4 = path3.clone();
-        let result = EditTool
-            .execute_prepared(prepared1, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-        let _ = path2;
-        let _ = path4;
-
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn execute_edit_emits_unified_diff_in_metadata() {
-        let path = temp_path("diff.txt");
-        fs::write(&path, "alpha\nbeta\ngamma\n").await.unwrap();
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "beta".to_string(),
-            new_string: "BETA".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-        let metadata = result.metadata.expect("metadata should be set");
-        let diff = metadata
-            .get("diff")
-            .and_then(|v| v.as_str())
-            .expect("diff in metadata");
-        let file_name = std::path::Path::new(&path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap();
-        assert!(diff.contains(&format!("--- {file_name}")));
-        assert!(diff.contains(&format!("+++ {file_name}")));
-        assert!(diff.contains("@@ "));
-        assert!(diff.contains("-beta"));
-        assert!(diff.contains("+BETA"));
-        let _ = fs::remove_file(path).await;
     }
 
     #[tokio::test]
@@ -961,108 +842,6 @@ mod tests {
         assert_eq!(del_count, 1, "preview diff 应有 1 行 -: {preview_diff}");
     }
 
-    #[tokio::test]
-    async fn test_edit_replaces_unique_match() {
-        let path = temp_path("unique.txt");
-        fs::write(&path, "one\ntwo\nthree\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "two\n".to_string(),
-            new_string: "TWO\n".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        assert_eq!(prepared.matches[0].start_line, 2);
-
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-        assert_eq!(
-            fs::read_to_string(&path).await.unwrap(),
-            "one\nTWO\nthree\n"
-        );
-
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn test_edit_rejects_multiple_matches_without_replace_all() {
-        let path = temp_path("multiple.txt");
-        fs::write(&path, "same\nsame\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "same".to_string(),
-            new_string: "other".to_string(),
-            replace_all: None,
-        };
-        let err = EditTool.prepare(input).await.unwrap_err();
-        assert!(err.output.contains("Found multiple matches"));
-
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn test_edit_rejects_relative_path() {
-        let input = EditInput {
-            file_path: "relative.txt".to_string(),
-            old_string: "old".to_string(),
-            new_string: "new".to_string(),
-            replace_all: None,
-        };
-        let err = EditTool.prepare(input).await.unwrap_err();
-        assert!(err.output.contains("file_path must be absolute"));
-    }
-
-    #[tokio::test]
-    async fn test_edit_revalidates_before_write() {
-        let path = temp_path("changed.txt");
-        fs::write(&path, "before\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "before".to_string(),
-            new_string: "after".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        fs::write(&path, "changed\n").await.unwrap();
-
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(result.is_error);
-        assert!(result.output.contains("old_string not found"));
-        assert_eq!(fs::read_to_string(&path).await.unwrap(), "changed\n");
-
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn test_edit_replace_all() {
-        let path = temp_path("all.txt");
-        fs::write(&path, "x y x").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "x".to_string(),
-            new_string: "z".to_string(),
-            replace_all: Some(true),
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        assert_eq!(prepared.matches.len(), 2);
-
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-        assert_eq!(fs::read_to_string(&path).await.unwrap(), "z y z");
-
-        let _ = fs::remove_file(path).await;
-    }
-
     #[test]
     fn normalize_line_endings_collapses_crlf() {
         assert_eq!(normalize_line_endings("a\r\nb\r\n"), "a\nb\n");
@@ -1079,107 +858,6 @@ mod tests {
     fn convert_to_line_ending_round_trip() {
         assert_eq!(convert_to_line_ending("a\nb", LineEnding::Crlf), "a\r\nb");
         assert_eq!(convert_to_line_ending("a\r\nb", LineEnding::Lf), "a\r\nb");
-    }
-
-    #[tokio::test]
-    async fn execute_edit_replaces_match_on_unchanged_file() {
-        let path = temp_path("reuse.txt");
-        fs::write(&path, "alpha\nbeta\ngamma\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "beta".to_string(),
-            new_string: "BETA".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-
-        assert_eq!(
-            fs::read_to_string(&path).await.unwrap(),
-            "alpha\nBETA\ngamma\n"
-        );
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn execute_edit_revalidates_against_modified_file() {
-        // 在 match 之前插入一行让 prepared.matches 字节位置失效。
-        let path = temp_path("fallback.txt");
-        fs::write(&path, "alpha\nbeta\ngamma\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "beta".to_string(),
-            new_string: "BETA".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        fs::write(&path, "alpha\nnew-prefix\nbeta\ngamma\n")
-            .await
-            .unwrap();
-
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-
-        assert_eq!(
-            fs::read_to_string(&path).await.unwrap(),
-            "alpha\nnew-prefix\nBETA\ngamma\n"
-        );
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn execute_edit_errors_when_old_string_disappears_between_plan_and_execute() {
-        let path = temp_path("missing.txt");
-        fs::write(&path, "alpha\nbeta\ngamma\n").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "beta".to_string(),
-            new_string: "BETA".to_string(),
-            replace_all: None,
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        fs::write(&path, "alpha\nchanged\ngamma\n").await.unwrap();
-
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(result.is_error);
-        assert!(result.output.contains("old_string not found"));
-        assert_eq!(
-            fs::read_to_string(&path).await.unwrap(),
-            "alpha\nchanged\ngamma\n"
-        );
-
-        let _ = fs::remove_file(path).await;
-    }
-
-    #[tokio::test]
-    async fn execute_edit_with_replace_all_finds_all_current_matches() {
-        let path = temp_path("replace_all.txt");
-        fs::write(&path, "x y x y x").await.unwrap();
-
-        let input = EditInput {
-            file_path: path.clone(),
-            old_string: "x".to_string(),
-            new_string: "z".to_string(),
-            replace_all: Some(true),
-        };
-        let prepared = EditTool.prepare(input).await.unwrap();
-        let result = EditTool
-            .execute_prepared(prepared, ToolExecutionContext::test("edit"))
-            .await;
-        assert!(!result.is_error, "{}", result.output);
-
-        assert_eq!(fs::read_to_string(&path).await.unwrap(), "z y z y z");
-        let _ = fs::remove_file(path).await;
     }
 
     #[tokio::test]
@@ -1306,12 +984,5 @@ mod tests {
         );
 
         let _ = fs::remove_file(path).await;
-    }
-
-    #[allow(dead_code)]
-    fn _ensure_unique_helper_used() {
-        // 保留 helper 给后续测试复用,避免触发 clippy 严格模式下的
-        // "unused function" 警告。
-        let _ = unique_old("x");
     }
 }

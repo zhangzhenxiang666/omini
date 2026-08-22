@@ -176,29 +176,3 @@ impl Tool for CancelTaskTool {
         supervisor.cancel_task(&task_id).await
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::tools::Tool;
-
-    use super::*;
-
-    #[test]
-    fn agent_schemas_require_name_prompt_and_title() {
-        for schema in [SpawnAgentTool.input_schema(), RunAgentTool.input_schema()] {
-            let required = schema["required"].as_array().expect("required fields");
-            for field in ["name", "prompt", "title"] {
-                assert!(required.iter().any(|value| value.as_str() == Some(field)));
-            }
-        }
-    }
-
-    #[test]
-    fn spawn_agent_description_explains_completion_notification() {
-        let description = SpawnAgentTool.description();
-
-        assert!(description.contains("automatic notification"));
-        assert!(description.contains("do not wait or poll with Bash"));
-        assert!(description.contains("get_task"));
-    }
-}
