@@ -25,7 +25,7 @@ const MCP_TOOL_PREFIX: &str = "mcp";
 const MCP_TOOL_SEPARATOR: &str = "__";
 const MAX_TOOL_NAME_LEN: usize = 64;
 
-pub(crate) struct McpManager {
+pub struct McpManager {
     client_set: McpClientSet,
 }
 
@@ -60,7 +60,7 @@ struct PreparedMcpToolInput {
 }
 
 impl McpManager {
-    pub(crate) fn from_settings(settings: &Settings) -> Self {
+    pub fn from_settings(settings: &Settings) -> Self {
         let servers = settings
             .mcp_servers
             .iter()
@@ -71,15 +71,15 @@ impl McpManager {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.client_set.is_empty()
     }
 
-    pub(crate) async fn initialize(&self) -> Vec<String> {
+    pub async fn initialize(&self) -> Vec<String> {
         self.client_set.initialize().await
     }
 
-    pub(crate) fn register_available_tools(self: &Arc<Self>, registry: &mut ToolRegistry) {
+    pub fn register_available_tools(self: &Arc<Self>, registry: &mut ToolRegistry) {
         let server_tools = self.client_set.ready_server_tools();
         register_server_tools(self, registry, server_tools);
     }
@@ -96,7 +96,7 @@ impl McpManager {
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn read_resource(
+    pub async fn read_resource(
         &self,
         server_name: &str,
         uri: &str,
@@ -105,7 +105,7 @@ impl McpManager {
     }
 
     #[allow(dead_code)]
-    pub(crate) async fn get_prompt(
+    pub async fn get_prompt(
         &self,
         server_name: &str,
         name: &str,
@@ -117,26 +117,26 @@ impl McpManager {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn services(&self) -> Vec<McpServiceSummary> {
+    pub fn services(&self) -> Vec<McpServiceSummary> {
         self.client_set.services()
     }
 
     #[allow(dead_code)]
-    pub(crate) fn status(&self) -> Vec<McpServiceSummary> {
+    pub fn status(&self) -> Vec<McpServiceSummary> {
         self.client_set.status()
     }
 
-    pub(crate) fn runtime_snapshots(&self) -> Vec<RuntimeMcpServerSnapshot> {
+    pub fn runtime_snapshots(&self) -> Vec<RuntimeMcpServerSnapshot> {
         runtime_snapshots_from_service_snapshots(self.client_set.snapshots())
     }
 
     #[allow(dead_code)]
-    pub(crate) fn service_status(&self, server_name: &str) -> Option<McpServiceStatus> {
+    pub fn service_status(&self, server_name: &str) -> Option<McpServiceStatus> {
         self.client_set.service_status(server_name)
     }
 
     #[allow(dead_code)]
-    pub(crate) fn catalog(&self, server_name: &str) -> Option<McpCatalog> {
+    pub fn catalog(&self, server_name: &str) -> Option<McpCatalog> {
         self.client_set.catalog(server_name)
     }
 }

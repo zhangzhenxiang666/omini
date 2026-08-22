@@ -8,6 +8,7 @@ pub struct SkillSpec {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
+    #[allow(dead_code)] // Parsed skill metadata is retained for future prompt rendering.
     pub argument_hint: Option<String>,
     pub body: String,
     pub directory: PathBuf,
@@ -55,11 +56,11 @@ impl SkillSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SkillSummary {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) short_description: Option<String>,
-    pub(crate) directory: PathBuf,
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
+    pub short_description: Option<String>,
+    pub directory: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -75,12 +76,12 @@ impl SkillLoadDiagnostic {
 
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
-    pub(crate) skills: HashMap<String, SkillSpec>,
+    pub skills: HashMap<String, SkillSpec>,
     pub diagnostics: Vec<SkillLoadDiagnostic>,
 }
 
 impl SkillRegistry {
-    pub(crate) fn injected_summaries(&self) -> Vec<SkillSummary> {
+    pub fn injected_summaries(&self) -> Vec<SkillSummary> {
         let mut summaries = self
             .skills
             .values()
@@ -104,7 +105,7 @@ impl SkillRegistry {
         self.skills.values()
     }
 
-    pub(crate) fn sorted_names(&self) -> Vec<String> {
+    pub fn sorted_names(&self) -> Vec<String> {
         let mut names = self.skills.keys().cloned().collect::<Vec<_>>();
         names.sort();
         names
@@ -126,11 +127,7 @@ pub fn load_skill_registry(cwd: &Path) -> SkillRegistry {
     load_skill_registry_from_dirs(skill_dirs)
 }
 
-pub(crate) fn load_skill_summaries(cwd: &Path) -> Vec<SkillSummary> {
-    load_skill_registry(cwd).injected_summaries()
-}
-
-pub(crate) fn render_skill_invocation(spec: &SkillSpec, prompt: Option<&str>) -> String {
+pub fn render_skill_invocation(spec: &SkillSpec, prompt: Option<&str>) -> String {
     render_skill_invocation_inner(spec, prompt, None)
 }
 

@@ -7,9 +7,9 @@ mod generator;
 mod parser;
 mod tasks;
 
-pub(crate) use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
+pub use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
-pub(crate) use tasks::AgentTaskCompletion;
+pub use tasks::AgentTaskCompletion;
 pub use tasks::AgentTaskSupervisor;
 
 #[derive(Debug, Clone)]
@@ -20,26 +20,26 @@ pub struct AgentTaskRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AgentSpec {
-    pub(crate) name: String,
-    pub(crate) description: String,
-    pub(crate) short_description: Option<String>,
-    pub(crate) instructions: String,
-    pub(crate) tool_policy: AgentToolPolicy,
-    pub(crate) model: Option<AgentModelSpec>,
+pub struct AgentSpec {
+    pub name: String,
+    pub description: String,
+    pub short_description: Option<String>,
+    pub instructions: String,
+    pub tool_policy: AgentToolPolicy,
+    pub model: Option<AgentModelSpec>,
     source: AgentSource,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct AgentToolPolicy {
-    pub(crate) allow: Option<Vec<String>>,
-    pub(crate) deny: Option<Vec<String>>,
+pub struct AgentToolPolicy {
+    pub allow: Option<Vec<String>>,
+    pub deny: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AgentModelSpec {
-    pub(crate) provider: String,
-    pub(crate) model: String,
+pub struct AgentModelSpec {
+    pub provider: String,
+    pub model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -70,7 +70,7 @@ impl AgentLoadDiagnostic {
 
 #[derive(Debug, Clone)]
 pub struct AgentRegistry {
-    pub(crate) agents: HashMap<String, AgentSpec>,
+    pub agents: HashMap<String, AgentSpec>,
     pub diagnostics: Vec<AgentLoadDiagnostic>,
 }
 
@@ -90,22 +90,18 @@ impl AgentRegistry {
         summaries
     }
 
-    pub(crate) fn get(&self, name: &str) -> Option<&AgentSpec> {
+    pub fn get(&self, name: &str) -> Option<&AgentSpec> {
         self.agents.get(name)
     }
 
-    pub(crate) fn sorted_names(&self) -> Vec<String> {
+    pub fn sorted_names(&self) -> Vec<String> {
         let mut names: Vec<_> = self.agents.keys().cloned().collect();
         names.sort();
         names
     }
 }
 
-pub(crate) fn load_agent_summaries(cwd: &Path) -> Vec<AgentSummary> {
-    load_agent_registry(cwd).summaries()
-}
-
-pub(crate) fn load_agent_registry(cwd: &Path) -> AgentRegistry {
+pub fn load_agent_registry(cwd: &Path) -> AgentRegistry {
     let mut agent_dirs = Vec::new();
     if let Some(home_dir) = dirs::home_dir().filter(|path| !path.as_os_str().is_empty()) {
         agent_dirs.push(home_dir.join(".omini").join("agents"));

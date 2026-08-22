@@ -28,11 +28,11 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
-pub(crate) struct AgentTaskCompletion {
-    pub(crate) task_id: String,
-    pub(crate) agent: String,
-    pub(crate) title: String,
-    pub(crate) status: AgentTaskStatus,
+pub struct AgentTaskCompletion {
+    pub task_id: String,
+    pub agent: String,
+    pub title: String,
+    pub status: AgentTaskStatus,
 }
 
 const BACKGROUND_TASK_MEMORY_LIMIT: usize = 30;
@@ -141,7 +141,7 @@ impl std::fmt::Debug for AgentTaskSupervisor {
 
 impl AgentTaskSupervisor {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         event_tx: mpsc::Sender<RuntimeToServerEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
         completion_tx: mpsc::UnboundedSender<AgentTaskCompletion>,
@@ -358,7 +358,7 @@ impl AgentTaskSupervisor {
             .any(|entry| !entry.info.status.is_terminal())
     }
 
-    pub(crate) fn mark_notifications_delivered(&self, task_ids: &[String]) {
+    pub fn mark_notifications_delivered(&self, task_ids: &[String]) {
         let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
         for task_id in task_ids {
             if let Some(task) = tasks.get_mut(task_id) {

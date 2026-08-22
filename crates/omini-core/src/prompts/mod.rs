@@ -1,6 +1,6 @@
-mod environment;
-mod instructions;
-mod sections;
+pub mod environment;
+pub mod instructions;
+pub mod sections;
 
 use crate::skills::SkillSummary;
 use environment::{EnvironmentContext, environment_context_section};
@@ -16,53 +16,16 @@ use sections::{
 use std::path::Path;
 
 pub use sections::language_preference_section;
-pub(crate) use sections::skill_section;
-
-/// 构建 Main(默认)模式的 system prompt。
-pub fn build_main_system_prompt(settings: &Settings) -> String {
-    let subagents = crate::subagents::load_agent_summaries(&settings.cwd);
-    let skills = crate::skills::load_skill_summaries(&settings.cwd);
-    build_system_prompt_with_capabilities(settings, &subagents, &skills, ActiveProfile::Main)
-}
-
-/// 构建 Plan 模式的 system prompt。
-pub fn build_plan_system_prompt(settings: &Settings) -> String {
-    let subagents = crate::subagents::load_agent_summaries(&settings.cwd);
-    let skills = crate::skills::load_skill_summaries(&settings.cwd);
-    build_system_prompt_with_capabilities(settings, &subagents, &skills, ActiveProfile::Plan)
-}
-
-/// 构建默认(Main)模式的 system prompt。
-pub fn build_system_prompt(settings: &Settings) -> String {
-    build_main_system_prompt(settings)
-}
+pub use sections::skill_section;
 
 /// 获取最大停止步数的预算耗尽提示词
 pub fn get_max_steps_prompt() -> &'static str {
     max_steps_prompt()
 }
 
-/// 按给定的 active profile 构建 system prompt。
-pub fn build_system_prompt_for_profile(
-    settings: &Settings,
-    active_profile: ActiveProfile,
-) -> String {
-    let subagents = crate::subagents::load_agent_summaries(&settings.cwd);
-    let skills = crate::skills::load_skill_summaries(&settings.cwd);
-    build_system_prompt_with_capabilities(settings, &subagents, &skills, active_profile)
-}
-
-/// 使用调用方传入的 subagent 快照构建 Main(默认)模式的 system prompt。
-pub fn build_system_prompt_with_subagents(
-    settings: &Settings,
-    subagents: &[AgentSummary],
-) -> String {
-    build_system_prompt_with_capabilities(settings, subagents, &[], ActiveProfile::Main)
-}
-
 /// 使用调用方传入的能力快照,按给定的 active profile 构建 system prompt。
 /// 这是 runtime 唯一使用的入口(服务启动期初始化与 `rebuild_system_prompt`)。
-pub(crate) fn build_system_prompt_with_capabilities(
+pub fn build_system_prompt_with_capabilities(
     settings: &Settings,
     subagents: &[AgentSummary],
     skills: &[SkillSummary],
@@ -135,4 +98,67 @@ pub fn project_context_prompt(cwd: &Path) -> String {
     prompt.push('\n');
     prompt.push_str(&environment_context_section(&env));
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use omini_domain::subagents::AgentSummary;
+
+    #[test]
+    fn language_preference_blank_or_padded_values_have_stable_projection() {
+        let temp = crate::test_support::TestTempDir::new("prompts-language");
+        let mut settings = crate::test_support::settings(temp.path(), false);
+        settings.language = Some("  简体中文  ".into());
+        assert_eq!(
+            language_preference_section(&settings),
+            Some(
+                "<language_preference>\n- Use `简体中文` for user-facing responses unless the latest user request asks for another language.\n</language_preference>"
+                    .into()
+            )
+        );
+        settings.language = Some(" \t ".into());
+        assert_eq!(language_preference_section(&settings), None);
+    }
+
+    #[test]
+    fn main_prompt_projects_subagents_after_mode_header() {
+        let temp = crate::test_support::TestTempDir::new("prompts-main");
+        let settings = crate::test_support::settings(temp.path(), false);
+        let agents = vec![AgentSummary {
+            name: "reviewer".into(),
+            description: "Review focused changes.".into(),
+            short_description: Some("测试助手".into()),
+            location: "project".into(),
+        }];
+
+        let prompt =
+            build_system_prompt_with_capabilities(&settings, &agents, &[], ActiveProfile::Main);
+        assert!(prompt.starts_with("<active_mode>\nCollaboration Mode: Main"));
+        assert!(prompt.contains("<available_agents>\n  <agent>\n    <name>reviewer</name>"));
+        assert!(!prompt.contains("<location>project</location>"));
+        assert!(
+            prompt.find("</active_mode>").expect("mode block")
+                < prompt.find("<available_agents>").expect("agent block")
+        );
+        assert!(!prompt.contains("<plan_mode_instructions>"));
+    }
+
+    #[test]
+    fn profile_prompts_keep_main_auto_equal_and_plan_execution_free() {
+        let temp = crate::test_support::TestTempDir::new("prompts-profiles");
+        let settings = crate::test_support::settings(temp.path(), false);
+        let main = build_system_prompt_with_capabilities(&settings, &[], &[], ActiveProfile::Main);
+        let auto = build_system_prompt_with_capabilities(&settings, &[], &[], ActiveProfile::Auto);
+        let plan = build_system_prompt_with_capabilities(&settings, &[], &[], ActiveProfile::Plan);
+
+        assert_eq!(main, auto);
+        assert!(main.starts_with("<active_mode>\nCollaboration Mode: Main"));
+        assert!(main.contains("## Code Editing"));
+        assert!(plan.starts_with("<active_mode>\nCollaboration Mode: Plan"));
+        assert!(plan.contains("<HARD-GATE>"));
+        assert!(plan.contains("exactly one `<proposed_plan>` block"));
+        assert!(!plan.contains("## Code Editing"));
+        assert!(!plan.contains("## Git Safety"));
+    }
 }

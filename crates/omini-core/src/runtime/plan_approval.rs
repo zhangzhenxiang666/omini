@@ -3,11 +3,7 @@ use super::*;
 use omini_domain::display::HistoryItem;
 
 impl AgentRuntime {
-    pub(super) async fn resolve_plan_approval(
-        &mut self,
-        plan_id: &str,
-        action: PlanApprovalAction,
-    ) {
+    pub async fn resolve_plan_approval(&mut self, plan_id: &str, action: PlanApprovalAction) {
         match action {
             PlanApprovalAction::ContinueDiscussing => {
                 self.set_active_profile(ActiveProfile::Plan);
@@ -49,9 +45,7 @@ impl AgentRuntime {
         .await;
     }
 
-    pub(super) async fn persist_latest_proposed_plan(
-        &self,
-    ) -> Result<Option<SubmittedPlan>, String> {
+    pub async fn persist_latest_proposed_plan(&self) -> Result<Option<SubmittedPlan>, String> {
         let submitted =
             plan::persist_latest(&self.project, self.active_profile(), &self.messages).await?;
         if let Some(plan) = submitted.as_ref() {

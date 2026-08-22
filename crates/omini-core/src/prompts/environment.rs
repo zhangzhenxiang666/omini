@@ -4,7 +4,7 @@ use std::path::PathBuf;
 const COMMAND_SHELL: &str = "sh -c";
 
 #[derive(Debug, Clone)]
-pub(super) struct EnvironmentContext {
+pub struct EnvironmentContext {
     cwd: PathBuf,
     command_shell: String,
     login_shell: Option<String>,
@@ -17,7 +17,7 @@ pub(super) struct EnvironmentContext {
 }
 
 impl EnvironmentContext {
-    pub(super) fn detect(cwd: &std::path::Path) -> Self {
+    pub fn detect(cwd: &std::path::Path) -> Self {
         Self {
             cwd: cwd.to_path_buf(),
             command_shell: COMMAND_SHELL.to_string(),
@@ -32,7 +32,7 @@ impl EnvironmentContext {
     }
 }
 
-pub(super) fn environment_context_section(env: &EnvironmentContext) -> String {
+pub fn environment_context_section(env: &EnvironmentContext) -> String {
     let mut section = String::new();
     section.push_str("<environment_context>\n");
     section.push_str("## Runtime\n\n");

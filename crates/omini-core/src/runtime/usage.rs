@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) async fn record_total_usage_and_notify(
+pub async fn record_total_usage_and_notify(
     thread_id: &str,
     usage: Usage,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
@@ -22,7 +22,7 @@ pub(super) async fn record_total_usage_and_notify(
         .await;
 }
 
-pub(super) fn record_usage_snapshot(
+pub fn record_usage_snapshot(
     usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     usage: Usage,
     context_window: Option<u32>,
@@ -37,7 +37,7 @@ pub(super) fn record_usage_snapshot(
     *snapshot
 }
 
-pub(super) fn record_total_usage_snapshot(
+pub fn record_total_usage_snapshot(
     usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     usage: Usage,
     context_window: Option<u32>,

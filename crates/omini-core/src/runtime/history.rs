@@ -7,7 +7,7 @@ use omini_domain::proposed_plan::strip_proposed_plan_blocks;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use tokio::sync::mpsc;
 
-pub(super) async fn persist_initial_user_message(
+pub async fn persist_initial_user_message(
     thread_id: &str,
     llm_message: Option<Message>,
     start: RunStart,
@@ -42,7 +42,7 @@ pub(super) async fn persist_initial_user_message(
     }
 }
 
-pub(super) async fn persist_one(
+pub async fn persist_one(
     thread_id: &str,
     msg: Message,
     active_profile: ActiveProfile,
@@ -53,7 +53,7 @@ pub(super) async fn persist_one(
     persist_ui_message(thread_id, &msg, active_profile, model_ref, persistence_tx).await;
 }
 
-pub(super) async fn persist_llm_history_only(
+pub async fn persist_llm_history_only(
     thread_id: &str,
     msg: &Message,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
@@ -85,7 +85,7 @@ async fn persist_split_display_message(
         .await;
 }
 
-pub(super) async fn persist_ui_message(
+pub async fn persist_ui_message(
     thread_id: &str,
     msg: &Message,
     active_profile: ActiveProfile,
@@ -123,7 +123,7 @@ fn ui_message_blocks(msg: &Message, active_profile: ActiveProfile) -> Vec<Conten
         .collect()
 }
 
-pub(super) async fn persist_plan_ui_message(
+pub async fn persist_plan_ui_message(
     thread_id: &str,
     plan: &DisplayPlan,
     model_ref: &str,
@@ -138,7 +138,7 @@ pub(super) async fn persist_plan_ui_message(
         .await;
 }
 
-pub(super) async fn persist_compact_summary_ui_message(
+pub async fn persist_compact_summary_ui_message(
     thread_id: &str,
     summary: &DisplaySummary,
     model_ref: &str,

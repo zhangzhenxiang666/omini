@@ -115,16 +115,6 @@ impl ToolResult {
         self
     }
 
-    /// 关联 tool_use_id 转为 LLM API 需要的格式
-    pub fn into_block(self, tool_use_id: &str) -> ToolResultBlock {
-        ToolResultBlock {
-            tool_use_id: tool_use_id.to_string(),
-            is_error: self.is_error,
-            content: self.output,
-            metadata: self.metadata,
-        }
-    }
-
     pub fn into_parts(self, tool_use_id: &str) -> (ToolResultBlock, Option<Vec<ContentBlock>>) {
         let block = ToolResultBlock {
             tool_use_id: tool_use_id.to_string(),
@@ -156,6 +146,7 @@ pub struct ToolExecutionContext {
     pub permission_engine: Arc<PermissionEngine>,
     pub active_profile: ActiveProfile,
     pub cancelled: Arc<AtomicBool>,
+    #[allow(dead_code)] // Retained in the per-tool context for cancellation-aware tool handlers.
     pub cancel_notify: Arc<Notify>,
     pub runtime: Option<Arc<ToolRuntimeContext>>,
 }
@@ -385,7 +376,7 @@ fn preview_tool_use_id(pause_id: &str, tool_use_id: &str) -> Option<String> {
     (pause_id != tool_use_id).then(|| tool_use_id.to_string())
 }
 
-pub(crate) fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
+pub fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
     match tool_name {
         "bash" => normalize_path_field(raw_input, "workdir", cwd, true),
         "search" => normalize_path_field(raw_input, "path", cwd, true),
@@ -471,7 +462,7 @@ pub trait Tool: Send + Sync + 'static {
     ) -> ToolResult;
 }
 
-pub(crate) fn sanitize_tool_schema(value: &mut Value) {
+pub fn sanitize_tool_schema(value: &mut Value) {
     match value {
         Value::Object(map) => {
             map.remove("$schema");
@@ -697,19 +688,8 @@ impl ToolRegistry {
     }
 }
 
-/// 创建默认的工具注册表，注册所有内置工具。
-///
-/// 当需要集成所有 tools/ 中定义的工具时，调用此函数即可。
-pub fn create_default_registry() -> ToolRegistry {
-    create_registry_with_allowed(None, AgentToolSet::None)
-}
-
 pub fn create_main_registry() -> ToolRegistry {
     create_registry_with_allowed(None, AgentToolSet::Main)
-}
-
-pub fn create_agent_registry(allowed_tools: &[String]) -> ToolRegistry {
-    create_registry_with_allowed(Some(allowed_tools), AgentToolSet::None)
 }
 
 pub fn create_agent_registry_from_parent(
@@ -782,20 +762,6 @@ pub fn create_agent_registry_from_parent(
     Ok((registry, warnings))
 }
 
-pub fn inherited_agent_tool_names() -> Vec<String> {
-    create_agent_registry(&[
-        "ask_user".to_string(),
-        "bash".to_string(),
-        "search".to_string(),
-        "skill".to_string(),
-        "read".to_string(),
-        "view_image".to_string(),
-        "edit".to_string(),
-        "write".to_string(),
-    ])
-    .tool_names()
-}
-
 fn create_registry_with_allowed(
     allowed: Option<&[String]>,
     agent_tool_set: AgentToolSet,
@@ -861,7 +827,6 @@ fn tool_definition_priority(name: &str) -> usize {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AgentToolSet {
-    None,
     Main,
 }
 
@@ -966,5 +931,359 @@ mod tests {
         let value: Value = serde_json::from_str(&result.output).unwrap();
 
         assert_eq!(value["user_guidance"], "Use A < B & C > D.");
+    }
+
+    #[test]
+    fn main_registry_exposes_ordered_tool_contracts() {
+        let registry = create_main_registry();
+        assert_eq!(
+            registry.tool_names(),
+            vec![
+                "ask_user",
+                "bash",
+                "cancel_task",
+                "edit",
+                "get_task",
+                "read",
+                "search",
+                "skill",
+                "spawn_agent",
+                "todo_write",
+                "view_image",
+                "write",
+            ]
+        );
+        assert_eq!(
+            registry
+                .definitions()
+                .into_iter()
+                .map(|definition| definition.name)
+                .collect::<Vec<_>>(),
+            vec![
+                "search",
+                "read",
+                "view_image",
+                "edit",
+                "write",
+                "bash",
+                "ask_user",
+                "skill",
+                "todo_write",
+                "spawn_agent",
+                "get_task",
+                "cancel_task",
+            ]
+        );
+
+        let todo = registry
+            .definitions()
+            .into_iter()
+            .find(|definition| definition.name == "todo_write")
+            .expect("todo_write definition");
+        let todo_item = &todo.input_schema["properties"]["todos"]["items"]["properties"];
+        assert!(todo_item["content"].is_object());
+        assert!(todo_item["status"].is_object());
+        assert!(todo_item.get("step").is_none());
+
+        for schema in [
+            agent_tools::SpawnAgentTool.input_schema(),
+            agent_tools::RunAgentTool.input_schema(),
+        ] {
+            let required = schema["required"].as_array().expect("required fields");
+            for field in ["name", "prompt", "title"] {
+                assert!(required.iter().any(|value| value.as_str() == Some(field)));
+            }
+        }
+        assert!(
+            agent_tools::SpawnAgentTool
+                .description()
+                .contains("automatic notification")
+        );
+    }
+
+    #[test]
+    fn agent_registry_applies_parent_allow_deny_and_depth_rules() {
+        let parent = create_main_registry();
+        let allow = vec![
+            "read".to_string(),
+            "search".to_string(),
+            "write".to_string(),
+            "run_agent".to_string(),
+            "missing".to_string(),
+        ];
+        let deny = vec!["write".to_string()];
+        let (child, warnings) = create_agent_registry_from_parent(&parent, Some(&allow), &deny, 1)
+            .expect("remaining allowed tools should create a registry");
+
+        assert_eq!(child.tool_names(), vec!["read", "run_agent", "search"]);
+        assert_eq!(
+            warnings,
+            vec!["tool 'missing' is not available to the parent agent"]
+        );
+
+        let (deep_child, deep_warnings) = create_agent_registry_from_parent(&parent, None, &[], 2)
+            .expect("default policy should retain ordinary tools");
+        assert!(!deep_child.contains("run_agent"));
+        assert!(deep_warnings.is_empty());
+    }
+
+    #[test]
+    fn tool_result_preserves_error_metadata_and_extra_blocks() {
+        let result = ToolResult::error("failed")
+            .with_metadata(tool_metadata([("kind", serde_json::json!("test"))]))
+            .with_extra_blocks(vec![omini_domain::message::ContentBlock::from_text(
+                "extra".into(),
+            )]);
+
+        let (block, extra_blocks) = result.into_parts("call-1");
+        assert_eq!(block.tool_use_id, "call-1");
+        assert!(block.is_error);
+        assert_eq!(block.content, "failed");
+        assert_eq!(
+            block.metadata,
+            Some(tool_metadata([("kind", serde_json::json!("test"))]))
+        );
+        assert_eq!(
+            extra_blocks,
+            Some(vec![omini_domain::message::ContentBlock::from_text(
+                "extra".into()
+            )])
+        );
+
+        assert_eq!(ToolResult::ok("done").extra_blocks, None);
+    }
+
+    #[tokio::test]
+    async fn todo_tool_rejects_empty_input_and_serializes_full_list() {
+        let empty = todo_tool::TodoWriteTool
+            .prepare(todo_tool::TodoWriteInput { todos: Vec::new() })
+            .await
+            .expect_err("empty todo list should reject");
+        assert!(empty.is_error);
+        assert_eq!(empty.output, "todos must contain at least one item");
+        assert_eq!(empty.metadata, None);
+        assert_eq!(empty.extra_blocks, None);
+
+        let input = todo_tool::TodoWriteInput {
+            todos: vec![todo_tool::TodoItemInput {
+                content: "Implement focused tests".into(),
+                status: todo_tool::TodoStatus::InProgress,
+            }],
+        };
+        let prepared = todo_tool::TodoWriteTool
+            .prepare(input)
+            .await
+            .expect("valid todo should prepare");
+        assert_eq!(prepared.todos.len(), 1);
+        assert_eq!(prepared.todos[0].content, "Implement focused tests");
+    }
+
+    #[tokio::test]
+    async fn file_tools_apply_and_reject_paths() {
+        let temp = crate::test_support::TestTempDir::new("file-tools");
+        let file = temp.write("nested/note.txt", "first\nsecond\n");
+        let path = file.display().to_string();
+
+        let read = read_tool::ReadTool
+            .prepare(read_tool::ReadInput {
+                file_path: path.clone(),
+                offset: None,
+                limit: None,
+            })
+            .await
+            .expect("absolute file should prepare");
+        let read_result = read_tool::ReadTool
+            .execute_prepared(
+                read,
+                crate::test_support::tool_context(temp.path(), "read", false),
+            )
+            .await;
+        assert!(!read_result.is_error);
+        assert_eq!(read_result.output, "1: first\n2: second");
+        assert_eq!(read_result.metadata, None);
+        assert_eq!(read_result.extra_blocks, None);
+
+        let edit = edit_tool::EditTool
+            .prepare(edit_tool::EditInput {
+                file_path: path.clone(),
+                old_string: "second".into(),
+                new_string: "SECOND".into(),
+                replace_all: None,
+            })
+            .await
+            .expect("unique edit should prepare");
+        let edit_result = edit_tool::EditTool
+            .execute_prepared(
+                edit,
+                crate::test_support::tool_context(temp.path(), "edit", false),
+            )
+            .await;
+        assert!(!edit_result.is_error, "{}", edit_result.output);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("edited file should read"),
+            "first\nSECOND\n"
+        );
+
+        let write_result = write_tool::WriteTool
+            .execute_prepared(
+                write_tool::WriteTool
+                    .prepare(write_tool::WriteInput {
+                        file_path: path,
+                        content: "replacement\n".into(),
+                    })
+                    .await
+                    .expect("absolute write should prepare"),
+                crate::test_support::tool_context(temp.path(), "write", false),
+            )
+            .await;
+        assert!(!write_result.is_error, "{}", write_result.output);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("written file should read"),
+            "replacement\n"
+        );
+
+        for result in [
+            read_tool::ReadTool
+                .prepare(read_tool::ReadInput {
+                    file_path: "relative.txt".into(),
+                    offset: None,
+                    limit: None,
+                })
+                .await
+                .err(),
+            write_tool::WriteTool
+                .prepare(write_tool::WriteInput {
+                    file_path: "relative.txt".into(),
+                    content: "x".into(),
+                })
+                .await
+                .err(),
+            edit_tool::EditTool
+                .prepare(edit_tool::EditInput {
+                    file_path: "relative.txt".into(),
+                    old_string: "x".into(),
+                    new_string: "y".into(),
+                    replace_all: None,
+                })
+                .await
+                .err(),
+        ] {
+            let error = result.expect("relative path should reject");
+            assert!(error.is_error);
+            assert_eq!(error.output, "file_path must be absolute: relative.txt");
+        }
+    }
+
+    #[tokio::test]
+    async fn edit_changed_file_reports_error_without_overwriting_new_content() {
+        let temp = crate::test_support::TestTempDir::new("stale-edit");
+        let file = temp.write("note.txt", "before\n");
+        let prepared = edit_tool::EditTool
+            .prepare(edit_tool::EditInput {
+                file_path: file.display().to_string(),
+                old_string: "before".into(),
+                new_string: "after".into(),
+                replace_all: None,
+            })
+            .await
+            .expect("initial file should prepare");
+        std::fs::write(&file, "changed\n").expect("fixture should change after preview");
+
+        let result = edit_tool::EditTool
+            .execute_prepared(
+                prepared,
+                crate::test_support::tool_context(temp.path(), "edit", false),
+            )
+            .await;
+        assert!(result.is_error);
+        assert_eq!(
+            result.output.split_once(" in ").map(|(reason, _)| reason),
+            Some("old_string not found")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("changed file should read"),
+            "changed\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_creates_parents_and_returns_complete_diff_metadata() {
+        let temp = crate::test_support::TestTempDir::new("write-diff");
+        let file = temp.path().join("created/note.txt");
+        let result = write_tool::WriteTool
+            .execute_prepared(
+                write_tool::WriteTool
+                    .prepare(write_tool::WriteInput {
+                        file_path: file.display().to_string(),
+                        content: "alpha\nbeta\n".into(),
+                    })
+                    .await
+                    .expect("absolute path should prepare"),
+                crate::test_support::tool_context(temp.path(), "write", false),
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.output);
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("created file should read"),
+            "alpha\nbeta\n"
+        );
+        let metadata = result.metadata.expect("write should return diff metadata");
+        assert_eq!(
+            metadata.get("file_path"),
+            Some(&serde_json::json!(file.display().to_string()))
+        );
+        let diff = metadata
+            .get("diff")
+            .and_then(|value| value.as_str())
+            .expect("diff should be text");
+        assert!(diff.starts_with("--- "));
+        assert!(diff.contains("+alpha"));
+        assert!(diff.contains("+beta"));
+    }
+
+    #[tokio::test]
+    async fn view_image_requires_image_model() {
+        let temp = crate::test_support::TestTempDir::new("view-image");
+        let file = temp.write("image.PNG", b"png-bytes");
+        let prepared = view_image_tool::ViewImageTool
+            .prepare(view_image_tool::ViewImageInput {
+                path: file.display().to_string(),
+            })
+            .await
+            .expect("supported image should prepare");
+
+        let result = view_image_tool::ViewImageTool
+            .execute_prepared(
+                prepared.clone(),
+                crate::test_support::tool_context(temp.path(), "view_image", true),
+            )
+            .await;
+        assert_eq!(
+            result.output,
+            format!("Loaded image: {} (9 bytes, image/png)", file.display())
+        );
+        assert!(!result.is_error);
+        assert_eq!(
+            result.extra_blocks,
+            Some(vec![
+                omini_domain::message::ContentBlock::from_base64_image(
+                    "image/png".into(),
+                    "cG5nLWJ5dGVz".into()
+                )
+            ])
+        );
+
+        let rejected = view_image_tool::ViewImageTool
+            .execute_prepared(
+                prepared,
+                crate::test_support::tool_context(temp.path(), "view_image", false),
+            )
+            .await;
+        assert!(rejected.is_error);
+        assert_eq!(
+            rejected.output,
+            "view_image requires image input, but current model 'text-model' does not declare support for image input"
+        );
     }
 }

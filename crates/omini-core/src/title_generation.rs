@@ -123,7 +123,7 @@ fn build_generate_title_prompt(user_input: &str) -> String {
 /// 严格解析 LLM 输出为 JSON，提取 `title` 字段，校验非空。
 /// 与 `subagents::generator::parse_generated_agent` 完全对称：
 /// 支持裸 JSON，也支持 ```json / ``` 围栏。
-pub fn parse_generated_title(raw: &str) -> Result<String, TitleGenError> {
+fn parse_generated_title(raw: &str) -> Result<String, TitleGenError> {
     let mut json_text = raw.trim();
     if let Some(stripped) = json_text.strip_prefix("```json") {
         json_text = stripped.trim();
@@ -163,5 +163,38 @@ mod tests {
                 .count(),
             TITLE_MAX_CHARS
         );
+    }
+
+    #[test]
+    fn generated_title_json_and_fences_return_trimmed_title() {
+        let cases = [
+            (r#"{"title":"Fix login bug"}"#, "Fix login bug"),
+            (
+                "```json\n{\"title\": \"修复登录 bug\"}\n```",
+                "修复登录 bug",
+            ),
+            (
+                "```\n{\"title\": \"  Review flaky test  \"}\n```",
+                "Review flaky test",
+            ),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(parse_generated_title(raw), Ok(expected.into()));
+        }
+    }
+
+    #[test]
+    fn generated_title_invalid_shape_or_json_returns_parse_error() {
+        for raw in [
+            r#"{"description":"missing"}"#,
+            r#"{"title":"   "}"#,
+            "not json",
+        ] {
+            assert!(matches!(
+                parse_generated_title(raw),
+                Err(TitleGenError::Parse(_))
+            ));
+        }
     }
 }

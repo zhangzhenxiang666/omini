@@ -1,15 +1,15 @@
-mod active_run;
-mod agent_management;
-mod capabilities;
-pub(crate) mod compact;
-mod event_processor;
-mod history;
-mod manual_compact;
-pub(crate) mod plan;
-mod plan_approval;
-mod run_loop;
-mod service;
-mod usage;
+pub mod active_run;
+pub mod agent_management;
+pub mod capabilities;
+pub mod compact;
+pub mod event_processor;
+pub mod history;
+pub mod manual_compact;
+pub mod plan;
+pub mod plan_approval;
+pub mod run_loop;
+pub mod service;
+pub mod usage;
 
 use crate::engine::{QueryContext, ToolPauseResolver};
 use crate::skills::SkillRegistry;
@@ -33,11 +33,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-pub(crate) use capabilities::CapabilityStore;
+pub use capabilities::CapabilityStore;
 pub use service::AgentRuntime;
 pub use service::AgentRuntimeChannels;
 pub use service::AgentRuntimeDeps;
-pub(crate) use service::RuntimeCapabilityHandles;
+pub use service::RuntimeCapabilityHandles;
 
 /// 把已批准 plan 包装为新线程首条 user message 的公开入口,server 端 fork 时调用。
 ///

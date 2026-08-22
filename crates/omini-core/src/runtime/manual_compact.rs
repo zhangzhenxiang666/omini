@@ -10,7 +10,7 @@ use tracing::Instrument;
 
 impl AgentRuntime {
     /// 处理手动 compact 请求：构建上下文、执行压缩、处理取消和结果。
-    pub(super) async fn handle_compact_context(&mut self, instructions: Option<String>) {
+    pub async fn handle_compact_context(&mut self, instructions: Option<String>) {
         if self.messages.is_empty() {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
                 "没有可压缩的线程历史".to_string(),
@@ -98,7 +98,7 @@ impl AgentRuntime {
     }
 }
 
-pub(super) struct ManualCompactInput<'a> {
+pub struct ManualCompactInput<'a> {
     pub settings: &'a Settings,
     pub llm_client: &'a LlmClient,
     pub tool_definitions: &'a [ToolDefinition],
@@ -108,7 +108,7 @@ pub(super) struct ManualCompactInput<'a> {
 
 /// 执行手动 compact，不借用 `&mut AgentRuntime`，
 /// 使调用方可以在 `tokio::select!` 中同时访问 runtime 的其他字段。
-pub(super) async fn execute_manual_compact(
+pub async fn execute_manual_compact(
     messages: &mut Vec<Message>,
     input: ManualCompactInput<'_>,
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
@@ -250,7 +250,7 @@ pub(super) async fn execute_manual_compact(
     result
 }
 
-pub(super) async fn persist_compact_summary_event(
+pub async fn persist_compact_summary_event(
     thread_id: &str,
     event: &omini_domain::events::CompactSummaryFinishedEvent,
     model_ref: &str,
@@ -266,7 +266,7 @@ pub(super) async fn persist_compact_summary_event(
         .await;
 }
 
-pub(super) fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {
+pub fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {
     outcome.before_tokens == outcome.after_tokens
         && outcome.before_messages == outcome.after_messages
 }

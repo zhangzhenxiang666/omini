@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::capabilities::CapabilityStore;
 
-pub(super) async fn toggle_active_profile(
+pub async fn toggle_active_profile(
     active_profile: &mut ActiveProfile,
     settings: &mut Settings,
     capabilities: &CapabilityStore,
@@ -28,7 +28,7 @@ pub(super) async fn toggle_active_profile(
         .await;
 }
 
-pub(super) async fn reject_request(event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
+pub async fn reject_request(event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
     let _ = event_tx
         .send(RuntimeToServerEvent::error(
             "Cannot handle this request while a run is active".to_string(),
@@ -36,7 +36,7 @@ pub(super) async fn reject_request(event_tx: &mpsc::Sender<RuntimeToServerEvent>
         .await;
 }
 
-pub(super) fn rebuild_system_prompt(
+pub fn rebuild_system_prompt(
     settings: &mut Settings,
     capabilities: &CapabilityStore,
     active_profile: ActiveProfile,
@@ -51,7 +51,7 @@ pub(super) fn rebuild_system_prompt(
     ));
 }
 
-pub(super) fn current_context_window(settings: &Settings) -> Option<u32> {
+pub fn current_context_window(settings: &Settings) -> Option<u32> {
     settings
         .providers
         .get(&settings.active_provider)
@@ -64,19 +64,19 @@ pub(super) fn current_context_window(settings: &Settings) -> Option<u32> {
         })
 }
 
-pub(super) struct ModelSelection<'a> {
-    pub(super) provider: &'a str,
-    pub(super) model: &'a str,
-    pub(super) thinking_effort: Option<ThinkingEffort>,
+pub struct ModelSelection<'a> {
+    pub provider: &'a str,
+    pub model: &'a str,
+    pub thinking_effort: Option<ThinkingEffort>,
 }
 
-pub(super) struct RuntimeSinks<'a> {
-    pub(super) event_tx: &'a mpsc::Sender<RuntimeToServerEvent>,
-    pub(super) persistence_tx: &'a mpsc::Sender<RuntimePersistenceEvent>,
-    pub(super) usage_state: &'a Arc<Mutex<ThreadUsageSnapshot>>,
+pub struct RuntimeSinks<'a> {
+    pub event_tx: &'a mpsc::Sender<RuntimeToServerEvent>,
+    pub persistence_tx: &'a mpsc::Sender<RuntimePersistenceEvent>,
+    pub usage_state: &'a Arc<Mutex<ThreadUsageSnapshot>>,
 }
 
-pub(super) async fn apply_model_selection(
+pub async fn apply_model_selection(
     settings: &mut Settings,
     llm_client: &mut LlmClient,
     project: &ProjectDir,
@@ -140,7 +140,7 @@ pub(super) async fn apply_model_selection(
     }
 }
 
-pub(super) async fn apply_thinking_effort(
+pub async fn apply_thinking_effort(
     settings: &mut Settings,
     project: &ProjectDir,
     thread_id: Option<&str>,

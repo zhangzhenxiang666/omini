@@ -14,7 +14,7 @@ const MAX_STEPS_PROMPT: &str = include_str!("max_steps.txt");
 /// 在 Plan 模式下,该头部还会以简短重述的方式重复一次 Iron Law,
 /// 避免 LLM 在中途切换模式后漂移到 prose 输出或跳过
 /// `<proposed_plan>` 块。
-pub(super) fn mode_header_section(active_profile: ActiveProfile) -> String {
+pub fn mode_header_section(active_profile: ActiveProfile) -> String {
     let (mode_name, mode_specific) = match active_profile {
         ActiveProfile::Main | ActiveProfile::Auto => ("Main", None),
         ActiveProfile::Plan => (
@@ -45,20 +45,20 @@ pub(super) fn mode_header_section(active_profile: ActiveProfile) -> String {
 }
 
 /// Main 模式静态正文: agent identity + core behavior + tool instructions。
-pub(super) fn main_mode_body() -> &'static str {
+pub fn main_mode_body() -> &'static str {
     MAIN_MODE_BODY.trim()
 }
 
 /// Plan 模式静态正文: 模式规则 + 方法论 + 可用工具清单 + Finalization Rule。
-pub(super) fn plan_mode_body() -> &'static str {
+pub fn plan_mode_body() -> &'static str {
     PLAN_MODE_BODY.trim()
 }
 
-pub(super) fn max_steps_prompt() -> &'static str {
+pub fn max_steps_prompt() -> &'static str {
     MAX_STEPS_PROMPT.trim()
 }
 
-pub(super) fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) -> String {
+pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) -> String {
     let mut section = String::new();
     section.push_str("<delegation_instructions>\n");
     section.push_str("## Delegation Policy\n\n");
@@ -149,7 +149,7 @@ pub fn language_preference_section(settings: &Settings) -> Option<String> {
     ))
 }
 
-pub(crate) fn skill_section(skills: &[SkillSummary]) -> Option<String> {
+pub fn skill_section(skills: &[SkillSummary]) -> Option<String> {
     if skills.is_empty() {
         return None;
     }

@@ -11,18 +11,18 @@ use tokio::sync::mpsc;
 const CURRENT_PLAN_ID: &str = "plan";
 const CURRENT_PLAN_FILE: &str = "plan.md";
 
-pub(super) struct ProposedPlanForwarder {
+pub struct ProposedPlanForwarder {
     parser: Option<ProposedPlanParser>,
 }
 
 impl ProposedPlanForwarder {
-    pub(super) fn new(active_profile: ActiveProfile) -> Self {
+    pub fn new(active_profile: ActiveProfile) -> Self {
         Self {
             parser: (active_profile == ActiveProfile::Plan).then(ProposedPlanParser::new),
         }
     }
 
-    pub(super) async fn forward_text_delta(
+    pub async fn forward_text_delta(
         &mut self,
         event_tx: &mpsc::Sender<RuntimeToServerEvent>,
         delta: String,
@@ -35,7 +35,7 @@ impl ProposedPlanForwarder {
         forward_segments(event_tx, parser.push_str(&delta)).await;
     }
 
-    pub(super) async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
+    pub async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
         let Some(parser) = self.parser.as_mut() else {
             return;
         };
@@ -66,17 +66,17 @@ async fn forward_segments(
 }
 
 /// 把已批准 plan 包装成新线程的首条 user message,server 端 fork 时使用。
-pub(crate) fn compacted_context(plan_content: &str) -> String {
+pub fn compacted_context(plan_content: &str) -> String {
     format!(
         "A previous planning pass produced the approved plan below to accomplish the user's task. Implement the plan in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and carry the work through implementation and verification.\n\nApproved plan:\n{plan_content}\n\nIntermediate planning discussion and discarded alternatives were intentionally omitted."
     )
 }
 
-pub(super) fn approval_message() -> String {
+pub fn approval_message() -> String {
     "Approved. Implement the proposed plan now.".to_string()
 }
 
-pub(super) async fn persist_latest(
+pub async fn persist_latest(
     project: &ProjectDir,
     active_profile: ActiveProfile,
     messages: &[Message],

@@ -126,7 +126,7 @@ impl AgentRuntime {
         .await;
     }
 
-    pub(super) async fn toggle_active_profile(&mut self) {
+    pub async fn toggle_active_profile(&mut self) {
         let next = match self.active_profile() {
             ActiveProfile::Main => ActiveProfile::Auto,
             ActiveProfile::Auto => ActiveProfile::Plan,
@@ -139,17 +139,13 @@ impl AgentRuntime {
         .await;
     }
 
-    pub(super) fn rebuild_system_prompt(&mut self) {
+    pub fn rebuild_system_prompt(&mut self) {
         let active_profile = self.active_profile();
         active_run::rebuild_system_prompt(&mut self.settings, &self.capabilities, active_profile);
     }
 
     /// 接收一条用户消息，先回显给 UI，再启动运行。
-    pub(super) async fn submit_user_message(
-        &mut self,
-        draft: UserDraft,
-        client_echo_id: Option<String>,
-    ) {
+    pub async fn submit_user_message(&mut self, draft: UserDraft, client_echo_id: Option<String>) {
         tracing::debug!(client_echo_id = ?client_echo_id, "submitting user message");
         let submission = match draft.into_submission() {
             Ok(submission) => submission,
@@ -178,7 +174,7 @@ impl AgentRuntime {
     ///
     /// `AgentRuntime` 始终绑定一个已存在的 thread，所以这里只需刷新 `updated_at`
     /// 然后进入 query loop；不再生成 UUID、建目录或写 title —— 这些都交由 server。
-    pub(super) async fn process_run(&mut self, mut start: RunStart) {
+    pub async fn process_run(&mut self, mut start: RunStart) {
         loop {
             self.collect_task_completions().await;
             let run_id = Uuid::new_v4().to_string();
@@ -488,7 +484,7 @@ impl AgentRuntime {
         }
     }
 
-    pub(super) fn tool_registry_snapshot(&self) -> Arc<ToolRegistry> {
+    pub fn tool_registry_snapshot(&self) -> Arc<ToolRegistry> {
         let mut registry = self.tool_registry.as_ref().clone();
         self.mcp_manager.register_available_tools(&mut registry);
         Arc::new(registry)
@@ -514,7 +510,7 @@ impl AgentRuntime {
     }
 
     /// 发送事件到 server/facade，忽略 send 失败。
-    pub(crate) async fn send_event(&self, event: RuntimeToServerEvent) {
+    pub async fn send_event(&self, event: RuntimeToServerEvent) {
         let _ = self.event_tx.send(event).await;
     }
 }

@@ -1,7 +1,8 @@
 mod support;
 
-use omini_core::runtime::compacted_plan_context;
-use omini_core::{delete_project_agent, project_agents_snapshot, save_project_agent};
+use omini_core::{
+    compacted_plan_context, delete_project_agent, project_agents_snapshot, save_project_agent,
+};
 use omini_domain::subagents::{AgentDraft, AgentSourceKind};
 use omini_runtime_contract::project::{DeleteProjectAgentCommand, SaveProjectAgentCommand};
 

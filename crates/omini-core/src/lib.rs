@@ -1,15 +1,24 @@
-pub mod engine;
-pub mod error;
-pub mod frontmatter;
-pub mod mcp;
-pub mod prompts;
-pub mod runtime;
-mod skills;
-mod subagents;
-pub mod title_generation;
-pub mod tools;
-pub mod types;
-pub mod util;
+//! Core implementation for the local Omini daemon.
+//!
+//! `pub` is reserved for the server-facing facade in this module. A
+//! `pub(crate) mod` establishes a crate-internal subsystem boundary; members
+//! inside it use `pub` unless a narrower child-module boundary is intentional.
+
+pub(crate) mod engine;
+pub(crate) mod error;
+pub(crate) mod frontmatter;
+pub(crate) mod mcp;
+pub(crate) mod prompts;
+pub(crate) mod runtime;
+pub(crate) mod skills;
+pub(crate) mod subagents;
+pub(crate) mod title_generation;
+pub(crate) mod tools;
+pub(crate) mod types;
+pub(crate) mod util;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 use crate::runtime::AgentRuntime;
 use omini_config::Settings;
@@ -29,7 +38,10 @@ use tracing::Instrument;
 
 pub use crate::error::CoreError;
 pub use crate::title_generation::{TitleGenError, generate_thread_title};
-pub use omini_domain::title_generation::GeneratedThreadTitle;
+
+pub fn compacted_plan_context(plan_content: &str) -> String {
+    crate::runtime::compacted_plan_context(plan_content)
+}
 
 pub fn project_agents_snapshot(settings: &Settings) -> thread_types::AgentsSnapshot {
     let records = project_agent_records(&settings.cwd);

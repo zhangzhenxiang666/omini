@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
-pub(super) struct InstructionFile {
+pub struct InstructionFile {
     path: PathBuf,
     content: String,
 }
 
-pub(super) fn project_instructions_section(
+pub fn project_instructions_section(
     global: Option<&InstructionFile>,
     project: Option<&InstructionFile>,
 ) -> String {
@@ -50,12 +50,12 @@ pub(super) fn project_instructions_section(
     section
 }
 
-pub(super) fn load_global_instructions() -> Option<InstructionFile> {
+pub fn load_global_instructions() -> Option<InstructionFile> {
     let path = dirs::home_dir()?.join(".omini").join("AGENTS.md");
     load_instruction_file(path)
 }
 
-pub(super) fn load_project_instructions(cwd: &Path) -> Option<InstructionFile> {
+pub fn load_project_instructions(cwd: &Path) -> Option<InstructionFile> {
     load_instruction_file(cwd.join("AGENTS.md"))
 }
 

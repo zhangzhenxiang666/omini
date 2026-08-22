@@ -7,7 +7,7 @@ use tracing::Instrument;
 
 impl AgentRuntime {
     /// 启动事件处理器。
-    pub(super) async fn spawn_event_processor(
+    pub async fn spawn_event_processor(
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
         active_profile: ActiveProfile,

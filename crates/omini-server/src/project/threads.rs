@@ -210,7 +210,7 @@ impl ProjectManager {
         )?);
         // 5. 把 plan 作为新 thread 的初始 user message 推给新 core，
         // 走与普通 submit_run 完全相同的路径(包括 process_run 自动启动)。
-        let plan_text = omini_core::runtime::compacted_plan_context(&plan_content);
+        let plan_text = omini_core::compacted_plan_context(&plan_content);
         let submit_command = runtime_contract::thread::SubmitRunCommand {
             draft: domain::display::UserDraft::plain(plan_text),
             client_echo_id: None,
@@ -720,8 +720,7 @@ mod tests {
         assert_eq!(record.title.as_deref(), Some("(new from plan)"));
 
         let to_thread_dir = project.thread(&to_thread_id);
-        let plan_text =
-            omini_core::runtime::compacted_plan_context("# Approved plan\n\n1. Execute it.");
+        let plan_text = omini_core::compacted_plan_context("# Approved plan\n\n1. Execute it.");
         let history = tokio::time::timeout(std::time::Duration::from_millis(500), async {
             loop {
                 let history = manager

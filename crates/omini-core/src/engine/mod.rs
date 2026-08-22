@@ -104,7 +104,7 @@ impl QueryEngine {
         });
     }
 
-    pub(crate) fn enqueue_agent_task_completion(&self, completion: AgentTaskCompletion) {
+    pub fn enqueue_agent_task_completion(&self, completion: AgentTaskCompletion) {
         self.pending_agent_task_completions
             .lock()
             .expect("pending agent task completions mutex poisoned")
@@ -132,11 +132,11 @@ impl QueryEngine {
         self.tool_pause_resolver.clone()
     }
 
-    pub(crate) fn pending_tool_pauses(&self) -> PendingToolPauses {
+    pub fn pending_tool_pauses(&self) -> PendingToolPauses {
         self.tool_pause_resolver.pending_tool_pauses()
     }
 
-    pub(crate) fn permission_engine(&self) -> Arc<PermissionEngine> {
+    pub fn permission_engine(&self) -> Arc<PermissionEngine> {
         Arc::clone(&self.permission_engine)
     }
 

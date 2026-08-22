@@ -514,20 +514,16 @@ fn unescape_literal(text: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReplaceError {
+#[cfg(test)]
+enum ReplaceError {
     EmptyOldString,
     SameAsNew,
     NotFound,
     MultipleMatches,
-    Disproportionate,
 }
 
-pub fn replace(
-    content: &str,
-    old: &str,
-    new: &str,
-    replace_all: bool,
-) -> Result<String, ReplaceError> {
+#[cfg(test)]
+fn replace(content: &str, old: &str, new: &str, replace_all: bool) -> Result<String, ReplaceError> {
     if old.is_empty() {
         return Err(ReplaceError::EmptyOldString);
     }
@@ -723,6 +719,28 @@ mod tests {
         let content = "hello world\nnext line\n";
         let result = replace(content, "hello world", "HELLO", false).unwrap();
         assert_eq!(result, "HELLO\nnext line\n");
+    }
+
+    #[test]
+    fn replace_handles_fallbacks_crlf_and_rejections() {
+        assert_eq!(
+            replace("  alpha\n", "alpha", "beta", false),
+            Ok("  beta\n".into())
+        );
+        assert_eq!(
+            replace("a\r\nb\r\n", "b", "B", false),
+            Ok("a\r\nB\r\n".into())
+        );
+        assert_eq!(replace("x x x", "x", "y", true), Ok("y y y".into()));
+        assert_eq!(
+            replace("a a", "a", "b", false),
+            Err(ReplaceError::MultipleMatches)
+        );
+        assert_eq!(
+            replace("a", "", "b", false),
+            Err(ReplaceError::EmptyOldString)
+        );
+        assert_eq!(replace("a", "a", "a", false), Err(ReplaceError::SameAsNew));
     }
 
     #[test]

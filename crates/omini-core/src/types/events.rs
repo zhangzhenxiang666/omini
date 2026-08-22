@@ -66,10 +66,16 @@ pub enum EngineToRuntimeEvent {
     /// 当前 engine/thread 的一轮 LLM usage。
     UsageRecorded(Usage),
     /// 当前 engine/thread 开始快速收缩上下文。
+    #[allow(dead_code)]
+    // The runtime intentionally suppresses shrink progress from UI projection.
     CompactShrinkStarted(CompactEvent),
     /// 当前 engine/thread 完成快速收缩上下文。
+    #[allow(dead_code)]
+    // The runtime intentionally suppresses shrink progress from UI projection.
     CompactShrinkFinished(CompactShrinkFinishedEvent),
     /// 当前 engine/thread 快速收缩上下文失败。
+    #[allow(dead_code)]
+    // The runtime intentionally suppresses shrink progress from UI projection.
     CompactShrinkFailed(CompactShrinkFailedEvent),
     /// 当前 engine/thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),

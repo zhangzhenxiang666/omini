@@ -43,25 +43,25 @@ pub struct CompactOutcome {
 }
 
 /// Compact 操作的取消控制句柄，持有取消标志和通知器。
-pub(crate) struct CompactCancelToken<'a> {
-    pub(crate) cancelled: &'a AtomicBool,
-    pub(crate) cancel_notify: &'a Notify,
+pub struct CompactCancelToken<'a> {
+    pub cancelled: &'a AtomicBool,
+    pub cancel_notify: &'a Notify,
 }
 
 impl<'a> CompactCancelToken<'a> {
-    pub(crate) fn new(cancelled: &'a AtomicBool, cancel_notify: &'a Notify) -> Self {
+    pub fn new(cancelled: &'a AtomicBool, cancel_notify: &'a Notify) -> Self {
         Self {
             cancelled,
             cancel_notify,
         }
     }
 
-    pub(crate) fn is_cancelled(&self) -> bool {
+    pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
 }
 
-pub(crate) struct CompactRequestContext<'a> {
+pub struct CompactRequestContext<'a> {
     pub settings: &'a Settings,
     pub llm_client: &'a LlmClient,
     pub tool_definitions: &'a [ToolDefinition],

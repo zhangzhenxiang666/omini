@@ -16,13 +16,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
-pub(crate) struct RuntimeCapabilityHandles {
-    pub(crate) mcp_manager: Arc<McpManager>,
-    pub(crate) capabilities: Arc<CapabilityStore>,
+pub struct RuntimeCapabilityHandles {
+    pub mcp_manager: Arc<McpManager>,
+    pub capabilities: Arc<CapabilityStore>,
 }
 
 impl RuntimeCapabilityHandles {
-    pub(crate) fn load(settings: &Settings) -> Self {
+    pub fn load(settings: &Settings) -> Self {
         Self {
             mcp_manager: Arc::new(McpManager::from_settings(settings)),
             capabilities: Arc::new(CapabilityStore::load(settings)),
@@ -49,7 +49,7 @@ pub struct AgentRuntimeDeps {
 }
 
 #[derive(Debug)]
-pub(super) enum RunStart {
+pub enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
     /// 启动前将最新 runtime 消息写入 LLM 上下文，将 UI-only display 消息写入 UI 历史。
@@ -61,7 +61,7 @@ pub(super) enum RunStart {
 }
 
 impl RunStart {
-    pub(super) fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         match self {
             Self::UserMessage => "user_message",
             Self::SplitDisplayMessage { .. } => "split_display_message",
@@ -79,56 +79,58 @@ impl RunStart {
 ///
 /// 自身不负责创建 thread；调用方必须传入 server 已经持久化的 thread 与目录句柄。
 pub struct AgentRuntime {
-    pub(crate) thread_id: String,
-    pub(crate) thread_dir: ThreadDir,
+    pub thread_id: String,
+    pub thread_dir: ThreadDir,
     /// 向 server/facade 发送 runtime 事件。
-    pub(super) event_tx: mpsc::Sender<RuntimeToServerEvent>,
+    pub event_tx: mpsc::Sender<RuntimeToServerEvent>,
     /// 向外部 server 转发展示/SQLite 级持久化事件。
-    pub(super) persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+    pub persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
     /// 接收 server/facade 投递的 runtime 命令。
-    pub(super) request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
+    pub request_rx: mpsc::Receiver<ServerToRuntimeEvent>,
     /// 运行时配置。
-    pub(crate) settings: Settings,
+    pub settings: Settings,
     /// 当前项目目录。
-    pub(crate) project: ProjectDir,
+    pub project: ProjectDir,
     /// 运行时自主维护的对话历史。
-    pub(crate) messages: Vec<Message>,
-    pub(crate) llm_context_version: Arc<AtomicI64>,
+    pub messages: Vec<Message>,
+    pub llm_context_version: Arc<AtomicI64>,
     /// LLM 客户端。
-    pub(super) llm_client: LlmClient,
+    pub llm_client: LlmClient,
     /// 查询引擎。
-    pub(super) query_engine: QueryEngine,
+    pub query_engine: QueryEngine,
     /// 工具注册表，持有所有注册的工具。
-    pub(super) tool_registry: Arc<ToolRegistry>,
+    pub tool_registry: Arc<ToolRegistry>,
     /// 从有效配置加载的 MCP 服务管理器。
-    pub(super) mcp_manager: Arc<McpManager>,
+    pub mcp_manager: Arc<McpManager>,
     /// runtime 是否已在 query 前等待过 MCP 启动。
-    pub(super) mcp_initialized: bool,
+    pub mcp_initialized: bool,
     /// 长期存活的后台 task supervisor，不依赖前台运行生命周期。
-    pub(super) task_supervisor: Arc<AgentTaskSupervisor>,
-    pub(super) task_completion_rx: mpsc::UnboundedReceiver<AgentTaskCompletion>,
+    pub task_supervisor: Arc<AgentTaskSupervisor>,
+    pub task_completion_rx: mpsc::UnboundedReceiver<AgentTaskCompletion>,
     /// runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
-    pub(super) capabilities: Arc<CapabilityStore>,
+    pub capabilities: Arc<CapabilityStore>,
     /// 取消标志，用于 CancelRun。
-    pub(super) cancelled: Arc<AtomicBool>,
+    pub cancelled: Arc<AtomicBool>,
     /// 当前活跃 profile，供 runtime 主循环和运行中事件处理器共享读取。
-    pub(crate) active_profile: Arc<RwLock<ActiveProfile>>,
+    pub active_profile: Arc<RwLock<ActiveProfile>>,
     /// 当前 thread 的 usage 快照；SQLite 落库由 server 处理。
-    pub(super) thread_usage: Arc<Mutex<ThreadUsageSnapshot>>,
+    pub thread_usage: Arc<Mutex<ThreadUsageSnapshot>>,
 }
 
 impl AgentRuntime {
+    #[cfg(test)]
     pub fn new(channels: AgentRuntimeChannels, mut deps: AgentRuntimeDeps) -> Self {
         deps.active_profile = ActiveProfile::Main;
         Self::new_with_active_profile(channels, deps)
     }
 
+    #[cfg(test)]
     pub fn new_with_active_profile(channels: AgentRuntimeChannels, deps: AgentRuntimeDeps) -> Self {
         let handles = RuntimeCapabilityHandles::load(&deps.settings);
         Self::with_capability_handles(channels, deps, handles)
     }
 
-    pub(crate) fn with_capability_handles(
+    pub fn with_capability_handles(
         channels: AgentRuntimeChannels,
         deps: AgentRuntimeDeps,
         handles: RuntimeCapabilityHandles,
@@ -232,7 +234,7 @@ impl AgentRuntime {
         }
     }
 
-    pub(crate) fn set_active_profile(&mut self, profile: ActiveProfile) {
+    pub fn set_active_profile(&mut self, profile: ActiveProfile) {
         *self
             .active_profile
             .write()
@@ -240,7 +242,7 @@ impl AgentRuntime {
         self.rebuild_system_prompt();
     }
 
-    pub(crate) fn active_profile(&self) -> ActiveProfile {
+    pub fn active_profile(&self) -> ActiveProfile {
         *self
             .active_profile
             .read()
