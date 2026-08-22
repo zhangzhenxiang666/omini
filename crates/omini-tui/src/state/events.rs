@@ -61,7 +61,7 @@ impl UiState {
             return None;
         }
 
-        let pending = self.queued_user_inputs.drain(..).collect::<VecDeque<_>>();
+        let pending = std::mem::take(&mut self.queued_user_inputs);
         let draft = Self::draft_from_input_iter(pending.iter())?;
         self.pending_intervention_inputs = pending;
         self.pending_intervention_client_echo_id = Some(client_echo_id);
