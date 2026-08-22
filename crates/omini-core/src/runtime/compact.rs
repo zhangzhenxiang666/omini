@@ -1724,10 +1724,10 @@ mod tests {
     }
 
     #[test]
-    fn compact_prompt_includes_custom_focus() {
-        let prompt = get_compact_prompt(Some("保留关于compact实现部分"));
+    fn compact_prompt_preserves_custom_focus() {
+        let focus = "保留关于compact实现部分";
+        let prompt = get_compact_prompt(Some(focus));
 
-        assert!(prompt.contains("Additional user focus"));
-        assert!(prompt.contains("保留关于compact实现部分"));
+        assert!(prompt.contains(focus));
     }
 }

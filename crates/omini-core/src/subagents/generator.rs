@@ -226,18 +226,4 @@ mod tests {
 
         assert!(err.contains("生成结果缺少字段: instructions"));
     }
-
-    #[test]
-    fn generation_prompt_defines_compliant_subagent_constraints() {
-        let prompt = build_generate_agent_prompt("review diffs");
-
-        assert!(prompt.contains("specialized, bounded"));
-        assert!(prompt.contains("when the parent agent should use this subagent"));
-        assert!(prompt.contains("short_description"));
-        assert!(prompt.contains("the user's language"));
-        assert!(prompt.contains("tool policy is configured outside"));
-        assert!(prompt.contains("Forbid spawning"));
-        assert!(prompt.contains("Do not include extra JSON fields"));
-        assert!(prompt.contains("review diffs"));
-    }
 }

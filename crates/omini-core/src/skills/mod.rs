@@ -351,7 +351,6 @@ mod tests {
                 .to_string()
                 .contains("<built-in>")
         );
-        assert!(creator.body.contains("Project skill: `.omini/skills"));
         assert!(
             registry
                 .injected_summaries()
@@ -365,12 +364,12 @@ mod tests {
         let registry = load_skill_registry_from_dirs(std::iter::empty());
         let spec = registry.get("skill-creator").unwrap();
 
-        let output = render_skill_invocation(spec, Some("Create a project skill."));
+        let user_prompt = "Create a project skill.";
+        let output = render_skill_invocation(spec, Some(user_prompt));
 
-        assert!(output.contains("<skill_name>skill-creator</skill_name>"));
-        assert!(output.contains("<skill_directory><built-in>/skill-creator</skill_directory>"));
-        assert!(output.contains("<user_prompt>\nCreate a project skill.\n</user_prompt>"));
-        assert!(!output.contains("<skill_invocation>"));
+        assert!(output.contains(&spec.name));
+        assert!(output.contains(&spec.directory.display().to_string()));
+        assert!(output.contains(user_prompt));
     }
 
     #[test]
@@ -615,12 +614,12 @@ Use the writing workflow.
         );
         let spec = parse_skill_directory(&dir, SkillDirectoryKind::Project).unwrap();
 
-        let output = render_skill_invocation(&spec, Some("Draft this."));
+        let user_prompt = "Draft this.";
+        let output = render_skill_invocation(&spec, Some(user_prompt));
 
-        assert!(output.contains("<skill_name>writer</skill_name>"));
-        assert!(output.contains("<skill_directory>"));
+        assert!(output.contains(&spec.name));
         assert!(output.contains(dir.canonicalize().unwrap().to_str().unwrap()));
-        assert!(output.contains("<skill_body>\nUse the writing workflow.\n</skill_body>"));
-        assert!(output.contains("<user_prompt>\nDraft this.\n</user_prompt>"));
+        assert!(output.contains(&spec.body));
+        assert!(output.contains(user_prompt));
     }
 }

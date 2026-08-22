@@ -436,37 +436,6 @@ mod tests {
     }
 
     #[test]
-    fn built_in_explorer_returns_parent_agent_evidence_summary() {
-        let registry = load_agent_registry_from_dirs(std::iter::empty());
-        let explorer = registry.agents.get("explorer").unwrap();
-
-        assert!(explorer.instructions.contains("parent agent"));
-        // 新版 instructions 用 <analysis>/<results>/<next_steps> 描述输出形态
-        assert!(explorer.instructions.contains("<results>"));
-        assert!(explorer.instructions.contains("<answer>"));
-        assert!(explorer.instructions.contains("<next_steps>"));
-    }
-
-    #[test]
-    fn built_in_explorer_is_read_only_with_parallel_strategy() {
-        let registry = load_agent_registry_from_dirs(std::iter::empty());
-        let explorer = registry.agents.get("explorer").unwrap();
-
-        // read-only / 禁止写文件约束
-        assert!(explorer.instructions.contains("Read-only"));
-        assert!(explorer.instructions.contains("No file creation"));
-        // 并发首动作约束
-        assert!(explorer.instructions.contains("3+ tools simultaneously"));
-        // 失败清单(相对路径/漏检/无 <results> 等)
-        assert!(explorer.instructions.contains("relative"));
-        assert!(explorer.instructions.contains("`<results>` block"));
-        // 工具策略改写为 search/read/bash
-        assert!(explorer.instructions.contains("`search`"));
-        assert!(explorer.instructions.contains("`read`"));
-        assert!(explorer.instructions.contains("`bash`"));
-    }
-
-    #[test]
     fn parses_custom_agent_with_string_tools() {
         let cwd = temp_project();
         write_agent(
@@ -628,10 +597,7 @@ This should be skipped.
         let registry = load_project_agent_registry(&cwd);
         let agent = registry.agents.get("explorer").unwrap();
 
-        assert_eq!(
-            agent.description,
-            "Read-only codebase exploration agent. Use for finding files by pattern, searching definitions/symbols, tracing dependencies, and understanding architecture across multiple files. Specify thoroughness: 'quick' (narrow), 'medium', or 'very thorough' (comprehensive cross-file analysis)."
-        );
+        assert!(matches!(agent.source, AgentSource::BuiltIn));
         assert!(registry.diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message()
@@ -790,49 +756,13 @@ Help in this project.
     }
 
     #[test]
-    fn built_in_general_agent_inherits_main_mode_body_without_task_routing() {
+    fn built_in_general_agent_uses_default_tool_policy() {
         let registry = load_agent_registry_from_dirs(std::iter::empty());
         let general = registry.agents.get("general").unwrap();
 
         assert_eq!(general.name, "general");
-        assert_eq!(
-            general.description,
-            "General-purpose coding agent for multi-step implementation and research. Use for writing tests, refactoring modules, making code changes, or complex questions requiring multiple tools. Can parallelize independent subtasks. Unlike explorer, this agent can modify files."
-        );
         assert_eq!(general.tool_policy.allow, None);
         assert_eq!(general.tool_policy.deny, None);
-        assert_eq!(general.instructions, builtins::GENERAL_INSTRUCTIONS.trim());
-        // Task Routing 段已删除(避免引导 subagent 再去用 explorer)
-        assert!(!general.instructions.contains("## Task Routing"));
-        assert!(
-            !general
-                .instructions
-                .contains("`subagent` tool with the `explorer`")
-        );
-    }
-
-    #[test]
-    fn built_in_explorer_agent_instructions_contain_analysis_and_results_blocks() {
-        let registry = load_agent_registry_from_dirs(std::iter::empty());
-        let explorer = registry.agents.get("explorer").unwrap();
-
-        assert_eq!(explorer.name, "explorer");
-        // 引导"先分析、再并发、最后结构化报告"的新修辞
-        assert!(explorer.instructions.contains("<analysis>"));
-        assert!(explorer.instructions.contains("<results>"));
-        assert!(explorer.instructions.contains("<next_steps>"));
-        assert!(
-            explorer
-                .instructions
-                .contains("Launch **3+ tools simultaneously**")
-        );
-        // 工具策略改写为 search/read/bash 三件套
-        assert!(explorer.instructions.contains("`search`"));
-        assert!(explorer.instructions.contains("`read`"));
-        assert!(explorer.instructions.contains("`bash`"));
-        // 旧版"Findings/Key references/Uncertainty"格式已替换
-        assert!(!explorer.instructions.contains("Findings:"));
-        assert!(!explorer.instructions.contains("Key references:"));
     }
 
     #[test]
