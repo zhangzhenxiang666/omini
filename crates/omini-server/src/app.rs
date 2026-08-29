@@ -84,6 +84,11 @@ fn v1_routes() -> Router<AppState> {
 
 fn project_routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/configuration",
+            get(routes::projects::project_configuration)
+                .post(routes::projects::bootstrap_project_configuration),
+        )
         .route("/models", get(routes::projects::list_models))
         .route("/model", post(routes::projects::set_model))
         .route(

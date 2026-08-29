@@ -128,7 +128,7 @@ fn run_server_command(command: ServerCommand) -> Result<ExitCode, Box<dyn Error>
     }
 }
 
-fn connect_current_project() -> Result<omini_tui::ProjectConnection, String> {
+fn connect_current_project() -> Result<omini_tui::StartupConnection, String> {
     let cwd = env::current_dir().map_err(|err| format!("read cwd: {err}"))?;
     let status = ensure_daemon()?;
     let http = daemon_http_client()?;
@@ -147,17 +147,37 @@ fn connect_current_project() -> Result<omini_tui::ProjectConnection, String> {
             name: None,
         },
     )?;
+    let configuration: protocol::ProjectConfigurationResponse = get_json_without_client(
+        &http,
+        &format!(
+            "http://{}/v1/projects/{}/configuration",
+            status.addr, project.id
+        ),
+    )?;
+
+    if configuration.state != protocol::ProjectConfigurationState::Ready {
+        return Ok(omini_tui::StartupConnection::Configuration(
+            omini_tui::ConfigurationConnection {
+                addr: status.addr,
+                project_id: project.id,
+                client_id: register.client_id,
+                status: configuration,
+            },
+        ));
+    }
     let open: protocol::OpenProjectResponse = post_empty_without_client(
         &http,
         &format!("http://{}/v1/projects/{}/open", status.addr, project.id),
     )?;
 
-    Ok(omini_tui::ProjectConnection {
-        addr: status.addr,
-        project_id: project.id,
-        client_id: register.client_id,
-        open,
-    })
+    Ok(omini_tui::StartupConnection::Project(Box::new(
+        omini_tui::ProjectConnection {
+            addr: status.addr,
+            project_id: project.id,
+            client_id: register.client_id,
+            open,
+        },
+    )))
 }
 
 fn start_server() -> Result<ExitCode, Box<dyn Error>> {
@@ -389,6 +409,17 @@ where
         .post(url)
         .send()
         .map_err(|err| format!("POST {url}: {err}"))?;
+    decode_response(response, url)
+}
+
+fn get_json_without_client<T>(http: &reqwest::blocking::Client, url: &str) -> Result<T, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let response = http
+        .get(url)
+        .send()
+        .map_err(|err| format!("GET {url}: {err}"))?;
     decode_response(response, url)
 }
 

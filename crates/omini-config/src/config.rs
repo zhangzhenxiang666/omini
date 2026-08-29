@@ -1,6 +1,6 @@
 use crate::{
-    CompactConfig, ConfigError, McpServerConfig, ModelTierEntry, ModelTiers, OminiRoot,
-    ProviderProfile, RawPermissionConfig, Settings,
+    AuthEnvironment, CompactConfig, ConfigError, McpServerConfig, ModelTierEntry, ModelTiers,
+    OminiRoot, ProviderProfile, RawPermissionConfig, Settings,
 };
 use indexmap::IndexMap;
 use omini_domain::config::{
@@ -11,11 +11,26 @@ use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
+use std::path::PathBuf;
+use toml_edit::DocumentMut;
+use toml_edit::Item;
+use toml_edit::Table;
+use toml_edit::value;
 use url::Url;
 
 pub const DEFAULT_CONTEXT_WINDOW: u32 = 256_000;
 
 pub type ProviderProtocol = ProviderEndpointKind;
+
+/// 首次引导写入的最小 provider/model 信息。认证材料由 auth.json 单独管理。
+#[derive(Debug, Clone)]
+pub struct BootstrapProviderConfig {
+    pub provider_id: String,
+    pub protocol: ProviderProtocol,
+    pub base_url: String,
+    pub model_id: String,
+    pub api_key_env: Option<String>,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResolvedSecret(String);
@@ -40,12 +55,14 @@ pub enum RawSecretRef {
 }
 
 impl RawSecretRef {
-    fn resolve(&self) -> Result<ResolvedSecret, ConfigError> {
+    fn resolve(&self, auth_environment: &AuthEnvironment) -> Result<ResolvedSecret, ConfigError> {
         match self {
             Self::Literal(value) => Ok(ResolvedSecret(value.clone())),
             Self::Env { env } => std::env::var(env)
+                .ok()
+                .or_else(|| auth_environment.get(env).map(str::to_string))
                 .map(ResolvedSecret)
-                .map_err(|_| ConfigError::MissingEnv(env.clone())),
+                .ok_or_else(|| ConfigError::MissingEnv(env.clone())),
         }
     }
 }
@@ -269,7 +286,7 @@ impl RawRoutingConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawConfig {
     pub agent: Option<RawAgentConfig>,
@@ -309,6 +326,13 @@ impl RawConfig {
     }
 
     pub fn resolve(self) -> Result<ResolvedConfig, ConfigError> {
+        self.resolve_with_auth(&AuthEnvironment::default())
+    }
+
+    pub fn resolve_with_auth(
+        self,
+        auth_environment: &AuthEnvironment,
+    ) -> Result<ResolvedConfig, ConfigError> {
         if self.providers.is_empty() {
             return Err(ConfigError::NoActiveProvider);
         }
@@ -374,7 +398,7 @@ impl RawConfig {
                     base_url: url,
                     api_key: provider
                         .api_key
-                        .map(|secret| secret.resolve())
+                        .map(|secret| secret.resolve(auth_environment))
                         .transpose()?,
                     request: provider.request.unwrap_or_default(),
                     models,
@@ -746,13 +770,99 @@ pub fn load_resolved_config_for_cwd(
     root: &OminiRoot,
     cwd: &Path,
 ) -> Result<ResolvedConfig, ConfigError> {
-    let mut config: RawConfig = load_toml_file(&root.config_path())?;
+    let global_path = root.config_path();
+    let mut config: RawConfig = match load_toml_file(&global_path) {
+        Ok(config) => config,
+        Err(ConfigError::ConfigLoad { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            RawConfig::default()
+        }
+        Err(error) => return Err(error),
+    };
     let project_path = root.project_config_path(cwd);
     if project_path.exists() {
         let project: RawConfig = load_toml_file(&project_path)?;
         config.merge_project_config(project)?;
     }
-    config.resolve()
+    config.resolve_with_auth(&root.load_auth_environment()?)
+}
+
+/// 保留用户已有 TOML 的无关段与注释，仅补齐首次引导指定的 provider/model。
+pub fn bootstrap_global_config(
+    root: &OminiRoot,
+    bootstrap: &BootstrapProviderConfig,
+) -> Result<(), ConfigError> {
+    if bootstrap.provider_id.trim().is_empty() {
+        return Err(ConfigError::InvalidProviderId);
+    }
+    if bootstrap.model_id.trim().is_empty() {
+        return Err(ConfigError::InvalidModelId {
+            provider: bootstrap.provider_id.clone(),
+        });
+    }
+    let path = root.config_path();
+    let content = if path.exists() {
+        std::fs::read_to_string(&path).map_err(|source| ConfigError::ConfigLoad {
+            path: path.clone(),
+            source,
+        })?
+    } else {
+        String::new()
+    };
+    let mut document =
+        content
+            .parse::<DocumentMut>()
+            .map_err(|source| ConfigError::ConfigEdit {
+                path: path.clone(),
+                source,
+            })?;
+    let protocol = match bootstrap.protocol {
+        ProviderProtocol::OpenAI => "openai",
+        ProviderProtocol::Anthropic => "anthropic",
+    };
+    let providers = ensure_table(&mut document["providers"])?;
+    let provider = ensure_table(&mut providers[&bootstrap.provider_id])?;
+    provider["protocol"] = value(protocol);
+    provider["base_url"] = value(&bootstrap.base_url);
+    let models = ensure_table(&mut provider["models"])?;
+    let model = &mut models[&bootstrap.model_id];
+    if model.is_none() {
+        *model = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(env) = &bootstrap.api_key_env {
+        let mut secret = toml_edit::InlineTable::new();
+        secret.insert("env", toml_edit::Value::from(env.as_str()));
+        provider["api_key"] = toml_edit::Item::Value(toml_edit::Value::InlineTable(secret));
+    }
+    write_atomic(&path, document.to_string().as_bytes())
+}
+
+fn ensure_table(item: &mut Item) -> Result<&mut Table, ConfigError> {
+    if item.is_none() {
+        *item = Item::Table(Table::new());
+    }
+    item.as_table_mut()
+        .ok_or_else(|| ConfigError::BootstrapTableConflict("providers".to_string()))
+}
+
+fn write_atomic(path: &Path, content: &[u8]) -> Result<(), ConfigError> {
+    let parent = path.parent().ok_or_else(|| ConfigError::ConfigLoad {
+        path: PathBuf::from(path),
+        source: std::io::Error::other("config path has no parent"),
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    use std::io::Write;
+    file.write_all(content)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(temporary, path)?;
+    Ok(())
 }
 
 fn load_toml_file<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, ConfigError> {

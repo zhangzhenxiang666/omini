@@ -88,7 +88,18 @@ impl TestDaemon {
     pub async fn start(label: &str) -> Self {
         let root = TestTempDir::new(label);
         root.write(".omini/config.toml", TEST_CONFIG);
+        install_bundled_rg(&root);
 
+        Self::start_with_root(root).await
+    }
+
+    pub async fn start_without_config(label: &str) -> Self {
+        let root = TestTempDir::new(label);
+        install_bundled_rg(&root);
+        Self::start_with_root(root).await
+    }
+
+    async fn start_with_root(root: TestTempDir) -> Self {
         let child = spawn_daemon(&root);
 
         let client = reqwest::Client::builder()
@@ -286,5 +297,19 @@ fn spawn_daemon(root: &TestTempDir) -> Child {
         .stderr(Stdio::piped())
         .spawn()
         .expect("daemon process should start")
+}
+
+fn install_bundled_rg(root: &TestTempDir) {
+    let paths = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let rg = paths
+        .into_iter()
+        .map(|directory| directory.join("rg"))
+        .find(|path| path.is_file())
+        .expect("test environment must provide rg on PATH");
+    let target = root.path().join(".omini/bin/rg");
+    std::fs::create_dir_all(target.parent().unwrap()).expect("test rg directory should be created");
+    std::fs::copy(rg, target).expect("test rg should be copied");
 }
 pub mod store;

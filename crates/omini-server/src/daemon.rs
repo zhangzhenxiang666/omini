@@ -1,7 +1,12 @@
+use crate::bundled_tools::BundledTools;
 use crate::project::{ProjectManager, load_validated_config};
 use crate::store::{Database, Project, StoreError};
 use chrono::Utc;
+use omini_config::AuthStore;
+use omini_config::BootstrapProviderConfig;
+use omini_config::ConfigError;
 use omini_config::OminiRoot;
+use omini_config::bootstrap_global_config;
 use omini_config::project::storage_key;
 use omini_core::CoreError;
 use omini_protocol as protocol;
@@ -15,15 +20,33 @@ pub struct GlobalDaemonManager {
     root: Arc<OminiRoot>,
     db: Arc<Database>,
     projects: Mutex<HashMap<String, Arc<ProjectManager>>>,
+    bundled_tools: Arc<BundledTools>,
 }
 
 impl GlobalDaemonManager {
     pub fn new(root: OminiRoot, db: Arc<Database>) -> Self {
+        let bundled_tools = Arc::new(BundledTools::new(root.path().as_path()));
         Self {
             root: Arc::new(root),
             db,
             projects: Mutex::new(HashMap::new()),
+            bundled_tools,
         }
+    }
+
+    pub fn bundled_tool_status(&self) -> protocol::BundledToolStatus {
+        self.bundled_tools.status()
+    }
+
+    pub fn bundled_tools(&self) -> Arc<BundledTools> {
+        Arc::clone(&self.bundled_tools)
+    }
+
+    pub async fn ensure_bundled_rg(&self) -> Result<(), String> {
+        let tools = Arc::clone(&self.bundled_tools);
+        tokio::task::spawn_blocking(move || tools.ensure_rg())
+            .await
+            .map_err(|error| format!("bundled ripgrep restore task failed: {error}"))?
     }
 
     pub async fn list_projects(&self) -> Result<protocol::ProjectsResponse, ProjectError> {
@@ -53,12 +76,6 @@ impl GlobalDaemonManager {
         };
         let id = Uuid::new_v4();
         let storage_key = storage_key(&path, id);
-        let config = load_validated_config(&self.root, &path)
-            .map_err(|error| ProjectError::Config(error.to_string()))?;
-        self.root
-            .init_project(&storage_key, &config)
-            .map_err(|error| ProjectError::Config(error.to_string()))?;
-
         let now = Utc::now();
         let project = Project {
             id: id.to_string(),
@@ -158,6 +175,89 @@ impl GlobalDaemonManager {
         Ok(response)
     }
 
+    pub async fn project_configuration(
+        &self,
+        project_id: &str,
+    ) -> Result<protocol::ProjectConfigurationResponse, ProjectError> {
+        let project = self
+            .db
+            .get_project(project_id)
+            .await?
+            .ok_or(ProjectError::NotFound)?;
+        let cwd = PathBuf::from(&project.path);
+        if !cwd.is_dir() {
+            return Err(ProjectError::MissingPath(project.path));
+        }
+        Ok(project_configuration_status(&self.root, &cwd))
+    }
+
+    pub async fn bootstrap_project_configuration(
+        &self,
+        project_id: &str,
+        request: protocol::BootstrapProjectConfigurationRequest,
+    ) -> Result<protocol::ProjectConfigurationResponse, ProjectError> {
+        let project = self
+            .db
+            .get_project(project_id)
+            .await?
+            .ok_or(ProjectError::NotFound)?;
+        let cwd = PathBuf::from(&project.path);
+        if !cwd.is_dir() {
+            return Err(ProjectError::MissingPath(project.path));
+        }
+        let current = project_configuration_status(&self.root, &cwd);
+        if current.state != protocol::ProjectConfigurationState::SetupRequired {
+            return Err(ProjectError::Invalid(
+                "Project configuration is not eligible for bootstrap".to_string(),
+            ));
+        }
+
+        let api_key = request.api_key.filter(|value| !value.trim().is_empty());
+        let api_key_env = api_key.as_ref().map(|_| {
+            request
+                .environment_variable
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| default_api_key_environment_variable(&request.provider_id))
+        });
+        if let Some(api_key) = api_key {
+            let mut auth = AuthStore::load(&self.root.auth_path())
+                .map_err(|error| ProjectError::Config(error.to_string()))?;
+            auth.upsert_env(
+                api_key_env
+                    .clone()
+                    .expect("api key has an environment variable"),
+                api_key,
+            )
+            .map_err(|error| ProjectError::Config(error.to_string()))?;
+            auth.save_atomic(&self.root.auth_path())
+                .map_err(|error| ProjectError::Config(error.to_string()))?;
+        }
+
+        bootstrap_global_config(
+            &self.root,
+            &BootstrapProviderConfig {
+                provider_id: request.provider_id,
+                protocol: request.protocol,
+                base_url: request.base_url,
+                model_id: request.model_id,
+                api_key_env,
+            },
+        )
+        .map_err(|error| ProjectError::Config(error.to_string()))?;
+
+        let status = project_configuration_status(&self.root, &cwd);
+        if status.state != protocol::ProjectConfigurationState::Ready {
+            return Err(ProjectError::Config(status.message.unwrap_or_else(|| {
+                "bootstrap did not produce a valid configuration".to_string()
+            })));
+        }
+        self.projects
+            .lock()
+            .expect("projects lock poisoned")
+            .remove(project_id);
+        Ok(status)
+    }
+
     pub async fn get_or_load_project(
         &self,
         project_id: &str,
@@ -202,6 +302,72 @@ impl GlobalDaemonManager {
                 .or_insert_with(|| Arc::clone(&loaded)),
         ))
     }
+}
+
+fn project_configuration_status(
+    root: &OminiRoot,
+    cwd: &Path,
+) -> protocol::ProjectConfigurationResponse {
+    match load_validated_config(root, cwd) {
+        Ok(_) => protocol::ProjectConfigurationResponse {
+            state: protocol::ProjectConfigurationState::Ready,
+            code: None,
+            message: None,
+            provider_id: None,
+        },
+        Err(ConfigError::NoActiveProvider) => configuration_setup_required(
+            "no_provider",
+            "No provider is configured for this project",
+            None,
+        ),
+        Err(ConfigError::NoModels(provider_id)) => configuration_setup_required(
+            "no_model",
+            "A configured provider has no models",
+            Some(provider_id),
+        ),
+        Err(error) => protocol::ProjectConfigurationResponse {
+            state: protocol::ProjectConfigurationState::Invalid,
+            code: Some(configuration_error_code(&error).to_string()),
+            message: Some(error.to_string()),
+            provider_id: None,
+        },
+    }
+}
+
+fn configuration_setup_required(
+    code: &str,
+    message: &str,
+    provider_id: Option<String>,
+) -> protocol::ProjectConfigurationResponse {
+    protocol::ProjectConfigurationResponse {
+        state: protocol::ProjectConfigurationState::SetupRequired,
+        code: Some(code.to_string()),
+        message: Some(message.to_string()),
+        provider_id,
+    }
+}
+
+fn configuration_error_code(error: &ConfigError) -> &'static str {
+    match error {
+        ConfigError::ConfigParse { .. } | ConfigError::ConfigEdit { .. } => "config_parse_error",
+        ConfigError::AuthLoad { .. } | ConfigError::AuthParse { .. } => "auth_error",
+        ConfigError::MissingEnv(_) => "missing_environment_variable",
+        _ => "invalid_configuration",
+    }
+}
+
+fn default_api_key_environment_variable(provider_id: &str) -> String {
+    let normalized = provider_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("{normalized}_API_KEY")
 }
 
 #[derive(Debug)]

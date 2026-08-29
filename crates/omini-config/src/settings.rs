@@ -472,6 +472,27 @@ pub enum ConfigError {
         path: String,
         source: toml::de::Error,
     },
+    #[error("cannot edit {path}: {source}")]
+    ConfigEdit {
+        path: PathBuf,
+        source: toml_edit::TomlError,
+    },
+    #[error("bootstrap expected TOML table at '{0}'")]
+    BootstrapTableConflict(String),
+    #[error("cannot read auth file {path}: {source}")]
+    AuthLoad {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("cannot parse auth file {path}: {source}")]
+    AuthParse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("auth environment variable name must not be empty")]
+    InvalidAuthEnvironmentVariable,
+    #[error("auth file path has no parent: {0}")]
+    InvalidAuthPath(PathBuf),
     #[error("failed to parse config toml: {0}")]
     TomlDe(#[from] toml::de::Error),
     #[error("io error: {0}")]
@@ -511,6 +532,14 @@ impl OminiRoot {
 
     pub fn config_path(&self) -> PathBuf {
         self.path.join("config.toml")
+    }
+
+    pub fn auth_path(&self) -> PathBuf {
+        self.path.join("auth.json")
+    }
+
+    pub fn load_auth_environment(&self) -> Result<crate::AuthEnvironment, ConfigError> {
+        Ok(crate::AuthStore::load(&self.auth_path())?.environment())
     }
 
     pub fn project_config_path(&self, cwd: &Path) -> PathBuf {

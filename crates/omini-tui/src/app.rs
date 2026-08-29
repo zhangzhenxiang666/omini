@@ -2,21 +2,11 @@ use super::client;
 use super::render;
 use super::state::UiState;
 use super::update;
+use crate::setup;
+use crate::terminal;
 use crate::types::events::{ActiveProfile, RuntimeToUiEvent};
-use crossterm::cursor::Hide;
-use crossterm::event::DisableMouseCapture;
-use crossterm::event::EnableMouseCapture;
-use crossterm::event::{
-    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
-use ratatui::Terminal;
-use ratatui::backend::CrosstermBackend;
-use std::io::{self, stderr};
+use crossterm::event::{self, Event};
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -25,49 +15,27 @@ use tokio::sync::mpsc;
 const STREAMING_TICK_RATE: Duration = Duration::from_millis(100);
 const IDLE_TICK_RATE: Duration = Duration::from_millis(50);
 
-fn init_terminal() -> io::Result<Terminal<CrosstermBackend<io::Stderr>>> {
-    enable_raw_mode()?;
-    execute!(stderr(), EnterAlternateScreen)?;
-    execute!(stderr(), EnableBracketedPaste)?;
-    execute!(
-        stderr(),
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES,
-        )
-    )?;
-    execute!(stderr(), EnableMouseCapture)?;
-    execute!(stderr(), Hide)?;
-    Terminal::new(CrosstermBackend::new(stderr()))
+pub(crate) async fn run_ui_async(connection: client::StartupConnection) -> io::Result<()> {
+    match connection {
+        client::StartupConnection::Project(connection) => run_project_ui_async(*connection).await,
+        client::StartupConnection::Configuration(connection) => {
+            if let Some(connection) = setup::run(connection).await? {
+                run_project_ui_async(connection).await
+            } else {
+                Ok(())
+            }
+        }
+    }
 }
 
-fn safe_restore_terminal() {
-    let _ = disable_raw_mode();
-    let _ = execute!(io::stderr(), PopKeyboardEnhancementFlags);
-    let _ = execute!(io::stderr(), DisableBracketedPaste);
-    let _ = execute!(io::stderr(), LeaveAlternateScreen);
-    let _ = execute!(io::stderr(), DisableMouseCapture);
-}
-
-fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
-    execute!(terminal.backend_mut(), DisableBracketedPaste)?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
-pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::Result<()> {
+async fn run_project_ui_async(connection: client::ProjectConnection) -> io::Result<()> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
-        safe_restore_terminal();
+        terminal::safe_restore();
         prev_hook(panic);
     }));
 
-    let mut terminal = init_terminal()?;
+    let mut terminal = terminal::init()?;
     let mut state = UiState::new();
     let open = &connection.open;
     let cwd = std::path::PathBuf::from(&open.project.path);
@@ -185,7 +153,7 @@ pub(crate) async fn run_ui_async(connection: client::ProjectConnection) -> io::R
         handle.abort();
     }
     let _ = input_handle.await;
-    restore_terminal(&mut terminal)?;
+    terminal::restore(&mut terminal)?;
     let _ = std::panic::take_hook();
     result
 }

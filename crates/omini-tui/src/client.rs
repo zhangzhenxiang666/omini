@@ -107,6 +107,20 @@ pub struct ProjectConnection {
     pub open: protocol::OpenProjectResponse,
 }
 
+#[derive(Debug)]
+pub struct ConfigurationConnection {
+    pub addr: SocketAddr,
+    pub project_id: String,
+    pub client_id: String,
+    pub status: protocol::ProjectConfigurationResponse,
+}
+
+#[derive(Debug)]
+pub enum StartupConnection {
+    Project(Box<ProjectConnection>),
+    Configuration(ConfigurationConnection),
+}
+
 pub(crate) fn spawn_project_client(
     connection: ProjectConnection,
     event_tx: mpsc::Sender<RuntimeToUiEvent>,

@@ -25,6 +25,13 @@ pub async fn submit_run(
 ) -> ApiResult<protocol::RunSubmittedResponse> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     ensure_connected_controller(&thread, &headers).await?;
+    manager.ensure_bundled_rg().await.map_err(|error| {
+        api_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "bundled_tool_unavailable",
+            error,
+        )
+    })?;
     if request.mode == protocol::RunInputMode::Submit {
         // 同步落库 300 字符兜底 title。只有当 title 这次被实际写入
         // (text 非空 + DB 软写条件命中) 时,才 spawn 后台 LLM 升级任务,

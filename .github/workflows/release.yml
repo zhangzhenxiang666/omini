@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RIPGREP_VERSION: 15.2.0
+
+jobs:
+  package:
+    name: package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            rg_archive: ripgrep-15.2.0-aarch64-apple-darwin.tar.gz
+            rg_sha256: 3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            rg_archive: ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz
+            rg_sha256: 33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Verify release tag
+        run: test "${GITHUB_REF_NAME#v}" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "omini") | .version')"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binaries
+        run: cargo build --locked --release -p omini -p omini-server
+      - name: Download bundled ripgrep
+        run: |
+          curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${{ matrix.rg_archive }}" -o /tmp/rg.tar.gz
+          if command -v sha256sum >/dev/null 2>&1; then
+            echo "${{ matrix.rg_sha256 }}  /tmp/rg.tar.gz" | sha256sum --check
+          else
+            echo "${{ matrix.rg_sha256 }}  /tmp/rg.tar.gz" | shasum -a 256 --check
+          fi
+          tar -xzf /tmp/rg.tar.gz -C /tmp
+          rg_dir="${{ matrix.rg_archive }}"
+          rg_dir="${rg_dir%.tar.gz}"
+          install -m 0755 "/tmp/$rg_dir/rg" dist-rg
+          ./dist-rg --version
+      - name: Create release archive
+        run: |
+          mkdir -p dist/bin
+          install -m 0755 target/release/omini dist/bin/omini
+          install -m 0755 target/release/omini-server dist/bin/omini-server
+          install -m 0755 dist-rg dist/bin/rg
+          tar -czf "omini-${{ matrix.target }}.tar.gz" -C dist bin
+          cp dist-rg "rg-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            omini-${{ matrix.target }}.tar.gz
+            rg-${{ matrix.target }}
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum omini-*.tar.gz rg-* > SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" release-assets/* scripts/install.sh --generate-notes

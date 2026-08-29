@@ -11,6 +11,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 mod app;
+mod bundled_tools;
 mod daemon;
 mod event;
 mod git;
@@ -31,6 +32,12 @@ pub async fn serve_daemon(root: OminiRoot) -> io::Result<()> {
         .await
         .map_err(io::Error::other)?;
     let manager = Arc::new(GlobalDaemonManager::new(root, Arc::new(db)));
+    let bundled_tools = manager.bundled_tools();
+    tokio::task::spawn_blocking(move || {
+        if let Err(error) = bundled_tools.ensure_rg() {
+            tracing::warn!(%error, "bundled ripgrep is unavailable");
+        }
+    });
     let (shutdown, shutdown_rx) = app::shutdown_channel();
     let app = app::router(manager, shutdown);
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;

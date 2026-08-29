@@ -19,6 +19,42 @@ api_key = { env = "OPENAI_API_KEY" }
 
 `name`、`context_window`、`thinking`、`input`、routing、MCP 和权限均为可选配置。
 
+如果用户级配置缺失，或某个 provider 尚未配置 model，omini 会把对应项目标为
+“需要配置”，并在 TUI 中提供服务端驱动的首次引导。配置 TOML 语法错误、provider
+缺少 `protocol`/`base_url` 或凭据无法解析时则显示只读诊断，需手动修复文件。
+引导表单使用 `Tab`/上下键切换字段；文本字段支持左右键、`Home`、`End`、
+`Backspace`、`Delete` 和在当前光标处粘贴，protocol 字段使用左右键切换类型。
+
+## 认证存储（auth.json）
+
+首次引导保存的 API key 不会写入 `config.toml`，而是保存到权限为 `0600` 的
+`~/.omini/auth.json`，并由配置引用环境变量名：
+
+```json
+{
+  "env": {
+    "OPENAI_API_KEY": "sk-..."
+  }
+}
+```
+
+```toml
+[providers.openai]
+api_key = { env = "OPENAI_API_KEY" }
+```
+
+daemon 每次打开项目或创建 runtime 都读取最新 `auth.json`；启动 omini-server 的真实
+环境变量优先于该文件。`auth.json` 目前只为模型 provider 提供凭据，不会注入 MCP 或其
+子进程。
+
+## 内置工具状态
+
+`rg` 是 omini-server 管理的内置依赖，而非 TUI/CLI 的依赖。安装器负责首次放置它；
+server 启动时会异步校验并在缺失时下载与自身版本匹配的 Release 资产。`GET /v1/health`
+中的 `bundled_rg.state` 为 `ready`、`restoring` 或 `unavailable`，所有客户端（包括未来的
+Web）都应消费此状态。daemon 即使 `unavailable` 仍可用于配置和项目管理，但提交新的
+agent run 会返回 `bundled_tool_unavailable`，直到恢复成功。
+
 ## 完整配置示例
 
 下面的示例覆盖当前 `config.toml` 支持的所有配置段和字段。示例中的值仅用于说明；特别是 request 覆盖和 MCP command 应按实际 provider 与本机环境调整。

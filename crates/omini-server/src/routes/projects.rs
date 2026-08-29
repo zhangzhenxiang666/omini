@@ -65,6 +65,33 @@ pub async fn open_project(
         .map_err(project_error)
 }
 
+/// 返回项目当前有效配置是否能创建 runtime。
+#[axum::debug_handler]
+pub async fn project_configuration(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path(project_id): Path<String>,
+) -> ApiResult<protocol::ProjectConfigurationResponse> {
+    manager
+        .project_configuration(&project_id)
+        .await
+        .map(Json)
+        .map_err(project_error)
+}
+
+/// 仅为缺少最小 provider/model 的项目写入首次配置。
+#[axum::debug_handler]
+pub async fn bootstrap_project_configuration(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path(project_id): Path<String>,
+    Json(request): Json<protocol::BootstrapProjectConfigurationRequest>,
+) -> ApiResult<protocol::ProjectConfigurationResponse> {
+    manager
+        .bootstrap_project_configuration(&project_id, request)
+        .await
+        .map(Json)
+        .map_err(project_error)
+}
+
 /// 列出项目默认可用模型；不需要已有 thread。
 #[axum::debug_handler]
 pub async fn list_models(

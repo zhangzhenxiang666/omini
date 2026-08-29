@@ -7,14 +7,18 @@ mod markdown;
 mod protocol;
 mod render;
 mod selection;
+mod setup;
 mod state;
+mod terminal;
 mod types;
 mod update;
 mod widgets;
 
+pub use client::ConfigurationConnection;
 pub use client::ProjectConnection;
+pub use client::StartupConnection;
 
-pub fn run_ui(connection: ProjectConnection) -> std::io::Result<()> {
+pub fn run_ui(connection: StartupConnection) -> std::io::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;

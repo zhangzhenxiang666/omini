@@ -2,23 +2,7 @@
 
 # omini
 
-**一个用于探索 Vibe Coding Agent 实现方式的学习项目**
-
 </div>
-
-## 关于
-
-`omini` 是一个个人学习项目，旨在深入探索 OpenCode、Claude Code这类 **Vibe Coding Agent**
-背后的实现原理与核心机制。
-
-通过这个项目的构建过程，将逐步理解：
-
-- Tool Calling 与 Agent Loop 的设计与编排
-- Codebase 上下文的理解与检索（索引、搜索、代码分析）
-- 文件编辑与代码生成的最佳实践
-- 多客户端交互与 Vibe Coding 体验的搭建
-
-> ⚠️ **注意**: 这是一个学习性质的项目，并非生产级工具。
 
 ## 功能预览
 
@@ -60,10 +44,23 @@ bin/omini-server
 bin/rg
 ```
 
-未来安装流程会把用户命令 `omini` 安装到 `~/.local/bin/omini`，把内部依赖
+安装脚本会把用户命令 `omini` 安装到 `~/.local/bin/omini`，把内部依赖
 `omini-server` 和 `rg` 安装到 `~/.omini/bin/`。运行时 `omini` 从 `OMINI_SERVER_BIN`
 或 `~/.omini/bin/omini-server` 启动 daemon，search 工具固定调用 `~/.omini/bin/rg`，
-不依赖用户 `PATH` 中的 `rg`。
+不依赖用户 `PATH` 中的 `rg`。若 `rg` 丢失或损坏，server 会下载当前版本 Release
+中的匹配二进制并校验 SHA-256。下载失败不会阻止 daemon、配置引导或 Web/TUI 连接，
+但新的 agent run 会明确报告 search 依赖不可用。
+
+## 安装
+
+当前 Release 支持 macOS Apple Silicon 和 Linux x86_64：
+
+```bash
+curl -fsSL https://github.com/zhangzhenxiang666/omini/releases/latest/download/install.sh | sh
+```
+
+设置 `OMINI_VERSION=0.1.0` 可安装指定版本。脚本不会修改 shell 配置；请确保
+`~/.local/bin` 已在 `PATH` 中。
 
 ## 配置
 
@@ -73,6 +70,8 @@ Omini 支持用户级和项目级两层配置：
 - **项目级配置**：`<project>/.omini/config.toml`（可选，仅当前项目生效）
 
 项目级配置会与用户级配置自动合并，支持为特定项目定制 provider、模型、MCP server 等。
+daemon 即使没有最小配置也会启动。首次打开一个尚未配置的项目时，TUI 会调用服务端
+配置接口显示引导页；TUI 不直接写配置文件，未来 Web 客户端可使用同一接口。
 
 详细配置说明请参考 [配置文档](docs/index.md)，包括：
 

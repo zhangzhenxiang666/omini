@@ -27,6 +27,23 @@ use serde::{Deserialize, Serialize};
 pub struct DaemonHealthResponse {
     pub ok: bool,
     pub daemon: String,
+    pub bundled_rg: BundledToolStatus,
+}
+
+/// server 管理的内置依赖状态；客户端只展示状态，不负责下载或修复。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BundledToolState {
+    Ready,
+    Restoring,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundledToolStatus {
+    pub state: BundledToolState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// 客户端注册请求目前只需要分配身份，kind 预留给后续区分 TUI/observer 等客户端。
@@ -115,6 +132,55 @@ pub struct OpenProjectResponse {
     /// 项目工作目录的 git 分支；不在 git 仓库中时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
+}
+
+/// 一个项目按「全局配置 + 项目覆盖」合并后的可运行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectConfigurationState {
+    Ready,
+    SetupRequired,
+    Invalid,
+}
+
+/// 供所有客户端决定显示普通工作区、首次引导还是只读诊断页的项目配置快照。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectConfigurationResponse {
+    pub state: ProjectConfigurationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// provider 缺少模型时，客户端可以预填该 ID；不包含任何 secret。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+}
+
+/// 服务端首次配置入口。api_key 仅用于本次写入 auth.json，绝不出现在响应中。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapProjectConfigurationRequest {
+    pub provider_id: String,
+    pub protocol: ProviderEndpointKind,
+    pub base_url: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_variable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for BootstrapProjectConfigurationRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BootstrapProjectConfigurationRequest")
+            .field("provider_id", &self.provider_id)
+            .field("protocol", &self.protocol)
+            .field("base_url", &self.base_url)
+            .field("model_id", &self.model_id)
+            .field("environment_variable", &self.environment_variable)
+            .field("api_key", &self.api_key.as_ref().map(|_| "REDACTED"))
+            .finish()
+    }
 }
 
 /// 项目级运行配置更新后的快照；用于无活跃 thread 的 TUI 状态同步。
