@@ -1,16 +1,18 @@
 mod support;
 
-use futures_util::StreamExt;
+use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use omini_protocol::{
-    AckResponse, AttachmentUploadResponse, ClientThreadRole, CreateProjectRequest,
+    AckResponse, AttachmentUploadResponse, ClientThreadRole, ControllerLease, CreateProjectRequest,
     CreateThreadRequest, ProtocolError, RegisterClientRequest, RegisterClientResponse,
-    RenameThreadRequest, RunInputMode, ServerEnvelope, SubmitRunRequest, ThreadStatusesResponse,
-    ThreadsResponse, TypedRuntimeEvent, UserInput,
+    RenameThreadRequest, RunInputMode, ServerEnvelope, SubmitRunRequest,
+    ThreadRuntimeStatusResponse, ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent,
+    UserInput,
 };
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::HeaderValue;
+use tokio_tungstenite::tungstenite::{Error as WebSocketError, Message};
 
 async fn project_and_thread(daemon: &support::TestDaemon) -> (String, String) {
     let workspace = daemon.root().create_dir("workspace");
@@ -53,6 +55,28 @@ async fn register_client(daemon: &support::TestDaemon) -> String {
     assert_eq!(status, reqwest::StatusCode::OK);
     uuid::Uuid::parse_str(&response.client_id).expect("client ID should be a UUID");
     response.client_id
+}
+
+async fn close_socket<S>(socket: &mut S)
+where
+    S: Sink<Message, Error = WebSocketError>
+        + Stream<Item = Result<Message, WebSocketError>>
+        + Unpin,
+{
+    socket
+        .send(Message::Close(None))
+        .await
+        .expect("WebSocket close frame should send");
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            }
+        }
+    })
+    .await
+    .expect("WebSocket should finish closing");
 }
 
 #[tokio::test]
@@ -177,6 +201,78 @@ async fn threads_websocket_initializes_in_protocol_order() {
                 && status.connected_client_count == 1
                 && status.controller_id.as_deref() == Some(client_id.as_str())
     ));
+
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn duplicate_connections_are_refcounted() {
+    let mut daemon = support::TestDaemon::start("thread-duplicate-client").await;
+    let (project_id, thread_id) = project_and_thread(&daemon).await;
+    let client_id = register_client(&daemon).await;
+    let request = || {
+        let mut request = daemon
+            .websocket_url(&format!(
+                "/projects/{project_id}/threads/{thread_id}/events"
+            ))
+            .into_client_request()
+            .expect("WebSocket request should build");
+        request.headers_mut().insert(
+            "x-omini-client-id",
+            HeaderValue::from_str(&client_id).expect("client ID should be a valid header"),
+        );
+        request
+    };
+
+    let (mut first, _) = connect_async(request())
+        .await
+        .expect("first WebSocket should connect");
+    let (mut second, _) = connect_async(request())
+        .await
+        .expect("second WebSocket should connect");
+    for socket in [&mut first, &mut second] {
+        for _ in 0..7 {
+            tokio::time::timeout(std::time::Duration::from_secs(1), socket.next())
+                .await
+                .expect("initial WebSocket envelope should arrive")
+                .expect("WebSocket should remain open")
+                .expect("initial WebSocket frame should be valid");
+        }
+    }
+
+    // 连接数按 client_id 去重展示，但在线状态必须保留底层 WebSocket 引用计数。
+    let (status, response): (_, ThreadRuntimeStatusResponse) = daemon
+        .get(&format!(
+            "/projects/{project_id}/threads/{thread_id}/status"
+        ))
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(response.status.connected_client_count, 1);
+
+    close_socket(&mut first).await;
+    let (status, lease): (_, ControllerLease) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads/{thread_id}/controller/claim"),
+            Some(&client_id),
+            &serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(lease.controller_id.as_deref(), Some(client_id.as_str()));
+
+    // 只有最后一条连接关闭后，这个 client_id 才真正离线。
+    close_socket(&mut second).await;
+    let (status, error): (_, ProtocolError) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads/{thread_id}/controller/claim"),
+            Some(&client_id),
+            &serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+    assert_eq!(error.code, "client_not_connected");
 
     daemon.shutdown().await;
 }

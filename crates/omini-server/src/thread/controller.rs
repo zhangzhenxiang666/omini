@@ -63,7 +63,7 @@ impl ThreadRuntime {
     pub async fn is_controller(&self, client_id: &str) -> bool {
         let presence = self.presence.lock().expect("presence lock poisoned");
         presence.controller_id.as_deref() == Some(client_id)
-            && presence.clients.contains_key(client_id)
+            && presence.connection_counts.contains_key(client_id)
     }
 
     pub async fn controller_id(&self) -> Option<String> {
@@ -78,13 +78,13 @@ impl ThreadRuntime {
         self.presence
             .lock()
             .expect("presence lock poisoned")
-            .clients
+            .connection_counts
             .contains_key(client_id)
     }
 
     pub(crate) fn has_connected_clients(&self) -> bool {
         let presence = self.presence.lock().expect("presence lock poisoned");
-        !presence.clients.is_empty()
+        !presence.connection_counts.is_empty()
     }
 
     pub async fn client_role(&self, client_id: &str) -> client_proto::ClientThreadRole {

@@ -13,7 +13,10 @@ impl ThreadRuntime {
     pub fn runtime_status(&self) -> client_proto::ThreadRuntimeStatus {
         let (controller_id, connected_client_count) = {
             let presence = self.presence.lock().expect("presence lock poisoned");
-            (presence.controller_id.clone(), presence.clients.len())
+            (
+                presence.controller_id.clone(),
+                presence.connection_counts.len(),
+            )
         };
         // 新架构下 runtime 启动即加载，ThreadRuntime 暴露给上层时一定处于
         // "已加载" 状态,这里直接告诉 status 模块;老架构下的 RuntimeLoadGate
