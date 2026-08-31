@@ -127,10 +127,8 @@ pub async fn execute_manual_compact(
     let forwarder_persistence_tx = persistence_tx.clone();
     let forwarder_usage_state = Arc::clone(usage_state);
     let forwarder_thread_id = input.runtime_context.thread_id.clone();
-    let forwarder_model_ref = format!(
-        "{}/{}",
-        input.settings.active_provider, input.settings.model
-    );
+    let model = input.settings.active_model();
+    let forwarder_model_ref = format!("{}/{}", model.provider_id, model.model_id);
     let span_thread_id = forwarder_thread_id.clone();
     let forwarder = tokio::spawn(
         async move {

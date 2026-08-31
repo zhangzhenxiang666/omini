@@ -1,5 +1,6 @@
 mod support;
 
+use omini_config::RawConfig;
 use omini_core::{
     compacted_plan_context, delete_project_agent, project_agents_snapshot, save_project_agent,
 };
@@ -63,12 +64,27 @@ fn project_agent_facade_rejects_built_in_writes_and_sorts_models() {
     assert_eq!(error.code(), "core_error");
     assert_eq!(error.message(), "内置 agent 不能写入");
 
-    let mut settings = support::settings(temp.path(), false);
-    let provider = settings.providers.remove("test").expect("test provider");
-    settings
-        .providers
-        .insert("z-provider".into(), provider.clone());
-    settings.providers.insert("a-provider".into(), provider);
+    let raw: RawConfig = toml::from_str(
+        r#"
+[providers.z-provider]
+protocol = "openai"
+base_url = "http://127.0.0.1:9"
+
+[providers.z-provider.models.test]
+
+[providers.a-provider]
+protocol = "openai"
+base_url = "http://127.0.0.1:9"
+
+[providers.a-provider.models.test]
+"#,
+    )
+    .expect("test config should parse");
+    let settings = raw
+        .resolve()
+        .expect("test config should resolve")
+        .to_settings(Some("z-provider"), Some("test"), None, temp.path())
+        .expect("test settings should build");
     let snapshot = project_agents_snapshot(&settings);
     assert_eq!(
         snapshot

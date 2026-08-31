@@ -1,66 +1,10 @@
-use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind, ThinkingEffort};
+use crate::config::{EffectiveModelConfig, ModelSelection, ResolvedConfig, RoutingTier};
+use indexmap::IndexMap;
+use omini_domain::config::{InputModality, ThinkingEffort};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use url::Url;
-
-/// Provider-neutral 抽象模型档位。
-///
-/// 命名刻意不引用任何 vendor(haiku/sonnet/opus/mini/nano)，
-/// 以保持跨 provider 配置可移植。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModelTier {
-    Small,
-    Standard,
-    Large,
-}
-
-impl ModelTier {
-    pub const ALL: [ModelTier; 3] = [ModelTier::Small, ModelTier::Standard, ModelTier::Large];
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ModelTier::Small => "small",
-            ModelTier::Standard => "standard",
-            ModelTier::Large => "large",
-        }
-    }
-}
-
-/// 单个 tier 的配置定义:目标 provider + model + 可选 thinking effort。
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ModelTierEntry {
-    pub provider: String,
-    pub model: String,
-    #[serde(default)]
-    pub thinking_effort: Option<ThinkingEffort>,
-}
-
-/// 完整的 `model_tiers` 配置块。
-///
-/// 整块缺失 = 所有 tier 在解析时 fallback 到当前线程模型。
-/// 单独某个 slot 缺失 = 该 slot 解析时 fallback。
-#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct ModelTiers {
-    #[serde(default)]
-    pub small: Option<ModelTierEntry>,
-    #[serde(default)]
-    pub standard: Option<ModelTierEntry>,
-    #[serde(default)]
-    pub large: Option<ModelTierEntry>,
-}
-
-impl ModelTiers {
-    pub fn get(&self, tier: ModelTier) -> Option<&ModelTierEntry> {
-        match tier {
-            ModelTier::Small => self.small.as_ref(),
-            ModelTier::Standard => self.standard.as_ref(),
-            ModelTier::Large => self.large.as_ref(),
-        }
-    }
-}
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RawPermissionConfig {
@@ -72,158 +16,93 @@ pub struct RawPermissionConfig {
     pub deny: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ProviderProfile {
-    pub name: String,
-    pub endpoint: ProviderEndpointKind,
-    pub api_key: String,
-    pub base_url: Url,
-    pub models: Vec<ModelInfo>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct Settings {
-    pub api_key: String,
-    pub base_url: Url,
-    pub model: String,
-    pub endpoint: ProviderEndpointKind,
-    pub providers: HashMap<String, ProviderProfile>,
-    pub active_provider: String,
-
+    resolved: Arc<ResolvedConfig>,
+    active_model: EffectiveModelConfig,
     pub system_prompt: Option<String>,
-    pub language: Option<String>,
     pub max_turns: Option<usize>,
-
     pub cwd: PathBuf,
-    pub thinking_effort: Option<ThinkingEffort>,
-    pub permissions: Option<RawPermissionConfig>,
-    pub compact: CompactConfig,
-    pub mcp_servers: HashMap<String, McpServerConfig>,
-    #[serde(default)]
-    pub model_tiers: ModelTiers,
 }
 
-// TODO: 需要重新审视方法的合理性
 impl Settings {
-    pub fn current_model_config(&self) -> Option<&ModelInfo> {
-        self.providers
-            .get(&self.active_provider)
-            .and_then(|provider| provider.models.iter().find(|model| model.id == self.model))
-    }
-
-    pub fn model_supports_thinking(&self, provider: &str, model: &str) -> bool {
-        self.providers
-            .get(provider)
-            .and_then(|profile| {
-                profile
-                    .models
-                    .iter()
-                    .find(|candidate| candidate.id == model)
-            })
-            .is_some_and(|model| model.thinking)
-    }
-
-    pub fn current_model_supports_thinking(&self) -> bool {
-        self.model_supports_thinking(&self.active_provider, &self.model)
-    }
-
-    pub fn effective_thinking_effort_for(
-        &self,
-        provider: &str,
-        model: &str,
-        effort: Option<ThinkingEffort>,
-    ) -> Option<ThinkingEffort> {
-        if !self.model_supports_thinking(provider, model) {
-            return None;
+    pub(crate) fn new(
+        resolved: Arc<ResolvedConfig>,
+        active_model: EffectiveModelConfig,
+        cwd: PathBuf,
+    ) -> Self {
+        Self {
+            resolved,
+            active_model,
+            system_prompt: None,
+            max_turns: None,
+            cwd,
         }
-
-        Some(effort.unwrap_or_default())
     }
 
-    pub fn effective_current_thinking_effort(
+    pub fn resolved_config(&self) -> &ResolvedConfig {
+        &self.resolved
+    }
+
+    pub fn active_model(&self) -> &EffectiveModelConfig {
+        &self.active_model
+    }
+
+    pub fn resolve_model(
         &self,
-        effort: Option<ThinkingEffort>,
-    ) -> Option<ThinkingEffort> {
-        self.effective_thinking_effort_for(&self.active_provider, &self.model, effort)
+        selection: &ModelSelection,
+    ) -> Result<EffectiveModelConfig, ConfigError> {
+        self.resolved.effective_model_config(selection)
     }
 
-    pub fn normalize_current_thinking_effort(&mut self) {
-        self.thinking_effort = self.effective_current_thinking_effort(self.thinking_effort);
+    pub fn select_model(&mut self, selection: ModelSelection) -> Result<(), ConfigError> {
+        let active_model = self.resolve_model(&selection)?;
+        self.active_model = active_model;
+        Ok(())
+    }
+
+    pub fn set_thinking_effort(
+        &mut self,
+        thinking_effort: Option<ThinkingEffort>,
+    ) -> Result<(), ConfigError> {
+        self.select_model(ModelSelection {
+            active_provider: self.active_model.provider_id.clone(),
+            model: self.active_model.model_id.clone(),
+            thinking_effort,
+        })
+    }
+
+    pub fn resolve_routing_model(
+        &self,
+        tier: RoutingTier,
+    ) -> Result<EffectiveModelConfig, ConfigError> {
+        let current = ModelSelection {
+            active_provider: self.active_model.provider_id.clone(),
+            model: self.active_model.model_id.clone(),
+            thinking_effort: self.active_model.thinking_effort,
+        };
+        let selection = self.resolved.routing_selection(tier, &current);
+        self.resolved.effective_model_config(&selection)
     }
 
     pub fn supports_input_modality(&self, modality: InputModality) -> bool {
-        self.current_model_config()
-            .and_then(|model| model.input_modalities.as_ref())
-            .is_some_and(|modalities| modalities.contains(&modality))
+        self.active_model.capabilities.input.contains(&modality)
     }
 
-    /// 解析指定档位应使用的 `(provider, model, thinking_effort)`。
-    ///
-    /// 任一前置条件不满足时,fallback 到当前线程活跃 provider/model
-    /// 并保留当前 `thinking_effort`,同时记录 `tracing::warn`:
-    ///   1. `model_tiers` 未配置 / 该 tier slot 未配置;
-    ///   2. tier.provider 不在 `self.providers`;
-    ///   3. tier.model 不在该 provider.models;
-    ///   4. target model 不支持 thinking → effort 归一化为 `None`。
-    ///
-    /// 思考力度按 `effective_thinking_effort_for` 归一化,与主线程模型
-    /// 选择行为一致。
-    pub fn resolve_tier(&self, tier: ModelTier) -> (String, String, Option<ThinkingEffort>) {
-        let entry = match self.model_tiers.get(tier) {
-            Some(e) => e,
-            None => {
-                return self.fallback_for_tier(tier, "tier_not_configured", None, None);
-            }
-        };
-        if !self.providers.contains_key(&entry.provider) {
-            return self.fallback_for_tier(
-                tier,
-                "tier_provider_missing",
-                Some(&entry.provider),
-                None,
-            );
-        }
-        let model_exists = self.providers[&entry.provider]
-            .models
-            .iter()
-            .any(|m| m.id == entry.model);
-        if !model_exists {
-            return self.fallback_for_tier(
-                tier,
-                "tier_model_missing",
-                Some(&entry.provider),
-                Some(&entry.model),
-            );
-        }
-        let effort = self.effective_thinking_effort_for(
-            &entry.provider,
-            &entry.model,
-            entry.thinking_effort,
-        );
-        (entry.provider.clone(), entry.model.clone(), effort)
+    pub fn language(&self) -> Option<&str> {
+        self.resolved.agent.language.as_deref()
     }
 
-    fn fallback_for_tier(
-        &self,
-        tier: ModelTier,
-        reason: &'static str,
-        configured_provider: Option<&str>,
-        configured_model: Option<&str>,
-    ) -> (String, String, Option<ThinkingEffort>) {
-        tracing::warn!(
-            tier = tier.as_str(),
-            reason = reason,
-            configured_provider = configured_provider.unwrap_or("-"),
-            configured_model = configured_model.unwrap_or("-"),
-            active_provider = %self.active_provider,
-            active_model = %self.model,
-            "model tier resolution fell back to current thread model",
-        );
-        (
-            self.active_provider.clone(),
-            self.model.clone(),
-            self.thinking_effort,
-        )
+    pub fn permissions(&self) -> Option<RawPermissionConfig> {
+        self.resolved.permissions.clone()
+    }
+
+    pub fn compact(&self) -> &CompactConfig {
+        &self.resolved.context.compaction
+    }
+
+    pub fn mcp_servers(&self) -> &IndexMap<String, McpServerConfig> {
+        &self.resolved.mcp
     }
 }
 

@@ -151,10 +151,15 @@ impl AgentRuntime {
             active_profile,
             agent_tasks,
         } = deps;
+        let model = settings.active_model();
         let llm_client = LlmClient::new(
-            settings.endpoint,
-            settings.api_key.clone(),
-            settings.base_url.clone(),
+            model.protocol,
+            model
+                .api_key
+                .as_ref()
+                .map(|secret| secret.expose().to_string())
+                .unwrap_or_default(),
+            model.base_url.clone(),
         );
         let tool_registry = Arc::new(crate::tools::create_main_registry());
         let mcp_manager = handles.mcp_manager;
@@ -170,7 +175,7 @@ impl AgentRuntime {
         let permission_sources = omini_config::permissions::load_permission_sources(
             &settings.cwd,
             dirs::home_dir().as_deref(),
-            settings.permissions.clone(),
+            settings.permissions(),
         );
         let permission_engine = Arc::new(PermissionEngine::from_sources(
             settings.cwd.clone(),
@@ -322,11 +327,9 @@ thinking = true
     }
 
     fn settings_for_cwd(config: &ResolvedConfig, cwd: &Path) -> Settings {
-        let mut settings = config
-            .to_settings(None, None, None)
-            .expect("failed to build settings");
-        settings.cwd = cwd.to_path_buf();
-        settings
+        config
+            .to_settings(None, None, None, cwd)
+            .expect("failed to build settings")
     }
 
     fn text_content(message: &Message) -> &str {
@@ -790,10 +793,8 @@ thinking = true
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
         let thread_id = runtime.thread_id.clone();
-        let expected_model_ref = format!(
-            "{}/{}",
-            runtime.settings.active_provider, runtime.settings.model
-        );
+        let model = runtime.settings.active_model();
+        let expected_model_ref = format!("{}/{}", model.provider_id, model.model_id);
         runtime.set_active_profile(ActiveProfile::Plan);
         runtime.messages = vec![Message::new(
             Role::Assistant,

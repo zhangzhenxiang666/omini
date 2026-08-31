@@ -53,7 +53,13 @@ impl ThreadRuntime {
                     .as_deref()
                     .and_then(|effort| effort.parse().ok());
                 self.settings
-                    .effective_thinking_effort_for(&thread.provider, &thread.model, effort)
+                    .resolve_model(&omini_config::ModelSelection {
+                        active_provider: thread.provider.clone(),
+                        model: thread.model.clone(),
+                        thinking_effort: effort,
+                    })
+                    .ok()
+                    .and_then(|model| model.thinking_effort)
             },
             active_profile,
             title: thread.title,
@@ -78,14 +84,9 @@ impl ThreadRuntime {
 
     fn context_window_for_snapshot(&self, snapshot: &domain::events::LoadedThread) -> Option<u32> {
         self.settings
-            .providers
-            .get(&snapshot.provider)
-            .and_then(|provider| {
-                provider
-                    .models
-                    .iter()
-                    .find(|model| model.id == snapshot.model)
-            })
-            .map(|model| model.limit)
+            .resolved_config()
+            .model(&snapshot.provider, &snapshot.model)
+            .ok()
+            .map(|model| model.context_window)
     }
 }

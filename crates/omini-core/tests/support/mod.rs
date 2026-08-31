@@ -1,6 +1,4 @@
-use omini_config::{CompactConfig, ModelTiers, ProviderProfile, Settings};
-use omini_domain::config::{InputModality, ModelInfo, ProviderEndpointKind};
-use std::collections::HashMap;
+use omini_config::{RawConfig, Settings};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,49 +30,34 @@ impl Drop for TestTempDir {
     }
 }
 
+#[allow(dead_code)]
 pub fn settings(cwd: &Path, image_input: bool) -> Settings {
-    let provider = "test".to_string();
     let model = if image_input {
         "vision-model"
     } else {
         "text-model"
-    }
-    .to_string();
-    let mut providers = HashMap::new();
-    providers.insert(
-        provider.clone(),
-        ProviderProfile {
-            name: "Test".to_string(),
-            endpoint: ProviderEndpointKind::OpenAI,
-            api_key: String::new(),
-            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-            models: vec![ModelInfo {
-                id: model.clone(),
-                name: None,
-                limit: 256_000,
-                thinking: false,
-                input_modalities: image_input
-                    .then_some(vec![InputModality::Text, InputModality::Image]),
-                extra_body: None,
-                extra_headers: None,
-            }],
-        },
-    );
-    Settings {
-        api_key: String::new(),
-        base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-        model,
-        endpoint: ProviderEndpointKind::OpenAI,
-        providers,
-        active_provider: provider,
-        system_prompt: None,
-        language: None,
-        max_turns: None,
-        cwd: cwd.to_path_buf(),
-        thinking_effort: None,
-        permissions: None,
-        compact: CompactConfig::default(),
-        mcp_servers: HashMap::new(),
-        model_tiers: ModelTiers::default(),
-    }
+    };
+    let input = if image_input {
+        r#"["text", "image"]"#
+    } else {
+        r#"["text"]"#
+    };
+    let raw: RawConfig = toml::from_str(&format!(
+        r#"
+[providers.test]
+protocol = "openai"
+base_url = "http://127.0.0.1:9"
+api_key = "test-key"
+
+[providers.test.models.{model}]
+context_window = 256000
+thinking = false
+input = {input}
+"#
+    ))
+    .expect("test config should parse");
+    raw.resolve()
+        .expect("test config should resolve")
+        .to_settings(Some("test"), Some(model), None, cwd)
+        .expect("test settings should build")
 }

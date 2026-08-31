@@ -67,7 +67,7 @@ impl Tool for ViewImageTool {
         if !ctx.settings.supports_input_modality(InputModality::Image) {
             return ToolResult::error(format!(
                 "view_image requires image input, but current model '{}' does not declare support for image input",
-                ctx.settings.model
+                ctx.settings.active_model().model_id
             ));
         }
 

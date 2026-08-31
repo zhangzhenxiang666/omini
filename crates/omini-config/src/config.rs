@@ -1,6 +1,6 @@
 use crate::{
-    AuthEnvironment, CompactConfig, ConfigError, McpServerConfig, ModelTierEntry, ModelTiers,
-    OminiRoot, ProviderProfile, RawPermissionConfig, Settings,
+    AuthEnvironment, CompactConfig, ConfigError, McpServerConfig, OminiRoot, RawPermissionConfig,
+    Settings,
 };
 use indexmap::IndexMap;
 use omini_domain::config::{
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use toml_edit::DocumentMut;
 use toml_edit::Item;
 use toml_edit::Table;
@@ -480,6 +481,7 @@ pub struct EffectiveModelConfig {
     pub capabilities: ModelCapabilities,
     pub headers: HashMap<String, String>,
     pub body: Map<String, Value>,
+    pub thinking_effort: Option<ThinkingEffort>,
 }
 
 #[derive(Debug, Clone)]
@@ -515,6 +517,7 @@ impl ResolvedConfig {
         active_provider: Option<&str>,
         active_model: Option<&str>,
         thinking_effort: Option<ThinkingEffort>,
+        cwd: &Path,
     ) -> Result<Settings, ConfigError> {
         let requested = active_provider
             .and_then(|provider| {
@@ -538,74 +541,11 @@ impl ResolvedConfig {
                 other => Err(other),
             })?;
         let effective = self.effective_model_config(&selection)?;
-        let providers = self
-            .providers
-            .iter()
-            .map(|(id, provider)| {
-                (
-                    id.clone(),
-                    ProviderProfile {
-                        name: provider.name.clone(),
-                        endpoint: provider.protocol,
-                        api_key: provider
-                            .api_key
-                            .as_ref()
-                            .map(|secret| secret.expose().to_string())
-                            .unwrap_or_default(),
-                        base_url: provider.base_url.clone(),
-                        models: provider
-                            .models
-                            .values()
-                            .map(|model| {
-                                let mut headers = provider.request.headers.clone();
-                                headers.extend(model.request.headers.clone());
-                                let mut body = provider.request.body.clone();
-                                body.extend(model.request.body.clone());
-                                ModelInfo {
-                                    id: model.id.clone(),
-                                    name: Some(model.name.clone()),
-                                    limit: model.context_window,
-                                    thinking: model.capabilities.thinking,
-                                    input_modalities: (!model.capabilities.input.is_empty())
-                                        .then(|| model.capabilities.input.clone()),
-                                    extra_headers: (!headers.is_empty()).then_some(headers),
-                                    extra_body: (!body.is_empty()).then_some(body),
-                                }
-                            })
-                            .collect(),
-                    },
-                )
-            })
-            .collect();
-        Ok(Settings {
-            api_key: effective
-                .api_key
-                .as_ref()
-                .map(|secret| secret.expose().to_string())
-                .unwrap_or_default(),
-            base_url: effective.base_url,
-            model: selection.model,
-            endpoint: effective.protocol,
-            providers,
-            active_provider: selection.active_provider,
-            system_prompt: None,
-            language: self.agent.language.clone(),
-            max_turns: None,
-            cwd: std::env::current_dir()?,
-            thinking_effort: selection.thinking_effort,
-            permissions: self.permissions.clone(),
-            compact: self.context.compaction.clone(),
-            mcp_servers: self
-                .mcp
-                .iter()
-                .map(|(id, server)| (id.clone(), server.clone()))
-                .collect(),
-            model_tiers: ModelTiers {
-                small: self.routing.small.as_ref().map(model_tier_entry),
-                standard: self.routing.standard.as_ref().map(model_tier_entry),
-                large: self.routing.large.as_ref().map(model_tier_entry),
-            },
-        })
+        Ok(Settings::new(
+            Arc::new(self.clone()),
+            effective,
+            cwd.to_path_buf(),
+        ))
     }
 
     pub fn normalize_selection(
@@ -639,6 +579,7 @@ impl ResolvedConfig {
         &self,
         selection: &ModelSelection,
     ) -> Result<EffectiveModelConfig, ConfigError> {
+        let selection = self.normalize_selection(selection.clone())?;
         let provider = self
             .providers
             .get(&selection.active_provider)
@@ -665,6 +606,7 @@ impl ResolvedConfig {
             capabilities: model.capabilities.clone(),
             headers,
             body,
+            thinking_effort: selection.thinking_effort,
         })
     }
 
@@ -706,14 +648,6 @@ impl ResolvedConfig {
         }
         .cloned()
         .unwrap_or_else(|| fallback.clone())
-    }
-}
-
-fn model_tier_entry(selection: &ModelSelection) -> ModelTierEntry {
-    ModelTierEntry {
-        provider: selection.active_provider.clone(),
-        model: selection.model.clone(),
-        thinking_effort: selection.thinking_effort,
     }
 }
 

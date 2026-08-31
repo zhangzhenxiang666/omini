@@ -29,18 +29,22 @@ pub async fn generate_agent_draft_checked_from_settings(
     settings: &Settings,
     description: &str,
 ) -> Result<GeneratedAgentDraft, GenerateAgentDraftError> {
+    let model = settings.active_model();
     let llm_client = LlmClient::new(
-        settings.endpoint,
-        settings.api_key.clone(),
-        settings.base_url.clone(),
+        model.protocol,
+        model
+            .api_key
+            .as_ref()
+            .map(|secret| secret.expose().to_string())
+            .unwrap_or_default(),
+        model.base_url.clone(),
     );
-    let model_config = settings.current_model_config();
     generate_agent_draft_checked(
         &llm_client,
-        &settings.model,
-        settings.thinking_effort,
-        model_config.and_then(|model| model.extra_headers.as_ref()),
-        model_config.and_then(|model| model.extra_body.as_ref()),
+        &model.model_id,
+        model.thinking_effort,
+        (!model.headers.is_empty()).then_some(&model.headers),
+        (!model.body.is_empty()).then_some(&model.body),
         description,
     )
     .await

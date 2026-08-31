@@ -186,14 +186,15 @@ impl AgentRuntime {
                 .await;
 
             let thread_id = self.thread_id.clone();
+            let model = self.settings.active_model();
             let run_span = tracing::info_span!(
                 "run",
                 thread_id = %thread_id,
                 run_id = %run_id,
                 start_kind = start.kind(),
-                provider = %self.settings.active_provider,
-                model = %self.settings.model,
-                thinking_effort = ?self.settings.thinking_effort,
+                provider = %model.provider_id,
+                model = %model.model_id,
+                thinking_effort = ?model.thinking_effort,
                 max_turns = ?self.settings.max_turns,
             );
             let follow_up = self
@@ -219,11 +220,12 @@ impl AgentRuntime {
     ) -> bool {
         tracing::info!("agent run started");
         let requires_internal_input = matches!(start, RunStart::PendingAgentTaskNotification);
+        let model = self.settings.active_model();
         history::persist_initial_user_message(
             &self.thread_id,
             self.messages.last().cloned(),
             start,
-            &format!("{}/{}", self.settings.active_provider, self.settings.model),
+            &format!("{}/{}", model.provider_id, model.model_id),
             &self.persistence_tx,
         )
         .await;

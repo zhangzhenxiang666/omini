@@ -433,37 +433,19 @@ mod tests {
     use super::*;
     use crate::subagents::AgentTaskCompletion;
     use crate::tools::ToolRegistry;
-    use omini_config::{CompactConfig, ModelTiers};
     use omini_domain::config::ProviderEndpointKind;
-    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::path::Path;
     use std::sync::OnceLock;
     use std::sync::mpsc as std_mpsc;
     use std::thread;
     use std::time::Duration;
 
     fn test_settings() -> Settings {
-        Settings {
-            api_key: "test-key".to_string(),
-            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-            model: "test-model".to_string(),
-            endpoint: ProviderEndpointKind::OpenAI,
-            providers: HashMap::new(),
-            active_provider: "test".to_string(),
-            system_prompt: None,
-            language: None,
-            max_turns: Some(1),
-            cwd: std::env::current_dir().unwrap_or_else(|_| ".".into()),
-            thinking_effort: None,
-            permissions: None,
-            compact: CompactConfig {
-                enabled: false,
-                ..CompactConfig::default()
-            },
-            mcp_servers: HashMap::new(),
-            model_tiers: ModelTiers::default(),
-        }
+        let mut settings = crate::test_support::settings(Path::new("."), false);
+        settings.max_turns = Some(1);
+        settings
     }
 
     fn test_http_client() -> &'static reqwest::Client {

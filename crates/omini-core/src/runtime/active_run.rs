@@ -52,16 +52,7 @@ pub fn rebuild_system_prompt(
 }
 
 pub fn current_context_window(settings: &Settings) -> Option<u32> {
-    settings
-        .providers
-        .get(&settings.active_provider)
-        .and_then(|provider| {
-            provider
-                .models
-                .iter()
-                .find(|model| model.id == settings.model)
-                .map(|model| model.limit)
-        })
+    Some(settings.active_model().context_window)
 }
 
 pub struct ModelSelection<'a> {
@@ -84,60 +75,57 @@ pub async fn apply_model_selection(
     selection: ModelSelection<'_>,
     sinks: RuntimeSinks<'_>,
 ) {
-    let provider = selection.provider;
-    let model = selection.model;
-    if let Some(profile) = settings.providers.get(provider) {
-        let thinking_effort =
-            settings.effective_thinking_effort_for(provider, model, selection.thinking_effort);
-        settings.active_provider = provider.to_string();
-        settings.model = model.to_string();
-        settings.thinking_effort = thinking_effort;
-        settings.api_key = profile.api_key.clone();
-        settings.base_url = profile.base_url.clone();
-        settings.endpoint = profile.endpoint;
-
-        *llm_client = LlmClient::new(
-            profile.endpoint,
-            profile.api_key.clone(),
-            profile.base_url.clone(),
-        );
-
-        if let Some(thread_id) = thread_id {
-            let te = thinking_effort.map(|t| t.to_string());
-            let _ = sinks
-                .persistence_tx
-                .send(RuntimePersistenceEvent::UpdateThreadConfig {
-                    thread_id: thread_id.to_string(),
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    thinking_effort: te,
-                })
-                .await;
-        } else if let Ok(mut state) = project.load_state() {
-            state.default_provider = Some(provider.to_string());
-            state.default_model = Some(model.to_string());
-            state.thinking_effort = thinking_effort;
-            let _ = project.save_state(&state);
-        }
-
+    let requested = omini_config::ModelSelection {
+        active_provider: selection.provider.to_string(),
+        model: selection.model.to_string(),
+        thinking_effort: selection.thinking_effort,
+    };
+    if let Err(error) = settings.select_model(requested) {
         let _ = sinks
             .event_tx
-            .send(RuntimeToServerEvent::ModelChanged {
-                provider: provider.to_string(),
-                model: model.to_string(),
-                thinking_effort: settings.thinking_effort,
-                context_window: current_context_window(settings),
+            .send(RuntimeToServerEvent::error(error.to_string()))
+            .await;
+        return;
+    }
+
+    let model = settings.active_model();
+    *llm_client = LlmClient::new(
+        model.protocol,
+        model
+            .api_key
+            .as_ref()
+            .map(|secret| secret.expose().to_string())
+            .unwrap_or_default(),
+        model.base_url.clone(),
+    );
+
+    if let Some(thread_id) = thread_id {
+        let _ = sinks
+            .persistence_tx
+            .send(RuntimePersistenceEvent::UpdateThreadConfig {
+                thread_id: thread_id.to_string(),
+                provider: model.provider_id.clone(),
+                model: model.model_id.clone(),
+                thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
             })
             .await;
-        send_usage_snapshot(sinks.event_tx, sinks.usage_state, settings).await;
-    } else {
-        let _ = sinks
-            .event_tx
-            .send(RuntimeToServerEvent::error(format!(
-                "提供商 '{provider}' 不存在"
-            )))
-            .await;
+    } else if let Ok(mut state) = project.load_state() {
+        state.default_provider = Some(model.provider_id.clone());
+        state.default_model = Some(model.model_id.clone());
+        state.thinking_effort = model.thinking_effort;
+        let _ = project.save_state(&state);
     }
+
+    let _ = sinks
+        .event_tx
+        .send(RuntimeToServerEvent::ModelChanged {
+            provider: model.provider_id.clone(),
+            model: model.model_id.clone(),
+            thinking_effort: model.thinking_effort,
+            context_window: Some(model.context_window),
+        })
+        .await;
+    send_usage_snapshot(sinks.event_tx, sinks.usage_state, settings).await;
 }
 
 pub async fn apply_thinking_effort(
@@ -148,29 +136,31 @@ pub async fn apply_thinking_effort(
     event_tx: &mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
-    if effort != ThinkingEffort::None {
-        let supports_thinking = settings
-            .providers
-            .get(&settings.active_provider)
-            .and_then(|profile| {
-                profile
-                    .models
-                    .iter()
-                    .find(|model| model.id == settings.model)
-            })
-            .is_some_and(|model| model.thinking);
-        if !supports_thinking {
+    let current = settings.active_model();
+    if effort != ThinkingEffort::None && !current.capabilities.thinking {
+        let _ = event_tx
+            .send(RuntimeToServerEvent::error(format!(
+                "当前模型 '{}' 不支持思考模式",
+                current.model_id
+            )))
+            .await;
+        return;
+    }
+
+    let selection = omini_config::ModelSelection {
+        active_provider: current.provider_id.clone(),
+        model: current.model_id.clone(),
+        thinking_effort: Some(effort),
+    };
+    let effective_effort = match settings.resolve_model(&selection) {
+        Ok(model) => model.thinking_effort,
+        Err(error) => {
             let _ = event_tx
-                .send(RuntimeToServerEvent::error(format!(
-                    "当前模型 '{}' 不支持思考模式",
-                    settings.model
-                )))
+                .send(RuntimeToServerEvent::error(error.to_string()))
                 .await;
             return;
         }
-    }
-
-    let effective_effort = settings.effective_current_thinking_effort(Some(effort));
+    };
     if let Some(thread_id) = thread_id {
         if persistence_tx
             .send(RuntimePersistenceEvent::UpdateThreadThinkingEffort {
@@ -208,13 +198,19 @@ pub async fn apply_thinking_effort(
         }
     }
 
-    settings.thinking_effort = effective_effort;
+    if let Err(error) = settings.select_model(selection) {
+        let _ = event_tx
+            .send(RuntimeToServerEvent::error(error.to_string()))
+            .await;
+        return;
+    }
+    let model = settings.active_model();
     let _ = event_tx
         .send(RuntimeToServerEvent::ModelChanged {
-            provider: settings.active_provider.clone(),
-            model: settings.model.clone(),
-            thinking_effort: settings.thinking_effort,
-            context_window: current_context_window(settings),
+            provider: model.provider_id.clone(),
+            model: model.model_id.clone(),
+            thinking_effort: model.thinking_effort,
+            context_window: Some(model.context_window),
         })
         .await;
 }

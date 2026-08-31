@@ -1,5 +1,5 @@
 use crate::project::ProjectManager;
-use omini_config::Settings;
+use omini_config::{ModelSelection as ConfigModelSelection, Settings};
 use omini_core::CoreError;
 use omini_domain as domain;
 
@@ -10,38 +10,55 @@ impl ProjectManager {
         effort: EffortSelection,
     ) -> Result<Settings, CoreError> {
         let mut settings = self.fresh_settings_with_state()?;
-
-        match model {
+        let current = settings.active_model();
+        let (provider, requested_model) = match model {
             ModelSelection::Exact { provider, model } => {
-                apply_provider(&mut settings, provider)?;
-                apply_model(&mut settings, model)?;
+                (provider.to_string(), Some(model.to_string()))
             }
-            ModelSelection::PartialOverlay { provider, model } => {
-                if let Some(provider) = provider {
-                    apply_provider(&mut settings, provider)?;
-                }
-                if let Some(model) = model {
-                    apply_model(&mut settings, model)?;
-                }
-            }
-        }
-
-        match effort {
+            ModelSelection::PartialOverlay { provider, model } => (
+                provider.unwrap_or(&current.provider_id).to_string(),
+                model.map(str::to_string),
+            ),
+        };
+        let model = match requested_model {
+            Some(model) => model,
+            None if provider == current.provider_id => current.model_id.clone(),
+            None => settings
+                .resolved_config()
+                .providers
+                .get(&provider)
+                .and_then(|provider| provider.models.first())
+                .map(|(id, _)| id.clone())
+                .ok_or_else(|| {
+                    CoreError::invalid_model_selection(format!(
+                        "Unknown provider profile: {provider}"
+                    ))
+                })?,
+        };
+        let thinking_effort = match effort {
             EffortSelection::ClientRequest(Some(effort)) => {
-                if effort != domain::config::ThinkingEffort::None
-                    && !settings.current_model_supports_thinking()
-                {
-                    return Err(CoreError::invalid_model_selection(format!(
-                        "Model '{}' does not support thinking",
-                        settings.model
-                    )));
+                if effort != domain::config::ThinkingEffort::None {
+                    let candidate = settings
+                        .resolved_config()
+                        .model(&provider, &model)
+                        .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
+                    if !candidate.capabilities.thinking {
+                        return Err(CoreError::invalid_model_selection(format!(
+                            "Model '{model}' does not support thinking"
+                        )));
+                    }
                 }
-                settings.thinking_effort = settings.effective_current_thinking_effort(Some(effort));
+                Some(effort)
             }
-            EffortSelection::ClientRequest(None) => {}
-        }
-
-        settings.normalize_current_thinking_effort();
+            EffortSelection::ClientRequest(None) => current.thinking_effort,
+        };
+        settings
+            .select_model(ConfigModelSelection {
+                active_provider: provider,
+                model,
+                thinking_effort,
+            })
+            .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
         Ok(settings)
     }
 }
@@ -59,43 +76,4 @@ pub(super) enum ModelSelection<'a> {
 
 pub(super) enum EffortSelection {
     ClientRequest(Option<domain::config::ThinkingEffort>),
-}
-
-fn apply_provider(settings: &mut Settings, provider: &str) -> Result<(), CoreError> {
-    let profile = settings.providers.get(provider).ok_or_else(|| {
-        CoreError::invalid_model_selection(format!("Unknown provider profile: {provider}"))
-    })?;
-
-    settings.active_provider = provider.to_string();
-    settings.api_key = profile.api_key.clone();
-    settings.base_url = profile.base_url.clone();
-    settings.endpoint = profile.endpoint;
-
-    Ok(())
-}
-
-fn apply_model(settings: &mut Settings, model: &str) -> Result<(), CoreError> {
-    let provider = settings
-        .providers
-        .get(&settings.active_provider)
-        .ok_or_else(|| {
-            CoreError::invalid_model_selection(format!(
-                "Unknown provider profile: {}",
-                settings.active_provider
-            ))
-        })?;
-
-    if !provider
-        .models
-        .iter()
-        .any(|candidate| candidate.id == model)
-    {
-        return Err(CoreError::invalid_model_selection(format!(
-            "Unknown model '{}' for provider '{}'",
-            model, settings.active_provider
-        )));
-    }
-
-    settings.model = model.to_string();
-    Ok(())
 }

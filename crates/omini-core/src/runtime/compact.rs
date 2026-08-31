@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, mpsc, oneshot};
 use tokio_stream::StreamExt;
 
-const DEFAULT_CONTEXT_WINDOW: usize = 256_000;
 const SOFT_COMPACT_USAGE_PERCENT: usize = 80;
 const HARD_COMPACT_USAGE_PERCENT: usize = 85;
 const TOKEN_ESTIMATION_PADDING_NUMERATOR: usize = 4;
@@ -95,7 +94,7 @@ pub async fn auto_compact_if_needed(
     ctx: &CompactRequestContext<'_>,
     state: &mut AutoCompactState,
 ) -> bool {
-    let config = normalized_config(&ctx.settings.compact);
+    let config = normalized_config(ctx.settings.compact());
     if !config.enabled || state.consecutive_failures >= config.max_consecutive_failures {
         tracing::debug!(
             compact_trigger = %CompactTrigger::Auto,
@@ -467,7 +466,7 @@ fn normalized_config(config: &CompactConfig) -> CompactConfig {
 }
 
 fn auto_compact_thresholds(settings: &Settings) -> AutoCompactThresholds {
-    let config = normalized_config(&settings.compact);
+    let config = normalized_config(settings.compact());
     let context_window = context_window(settings);
     let reserve_threshold = context_window
         .saturating_sub(config.summary_output_tokens)
@@ -494,17 +493,7 @@ fn auto_compact_decision(tokens: usize, thresholds: AutoCompactThresholds) -> Au
 }
 
 fn context_window(settings: &Settings) -> usize {
-    settings
-        .providers
-        .get(&settings.active_provider)
-        .and_then(|provider| {
-            provider
-                .models
-                .iter()
-                .find(|model| model.id == settings.model)
-                .map(|model| model.limit as usize)
-        })
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW)
+    settings.active_model().context_window as usize
 }
 
 fn microcompact_messages(messages: &mut [Message], keep_recent: usize) -> usize {
@@ -625,7 +614,7 @@ async fn full_compact(
     messages: &mut Vec<Message>,
     ctx: &CompactRequestContext<'_>,
 ) -> Result<CompactOutcome, CompactError> {
-    let config = normalized_config(&ctx.settings.compact);
+    let config = normalized_config(ctx.settings.compact());
     let before_messages = messages.len();
     let before_tokens = estimate_request_tokens(
         messages,
@@ -823,22 +812,17 @@ async fn invoke_summary(
     max_tokens: usize,
     ctx: &CompactRequestContext<'_>,
 ) -> Result<String, CompactError> {
+    let model = ctx.settings.active_model();
     let request = ApiRequest {
         messages,
-        model: &ctx.settings.model,
+        model: &model.model_id,
         system_prompt: Some("You are a conversation summarizer."),
         tools: Some(&[]),
         max_tokens: Some(max_tokens as u64),
         temperature: None,
         thinking_effort: None,
-        extra_headers: ctx
-            .settings
-            .current_model_config()
-            .and_then(|m| m.extra_headers.as_ref()),
-        extra_body: ctx
-            .settings
-            .current_model_config()
-            .and_then(|m| m.extra_body.as_ref()),
+        extra_headers: (!model.headers.is_empty()).then_some(&model.headers),
+        extra_body: (!model.body.is_empty()).then_some(&model.body),
     };
     let mut stream = match crate::util::cancel::invoke_or_cancel(
         ctx.llm_client.invoke(request),
@@ -855,8 +839,8 @@ async fn invoke_summary(
         compact_trigger = %ctx.trigger,
         request_messages = messages.len(),
         max_tokens,
-        model = %ctx.settings.model,
-        provider = %ctx.settings.active_provider,
+        model = %model.model_id,
+        provider = %model.provider_id,
         "compact summary stream opened"
     );
     let mut summary = String::new();
@@ -1490,8 +1474,7 @@ async fn emit_compact_summary_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_config::{ModelTiers, ProviderProfile};
-    use omini_domain::config::{ModelInfo, ProviderEndpointKind};
+    use omini_config::RawConfig;
     use omini_domain::message::{ContentBlock, ToolUseBlock};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1514,45 +1497,21 @@ mod tests {
     }
 
     fn settings_with_limit(limit: u32) -> Settings {
-        let model = "test-model".to_string();
-        let provider = "test".to_string();
-        let mut providers = HashMap::new();
-        providers.insert(
-            provider.clone(),
-            ProviderProfile {
-                name: "Test".to_string(),
-                endpoint: ProviderEndpointKind::OpenAI,
-                api_key: String::new(),
-                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-                models: vec![ModelInfo {
-                    id: model.clone(),
-                    name: None,
-                    limit,
-                    thinking: false,
-                    input_modalities: None,
-                    extra_body: None,
-                    extra_headers: None,
-                }],
-            },
-        );
+        let raw: RawConfig = toml::from_str(&format!(
+            r#"
+[providers.test]
+protocol = "openai"
+base_url = "http://127.0.0.1:9"
 
-        Settings {
-            api_key: String::new(),
-            base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-            model,
-            endpoint: ProviderEndpointKind::OpenAI,
-            providers,
-            active_provider: provider,
-            system_prompt: None,
-            language: None,
-            max_turns: None,
-            cwd: PathBuf::from("."),
-            thinking_effort: None,
-            permissions: None,
-            compact: CompactConfig::default(),
-            mcp_servers: HashMap::new(),
-            model_tiers: ModelTiers::default(),
-        }
+[providers.test.models.test-model]
+context_window = {limit}
+"#
+        ))
+        .expect("test config should parse");
+        raw.resolve()
+            .expect("test config should resolve")
+            .to_settings(Some("test"), Some("test-model"), None, &PathBuf::from("."))
+            .expect("test settings should build")
     }
 
     #[test]

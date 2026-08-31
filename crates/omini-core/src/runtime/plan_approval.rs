@@ -49,10 +49,11 @@ impl AgentRuntime {
         let submitted =
             plan::persist_latest(&self.project, self.active_profile(), &self.messages).await?;
         if let Some(plan) = submitted.as_ref() {
+            let model = self.settings.active_model();
             history::persist_plan_ui_message(
                 &self.thread_id,
                 plan,
-                &format!("{}/{}", self.settings.active_provider, self.settings.model),
+                &format!("{}/{}", model.provider_id, model.model_id),
                 &self.persistence_tx,
             )
             .await;

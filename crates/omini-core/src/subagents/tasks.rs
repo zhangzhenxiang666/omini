@@ -8,7 +8,7 @@ use crate::tools::{
 use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::project::ThreadDir;
-use omini_config::{ProviderProfile, Settings};
+use omini_config::{ModelSelection, Settings};
 use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
     AgentTaskResult, AgentTaskStatus, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind,
@@ -454,15 +454,16 @@ impl AgentTaskSupervisor {
             completed_at: None,
             notification_delivered: false,
         };
+        let model = settings.active_model();
         let thread = ThreadRecord {
             id: thread_id,
             parent_thread_id: Some(runtime.thread_id.clone()),
             spawn_tool_use_id: Some(ctx.tool_use_id),
             thread_type: "agent".to_string(),
             agent_label: Some(spec.name),
-            provider: settings.active_provider.clone(),
-            model: settings.model.clone(),
-            thinking_effort: settings.thinking_effort.map(|effort| effort.to_string()),
+            provider: model.provider_id.clone(),
+            model: model.model_id.clone(),
+            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
             title: Some(info.title.clone()),
             current_context_tokens: 0,
             total_tokens: 0,
@@ -578,10 +579,15 @@ impl AgentTaskSupervisor {
             execution_mode = info.execution_mode.as_str(),
             agent = %info.agent,
         );
+        let model = settings.active_model();
         let llm_client = LlmClient::new(
-            settings.endpoint,
-            settings.api_key.clone(),
-            settings.base_url.clone(),
+            model.protocol,
+            model
+                .api_key
+                .as_ref()
+                .map(|secret| secret.expose().to_string())
+                .unwrap_or_default(),
+            model.base_url.clone(),
         );
         let runtime = Arc::new(ToolRuntimeContext {
             thread_id: info.thread_id.clone(),
@@ -603,7 +609,7 @@ impl AgentTaskSupervisor {
         let bridge = {
             let supervisor = Arc::clone(&self);
             let bridge_info = info.clone();
-            let model_ref = format!("{}/{}", settings.active_provider, settings.model);
+            let model_ref = format!("{}/{}", model.provider_id, model.model_id);
             tokio::spawn(async move {
                 supervisor
                     .bridge_engine_events(child_rx, &bridge_info, &model_ref)
@@ -1093,47 +1099,18 @@ fn resolve_agent_settings(parent_settings: &Settings, spec: &AgentSpec) -> (Sett
     let Some(model_spec) = &spec.model else {
         return (settings, warnings);
     };
-    let Some(provider) = parent_settings.providers.get(&model_spec.provider) else {
+    let parent_model = parent_settings.active_model();
+    if let Err(error) = settings.select_model(ModelSelection {
+        active_provider: model_spec.provider.clone(),
+        model: model_spec.model.clone(),
+        thinking_effort: None,
+    }) {
         warnings.push(format!(
-            "provider '{}' is not configured; falling back to {}/{}",
-            model_spec.provider, parent_settings.active_provider, parent_settings.model
+            "{}; falling back to {}/{}",
+            error, parent_model.provider_id, parent_model.model_id
         ));
-        return (settings, warnings);
-    };
-    if !provider
-        .models
-        .iter()
-        .any(|model| model.id == model_spec.model)
-    {
-        warnings.push(format!(
-            "model '{}' is not configured for provider '{}'; falling back to {}/{}",
-            model_spec.model,
-            model_spec.provider,
-            parent_settings.active_provider,
-            parent_settings.model
-        ));
-        return (settings, warnings);
     }
-    apply_provider(
-        &mut settings,
-        &model_spec.provider,
-        &model_spec.model,
-        provider,
-    );
     (settings, warnings)
-}
-
-fn apply_provider(
-    settings: &mut Settings,
-    provider_name: &str,
-    model_name: &str,
-    provider: &ProviderProfile,
-) {
-    settings.active_provider = provider_name.to_string();
-    settings.model = model_name.to_string();
-    settings.endpoint = provider.endpoint;
-    settings.api_key = provider.api_key.clone();
-    settings.base_url = provider.base_url.clone();
 }
 
 fn agent_system_prompt(

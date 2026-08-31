@@ -74,6 +74,7 @@ impl ProjectManager {
             CoreError::project_state("failed to create thread directory", error)
         })?;
         let now = chrono::Utc::now();
+        let model = settings.active_model();
         let thread = store_model::Thread {
             id: thread_id.clone(),
             project_id: self.project_id.clone(),
@@ -81,9 +82,9 @@ impl ProjectManager {
             spawn_tool_use_id: None,
             thread_type: "main".to_string(),
             agent_label: None,
-            provider: settings.active_provider.clone(),
-            model: settings.model.clone(),
-            thinking_effort: settings.thinking_effort.map(|effort| effort.to_string()),
+            provider: model.provider_id.clone(),
+            model: model.model_id.clone(),
+            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
             title: None,
             current_context_tokens: 0,
             total_tokens: 0,
@@ -167,6 +168,7 @@ impl ProjectManager {
             .map(|title| format!("{title} (new from plan)"))
             .unwrap_or_else(|| "(new from plan)".to_string());
         let now = chrono::Utc::now();
+        let model = settings.active_model();
         let thread = store_model::Thread {
             id: new_thread_id.clone(),
             project_id: self.project_id.clone(),
@@ -174,9 +176,9 @@ impl ProjectManager {
             spawn_tool_use_id: None,
             thread_type: "main".to_string(),
             agent_label: None,
-            provider: settings.active_provider.clone(),
-            model: settings.model.clone(),
-            thinking_effort: settings.thinking_effort.map(|effort| effort.to_string()),
+            provider: model.provider_id.clone(),
+            model: model.model_id.clone(),
+            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
             title: Some(new_title),
             current_context_tokens: 0,
             total_tokens: 0,
@@ -436,7 +438,7 @@ async fn load_thread_snapshot(
         thread_id: thread.id.clone(),
         provider: thread.provider.clone(),
         model: thread.model.clone(),
-        thinking_effort: settings.thinking_effort,
+        thinking_effort: settings.active_model().thinking_effort,
         active_profile,
         title: thread.title.clone(),
         messages,

@@ -23,7 +23,6 @@ pub(crate) mod test_support;
 use crate::runtime::AgentRuntime;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
-use omini_domain::config::ProviderInfo;
 use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
@@ -365,11 +364,14 @@ impl AgentCoreThread {
         let thinking_effort;
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
-            thinking_effort =
-                settings.effective_thinking_effort_for(&provider, &model, requested_effort);
-            settings.active_provider = provider.clone();
-            settings.model = model.clone();
-            settings.thinking_effort = thinking_effort;
+            settings
+                .select_model(omini_config::ModelSelection {
+                    active_provider: provider.clone(),
+                    model: model.clone(),
+                    thinking_effort: requested_effort,
+                })
+                .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
+            thinking_effort = settings.active_model().thinking_effort;
         }
         self.send_to_runtime(ServerToRuntimeEvent::ModelSelected {
             provider,
@@ -386,8 +388,9 @@ impl AgentCoreThread {
         let requested_effort = command.effort;
         {
             let mut settings = self.settings.write().expect("core settings lock poisoned");
-            settings.thinking_effort =
-                settings.effective_current_thinking_effort(Some(requested_effort));
+            settings
+                .set_thinking_effort(Some(requested_effort))
+                .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
         }
         self.send_to_runtime(ServerToRuntimeEvent::SetThinkingEffort(requested_effort))
             .await
@@ -530,21 +533,12 @@ fn runtime_skill_source_sort(source_kind: thread_types::RuntimeSkillSourceKind) 
 }
 
 fn models_snapshot_from_settings(settings: &Settings) -> thread_types::ModelsSnapshot {
-    let mut providers = settings
-        .providers
-        .iter()
-        .map(|(id, provider)| ProviderInfo {
-            id: id.clone(),
-            name: provider.name.clone(),
-            endpoint: provider.endpoint,
-            base_url: provider.base_url.to_string(),
-            models: provider.models.clone(),
-        })
-        .collect::<Vec<_>>();
+    let mut providers = settings.resolved_config().catalog();
     providers.sort_by(|a, b| a.id.cmp(&b.id));
+    let model = settings.active_model();
     thread_types::ModelsSnapshot {
         providers,
-        current_provider: settings.active_provider.clone(),
-        current_model: settings.model.clone(),
+        current_provider: model.provider_id.clone(),
+        current_model: model.model_id.clone(),
     }
 }

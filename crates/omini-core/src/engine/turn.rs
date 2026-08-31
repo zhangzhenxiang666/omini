@@ -57,9 +57,10 @@ impl QueryEngine {
             .instrument(tracing::debug_span!("compact", turn_index))
             .await;
 
+        let model = ctx.settings.active_model();
         let request = ApiRequest {
             messages: ctx.messages,
-            model: &ctx.settings.model,
+            model: &model.model_id,
             system_prompt: mode
                 .is_finalization()
                 .then(get_max_steps_prompt)
@@ -67,15 +68,9 @@ impl QueryEngine {
             tools: (!mode.is_finalization()).then_some(tool_definitions),
             max_tokens: None,
             temperature: None,
-            thinking_effort: ctx.settings.thinking_effort,
-            extra_headers: ctx
-                .settings
-                .current_model_config()
-                .and_then(|model| model.extra_headers.as_ref()),
-            extra_body: ctx
-                .settings
-                .current_model_config()
-                .and_then(|model| model.extra_body.as_ref()),
+            thinking_effort: model.thinking_effort,
+            extra_headers: (!model.headers.is_empty()).then_some(&model.headers),
+            extra_body: (!model.body.is_empty()).then_some(&model.body),
         };
 
         let mut stream = match crate::util::cancel::invoke_or_cancel(

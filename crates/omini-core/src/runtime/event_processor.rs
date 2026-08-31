@@ -18,7 +18,8 @@ impl AgentRuntime {
         let event_tx = self.event_tx.clone();
         let persistence_tx = self.persistence_tx.clone();
         let usage_state = Arc::clone(&self.thread_usage);
-        let model_ref = format!("{}/{}", self.settings.active_provider, self.settings.model);
+        let model = self.settings.active_model();
+        let model_ref = format!("{}/{}", model.provider_id, model.model_id);
         let context_window = active_run::current_context_window(&self.settings);
         let task_supervisor = Arc::clone(&self.task_supervisor);
         let span_thread_id = thread_id.clone();

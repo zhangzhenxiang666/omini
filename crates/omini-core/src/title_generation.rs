@@ -1,4 +1,4 @@
-use omini_config::{ModelTier, Settings};
+use omini_config::{RoutingTier, Settings};
 use omini_domain::message::{ContentBlock, Message, Role};
 use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use std::fmt;
@@ -32,23 +32,17 @@ pub async fn generate_thread_title(
     settings: &Settings,
     user_input: &str,
 ) -> Result<String, TitleGenError> {
-    let (provider_key, model, thinking_effort) = settings.resolve_tier(ModelTier::Small);
-    let profile = settings.providers.get(&provider_key).ok_or_else(|| {
-        TitleGenError::Request(format!(
-            "tier provider {provider_key} missing after resolve"
-        ))
-    })?;
-    let model_config = profile
-        .models
-        .iter()
-        .find(|candidate| candidate.id == model)
-        .ok_or_else(|| {
-            TitleGenError::Request(format!("tier model {model} missing after resolve"))
-        })?;
+    let model = settings
+        .resolve_routing_model(RoutingTier::Small)
+        .map_err(|error| TitleGenError::Request(error.to_string()))?;
     let llm_client = LlmClient::new(
-        profile.endpoint,
-        profile.api_key.clone(),
-        profile.base_url.clone(),
+        model.protocol,
+        model
+            .api_key
+            .as_ref()
+            .map(|secret| secret.expose().to_string())
+            .unwrap_or_default(),
+        model.base_url.clone(),
     );
     let prompt = build_generate_title_prompt(user_input);
     let messages = vec![Message {
@@ -57,7 +51,7 @@ pub async fn generate_thread_title(
     }];
     let request = ApiRequest {
         messages: &messages,
-        model: &model,
+        model: &model.model_id,
         system_prompt: Some(
             "You are a thread title generator. \
              You output ONLY a valid JSON object with one \"title\" field. Nothing else.",
@@ -65,9 +59,9 @@ pub async fn generate_thread_title(
         tools: None,
         max_tokens: Some(TITLE_MAX_TOKENS),
         temperature: Some(0.2),
-        thinking_effort,
-        extra_headers: model_config.extra_headers.as_ref(),
-        extra_body: model_config.extra_body.as_ref(),
+        thinking_effort: model.thinking_effort,
+        extra_headers: (!model.headers.is_empty()).then_some(&model.headers),
+        extra_body: (!model.body.is_empty()).then_some(&model.body),
     };
     let mut stream = llm_client
         .invoke(request)

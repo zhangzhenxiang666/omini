@@ -14,6 +14,6 @@ pub use config::{
 };
 pub use permissions::{PermissionSources, RawBashRulesFile, load_permission_sources};
 pub use settings::{
-    CompactConfig, ConfigError, McpServerConfig, McpServerTransportConfig, ModelTier,
-    ModelTierEntry, ModelTiers, OminiRoot, ProviderProfile, RawPermissionConfig, Settings,
+    CompactConfig, ConfigError, McpServerConfig, McpServerTransportConfig, OminiRoot,
+    RawPermissionConfig, Settings,
 };

@@ -312,34 +312,13 @@ fn runtime_capability_status_to_protocol(
 }
 
 pub fn models_response_from_settings(settings: &Settings) -> client_proto::ModelsResponse {
-    let mut providers = settings
-        .providers
-        .iter()
-        .map(|(id, provider)| client_proto::ProviderInfo {
-            id: id.clone(),
-            name: provider.name.clone(),
-            endpoint: provider.endpoint,
-            base_url: provider.base_url.to_string(),
-            models: provider
-                .models
-                .iter()
-                .map(|model| client_proto::ModelInfo {
-                    id: model.id.clone(),
-                    name: model.name.clone(),
-                    limit: model.limit,
-                    thinking: model.thinking,
-                    input_modalities: model.input_modalities.clone(),
-                    extra_headers: None,
-                    extra_body: None,
-                })
-                .collect(),
-        })
-        .collect::<Vec<_>>();
+    let mut providers = settings.resolved_config().catalog();
     providers.sort_by(|a, b| a.id.cmp(&b.id));
+    let model = settings.active_model();
     client_proto::ModelsResponse {
         providers,
-        current_provider: settings.active_provider.clone(),
-        current_model: settings.model.clone(),
+        current_provider: model.provider_id.clone(),
+        current_model: model.model_id.clone(),
     }
 }
 

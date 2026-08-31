@@ -137,7 +137,7 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
 }
 
 pub fn language_preference_section(settings: &Settings) -> Option<String> {
-    let language = settings.language.as_deref()?.trim();
+    let language = settings.language()?.trim();
     if language.is_empty() {
         return None;
     }

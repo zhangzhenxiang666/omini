@@ -201,50 +201,12 @@ impl ToolExecutionContext {
 
     #[cfg(test)]
     pub fn test_with_cwd(tool_name: &str, cwd: PathBuf) -> Self {
-        use omini_config::{CompactConfig, ModelTiers, ProviderProfile, Settings};
-        use omini_domain::config::{ModelInfo, ProviderEndpointKind};
-
         let (event_tx, _event_rx) = mpsc::channel(1);
-        let mut providers = HashMap::new();
-        providers.insert(
-            "test".to_string(),
-            ProviderProfile {
-                name: "Test".to_string(),
-                endpoint: ProviderEndpointKind::OpenAI,
-                api_key: String::new(),
-                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-                models: vec![ModelInfo {
-                    id: "test-model".to_string(),
-                    name: None,
-                    limit: 256000,
-                    thinking: false,
-                    input_modalities: None,
-                    extra_body: None,
-                    extra_headers: None,
-                }],
-            },
-        );
         Self {
             tool_use_id: format!("test_{tool_name}"),
             pause_id: format!("test_{tool_name}"),
             tool_name: tool_name.to_string(),
-            settings: Arc::new(Settings {
-                api_key: String::new(),
-                base_url: url::Url::parse("http://127.0.0.1:9").unwrap(),
-                model: "test-model".to_string(),
-                endpoint: ProviderEndpointKind::OpenAI,
-                providers,
-                active_provider: "test".to_string(),
-                system_prompt: None,
-                language: None,
-                max_turns: None,
-                cwd,
-                thinking_effort: None,
-                permissions: None,
-                compact: CompactConfig::default(),
-                mcp_servers: HashMap::new(),
-                model_tiers: ModelTiers::default(),
-            }),
+            settings: Arc::new(crate::test_support::settings(&cwd, false)),
             tool_registry: Arc::new(ToolRegistry::new()),
             event_tx,
             pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),

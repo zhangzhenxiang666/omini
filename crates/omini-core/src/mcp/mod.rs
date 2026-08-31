@@ -62,7 +62,7 @@ struct PreparedMcpToolInput {
 impl McpManager {
     pub fn from_settings(settings: &Settings) -> Self {
         let servers = settings
-            .mcp_servers
+            .mcp_servers()
             .iter()
             .map(|(name, config)| (name.clone(), client_config_from_core(config)));
 
