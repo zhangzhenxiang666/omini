@@ -326,7 +326,7 @@ pub struct StatusBar {
     pub total_cached_tokens: i64,
     /// 当前模型上下文窗口。
     pub context_window: Option<u32>,
-    /// 当前 git 分支名（detached HEAD 显示 "detached <sha>"，不在仓库中为 None）。
+    /// 当前 git 分支名（detached HEAD 显示 "HEAD"，不在仓库中为 None）。
     pub git_branch: Option<String>,
 }
 

@@ -4,7 +4,7 @@ use std::process::Command;
 /// 通过 `git branch --show-current` 检测当前分支名。
 ///
 /// 不在 git 仓库中时返回 `None`。
-/// detached HEAD 时回退到 `git rev-parse --short HEAD`，返回 `"detached <sha>"`。
+/// detached HEAD 时返回 `"HEAD"`。
 pub fn detect_git_branch(cwd: &Path) -> Option<String> {
     let output = Command::new("git")
         .args(["branch", "--show-current"])
@@ -21,21 +21,7 @@ pub fn detect_git_branch(cwd: &Path) -> Option<String> {
         return Some(branch);
     }
 
-    // detached HEAD：回退到 rev-parse 获取短 SHA
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !sha.is_empty() {
-            return Some(format!("detached {sha}"));
-        }
-    }
-
-    None
+    Some("HEAD".to_string())
 }
 
 #[cfg(test)]
@@ -93,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn git_branch_detached_head_returns_short_commit_identifier() {
+    fn git_branch_detached_head_returns_head() {
         let directory = TestTempDir::new("detached-head");
         run_git(directory.path(), ["init", "--quiet"]);
         std::fs::write(directory.path().join("README.md"), "test\n")
@@ -112,12 +98,11 @@ mod tests {
                 "test",
             ],
         );
-        let short = git_output(directory.path(), ["rev-parse", "--short", "HEAD"]);
         run_git(directory.path(), ["checkout", "--quiet", "--detach"]);
 
         assert_eq!(
             detect_git_branch(directory.path()),
-            Some(format!("detached {short}"))
+            Some("HEAD".to_string())
         );
     }
 
@@ -128,18 +113,5 @@ mod tests {
             .status()
             .expect("git command should start");
         assert!(status.success(), "git command should succeed: {status}");
-    }
-
-    fn git_output<const N: usize>(directory: &Path, args: [&str; N]) -> String {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(directory)
-            .output()
-            .expect("git command should start");
-        assert!(output.status.success(), "git command should succeed");
-        String::from_utf8(output.stdout)
-            .expect("git output should be UTF-8")
-            .trim()
-            .to_string()
     }
 }
