@@ -20,6 +20,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 mod agent_tasks;
+mod attachments;
 mod content;
 mod context;
 mod database;
@@ -34,8 +35,10 @@ pub use content::{CONTENT_SIZE_THRESHOLD, PreparedBlocks, prepare_blocks};
 use content::{
     PreparedUiContent, cleanup_created_files, finish_prepared_write, prepare_ui_content,
 };
-pub(crate) use content::{asset_path, load_blocks, load_ui_content, persist_asset};
+pub(crate) use content::{
+    load_asset, load_blocks, load_ui_content, persist_staged_asset, stored_asset_path,
+};
 pub use database::{Database, StoreError};
-pub use models::{AgentTask, NewMessage, Project, StoredMessage, Thread};
+pub use models::{AgentTask, Attachment, NewMessage, Project, StoredMessage, Thread};
 use models::{AgentTaskRow, StoredLlmMessageRow, StoredMessageRow, ThreadRow};
 pub use threads::thread_from_runtime;

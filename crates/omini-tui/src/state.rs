@@ -267,6 +267,7 @@ impl UiMessage {
             .map(|item| match item {
                 HistoryItem::Message(message) => Self::Message(message),
                 HistoryItem::Display(display) => Self::Display(display),
+                HistoryItem::UserInput(input) => Self::Display(input.display_message()),
                 HistoryItem::Plan(plan) => Self::ProposedPlan {
                     text: plan.markdown,
                 },

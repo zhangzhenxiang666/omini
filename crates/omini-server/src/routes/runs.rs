@@ -32,32 +32,56 @@ pub async fn submit_run(
             error,
         )
     })?;
-    if request.mode == protocol::RunInputMode::Submit {
+    let (is_initial_submit, input, is_init) = match &request {
+        protocol::SubmitRunRequest::SubmitMessage { input, .. } => (true, input.clone(), false),
+        protocol::SubmitRunRequest::InterveneMessage { input, .. } => (false, input.clone(), false),
+        protocol::SubmitRunRequest::ExecuteCommand { command, input, .. } => (
+            true,
+            input.clone(),
+            matches!(command, protocol::RunCommand::Init),
+        ),
+    };
+    let command = submit_run_command_from_protocol_request_for_thread(request, &thread)
+        .await
+        .map_err(core_error)?;
+    let command = thread.prepare_run(command).map_err(core_error)?;
+    if is_initial_submit {
         // 同步落库 300 字符兜底 title。只有当 title 这次被实际写入
         // (text 非空 + DB 软写条件命中) 时,才 spawn 后台 LLM 升级任务,
         // 避免为后续每一次 submit 都创建无用的 tokio 任务。spawn 时把刚
         // 写入的兜底 title 一并传过去,LLM 跑完后会用它判断"title 仍然
         // 是我刚写入的兜底"才覆盖,避免覆盖用户的 /rename 或 fork 预设。
+        let title_input = if is_init && fallback_thread_title_from_user_input(&input).is_none() {
+            protocol::UserInput::plain("Initialize project")
+        } else {
+            input.clone()
+        };
         let title_was_set = thread
-            .set_initial_title_from_input(&request.input)
+            .set_initial_title_from_input(&title_input)
             .await
             .map_err(core_error)?;
         if title_was_set
-            && let Some(fallback_title) = fallback_thread_title_from_user_input(&request.input)
+            && !is_init
+            && let Some(fallback_title) = fallback_thread_title_from_user_input(&input)
         {
             thread.spawn_background_title_generation(
                 project_id,
                 Arc::clone(&manager),
                 fallback_title,
-                request.input.text.clone(),
+                input
+                    .parts
+                    .iter()
+                    .filter_map(|part| match part {
+                        protocol::InputPart::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
             );
         }
     }
-    let command =
-        submit_run_command_from_protocol_request_for_thread(request, &thread.thread_dir())
-            .map_err(core_error)?;
     thread
-        .submit_run(command)
+        .submit_prepared_run(command)
         .await
         .map(run_submitted_response_from_runtime_result)
         .map(Json)

@@ -12,6 +12,8 @@ pub async fn daemon_health(
     Json(protocol::DaemonHealthResponse {
         ok: true,
         daemon: "omini-server".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_revision: protocol::PROTOCOL_REVISION,
         bundled_rg: manager.bundled_tool_status(),
     })
 }

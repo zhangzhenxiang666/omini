@@ -22,11 +22,17 @@ pub use omini_domain::subagents::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const PROTOCOL_REVISION: u32 = 2;
+
 /// daemon 健康检查响应，用于客户端确认本地服务可用并识别服务名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHealthResponse {
     pub ok: bool,
     pub daemon: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub protocol_revision: u32,
     pub bundled_rg: BundledToolStatus,
 }
 
@@ -577,118 +583,22 @@ pub struct ThreadRuntimeStatusResponse {
     pub status: ThreadRuntimeStatus,
 }
 
-/// 用户输入在协议层携带语义化上下文引用，避免 TUI 把本地 mention 文本直接塞给 core。
+pub use omini_domain::input::{InputPart, RunCommand};
+
+/// 用户输入由有序语义 parts 和无序、线程内附件引用组成。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserInput {
-    /// 用户输入的纯文本正文，不包含本地 UI mention 解析状态。
-    pub text: String,
-    /// TUI 已解析出的语义化上下文引用。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub context_refs: Option<Vec<ContextRef>>,
-    /// 随本轮输入一起发送的附件引用。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<AttachmentRef>>,
+    pub parts: Vec<InputPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachment_ids: Vec<String>,
 }
 
 impl UserInput {
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            context_refs: None,
-            attachments: None,
-        }
-    }
-}
-
-/// TUI 中的 @mention 会在发送前转成 ContextRef，server/core 再决定如何读取或使用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ContextRef {
-    /// 指向项目中的文件路径。
-    File {
-        path: String,
-        /// UI 展示用标签；为空时客户端可回退到路径。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
-    /// 指向项目中的目录路径。
-    Directory {
-        path: String,
-        /// UI 展示用标签；为空时客户端可回退到路径。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
-    /// 指向一个可调用的子 agent。
-    Subagent {
-        name: String,
-        /// UI 展示用标签；为空时客户端可回退到 agent 名称。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
-    /// 指向外部 URL。
-    Url {
-        url: String,
-        /// UI 展示用标签；为空时客户端可回退到 URL。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
-}
-
-impl ContextRef {
-    pub fn label(&self) -> String {
-        match self {
-            Self::File { path, label } | Self::Directory { path, label } => {
-                label.clone().unwrap_or_else(|| path.clone())
-            }
-            Self::Subagent { name, label } => label.clone().unwrap_or_else(|| name.clone()),
-            Self::Url { url, label } => label.clone().unwrap_or_else(|| url.clone()),
-        }
-    }
-
-    pub fn target(&self) -> &str {
-        match self {
-            Self::File { path, .. } | Self::Directory { path, .. } => path,
-            Self::Subagent { name, .. } => name,
-            Self::Url { url, .. } => url,
-        }
-    }
-}
-
-/// 附件既可以是本地路径，也可以是已经上传到 daemon 的引用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum AttachmentRef {
-    /// 客户端本地路径引用，server/core 可按需读取。
-    LocalPath {
-        path: String,
-        /// 客户端已知的 MIME 类型；未知时为空。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        mime_type: Option<String>,
-        /// UI 展示或模型提示中使用的附件名称。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    /// 已上传到 daemon 的附件引用。
-    Uploaded {
-        attachment_id: String,
-        mime_type: String,
-        /// UI 展示或模型提示中使用的附件名称。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-}
-
-impl AttachmentRef {
-    pub fn name(&self) -> Option<&str> {
-        match self {
-            Self::LocalPath { name, .. } | Self::Uploaded { name, .. } => name.as_deref(),
-        }
-    }
-
-    pub fn mime_type(&self) -> Option<&str> {
-        match self {
-            Self::LocalPath { mime_type, .. } => mime_type.as_deref(),
-            Self::Uploaded { mime_type, .. } => Some(mime_type.as_str()),
+            parts: vec![InputPart::Text { text: text.into() }],
+            attachment_ids: Vec::new(),
         }
     }
 }
@@ -838,22 +748,8 @@ pub struct SkillSummary {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub short_description: Option<String>,
-}
-
-/// 单个 skill 的完整内容，用于 TUI 展开 slash skill 调用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillDetail {
-    pub name: String,
-    pub description: String,
-    /// 短描述，用于在命令面板中显示。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub short_description: Option<String>,
-    /// skill markdown 或说明正文。
-    pub body: String,
-    /// skill 所在目录，用于提示模型理解来源。
-    pub directory: String,
-    /// 是否允许用户通过 slash skill 直接调用。
-    pub user_invocable: bool,
+    pub argument_hint: Option<String>,
 }
 
 /// 可调用 skill 列表响应。
@@ -862,28 +758,26 @@ pub struct SkillsResponse {
     pub skills: Vec<SkillSummary>,
 }
 
-/// 单个 skill 详情响应。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SkillResponse {
-    pub skill: SkillDetail,
-}
-
-/// Submit 是普通用户回合；Intervene 用于运行中插入输入。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RunInputMode {
-    Submit,
-    Intervene,
-}
-
 /// 向线程提交用户输入或运行中插入输入的请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SubmitRunRequest {
-    pub input: UserInput,
-    /// 发起方客户端用于关联本地 optimistic echo 与 runtime echo 的一次性 token。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_echo_id: Option<String>,
-    pub mode: RunInputMode,
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubmitRunRequest {
+    SubmitMessage {
+        input: UserInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
+    InterveneMessage {
+        input: UserInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
+    ExecuteCommand {
+        command: RunCommand,
+        input: UserInput,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
 }
 
 /// 运行请求已被接受后的响应。
@@ -913,19 +807,10 @@ pub struct ControllerLease {
     pub controller_id: Option<String>,
 }
 
-/// daemon 接收附件后返回的元数据。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AttachmentMetadata {
-    pub attachment_id: String,
-    pub mime_type: String,
-    pub size: u64,
-    pub name: String,
-}
-
 /// 附件上传接口响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentUploadResponse {
-    pub attachment: AttachmentMetadata,
+    pub attachment_id: String,
 }
 
 /// 无额外数据的成功响应。

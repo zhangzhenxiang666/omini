@@ -188,7 +188,7 @@ fn start_server() -> Result<ExitCode, Box<dyn Error>> {
 
 fn stop_server() -> Result<ExitCode, Box<dyn Error>> {
     let http = daemon_http_client().map_err(io::Error::other)?;
-    let Some(status) = discover_healthy_daemon(&http) else {
+    let Some((status, _)) = discover_daemon(&http) else {
         println!("omini-server is not running");
         return Ok(ExitCode::SUCCESS);
     };
@@ -199,7 +199,7 @@ fn stop_server() -> Result<ExitCode, Box<dyn Error>> {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if discover_healthy_daemon(&http).is_none() {
+        if discover_daemon(&http).is_none() {
             println!("Stopped omini-server at {}", daemon_url(status));
             return Ok(ExitCode::SUCCESS);
         }
@@ -215,8 +215,17 @@ fn stop_server() -> Result<ExitCode, Box<dyn Error>> {
 
 fn status_server() -> Result<ExitCode, Box<dyn Error>> {
     let http = daemon_http_client().map_err(io::Error::other)?;
-    if let Some(status) = discover_healthy_daemon(&http) {
-        println!("omini-server is running at {}", daemon_url(status));
+    if let Some((status, revision)) = discover_daemon(&http) {
+        if revision == protocol::PROTOCOL_REVISION {
+            println!("omini-server is running at {}", daemon_url(status));
+        } else {
+            println!(
+                "omini-server at {} uses incompatible protocol revision {} (client expects {})",
+                daemon_url(status),
+                revision,
+                protocol::PROTOCOL_REVISION
+            );
+        }
         Ok(ExitCode::SUCCESS)
     } else {
         println!("omini-server is not running");
@@ -227,8 +236,11 @@ fn status_server() -> Result<ExitCode, Box<dyn Error>> {
 fn ensure_daemon() -> Result<DaemonStatus, String> {
     let http = daemon_http_client()?;
 
-    if let Some(status) = discover_healthy_daemon(&http) {
-        return Ok(status);
+    if let Some((status, protocol_revision)) = discover_daemon(&http) {
+        if protocol_revision == protocol::PROTOCOL_REVISION {
+            return Ok(status);
+        }
+        replace_incompatible_daemon(&http, status, protocol_revision)?;
     }
 
     let _lock = match acquire_startup_lock(&http)? {
@@ -259,6 +271,11 @@ fn daemon_http_client() -> Result<reqwest::blocking::Client, String> {
 }
 
 fn discover_healthy_daemon(http: &reqwest::blocking::Client) -> Option<DaemonStatus> {
+    let (status, protocol_revision) = discover_daemon(http)?;
+    (protocol_revision == protocol::PROTOCOL_REVISION).then_some(status)
+}
+
+fn discover_daemon(http: &reqwest::blocking::Client) -> Option<(DaemonStatus, u32)> {
     let hint = read_daemon_hint()?;
     let addr = hint.addr()?;
     let response = http
@@ -267,10 +284,35 @@ fn discover_healthy_daemon(http: &reqwest::blocking::Client) -> Option<DaemonSta
         .ok()?
         .json::<protocol::DaemonHealthResponse>()
         .ok()?;
-    (response.ok && response.daemon == "omini-server").then_some(DaemonStatus {
-        addr,
-        pid: hint.pid,
-    })
+    (response.ok && response.daemon == "omini-server").then_some((
+        DaemonStatus {
+            addr,
+            pid: hint.pid,
+        },
+        response.protocol_revision,
+    ))
+}
+
+fn replace_incompatible_daemon(
+    http: &reqwest::blocking::Client,
+    status: DaemonStatus,
+    protocol_revision: u32,
+) -> Result<(), String> {
+    let _: protocol::AckResponse =
+        post_empty_without_client(http, &format!("http://{}/v1/shutdown", status.addr))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if discover_daemon(http).is_none() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "daemon at {} uses protocol revision {}, expected {}, and did not stop",
+        status.addr,
+        protocol_revision,
+        protocol::PROTOCOL_REVISION
+    ))
 }
 
 enum StartupLockResult {

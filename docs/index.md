@@ -11,6 +11,7 @@ Omini 使用多种配置文件来控制行为，支持 **用户级** 和 **项�
 | Bash 规则 | `~/.omini/rules/*.rules` | `<project>/.omini/rules/*.rules` | [权限配置](permissions.md) |
 | Agent 指令 | `~/.omini/AGENTS.md` | `<project>/AGENTS.md` | [Agent 指令](instructions.md) |
 | Skills | `~/.omini/skills/*/SKILL.md` | `<project>/.omini/skills/*/SKILL.md` | [Skills 配置](skills.md) |
+| Client/server 协议 | — | — | [输入与附件协议](protocol.md) |
 
 ## 文档目录
 
@@ -41,6 +42,10 @@ Omini 使用多种配置文件来控制行为，支持 **用户级** 和 **项�
 ### [Skills 配置](skills.md)
 
 可复用技能包的创建与管理。
+
+### [输入与附件协议](protocol.md)
+
+`/v1` typed input、命令分层、Skill 展开和 thread 附件生命周期。
 
 ## 快速开始
 

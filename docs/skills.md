@@ -26,6 +26,7 @@ Skills 按以下顺序加载，后加载的覆盖先加载的同名 skill：
 ---
 name: code-reviewer
 description: 审查代码变更，提供改进建议
+argument-hint: "[目标或额外要求]"
 inject: true
 user-invocable: true
 ---
@@ -43,8 +44,9 @@ user-invocable: true
 |------|------|------|--------|------|
 | `name` | `String` | ✅ | — | Skill 的唯一标识名，用于调用 |
 | `description` | `String` | ✅ | — | Skill 的简短描述，显示在系统提示中 |
+| `argument-hint` | `String` | ❌ | — | `/skill` 自动完成中展示的参数提示 |
 | `inject` | `bool` | ❌ | `true` | 是否注入到系统提示的 skill 列表中 |
-| `user-invocable` | `bool` | ❌ | `true` | 用户是否可以通过 `/skill` 命令调用 |
+| `user-invocable` | `bool` | ❌ | `true` | 用户是否可以通过 `/<skill-name>` 命令调用 |
 
 ### inject 字段
 
@@ -53,8 +55,10 @@ user-invocable: true
 
 ### user-invocable 字段
 
-- `user-invocable: true`（默认）：用户可以通过 `/skill <name>` 命令调用
+- `user-invocable: true`（默认）：用户可以通过 `/<skill-name>` 命令调用
 - `user-invocable: false`：只有 Agent 可以调用，用户不能直接调用
+
+客户端通过 `GET /skills` 获取可调用 Skill 的摘要和 `argument_hint`，不会下载完整正文。用户输入 `/skill-name prompt` 时，客户端发送一个有序 `skill` part 和后续原始参数 parts；Core 在线程当前 SkillRegistry 中重新校验权限并展开正文。展开后的正文只进入 LLM history，UI 历史仍显示用户原始调用。详见[输入与附件协议](protocol.md)。
 
 ## 目录结构
 

@@ -3,6 +3,7 @@
 use crate::daemon::GlobalDaemonManager;
 use crate::routes;
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::FromRef;
 use axum::routing::{delete, get, post};
 use std::sync::Arc;
@@ -133,8 +134,17 @@ fn thread_routes() -> Router<AppState> {
         .merge(thread_lifecycle_routes())
         .merge(capability_routes())
         .merge(run_routes())
-        // 附件只登记线程内引用，具体使用由后续 run input 决定。
-        .route("/attachments", post(routes::attachments::upload_attachment))
+        // 附件先流式落入线程 staging，再由 UUID 元数据供后续 run input 引用。
+        .route(
+            "/attachments",
+            post(routes::attachments::upload_attachment).layer(DefaultBodyLimit::max(
+                routes::attachments::MAX_ATTACHMENT_BYTES + 1024 * 1024,
+            )),
+        )
+        .route(
+            "/attachments/{attachment_id}",
+            get(routes::attachments::get_attachment),
+        )
 }
 
 fn controller_routes() -> Router<AppState> {
@@ -181,9 +191,7 @@ fn thread_lifecycle_routes() -> Router<AppState> {
 
 fn capability_routes() -> Router<AppState> {
     // 技能是当前线程的可用能力清单。
-    Router::new()
-        .route("/skills", get(routes::skills::list_skills))
-        .route("/skills/{skill_name}", get(routes::skills::get_skill))
+    Router::new().route("/skills", get(routes::skills::list_skills))
 }
 
 fn run_routes() -> Router<AppState> {

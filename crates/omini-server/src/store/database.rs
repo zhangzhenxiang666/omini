@@ -14,6 +14,8 @@ pub enum StoreError {
     InvalidData(String),
     #[error("LLM context version conflict: expected {expected}, found {actual}")]
     ContextVersionConflict { expected: i64, actual: i64 },
+    #[error("attachment not found: {0}")]
+    AttachmentNotFound(String),
 }
 
 pub struct Database {

@@ -28,6 +28,8 @@ async fn daemon_foreground_startup_publishes_health_and_cleans_runtime_state() {
     assert_eq!(status, reqwest::StatusCode::OK);
     assert!(health.ok);
     assert_eq!(health.daemon, "omini-server");
+    assert_eq!(health.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(health.protocol_revision, omini_protocol::PROTOCOL_REVISION);
 
     let state_path = daemon.root().path().join(".omini/run/daemon.json");
     let state: Value = serde_json::from_str(

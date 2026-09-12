@@ -1,5 +1,4 @@
 use super::clipboard::copy_to_clipboard;
-use super::command::INIT_PROMPT;
 use super::input;
 use super::protocol;
 use super::selection::{
@@ -577,19 +576,11 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
             instructions: (!args.is_empty()).then_some(args),
         }),
         "rename" => Some(ClientRequest::ThreadRename { title: args }),
-        "init" => {
-            let mut input = protocol::user_input_from_draft(draft);
-            let mut prompt = INIT_PROMPT.to_string();
-            if !args.is_empty() {
-                prompt.push_str("\n\nAdditional user notes for this initialization:\n");
-                prompt.push_str(&args);
-            }
-            input.text = prompt;
-            Some(ClientRequest::RunSubmitUserInput {
-                input,
-                client_echo_id: None,
-            })
-        }
+        "init" => Some(ClientRequest::RunExecuteCommand {
+            command: omini_protocol::RunCommand::Init,
+            input: protocol::command_input_from_draft(draft, "init"),
+            client_echo_id: None,
+        }),
         "thinking" => match args.as_str() {
             "" => Some(ClientRequest::ThinkingDisplaySet { show: None }),
             "on" => Some(ClientRequest::ThinkingDisplaySet { show: Some(true) }),
@@ -618,10 +609,9 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
                     && (cmd.name == skill_name || cmd.aliases.iter().any(|a| a == skill_name))
             });
             if is_known_skill {
-                Some(ClientRequest::ExpandSkillRun {
-                    skill_name: skill_name.to_string(),
-                    prompt: args,
-                    input: Some(protocol::user_input_from_draft(draft)),
+                Some(ClientRequest::RunSubmitUserInput {
+                    input: protocol::skill_input_from_draft(draft, skill_name.to_string()),
+                    client_echo_id: None,
                 })
             } else {
                 Some(ClientRequest::RunSubmitUserInput {
@@ -689,6 +679,9 @@ async fn handle_composer_key(
                         }
                         omini_domain::display::HistoryItem::Display(display) => {
                             UiMessage::Display(display)
+                        }
+                        omini_domain::display::HistoryItem::UserInput(input) => {
+                            UiMessage::Display(input.display_message())
                         }
                         omini_domain::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                             text: plan.markdown,
@@ -1414,17 +1407,24 @@ mod tests {
 
         handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
 
-        let Some(ClientRequest::ExpandSkillRun {
-            input: Some(command),
-            ..
-        }) = rx.recv().await
-        else {
+        let Some(ClientRequest::RunSubmitUserInput { input, .. }) = rx.recv().await else {
             panic!("expected command draft");
         };
-        assert_eq!(command.text, "/commit-message summarize @src/main.rs");
-        let context_refs = command.context_refs.expect("expected context refs");
-        assert_eq!(context_refs.len(), 1);
-        assert_eq!(context_refs[0].target(), "src/main.rs");
+        assert_eq!(
+            input.input.parts,
+            vec![
+                omini_protocol::InputPart::Skill {
+                    name: "commit-message".to_string(),
+                },
+                omini_protocol::InputPart::Text {
+                    text: " summarize ".to_string(),
+                },
+                omini_protocol::InputPart::File {
+                    path: "src/main.rs".to_string(),
+                    label: Some("src/main.rs".to_string()),
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1439,7 +1439,33 @@ mod tests {
         let Some(ClientRequest::RunSubmitUserInput { input, .. }) = rx.recv().await else {
             panic!("expected normal user input submission");
         };
-        assert_eq!(input.text, "/nonexistent some text");
+        assert_eq!(
+            input.input.parts,
+            vec![omini_protocol::InputPart::Text {
+                text: "/nonexistent some text".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn init_is_sent_as_typed_command_without_expanding_prompt() {
+        let mut state = UiState::new();
+        state.input = "/init notes".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::RunExecuteCommand { command, input, .. }) = rx.recv().await else {
+            panic!("expected typed init command");
+        };
+        assert_eq!(command, omini_protocol::RunCommand::Init);
+        assert_eq!(
+            input.input.parts,
+            vec![omini_protocol::InputPart::Text {
+                text: " notes".to_string(),
+            }]
+        );
     }
 
     #[tokio::test]

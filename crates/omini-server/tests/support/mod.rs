@@ -44,7 +44,12 @@ impl TestTempDir {
                 std::process::id()
             ));
             match std::fs::create_dir(&path) {
-                Ok(()) => return Self { path },
+                Ok(()) => {
+                    let path = path
+                        .canonicalize()
+                        .expect("test temp directory should have a canonical path");
+                    return Self { path };
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(error) => panic!("test temp directory should be created: {error}"),
             }

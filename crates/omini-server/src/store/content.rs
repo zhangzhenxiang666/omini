@@ -146,29 +146,62 @@ pub(crate) fn load_blocks(
         .collect()
 }
 
-pub(crate) fn persist_asset(
+pub(crate) fn persist_staged_asset(
     thread_dir: &ThreadDir,
-    bytes: &[u8],
-    mime_type: &str,
-) -> Result<(String, String), StoreError> {
-    let sha256 = sha256_hex(bytes);
-    let relative_path = asset_relative_path(&sha256, mime_type)?;
-    let path = thread_dir.path().join(&relative_path);
-    write_atomically_if_absent(thread_dir, &path, bytes)?;
-    Ok((sha256, path_to_relative_string(&relative_path)?))
-}
-
-pub(crate) fn asset_path(
-    thread_dir: &ThreadDir,
+    staging_path: &Path,
     sha256: &str,
     mime_type: &str,
-) -> Result<PathBuf, StoreError> {
+) -> Result<(String, bool), StoreError> {
     if sha256.len() != 64 || !sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(StoreError::InvalidData("invalid attachment id".to_string()));
+        return Err(StoreError::InvalidData(
+            "invalid attachment SHA-256".to_string(),
+        ));
     }
-    Ok(thread_dir
-        .path()
-        .join(asset_relative_path(sha256, mime_type)?))
+    let relative_path = asset_relative_path(sha256, mime_type)?;
+    let path = thread_dir.path().join(&relative_path);
+    if path.exists() {
+        fs::remove_file(staging_path)?;
+        return Ok((path_to_relative_string(&relative_path)?, false));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(staging_path, &path)?;
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
+    }
+    Ok((path_to_relative_string(&relative_path)?, true))
+}
+
+pub(crate) fn load_asset(
+    thread_dir: &ThreadDir,
+    relative_path: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<Vec<u8>, StoreError> {
+    let path = stored_asset_path(thread_dir, relative_path)?;
+    let bytes = fs::read(path)?;
+    if bytes.len() as u64 != expected_size || sha256_hex(&bytes) != expected_sha256 {
+        return Err(StoreError::InvalidData(
+            "attachment integrity check failed".to_string(),
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn stored_asset_path(
+    thread_dir: &ThreadDir,
+    relative_path: &str,
+) -> Result<PathBuf, StoreError> {
+    let path = safe_relative_path(thread_dir.path(), relative_path)?;
+    let canonical_root = thread_dir.path().canonicalize()?;
+    let canonical_path = path.canonicalize()?;
+    if !canonical_path.starts_with(canonical_root) {
+        return Err(StoreError::InvalidData(
+            "persisted attachment path escapes its thread".to_string(),
+        ));
+    }
+    Ok(canonical_path)
 }
 
 fn asset_relative_path(sha256: &str, mime_type: &str) -> Result<PathBuf, StoreError> {

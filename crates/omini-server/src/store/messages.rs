@@ -53,6 +53,28 @@ impl Database {
         .await
     }
 
+    pub async fn insert_user_input(
+        &self,
+        thread_id: &str,
+        display: &omini_domain::input::DisplayUserInput,
+        created_at: DateTime<Utc>,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        insert_ui_json(
+            &self.pool,
+            NewUiJson {
+                thread_id,
+                role: "user",
+                model_ref: None,
+                content: &serde_json::to_string(display)?,
+                kind: "user_input",
+                created_at,
+            },
+            thread_dir,
+        )
+        .await
+    }
+
     pub async fn insert_plan_message(
         &self,
         thread_id: &str,
@@ -159,6 +181,10 @@ async fn insert_ui_json(
     finish_prepared_write(result.map(|_| ()), &created_files)
 }
 fn extract_message_text(content_json: &str) -> String {
+    if let Ok(display) = serde_json::from_str::<omini_domain::input::DisplayUserInput>(content_json)
+    {
+        return display.text().replace('\n', " ").replace('\r', "");
+    }
     if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
         return display.text.replace('\n', " ").replace('\r', "");
     }

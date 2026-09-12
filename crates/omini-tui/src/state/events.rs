@@ -20,6 +20,7 @@ fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
     match item {
         HistoryItem::Message(message) => UiMessage::Message(message),
         HistoryItem::Display(display) => UiMessage::Display(display),
+        HistoryItem::UserInput(input) => UiMessage::Display(input.display_message()),
         HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
             text: plan.markdown,
         },

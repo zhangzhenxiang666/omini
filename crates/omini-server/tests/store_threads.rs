@@ -51,11 +51,38 @@ async fn delete_thread_tree_cleans_rows_and_files() {
     )
     .await
     .unwrap();
+    let attachment_path = project.thread("child").assets_dir().join("fixture.png");
+    std::fs::create_dir_all(attachment_path.parent().unwrap()).unwrap();
+    std::fs::write(&attachment_path, b"image").unwrap();
+    db.create_attachment(&Attachment {
+        id: "attachment-1".to_string(),
+        thread_id: "child".to_string(),
+        original_name: "original.png".to_string(),
+        mime_type: "image/png".to_string(),
+        size: 5,
+        sha256: "0".repeat(64),
+        relative_path: "assets/fixture.png".to_string(),
+        created_at: fixed_time(),
+    })
+    .await
+    .unwrap();
+    let restored = db
+        .get_attachment("child", "attachment-1")
+        .await
+        .unwrap()
+        .expect("attachment metadata should reload");
+    assert_eq!(restored.original_name, "original.png");
 
     db.delete_thread_tree("parent", &project).await.unwrap();
 
     assert!(db.get_thread("parent").await.unwrap().is_none());
     assert!(db.get_thread("child").await.unwrap().is_none());
+    assert!(
+        db.get_attachment("child", "attachment-1")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(!project.thread("parent").path().exists());
     assert!(!project.thread("child").path().exists());
 }

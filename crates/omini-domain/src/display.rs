@@ -80,6 +80,7 @@ pub enum MentionKind {
 pub enum HistoryItem {
     Message(Message),
     Display(DisplayMessage),
+    UserInput(crate::input::DisplayUserInput),
     Plan(DisplayPlan),
     Summary(DisplaySummary),
     AgentTaskNotification(AgentTaskNotification),

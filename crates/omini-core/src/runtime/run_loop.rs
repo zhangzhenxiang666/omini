@@ -1,5 +1,6 @@
 use super::service::{AgentRuntime, RunStart};
 use super::*;
+use omini_domain::display::HistoryItem;
 use tracing::Instrument;
 
 impl AgentRuntime {
@@ -12,9 +13,9 @@ impl AgentRuntime {
                 tokio::select! {
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            ServerToRuntimeEvent::SendMessage { draft, client_echo_id } => {
+                            ServerToRuntimeEvent::SendMessage { submission, client_echo_id } => {
                                 tracing::debug!(request_kind = "send_message", client_echo_id = ?client_echo_id, "runtime request received");
-                                self.submit_user_message(draft, client_echo_id).await;
+                                self.submit_user_message(submission, client_echo_id).await;
                             }
                             ServerToRuntimeEvent::CompactContext { instructions } => {
                                 tracing::debug!(request_kind = "compact_context", has_instructions = instructions.is_some(), "runtime request received");
@@ -44,8 +45,8 @@ impl AgentRuntime {
                                 ))
                                 .await;
                             }
-                            ServerToRuntimeEvent::InterveneMessage { draft, .. } => {
-                                let _ = draft;
+                            ServerToRuntimeEvent::InterveneMessage { submission, .. } => {
+                                let _ = submission;
                                 tracing::debug!(request_kind = "intervene_message", "runtime request rejected because no run is active");
                                 self.send_event(RuntimeToServerEvent::error(
                                     "Cannot intervene because no run is active".to_string(),
@@ -145,29 +146,23 @@ impl AgentRuntime {
     }
 
     /// 接收一条用户消息，先回显给 UI，再启动运行。
-    pub async fn submit_user_message(&mut self, draft: UserDraft, client_echo_id: Option<String>) {
+    pub async fn submit_user_message(
+        &mut self,
+        submission: omini_domain::input::PreparedUserSubmission,
+        client_echo_id: Option<String>,
+    ) {
         tracing::debug!(client_echo_id = ?client_echo_id, "submitting user message");
-        let submission = match draft.into_submission() {
-            Ok(submission) => submission,
-            Err(error) => {
-                tracing::warn!(error = %error, "invalid user message submission");
-                self.send_event(RuntimeToServerEvent::error(error)).await;
-                return;
-            }
-        };
-        let history_item = submission.clone().history_item();
-        self.messages.push(submission.llm_message);
+        let history_item = HistoryItem::UserInput(submission.display.clone());
+        self.messages.push(submission.llm_message.clone());
         self.send_event(RuntimeToServerEvent::UserMessageInjected {
             item: history_item,
             client_echo_id,
         })
         .await;
-        if let Some(display_message) = submission.display_message {
-            self.process_run(RunStart::SplitDisplayMessage { display_message })
-                .await;
-        } else {
-            self.process_run(RunStart::UserMessage).await;
-        }
+        self.process_run(RunStart::SplitUserInput {
+            display: submission.display,
+        })
+        .await;
     }
 
     /// 处理一次完整的用户请求，可能包含多轮 LLM 调用。
@@ -312,18 +307,10 @@ impl AgentRuntime {
                                         event_tx.send(RuntimeToServerEvent::error(e.to_string())).await;
                                 }
                             }
-                            ServerToRuntimeEvent::InterveneMessage { draft, client_echo_id } => {
+                            ServerToRuntimeEvent::InterveneMessage { submission, client_echo_id } => {
                                 tracing::debug!(client_echo_id = ?client_echo_id, "active run intervention received");
-                                let submission = match draft.into_submission() {
-                                    Ok(submission) => submission,
-                                    Err(error) => {
-                                        tracing::warn!(error = %error, "invalid intervention submission");
-                                        let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
-                                        continue;
-                                    }
-                                };
                                 self.query_engine
-                                    .enqueue_user_message(submission.llm_message, client_echo_id);
+                                    .enqueue_user_message(submission, client_echo_id);
                             }
                             ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 tracing::debug!(plan_id = %plan_id, action = ?action, "plan approval resolution rejected during active run");

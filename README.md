@@ -79,6 +79,7 @@ daemon 即使没有最小配置也会启动。首次打开一个尚未配置的�
 - [权限配置](docs/permissions.md) — 权限规则和 Bash 规则 DSL
 - [Agent 指令](docs/instructions.md) — AGENTS.md 文件格式
 - [Skills 配置](docs/skills.md) — 可复用技能包
+- [输入与附件协议](docs/protocol.md) — `/v1` typed input、命令与图片附件
 
 ## 许可
 

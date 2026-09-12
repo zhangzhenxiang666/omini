@@ -3,52 +3,138 @@ use crate::types::events as event_types;
 use omini_domain::display as display_types;
 use omini_domain::subagents as subagent_types;
 
-pub(crate) fn user_input_from_draft(draft: display_types::UserDraft) -> omini_protocol::UserInput {
-    let context_refs = draft
+#[derive(Debug, Clone)]
+pub(crate) struct ClientUserInput {
+    pub input: omini_protocol::UserInput,
+    pub images: Vec<display_types::DisplayImageAttachment>,
+}
+
+pub(crate) fn user_input_from_draft(draft: display_types::UserDraft) -> ClientUserInput {
+    enum Atom {
+        Mention(display_types::DisplayMention),
+        Image(display_types::DisplayImageAttachment),
+    }
+
+    impl Atom {
+        fn span(&self) -> (usize, usize) {
+            match self {
+                Self::Mention(value) => (value.start_char, value.end_char),
+                Self::Image(value) => (value.start_char, value.end_char),
+            }
+        }
+    }
+
+    let mut atoms = draft
         .mentions
         .into_iter()
-        .filter_map(context_ref_from_mention)
+        .filter(|mention| mention.kind != display_types::MentionKind::Command)
+        .map(Atom::Mention)
+        .chain(draft.images.iter().cloned().map(Atom::Image))
         .collect::<Vec<_>>();
-    let attachments = draft
+    atoms.sort_by_key(Atom::span);
+
+    let chars = draft.text.chars().collect::<Vec<_>>();
+    let mut parts = Vec::new();
+    let mut cursor = 0usize;
+    for atom in atoms {
+        let (start, end) = atom.span();
+        if start > cursor {
+            push_text_part(&mut parts, chars[cursor..start].iter().collect());
+        }
+        match atom {
+            Atom::Mention(mention) => parts.push(input_part_from_mention(mention)),
+            Atom::Image(_) => {}
+        }
+        cursor = end.max(cursor);
+    }
+    if cursor < chars.len() {
+        push_text_part(&mut parts, chars[cursor..].iter().collect());
+    }
+
+    ClientUserInput {
+        input: omini_protocol::UserInput {
+            parts,
+            attachment_ids: Vec::new(),
+        },
+        images: draft.images,
+    }
+}
+
+pub(crate) fn command_input_from_draft(
+    draft: display_types::UserDraft,
+    command_name: &str,
+) -> ClientUserInput {
+    user_input_from_draft(strip_slash_command(draft, command_name))
+}
+
+pub(crate) fn skill_input_from_draft(
+    draft: display_types::UserDraft,
+    skill_name: String,
+) -> ClientUserInput {
+    let mut input = command_input_from_draft(draft, &skill_name);
+    input
+        .input
+        .parts
+        .insert(0, omini_protocol::InputPart::Skill { name: skill_name });
+    input
+}
+
+fn strip_slash_command(
+    mut draft: display_types::UserDraft,
+    command_name: &str,
+) -> display_types::UserDraft {
+    let prefix_len = command_name.chars().count() + 1;
+    let chars = draft.text.chars().collect::<Vec<_>>();
+    if chars.len() < prefix_len {
+        return draft;
+    }
+    draft.text = chars[prefix_len..].iter().collect();
+    draft.mentions = draft
+        .mentions
+        .into_iter()
+        .filter_map(|mut mention| {
+            (mention.start_char >= prefix_len).then(|| {
+                mention.start_char -= prefix_len;
+                mention.end_char -= prefix_len;
+                mention
+            })
+        })
+        .collect();
+    draft.images = draft
         .images
         .into_iter()
-        .map(attachment_from_image)
-        .collect::<Vec<_>>();
+        .filter_map(|mut image| {
+            (image.start_char >= prefix_len).then(|| {
+                image.start_char -= prefix_len;
+                image.end_char -= prefix_len;
+                image
+            })
+        })
+        .collect();
+    draft
+}
 
-    omini_protocol::UserInput {
-        text: draft.text,
-        context_refs: (!context_refs.is_empty()).then_some(context_refs),
-        attachments: (!attachments.is_empty()).then_some(attachments),
+fn push_text_part(parts: &mut Vec<omini_protocol::InputPart>, text: String) {
+    if !text.is_empty() {
+        parts.push(omini_protocol::InputPart::Text { text });
     }
 }
 
-fn context_ref_from_mention(
-    mention: display_types::DisplayMention,
-) -> Option<omini_protocol::ContextRef> {
+fn input_part_from_mention(mention: display_types::DisplayMention) -> omini_protocol::InputPart {
     match mention.kind {
-        display_types::MentionKind::File => Some(omini_protocol::ContextRef::File {
+        display_types::MentionKind::File => omini_protocol::InputPart::File {
             path: mention.target,
             label: Some(mention.label),
-        }),
-        display_types::MentionKind::Directory => Some(omini_protocol::ContextRef::Directory {
+        },
+        display_types::MentionKind::Directory => omini_protocol::InputPart::Directory {
             path: mention.target,
             label: Some(mention.label),
-        }),
-        display_types::MentionKind::Subagent => Some(omini_protocol::ContextRef::Subagent {
+        },
+        display_types::MentionKind::Subagent => omini_protocol::InputPart::Subagent {
             name: mention.target,
             label: Some(mention.label),
-        }),
-        display_types::MentionKind::Command => None,
-    }
-}
-
-fn attachment_from_image(
-    image: display_types::DisplayImageAttachment,
-) -> omini_protocol::AttachmentRef {
-    omini_protocol::AttachmentRef::LocalPath {
-        path: image.source_path,
-        mime_type: None,
-        name: (!image.file_name.is_empty()).then_some(image.file_name),
+        },
+        display_types::MentionKind::Command => unreachable!("command mentions are filtered"),
     }
 }
 
@@ -139,5 +225,102 @@ pub(crate) fn agent_draft_from_internal(
         tools: draft.tools,
         disallow_tools: draft.disallow_tools,
         model: draft.model,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn char_index(text: &str, needle: &str) -> usize {
+        text[..text.find(needle).expect("needle should exist")]
+            .chars()
+            .count()
+    }
+
+    #[test]
+    fn draft_atoms_preserve_unicode_order_labels_and_whitespace() {
+        let text = "甲@same 乙[Image 1] 丙@same".to_string();
+        let first_start = char_index(&text, "@same");
+        let image_start = char_index(&text, "[Image 1]");
+        let second_start = text
+            .char_indices()
+            .filter_map(|(index, _)| text[index..].starts_with("@same").then_some(index))
+            .nth(1)
+            .map(|byte| text[..byte].chars().count())
+            .expect("second mention should exist");
+        let input = user_input_from_draft(display_types::UserDraft {
+            text,
+            mentions: vec![
+                display_types::DisplayMention {
+                    start_char: first_start,
+                    end_char: first_start + "@same".chars().count(),
+                    kind: display_types::MentionKind::File,
+                    label: "same".to_string(),
+                    target: "first.txt".to_string(),
+                    description: String::new(),
+                },
+                display_types::DisplayMention {
+                    start_char: second_start,
+                    end_char: second_start + "@same".chars().count(),
+                    kind: display_types::MentionKind::Directory,
+                    label: "same".to_string(),
+                    target: "second".to_string(),
+                    description: String::new(),
+                },
+            ],
+            images: vec![display_types::DisplayImageAttachment {
+                start_char: image_start,
+                end_char: image_start + "[Image 1]".chars().count(),
+                marker: "[Image 1]".to_string(),
+                source_path: "/tmp/image.png".to_string(),
+                file_name: "image.png".to_string(),
+            }],
+        });
+
+        assert_eq!(
+            input.input.parts,
+            vec![
+                omini_protocol::InputPart::Text {
+                    text: "甲".to_string(),
+                },
+                omini_protocol::InputPart::File {
+                    path: "first.txt".to_string(),
+                    label: Some("same".to_string()),
+                },
+                omini_protocol::InputPart::Text {
+                    text: " 乙".to_string(),
+                },
+                omini_protocol::InputPart::Text {
+                    text: " 丙".to_string(),
+                },
+                omini_protocol::InputPart::Directory {
+                    path: "second".to_string(),
+                    label: Some("same".to_string()),
+                },
+            ]
+        );
+        assert_eq!(input.images.len(), 1);
+        assert!(input.input.attachment_ids.is_empty());
+    }
+
+    #[test]
+    fn skill_part_precedes_unmodified_argument_parts() {
+        let input = skill_input_from_draft(
+            display_types::UserDraft::plain("/review  原始参数".to_string()),
+            "review".to_string(),
+        );
+
+        assert_eq!(
+            input.input.parts,
+            vec![
+                omini_protocol::InputPart::Skill {
+                    name: "review".to_string(),
+                },
+                omini_protocol::InputPart::Text {
+                    text: "  原始参数".to_string(),
+                },
+            ]
+        );
     }
 }

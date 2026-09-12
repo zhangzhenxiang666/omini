@@ -5,8 +5,8 @@ use crate::subagents::{AgentTaskCompletion, AgentTaskSupervisor};
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::display::DisplayMessage;
 use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
+use omini_domain::input::DisplayUserInput;
 use omini_domain::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
@@ -53,7 +53,7 @@ pub enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
     /// 启动前将最新 runtime 消息写入 LLM 上下文，将 UI-only display 消息写入 UI 历史。
-    SplitDisplayMessage { display_message: DisplayMessage },
+    SplitUserInput { display: DisplayUserInput },
     /// 由待持久化的 Agent task completion 启动；落库前禁止请求 provider。
     PendingAgentTaskNotification,
     /// 通知已在上一个 query 的终止边界持久化，只需继续请求 provider。
@@ -64,7 +64,7 @@ impl RunStart {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::UserMessage => "user_message",
-            Self::SplitDisplayMessage { .. } => "split_display_message",
+            Self::SplitUserInput { .. } => "split_user_input",
             Self::PendingAgentTaskNotification => "pending_agent_task_notification",
             Self::PersistedAgentTaskNotification => "persisted_agent_task_notification",
         }
@@ -265,13 +265,14 @@ mod tests {
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{RawConfig, ResolvedConfig, Settings};
-    use omini_domain::display::{
-        AgentTaskNotification, AgentTaskNotificationItem, HistoryItem, UserDraft,
-    };
+    use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem, HistoryItem};
     use omini_domain::events::{
         AgentTaskStatus, CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview,
         PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
         ToolPauseResponse,
+    };
+    use omini_domain::input::{
+        DisplayUserInput, InputPart, PreparedUserSubmission, UserInputIntent,
     };
     use omini_domain::message::{ContentBlock, Role};
     use omini_domain::usage::Usage;
@@ -491,7 +492,17 @@ thinking = true
 
         runtime
             .submit_user_message(
-                UserDraft::plain("hello".to_string()),
+                PreparedUserSubmission {
+                    llm_message: Message::from_user_text("hello".to_string()),
+                    display: DisplayUserInput {
+                        role: Role::User,
+                        intent: UserInputIntent::Message,
+                        parts: vec![InputPart::Text {
+                            text: "hello".to_string(),
+                        }],
+                        attachments: Vec::new(),
+                    },
+                },
                 Some("echo-1".to_string()),
             )
             .await;
@@ -503,9 +514,9 @@ thinking = true
                 matches!(
                     event,
                     RuntimeToServerEvent::UserMessageInjected {
-                        item: HistoryItem::Message(message),
+                        item: HistoryItem::UserInput(input),
                         client_echo_id,
-                    } if text_content(message) == "hello"
+                    } if input.text() == "hello"
                         && client_echo_id.as_deref() == Some("echo-1")
                 )
             })
@@ -1415,8 +1426,18 @@ thinking = true
         let message = Message::from_user_text("intervention".to_string());
 
         engine_tx
-            .send(EngineToRuntimeEvent::UserMessageProduced {
-                message: message.clone(),
+            .send(EngineToRuntimeEvent::UserInputProduced {
+                submission: PreparedUserSubmission {
+                    llm_message: message.clone(),
+                    display: DisplayUserInput {
+                        role: Role::User,
+                        intent: UserInputIntent::Message,
+                        parts: vec![InputPart::Text {
+                            text: "intervention".to_string(),
+                        }],
+                        attachments: Vec::new(),
+                    },
+                },
                 client_echo_id: Some("echo-intervention".to_string()),
             })
             .await
@@ -1427,26 +1448,24 @@ thinking = true
             .expect("ui user message event should arrive")
             .expect("ui event channel should stay open");
         let RuntimeToServerEvent::UserMessageInjected {
-            item: HistoryItem::Message(event_message),
+            item: HistoryItem::UserInput(event_input),
             client_echo_id,
         } = event
         else {
             panic!("expected user message injection");
         };
-        assert_eq!(event_message, message);
+        assert_eq!(event_input.text(), "intervention");
         assert_eq!(client_echo_id.as_deref(), Some("echo-intervention"));
 
         let mut saw_persistence_event = false;
         while let Ok(event) = persistence_rx.try_recv() {
-            if let RuntimePersistenceEvent::InsertMessage {
+            if let RuntimePersistenceEvent::InsertUserInput {
                 thread_id: event_thread_id,
-                role,
-                blocks,
+                display,
                 ..
             } = event
                 && event_thread_id == thread_id
-                && role == "user"
-                && blocks == message.content
+                && display.text() == "intervention"
             {
                 saw_persistence_event = true;
             }

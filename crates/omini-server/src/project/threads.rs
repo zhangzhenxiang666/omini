@@ -214,9 +214,12 @@ impl ProjectManager {
         // 走与普通 submit_run 完全相同的路径(包括 process_run 自动启动)。
         let plan_text = omini_core::compacted_plan_context(&plan_content);
         let submit_command = runtime_contract::thread::SubmitRunCommand {
-            draft: domain::display::UserDraft::plain(plan_text),
+            input: domain::input::RuntimeUserInput {
+                parts: vec![domain::input::InputPart::Text { text: plan_text }],
+                attachments: Vec::new(),
+            },
             client_echo_id: None,
-            mode: runtime_contract::thread::RunInputMode::Submit,
+            intent: runtime_contract::thread::RunIntent::SubmitMessage,
         };
         // 推送失败不致命：runtime 已建，原 thread 状态保持；这里只记录错误。
         if let Err(error) = runtime.submit_run(submit_command).await {

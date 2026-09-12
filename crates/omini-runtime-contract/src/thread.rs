@@ -1,20 +1,28 @@
 use omini_domain::config::{ProviderInfo, ThinkingEffort};
-use omini_domain::display::UserDraft;
 use omini_domain::events::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
+use omini_domain::input::{PreparedUserSubmission, RunCommand, RuntimeUserInput};
 use omini_domain::subagents::AgentRecord;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunInputMode {
-    Submit,
-    Intervene,
+pub enum RunIntent {
+    SubmitMessage,
+    InterveneMessage,
+    ExecuteCommand(RunCommand),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitRunCommand {
-    pub draft: UserDraft,
+    pub input: RuntimeUserInput,
     pub client_echo_id: Option<String>,
-    pub mode: RunInputMode,
+    pub intent: RunIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedRunCommand {
+    pub submission: PreparedUserSubmission,
+    pub client_echo_id: Option<String>,
+    pub intent: RunIntent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,16 +50,7 @@ pub struct SkillSummarySnapshot {
     pub name: String,
     pub description: String,
     pub short_description: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillDetailSnapshot {
-    pub name: String,
-    pub description: String,
-    pub short_description: Option<String>,
-    pub body: String,
-    pub directory: PathBuf,
-    pub user_invocable: bool,
+    pub argument_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

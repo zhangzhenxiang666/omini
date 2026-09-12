@@ -64,7 +64,7 @@
 ## 与其他配置的交互
 
 - **权限规则**：`AGENTS.md` 中的工作流约束不会覆盖权限配置，两者独立生效
-- **Skills**：`AGENTS.md` 可以提到使用特定 skills，但 skill 的调用仍需通过 `/skill` 命令
+- **Skills**：`AGENTS.md` 可以提到使用特定 skills，但用户调用仍通过 `/<skill-name>` 输入，由 Core 展开正文
 - **配置合并**：项目级 `AGENTS.md` 完全覆盖用户级，不会合并内容
 
 ## 相关文档

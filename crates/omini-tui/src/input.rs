@@ -878,6 +878,9 @@ pub(super) async fn flush_queued_user_inputs(
         .map(|draft| match draft.clone().history_item() {
             omini_domain::display::HistoryItem::Message(message) => UiMessage::Message(message),
             omini_domain::display::HistoryItem::Display(display) => UiMessage::Display(display),
+            omini_domain::display::HistoryItem::UserInput(input) => {
+                UiMessage::Display(input.display_message())
+            }
             omini_domain::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
                 text: plan.markdown,
             },

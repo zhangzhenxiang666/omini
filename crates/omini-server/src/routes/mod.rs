@@ -39,7 +39,12 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE
         }
         omini_core::CoreError::ThreadNotFound => StatusCode::NOT_FOUND,
-        omini_core::CoreError::InvalidModelSelection { .. } => StatusCode::BAD_REQUEST,
+        omini_core::CoreError::InvalidInput {
+            code: "attachment_not_found",
+            ..
+        } => StatusCode::NOT_FOUND,
+        omini_core::CoreError::InvalidModelSelection { .. }
+        | omini_core::CoreError::InvalidInput { .. } => StatusCode::BAD_REQUEST,
         omini_core::CoreError::Internal { .. }
         | omini_core::CoreError::Config { .. }
         | omini_core::CoreError::ProjectState { .. }

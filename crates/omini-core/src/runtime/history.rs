@@ -1,7 +1,8 @@
 use crate::runtime::service::RunStart;
 use chrono::Utc;
-use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::display::{DisplayPlan, DisplaySummary};
 use omini_domain::events::ActiveProfile;
+use omini_domain::input::DisplayUserInput;
 use omini_domain::message::{ContentBlock, Message, Role, TextBlock};
 use omini_domain::proposed_plan::strip_proposed_plan_blocks;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
@@ -28,15 +29,8 @@ pub async fn persist_initial_user_message(
             )
             .await;
         }
-        RunStart::SplitDisplayMessage { display_message } => {
-            persist_split_display_message(
-                thread_id,
-                llm_message,
-                display_message,
-                model_ref,
-                persistence_tx,
-            )
-            .await;
+        RunStart::SplitUserInput { display } => {
+            persist_split_user_input(thread_id, llm_message, display, persistence_tx).await;
         }
         RunStart::PendingAgentTaskNotification | RunStart::PersistedAgentTaskNotification => {}
     }
@@ -67,19 +61,17 @@ pub async fn persist_llm_history_only(
         .await;
 }
 
-async fn persist_split_display_message(
+pub async fn persist_split_user_input(
     thread_id: &str,
     llm_msg: Message,
-    display_msg: DisplayMessage,
-    model_ref: &str,
+    display: DisplayUserInput,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
     persist_llm_history_only(thread_id, &llm_msg, persistence_tx).await;
     let _ = persistence_tx
-        .send(RuntimePersistenceEvent::InsertDisplayMessage {
+        .send(RuntimePersistenceEvent::InsertUserInput {
             thread_id: thread_id.to_string(),
-            model_ref: model_ref_for_role(display_msg.role.clone(), model_ref),
-            display: display_msg,
+            display,
             created_at: Utc::now(),
         })
         .await;

@@ -95,6 +95,21 @@ impl Database {
         .execute(&mut *tx)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS attachment (
+                id              TEXT PRIMARY KEY,
+                thread_id       TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                original_name   TEXT NOT NULL,
+                mime_type       TEXT NOT NULL,
+                size            INTEGER NOT NULL,
+                sha256          TEXT NOT NULL,
+                relative_path   TEXT NOT NULL,
+                created_at      TEXT NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_thread_project ON thread(project_id)")
             .execute(&mut *tx)
             .await?;
@@ -111,6 +126,11 @@ impl Database {
         .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_agent_task_owner ON agent_task(owner_thread_id, created_at)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_attachment_thread ON attachment(thread_id, created_at)",
         )
         .execute(&mut *tx)
         .await?;

@@ -33,21 +33,20 @@ impl AgentRuntime {
                         .expect("active profile lock poisoned");
                     match event {
                         // ===== 需要持久化的事件 =====
-                        EngineToRuntimeEvent::UserMessageProduced {
-                            message,
+                        EngineToRuntimeEvent::UserInputProduced {
+                            submission,
                             client_echo_id,
                         } => {
-                            history::persist_one(
+                            history::persist_split_user_input(
                                 &thread_id,
-                                message.clone(),
-                                active,
-                                &model_ref,
+                                submission.llm_message.clone(),
+                                submission.display.clone(),
                                 &persistence_tx,
                             )
                             .await;
                             let _ = event_tx
                                 .send(RuntimeToServerEvent::UserMessageInjected {
-                                    item: HistoryItem::Message(message),
+                                    item: HistoryItem::UserInput(submission.display),
                                     client_echo_id,
                                 })
                                 .await;

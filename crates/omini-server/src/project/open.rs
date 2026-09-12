@@ -45,6 +45,7 @@ impl ProjectManager {
                 name: skill.name,
                 description: skill.description,
                 short_description: skill.short_description,
+                argument_hint: skill.argument_hint,
             })
             .collect();
 

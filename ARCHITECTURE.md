@@ -74,6 +74,23 @@ belongs to a project.
 6. Reconnecting clients reopen the project by UUID; the current path is not used as
    project identity.
 
+## Typed Input and Attachments
+
+The TUI converts composer spans into ordered semantic input parts. Text, skills,
+project files/directories, and subagents retain their relative order; local image
+markers are removed and uploaded before the run request. The public protocol carries
+only opaque attachment UUIDs, never client filesystem paths.
+
+The server owns project-path canonicalization, attachment ownership and integrity,
+and controller checks. Core owns SkillRegistry validation, skill and `/init` prompt
+expansion, subagent validation, model modality checks, and construction of the single
+Provider user message. These checks complete before a run is dispatched.
+
+UI history persists typed user intent and attachment metadata separately from LLM
+history. Expanded skill bodies, the internal `/init` prompt, and base64 image blocks
+remain only in LLM history. Thread-local attachment bytes use content-addressed files
+under `assets/`, while SQLite maps independent attachment UUIDs to those files.
+
 ## Agent Tasks
 
 Agent derivation is bounded. `MAX_AGENT_DEPTH` is `2`:

@@ -686,11 +686,24 @@ impl AgentTaskSupervisor {
                     self.emit(info, AgentTaskEvent::ToolResult { tool_result })
                         .await
                 }
-                EngineToRuntimeEvent::UserMessageProduced { message, .. }
-                | EngineToRuntimeEvent::MessageProduced(message)
+                EngineToRuntimeEvent::MessageProduced(message)
                 | EngineToRuntimeEvent::ToolResultsProduced(message) => {
                     if let Err(error) = self
                         .persist_agent_message(info, message, Some(model_ref), true, true)
+                        .await
+                    {
+                        warnings.push(error);
+                    }
+                }
+                EngineToRuntimeEvent::UserInputProduced { submission, .. } => {
+                    if let Err(error) = self
+                        .persist_agent_message(
+                            info,
+                            submission.llm_message,
+                            Some(model_ref),
+                            true,
+                            true,
+                        )
                         .await
                     {
                         warnings.push(error);

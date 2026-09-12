@@ -15,6 +15,8 @@ pub enum CoreError {
     ThreadNotFound,
     #[error("{message}")]
     InvalidModelSelection { message: String },
+    #[error("{message}")]
+    InvalidInput { code: &'static str, message: String },
     #[error("{context}: {source}")]
     Config {
         context: &'static str,
@@ -54,6 +56,13 @@ impl CoreError {
         }
     }
 
+    pub fn invalid_input(code: &'static str, message: impl Into<String>) -> Self {
+        Self::InvalidInput {
+            code,
+            message: message.into(),
+        }
+    }
+
     pub fn config(context: &'static str, source: ConfigError) -> Self {
         Self::Config {
             context,
@@ -88,6 +97,7 @@ impl CoreError {
             Self::RuntimeLoadInterrupted => "runtime_load_interrupted",
             Self::ThreadNotFound => "thread_not_found",
             Self::InvalidModelSelection { .. } => "invalid_model_selection",
+            Self::InvalidInput { code, .. } => code,
             Self::Config { .. } => "config_error",
             Self::ProjectState { .. } => "project_state_error",
             Self::Persistence { .. } => "persistence_error",
@@ -100,6 +110,7 @@ impl CoreError {
         match self {
             Self::Internal { message }
             | Self::InvalidModelSelection { message }
+            | Self::InvalidInput { message, .. }
             | Self::Subagent { message } => Cow::Borrowed(message),
             _ => Cow::Owned(self.to_string()),
         }

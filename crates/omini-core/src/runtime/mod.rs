@@ -10,6 +10,7 @@ pub mod plan_approval;
 pub mod run_loop;
 pub mod service;
 pub mod usage;
+pub mod user_input;
 
 use crate::engine::{QueryContext, ToolPauseResolver};
 use crate::skills::SkillRegistry;
@@ -19,7 +20,7 @@ use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::{DisplaySummary, UserDraft};
+use omini_domain::display::DisplaySummary;
 use omini_domain::events::{
     ActiveProfile, Notification, PlanApprovalAction, SubmittedPlan, ThreadUsageSnapshot,
     ToolPauseKind, ToolPauseRequest, ToolPauseResponse,

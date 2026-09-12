@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use omini_domain::display::{AgentTaskNotification, DisplayMessage, DisplayPlan, DisplaySummary};
 use omini_domain::events::{AgentTaskInfo, AgentTaskResult, AgentTaskStatus};
+use omini_domain::input::DisplayUserInput;
 use omini_domain::message::{ContentBlock, Message};
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
@@ -89,6 +90,11 @@ pub enum RuntimePersistenceEvent {
         thread_id: String,
         display: DisplayMessage,
         model_ref: Option<String>,
+        created_at: DateTime<Utc>,
+    },
+    InsertUserInput {
+        thread_id: String,
+        display: DisplayUserInput,
         created_at: DateTime<Utc>,
     },
     InsertPlanMessage {

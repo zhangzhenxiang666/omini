@@ -1,10 +1,11 @@
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::{HistoryItem, UserDraft};
+use omini_domain::display::HistoryItem;
 use omini_domain::events::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
     SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest, ToolPauseResponse,
 };
+use omini_domain::input::PreparedUserSubmission;
 use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub enum ServerToRuntimeEvent {
     CancelRun,
     SendMessage {
-        draft: UserDraft,
+        submission: PreparedUserSubmission,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
     },
@@ -28,7 +29,7 @@ pub enum ServerToRuntimeEvent {
     ToggleActiveProfile,
     SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
     InterveneMessage {
-        draft: UserDraft,
+        submission: PreparedUserSubmission,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
     },

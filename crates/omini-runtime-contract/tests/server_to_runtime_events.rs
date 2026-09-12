@@ -1,8 +1,9 @@
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::UserDraft;
 use omini_domain::events::{
     ActiveProfile, PlanApprovalAction, PlanExecutionProfile, ToolPauseResponse,
 };
+use omini_domain::input::{DisplayUserInput, InputPart, PreparedUserSubmission, UserInputIntent};
+use omini_domain::message::{Message, Role};
 use omini_runtime_contract::ServerToRuntimeEvent;
 use serde_json::{Value, json};
 
@@ -15,12 +16,12 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
         ),
         (
             ServerToRuntimeEvent::SendMessage {
-                draft: UserDraft::plain("hello".into()),
+                submission: submission("hello"),
                 client_echo_id: None,
             },
             json!({
                 "type": "send_message",
-                "draft": {"text": "hello", "mentions": [], "images": []}
+                "submission": submission_json("hello")
             }),
         ),
         (
@@ -43,12 +44,12 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
         ),
         (
             ServerToRuntimeEvent::InterveneMessage {
-                draft: UserDraft::plain("补充说明".into()),
+                submission: submission("补充说明"),
                 client_echo_id: Some("echo-1".into()),
             },
             json!({
                 "type": "intervene_message",
-                "draft": {"text": "补充说明", "mentions": [], "images": []},
+                "submission": submission_json("补充说明"),
                 "client_echo_id": "echo-1"
             }),
         ),
@@ -172,14 +173,14 @@ fn message_events_missing_or_null_echo_id_default_to_none_and_are_omitted() {
     for event_type in ["send_message", "intervene_message"] {
         let canonical = json!({
             "type": event_type,
-            "draft": {"text": "", "mentions": [], "images": []}
+            "submission": submission_json("")
         });
 
         for input in [
             canonical.clone(),
             json!({
                 "type": event_type,
-                "draft": {"text": "", "mentions": [], "images": []},
+                "submission": submission_json(""),
                 "client_echo_id": null
             }),
         ] {
@@ -265,11 +266,14 @@ fn server_to_runtime_event_malformed_shapes_are_rejected_with_stable_reasons() {
             json!({"type": "set_active_profile", "plan": null}),
             "missing field `profile`",
         ),
-        (json!({"type": "send_message"}), "missing field `draft`"),
+        (
+            json!({"type": "send_message"}),
+            "missing field `submission`",
+        ),
         (
             json!({
                 "type": "send_message",
-                "draft": {"text": "hello", "mentions": [], "images": []},
+                "submission": submission_json("hello"),
                 "client_echo_id": 1
             }),
             "expected a string",
@@ -285,6 +289,25 @@ fn server_to_runtime_event_malformed_shapes_are_rejected_with_stable_reasons() {
     ] {
         assert_data_error(value, reason);
     }
+}
+
+fn submission(text: &str) -> PreparedUserSubmission {
+    let parts = vec![InputPart::Text {
+        text: text.to_string(),
+    }];
+    PreparedUserSubmission {
+        llm_message: Message::from_user_text(text.to_string()),
+        display: DisplayUserInput {
+            role: Role::User,
+            intent: UserInputIntent::Message,
+            parts,
+            attachments: Vec::new(),
+        },
+    }
+}
+
+fn submission_json(text: &str) -> Value {
+    serde_json::to_value(submission(text)).expect("submission should encode")
 }
 
 fn server_event_type(event: &ServerToRuntimeEvent) -> &'static str {

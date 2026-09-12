@@ -11,6 +11,18 @@ pub struct Project {
     pub last_opened_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct Attachment {
+    pub id: String,
+    pub thread_id: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub size: i64,
+    pub sha256: String,
+    pub relative_path: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Thread {
     pub id: String,

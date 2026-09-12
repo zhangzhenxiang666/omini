@@ -168,6 +168,14 @@ impl Database {
                 )
                 .await
             }
+            RuntimePersistenceEvent::InsertUserInput {
+                thread_id,
+                display,
+                created_at,
+            } => {
+                self.insert_user_input(thread_id, display, *created_at, &project.thread(thread_id))
+                    .await
+            }
             RuntimePersistenceEvent::InsertPlanMessage {
                 thread_id,
                 plan,

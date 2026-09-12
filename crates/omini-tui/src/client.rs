@@ -27,11 +27,16 @@ const CLIENT_ID_HEADER: &str = "x-omini-client-id";
 #[derive(Debug, Clone)]
 pub(crate) enum ClientRequest {
     RunSubmitUserInput {
-        input: protocol::UserInput,
+        input: crate::protocol::ClientUserInput,
         client_echo_id: Option<String>,
     },
     RunInterveneInput {
-        input: protocol::UserInput,
+        input: crate::protocol::ClientUserInput,
+        client_echo_id: Option<String>,
+    },
+    RunExecuteCommand {
+        command: protocol::RunCommand,
+        input: crate::protocol::ClientUserInput,
         client_echo_id: Option<String>,
     },
     RunCancel,
@@ -86,11 +91,6 @@ pub(crate) enum ClientRequest {
         provider: String,
         model: String,
         thinking_effort: Option<protocol::ThinkingEffort>,
-    },
-    ExpandSkillRun {
-        skill_name: String,
-        prompt: String,
-        input: Option<protocol::UserInput>,
     },
     ThinkingDisplaySet {
         show: Option<bool>,
@@ -267,7 +267,7 @@ async fn handle_project_request(
     blank_profile: &mut protocol::ActiveProfile,
 ) -> Result<ProjectAction, String> {
     match request {
-        ClientRequest::RunSubmitUserInput { .. } | ClientRequest::ExpandSkillRun { .. } => {
+        ClientRequest::RunSubmitUserInput { .. } | ClientRequest::RunExecuteCommand { .. } => {
             let thread_id = create_thread(http, connection, *blank_profile, event_tx).await?;
             let mut pending = VecDeque::new();
             pending.push_back(request);
@@ -616,6 +616,7 @@ fn request_name(request: &ClientRequest) -> &'static str {
     match request {
         ClientRequest::RunSubmitUserInput { .. } => "submit",
         ClientRequest::RunInterveneInput { .. } => "intervene",
+        ClientRequest::RunExecuteCommand { .. } => "command",
         ClientRequest::RunCancel => "cancel",
         ClientRequest::ProfileToggle => "profile toggle",
         ClientRequest::ProfileSet { .. } => "profile",
@@ -633,7 +634,6 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::AgentSave { .. } => "agent save",
         ClientRequest::AgentDelete { .. } => "agent delete",
         ClientRequest::AgentGenerate { .. } => "agent generate",
-        ClientRequest::ExpandSkillRun { .. } => "skill",
         ClientRequest::ThinkingDisplaySet { .. } => "thinking display",
         ClientRequest::AppShutdown => "shutdown",
     }
@@ -1069,8 +1069,17 @@ async fn discover_healthy_daemon(http: &reqwest::Client) -> Result<SocketAddr, S
         timeout(Duration::from_millis(500), get_json(http, &url))
             .await
             .map_err(|_| format!("GET {url}: timed out"))??;
-    if response.ok && response.daemon == "omini-server" {
+    if response.ok
+        && response.daemon == "omini-server"
+        && response.protocol_revision == protocol::PROTOCOL_REVISION
+    {
         Ok(addr)
+    } else if response.protocol_revision != protocol::PROTOCOL_REVISION {
+        Err(format!(
+            "incompatible daemon protocol at {url}: client revision {}, server revision {}",
+            protocol::PROTOCOL_REVISION,
+            response.protocol_revision
+        ))
     } else {
         Err(format!("daemon health check failed at {url}"))
     }
@@ -1105,33 +1114,51 @@ async fn handle_local_request(
     // 返回 Switch/Blank 表示该请求要求外层退出当前 thread loop。
     match request {
         ClientRequest::RunSubmitUserInput {
-            input,
+            mut input,
             client_echo_id,
         } => {
+            upload_images(http, base, client_id, &mut input).await?;
             post_json::<_, protocol::RunSubmittedResponse>(
                 http,
                 &format!("{base}/runs"),
                 client_id,
-                &protocol::SubmitRunRequest {
-                    input,
+                &protocol::SubmitRunRequest::SubmitMessage {
+                    input: input.input,
                     client_echo_id,
-                    mode: protocol::RunInputMode::Submit,
                 },
             )
             .await?;
         }
         ClientRequest::RunInterveneInput {
-            input,
+            mut input,
             client_echo_id,
         } => {
+            upload_images(http, base, client_id, &mut input).await?;
             post_json::<_, protocol::RunSubmittedResponse>(
                 http,
                 &format!("{base}/runs"),
                 client_id,
-                &protocol::SubmitRunRequest {
-                    input,
+                &protocol::SubmitRunRequest::InterveneMessage {
+                    input: input.input,
                     client_echo_id,
-                    mode: protocol::RunInputMode::Intervene,
+                },
+            )
+            .await?;
+        }
+        ClientRequest::RunExecuteCommand {
+            command,
+            mut input,
+            client_echo_id,
+        } => {
+            upload_images(http, base, client_id, &mut input).await?;
+            post_json::<_, protocol::RunSubmittedResponse>(
+                http,
+                &format!("{base}/runs"),
+                client_id,
+                &protocol::SubmitRunRequest::ExecuteCommand {
+                    command,
+                    input: input.input,
+                    client_echo_id,
                 },
             )
             .await?;
@@ -1330,26 +1357,6 @@ async fn handle_local_request(
                     provider,
                     model,
                     thinking_effort,
-                },
-            )
-            .await?;
-        }
-        ClientRequest::ExpandSkillRun {
-            skill_name,
-            prompt,
-            input,
-        } => {
-            let skill: protocol::SkillResponse =
-                get_json(http, &format!("{base}/skills/{skill_name}")).await?;
-            let run_input = expanded_skill_input(skill.skill, prompt, input);
-            post_json::<_, protocol::RunSubmittedResponse>(
-                http,
-                &format!("{base}/runs"),
-                client_id,
-                &protocol::SubmitRunRequest {
-                    input: run_input,
-                    client_echo_id: None,
-                    mode: protocol::RunInputMode::Submit,
                 },
             )
             .await?;
@@ -1608,6 +1615,7 @@ pub(crate) fn skill_command_summary(
     skill: protocol::SkillSummary,
 ) -> crate::types::events::CommandSummary {
     let description = skill.short_description.clone().unwrap_or(skill.description);
+    let args_description = skill.argument_hint.or_else(|| Some("[prompt]".to_string()));
     crate::types::events::CommandSummary {
         name: skill.name,
         aliases: Vec::new(),
@@ -1615,7 +1623,7 @@ pub(crate) fn skill_command_summary(
         sort_weight: 500,
         kind: crate::types::events::CommandKind::Skill,
         has_args: true,
-        args_description: Some("[prompt]".to_string()),
+        args_description,
     }
 }
 
@@ -1763,89 +1771,52 @@ fn generated_agent_draft_from_protocol(
     }
 }
 
-fn expanded_skill_input(
-    skill: protocol::SkillDetail,
-    prompt: String,
-    input: Option<protocol::UserInput>,
-) -> protocol::UserInput {
-    // slash skill 在 TUI 侧展开成普通用户输入，server/core 不需要知道本地命令语法。
-    let mut text = render_skill_slash_command_invocation(&skill, Some(&prompt));
-    if let Some(context) = input
-        .as_ref()
-        .and_then(|input| context_text(input.context_refs.as_deref()))
+async fn upload_images(
+    http: &reqwest::Client,
+    base: &str,
+    client_id: &str,
+    input: &mut crate::protocol::ClientUserInput,
+) -> Result<(), String> {
+    for image in &input.images {
+        let bytes = tokio::fs::read(&image.source_path)
+            .await
+            .map_err(|error| format!("read image {}: {error}", image.source_path))?;
+        let mime_type = image_mime_type(&image.source_path)?;
+        let file_name = if image.file_name.is_empty() {
+            "attachment".to_string()
+        } else {
+            image.file_name.clone()
+        };
+        let part = reqwest::multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(mime_type)
+            .map_err(|error| format!("build image upload: {error}"))?;
+        let url = format!("{base}/attachments");
+        let response = http
+            .post(&url)
+            .header(CLIENT_ID_HEADER, client_id)
+            .multipart(reqwest::multipart::Form::new().part("file", part))
+            .send()
+            .await
+            .map_err(|error| format!("upload image: {error}"))?;
+        let uploaded: protocol::AttachmentUploadResponse = decode_response(response, &url).await?;
+        input.input.attachment_ids.push(uploaded.attachment_id);
+    }
+    Ok(())
+}
+
+fn image_mime_type(path: &str) -> Result<&'static str, String> {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
     {
-        text.push_str("\n\n");
-        text.push_str(&context);
-    }
-    protocol::UserInput {
-        text,
-        context_refs: None,
-        attachments: input.and_then(|input| input.attachments),
-    }
-}
-
-fn render_skill_slash_command_invocation(
-    skill: &protocol::SkillDetail,
-    prompt: Option<&str>,
-) -> String {
-    let mut output = String::new();
-    output.push_str("<skill>\n");
-    output.push_str("<skill_name>");
-    output.push_str(&skill.name);
-    output.push_str("</skill_name>\n");
-    output.push_str("<skill_invocation>\n");
-    output.push_str("<source>slash_command</source>\n");
-    output.push_str("</skill_invocation>\n");
-    output.push_str("<skill_directory>");
-    output.push_str(&skill.directory);
-    output.push_str("</skill_directory>\n");
-    output.push_str("<skill_body>\n");
-    output.push_str(skill.body.trim());
-    output.push_str("\n</skill_body>");
-    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
-        output.push_str("\n<user_prompt>\n");
-        output.push_str(prompt);
-        output.push_str("\n</user_prompt>");
-    }
-    output.push_str("\n</skill>");
-    output
-}
-
-fn context_text(context_refs: Option<&[protocol::ContextRef]>) -> Option<String> {
-    let refs = context_refs?;
-    if refs.is_empty() {
-        return None;
-    }
-    let mut output = String::from("Referenced context:\n");
-    for context_ref in refs {
-        output.push_str("- ");
-        output.push_str(&context_ref_text(context_ref));
-        output.push('\n');
-    }
-    Some(output)
-}
-
-fn context_ref_text(context_ref: &protocol::ContextRef) -> String {
-    match context_ref {
-        protocol::ContextRef::File { path, label } => format!(
-            "File: @{}. Read this file if needed.",
-            label.as_deref().unwrap_or(path)
-        ),
-        protocol::ContextRef::Directory { path, label } => format!(
-            "Directory: @{}. Inspect this directory if needed.",
-            label.as_deref().unwrap_or(path)
-        ),
-        protocol::ContextRef::Subagent { name, label } => format!(
-            "Agent: @{}. Use subagent \"{}\" if this helps answer the user.",
-            label.as_deref().unwrap_or(name),
-            name
-        ),
-        protocol::ContextRef::Url { url, label } => {
-            format!(
-                "URL: @{}. Use this URL if needed.",
-                label.as_deref().unwrap_or(url)
-            )
-        }
+        Some("png") => Ok("image/png"),
+        Some("jpg" | "jpeg") => Ok("image/jpeg"),
+        Some("webp") => Ok("image/webp"),
+        Some("gif") => Ok("image/gif"),
+        _ => Err(format!("unsupported image extension: {path}")),
     }
 }
 

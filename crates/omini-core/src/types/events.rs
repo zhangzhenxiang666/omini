@@ -3,6 +3,7 @@ use omini_domain::events::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, ToolPauseRequest,
 };
+use omini_domain::input::PreparedUserSubmission;
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
@@ -13,9 +14,9 @@ use tokio::sync::oneshot;
 /// `omini_runtime_contract::RuntimeToServerEvent`。
 #[derive(Debug)]
 pub enum EngineToRuntimeEvent {
-    /// 一条 User Message 已进入引擎消息历史，需要按当前位置持久化。
-    UserMessageProduced {
-        message: Message,
+    /// 一条携带原始 typed input 展示快照的用户消息已进入历史。
+    UserInputProduced {
+        submission: PreparedUserSubmission,
         client_echo_id: Option<String>,
     },
 

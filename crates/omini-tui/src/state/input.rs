@@ -78,7 +78,7 @@ impl UiState {
         self.insert_text(&replacement);
         self.input_images.push(InputImageAttachment {
             start_char: start,
-            end_char: start + replacement.chars().count(),
+            end_char: start + marker.chars().count(),
             marker,
             source_path: path.to_string_lossy().to_string(),
             file_name: path
@@ -102,7 +102,7 @@ impl UiState {
         self.apply_input_edit(start, old_len, new_len);
         self.input_images.push(InputImageAttachment {
             start_char: start,
-            end_char: start + new_len,
+            end_char: start + marker.chars().count(),
             marker,
             source_path: path.to_string_lossy().to_string(),
             file_name: path
@@ -340,7 +340,7 @@ impl UiState {
         let old_len = end.saturating_sub(start);
         let new_len = replacement.chars().count();
         self.apply_input_edit(start, old_len, new_len);
-        let mention_len = replacement.chars().count();
+        let mention_len = display.chars().count();
         self.input_mentions.push(InputMention {
             start_char: start,
             end_char: start + mention_len,

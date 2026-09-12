@@ -925,7 +925,7 @@ fn cursor_movement_in_plain_text_stays_character_based() {
 }
 
 #[test]
-fn inserted_mention_range_includes_trailing_space() {
+fn inserted_mention_range_excludes_trailing_space() {
     let mut state = UiState::new();
     state.input = "@sr".to_string();
     state.cursor_char = 3;
@@ -943,7 +943,7 @@ fn inserted_mention_range_includes_trailing_space() {
     assert_eq!(state.input, "@src ");
     assert_eq!(state.cursor_char, 5);
     assert_eq!(state.input_mentions[0].start_char, 0);
-    assert_eq!(state.input_mentions[0].end_char, 5);
+    assert_eq!(state.input_mentions[0].end_char, 4);
 }
 
 #[test]

@@ -3,10 +3,9 @@ mod support;
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use omini_protocol::{
     AckResponse, AttachmentUploadResponse, ClientThreadRole, ControllerLease, CreateProjectRequest,
-    CreateThreadRequest, ProtocolError, RegisterClientRequest, RegisterClientResponse,
-    RenameThreadRequest, RunInputMode, ServerEnvelope, SubmitRunRequest,
-    ThreadRuntimeStatusResponse, ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent,
-    UserInput,
+    CreateThreadRequest, InputPart, ProtocolError, RegisterClientRequest, RegisterClientResponse,
+    RenameThreadRequest, ServerEnvelope, SubmitRunRequest, ThreadRuntimeStatusResponse,
+    ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent, UserInput,
 };
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
@@ -83,10 +82,9 @@ where
 async fn threads_run_requires_connected_client() {
     let mut daemon = support::TestDaemon::start("thread-auth").await;
     let (project_id, thread_id) = project_and_thread(&daemon).await;
-    let request = SubmitRunRequest {
+    let request = SubmitRunRequest::SubmitMessage {
         input: UserInput::plain("hello"),
         client_echo_id: None,
-        mode: RunInputMode::Submit,
     };
 
     // 缺 header 和未连接的已注册客户端是两个对调用方有区别的拒绝状态。
@@ -278,19 +276,64 @@ async fn duplicate_connections_are_refcounted() {
 }
 
 #[tokio::test]
-async fn threads_unknown_skill_rejects() {
+async fn threads_invalid_run_references_reject_before_accept() {
     let mut daemon = support::TestDaemon::start("thread-unknown-skill").await;
     let (project_id, thread_id) = project_and_thread(&daemon).await;
+    let client_id = register_client(&daemon).await;
+    let mut request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .expect("WebSocket request should build");
+    request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&client_id).expect("client ID should be a valid header"),
+    );
+    let (socket, _) = connect_async(request)
+        .await
+        .expect("thread WebSocket should connect");
 
     let (status, error): (_, ProtocolError) = daemon
-        .get(&format!(
-            "/projects/{project_id}/threads/{thread_id}/skills/not-installed"
-        ))
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads/{thread_id}/runs"),
+            Some(&client_id),
+            &SubmitRunRequest::SubmitMessage {
+                input: UserInput {
+                    parts: vec![InputPart::Skill {
+                        name: "not-installed".to_string(),
+                    }],
+                    attachment_ids: Vec::new(),
+                },
+                client_echo_id: None,
+            },
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(error.code, "skill_not_found");
+    assert_eq!(error.message, "skill 'not-installed' does not exist");
+
+    let (status, error): (_, ProtocolError) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads/{thread_id}/runs"),
+            Some(&client_id),
+            &SubmitRunRequest::SubmitMessage {
+                input: UserInput {
+                    parts: vec![InputPart::Text {
+                        text: "look".to_string(),
+                    }],
+                    attachment_ids: vec![uuid::Uuid::new_v4().to_string()],
+                },
+                client_echo_id: None,
+            },
+        )
         .await;
     assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
-    assert_eq!(error.code, "skill_not_found");
-    assert_eq!(error.message, "Skill 'not-installed' does not exist");
+    assert_eq!(error.code, "attachment_not_found");
 
+    drop(socket);
     daemon.shutdown().await;
 }
 
@@ -335,30 +378,104 @@ async fn threads_controller_mutations_preserve_contract() {
     assert_eq!(threads.threads[0].id, thread_id);
     assert_eq!(threads.threads[0].title, "界".repeat(300));
 
+    let image = b"\x89PNG\r\n\x1a\nfixture".to_vec();
     let response = daemon
-        .send_bytes(
-            &format!("/projects/{project_id}/threads/{thread_id}/attachments"),
-            Some(&client_id),
-            "image/png",
-            vec![0, 1, 2, 3],
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/attachments"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(image.clone())
+                    .file_name("diagram.png")
+                    .mime_str("image/png")
+                    .expect("MIME type should parse"),
+            ),
+        )
+        .send()
+        .await;
+    let response = response.expect("attachment request should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let uploaded = response
+        .json::<AttachmentUploadResponse>()
+        .await
+        .expect("attachment response should decode");
+    uuid::Uuid::parse_str(&uploaded.attachment_id).expect("attachment ID should be opaque UUID");
+    let duplicate = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/attachments"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(image.clone())
+                    .file_name("diagram-copy.png")
+                    .mime_str("image/png")
+                    .expect("MIME type should parse"),
+            ),
+        )
+        .send()
+        .await
+        .expect("duplicate attachment upload should complete")
+        .json::<AttachmentUploadResponse>()
+        .await
+        .expect("duplicate attachment response should decode");
+    assert_ne!(duplicate.attachment_id, uploaded.attachment_id);
+
+    let response = daemon
+        .client()
+        .get(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/attachments/{}",
+            uploaded.attachment_id
+        )))
+        .send()
+        .await
+        .expect("attachment GET should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(
+        response.headers()["content-length"],
+        image.len().to_string()
+    );
+    assert_eq!(
+        response.headers()["content-disposition"],
+        "inline; filename=\"diagram.png\""
+    );
+    assert!(
+        response.headers()["etag"]
+            .to_str()
+            .unwrap()
+            .starts_with('"')
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.bytes().await.expect("attachment body should load"),
+        image
+    );
+
+    let (status, other_thread): (_, omini_protocol::CreateThreadResponse) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads"),
+            None,
+            &CreateThreadRequest::default(),
         )
         .await;
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
-        response
-            .json::<AttachmentUploadResponse>()
-            .await
-            .expect("attachment response should decode"),
-        AttachmentUploadResponse {
-            attachment: omini_protocol::AttachmentMetadata {
-                attachment_id: "054edec1d0211f624fed0cbca9d4f9400b0e491c43742af2c5b0abebf0c990d8"
-                    .to_string(),
-                mime_type: "image/png".to_string(),
-                size: 4,
-                name: "attachment".to_string(),
-            },
-        }
-    );
+    assert_eq!(status, reqwest::StatusCode::OK);
+    let response = daemon
+        .client()
+        .get(daemon.url(&format!(
+            "/projects/{project_id}/threads/{}/attachments/{}",
+            other_thread.thread_id, uploaded.attachment_id
+        )))
+        .send()
+        .await
+        .expect("cross-thread attachment GET should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     let (status, statuses): (_, ThreadStatusesResponse) = daemon
         .get(&format!(
@@ -366,12 +483,12 @@ async fn threads_controller_mutations_preserve_contract() {
         ))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(statuses.statuses.len(), 1);
-    assert_eq!(statuses.statuses[0].thread_id, thread_id);
-    assert_eq!(
-        statuses.statuses[0].state,
-        omini_protocol::ThreadRuntimeState::Idle
-    );
+    let status = statuses
+        .statuses
+        .iter()
+        .find(|status| status.thread_id == thread_id)
+        .expect("original thread status should be present");
+    assert_eq!(status.state, omini_protocol::ThreadRuntimeState::Idle);
 
     let (status, error): (_, ProtocolError) = daemon
         .get(&format!(

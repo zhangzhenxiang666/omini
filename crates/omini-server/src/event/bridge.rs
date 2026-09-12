@@ -1,22 +1,122 @@
 use crate::store as store_model;
-use crate::store;
+use crate::thread::ThreadRuntime;
 use omini_config::Settings;
-use omini_config::project::ThreadDir;
 use omini_core::CoreError;
 use omini_domain as domain;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Component, Path};
 
-pub fn submit_run_command_from_protocol_request_for_thread(
+pub async fn submit_run_command_from_protocol_request_for_thread(
     request: client_proto::SubmitRunRequest,
-    thread_dir: &ThreadDir,
+    thread: &ThreadRuntime,
 ) -> Result<runtime_contract::thread::SubmitRunCommand, CoreError> {
+    let (mut input, client_echo_id, intent) = match request {
+        client_proto::SubmitRunRequest::SubmitMessage {
+            input,
+            client_echo_id,
+        } => (
+            input,
+            client_echo_id,
+            runtime_contract::thread::RunIntent::SubmitMessage,
+        ),
+        client_proto::SubmitRunRequest::InterveneMessage {
+            input,
+            client_echo_id,
+        } => (
+            input,
+            client_echo_id,
+            runtime_contract::thread::RunIntent::InterveneMessage,
+        ),
+        client_proto::SubmitRunRequest::ExecuteCommand {
+            command,
+            input,
+            client_echo_id,
+        } => (
+            input,
+            client_echo_id,
+            runtime_contract::thread::RunIntent::ExecuteCommand(command),
+        ),
+    };
+    validate_attachment_ids(&input.attachment_ids)?;
+    normalize_input_parts(&mut input.parts, thread.cwd())?;
+    let attachments = thread.resolve_attachments(&input.attachment_ids).await?;
     Ok(runtime_contract::thread::SubmitRunCommand {
-        draft: user_input_from_protocol(request.input, Some(thread_dir))?,
-        client_echo_id: request.client_echo_id,
-        mode: run_input_mode_from_protocol(request.mode),
+        input: domain::input::RuntimeUserInput {
+            parts: input.parts,
+            attachments,
+        },
+        client_echo_id,
+        intent,
     })
+}
+
+fn validate_attachment_ids(attachment_ids: &[String]) -> Result<(), CoreError> {
+    let mut unique = HashSet::with_capacity(attachment_ids.len());
+    if attachment_ids
+        .iter()
+        .any(|attachment_id| attachment_id.is_empty() || !unique.insert(attachment_id))
+    {
+        return Err(CoreError::invalid_input(
+            "invalid_input_part",
+            "attachment IDs must be non-empty and unique",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_input_parts(
+    parts: &mut [client_proto::InputPart],
+    cwd: &Path,
+) -> Result<(), CoreError> {
+    let canonical_root = cwd.canonicalize().map_err(|error| {
+        CoreError::invalid_input(
+            "invalid_input_part",
+            format!("project root cannot be resolved: {error}"),
+        )
+    })?;
+    for part in parts {
+        let (path, expected_directory) = match part {
+            client_proto::InputPart::File { path, .. } => (path, false),
+            client_proto::InputPart::Directory { path, .. } => (path, true),
+            client_proto::InputPart::Text { .. }
+            | client_proto::InputPart::Skill { .. }
+            | client_proto::InputPart::Subagent { .. } => continue,
+        };
+        let relative = Path::new(path);
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(CoreError::invalid_input(
+                "invalid_input_part",
+                format!("project reference '{path}' is not a safe relative path"),
+            ));
+        }
+        let canonical = canonical_root.join(relative).canonicalize().map_err(|_| {
+            CoreError::invalid_input(
+                "invalid_input_part",
+                format!("project reference '{path}' does not exist"),
+            )
+        })?;
+        if !canonical.starts_with(&canonical_root)
+            || (expected_directory && !canonical.is_dir())
+            || (!expected_directory && !canonical.is_file())
+        {
+            return Err(CoreError::invalid_input(
+                "invalid_input_part",
+                format!("project reference '{path}' has the wrong type or escapes the project"),
+            ));
+        }
+        *path = canonical
+            .strip_prefix(&canonical_root)
+            .expect("contained path has a relative suffix")
+            .to_string_lossy()
+            .replace('\\', "/");
+    }
+    Ok(())
 }
 
 pub fn run_submitted_response_from_runtime_result(
@@ -62,23 +162,9 @@ pub fn skills_response_from_runtime_skill_summaries(
                 name: skill.name,
                 description: skill.description,
                 short_description: skill.short_description,
+                argument_hint: skill.argument_hint,
             })
             .collect(),
-    }
-}
-
-pub fn skill_response_from_runtime_skill_detail(
-    skill: runtime_contract::thread::SkillDetailSnapshot,
-) -> client_proto::SkillResponse {
-    client_proto::SkillResponse {
-        skill: client_proto::SkillDetail {
-            name: skill.name,
-            description: skill.description,
-            short_description: skill.short_description,
-            body: skill.body,
-            directory: skill.directory.display().to_string(),
-            user_invocable: skill.user_invocable,
-        },
     }
 }
 
@@ -143,123 +229,6 @@ pub fn resolve_plan_command_from_protocol_request(
     runtime_contract::thread::ResolvePlanCommand {
         plan_id,
         action: request.action,
-    }
-}
-
-fn run_input_mode_from_protocol(
-    mode: client_proto::RunInputMode,
-) -> runtime_contract::thread::RunInputMode {
-    match mode {
-        client_proto::RunInputMode::Submit => runtime_contract::thread::RunInputMode::Submit,
-        client_proto::RunInputMode::Intervene => runtime_contract::thread::RunInputMode::Intervene,
-    }
-}
-
-fn user_input_from_protocol(
-    input: client_proto::UserInput,
-    thread_dir: Option<&ThreadDir>,
-) -> Result<domain::display::UserDraft, CoreError> {
-    Ok(domain::display::UserDraft {
-        text: input.text.clone(),
-        mentions: input
-            .context_refs
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|context_ref| mention_from_protocol(&input.text, context_ref))
-            .collect(),
-        images: input
-            .attachments
-            .unwrap_or_default()
-            .into_iter()
-            .map(|attachment| image_from_protocol(attachment, thread_dir))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect(),
-    })
-}
-
-fn mention_from_protocol(
-    text: &str,
-    context_ref: client_proto::ContextRef,
-) -> Option<domain::display::DisplayMention> {
-    let label = context_ref.label();
-    let target = context_ref.target().to_string();
-    let (start_char, end_char) = find_reference_span(text, &label).unwrap_or((0, 0));
-    let (kind, description) = match context_ref {
-        client_proto::ContextRef::File { .. } => (domain::display::MentionKind::File, "file"),
-        client_proto::ContextRef::Directory { .. } => {
-            (domain::display::MentionKind::Directory, "directory")
-        }
-        client_proto::ContextRef::Subagent { .. } => {
-            (domain::display::MentionKind::Subagent, "subagent")
-        }
-        client_proto::ContextRef::Url { .. } => return None,
-    };
-
-    Some(domain::display::DisplayMention {
-        start_char,
-        end_char,
-        kind,
-        label,
-        target,
-        description: description.to_string(),
-    })
-}
-
-fn find_reference_span(text: &str, label: &str) -> Option<(usize, usize)> {
-    let needle = format!("@{label}");
-    let byte_start = text.find(&needle)?;
-    let start = text[..byte_start].chars().count();
-    let end = start + needle.chars().count();
-    Some((start, end))
-}
-
-fn image_from_protocol(
-    attachment: client_proto::AttachmentRef,
-    thread_dir: Option<&ThreadDir>,
-) -> Result<Option<domain::display::DisplayImageAttachment>, CoreError> {
-    match attachment {
-        client_proto::AttachmentRef::LocalPath { path, name, .. } => {
-            let file_name = name.unwrap_or_else(|| {
-                Path::new(&path)
-                    .file_name()
-                    .and_then(|file_name| file_name.to_str())
-                    .unwrap_or_default()
-                    .to_string()
-            });
-            Ok(Some(domain::display::DisplayImageAttachment {
-                start_char: 0,
-                end_char: 0,
-                marker: String::new(),
-                source_path: path,
-                file_name,
-            }))
-        }
-        client_proto::AttachmentRef::Uploaded {
-            attachment_id,
-            mime_type,
-            name,
-        } => {
-            let thread_dir = thread_dir.ok_or_else(|| {
-                CoreError::new("uploaded attachment cannot be resolved without a thread")
-            })?;
-            let path = store::asset_path(thread_dir, &attachment_id, &mime_type)
-                .map_err(|error| CoreError::persistence("invalid attachment", error.to_string()))?;
-            if !path.is_file() {
-                return Err(CoreError::new(format!(
-                    "uploaded attachment '{}' does not exist",
-                    attachment_id
-                )));
-            }
-            Ok(Some(domain::display::DisplayImageAttachment {
-                start_char: 0,
-                end_char: 0,
-                marker: String::new(),
-                source_path: path.display().to_string(),
-                file_name: name.unwrap_or(attachment_id),
-            }))
-        }
     }
 }
 
@@ -339,7 +308,16 @@ pub fn thread_summary_from_store_record(
 
 /// 从首条用户输入生成默认线程标题。
 pub fn fallback_thread_title_from_user_input(input: &client_proto::UserInput) -> Option<String> {
-    let title = input.text.trim();
+    let text = input
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            client_proto::InputPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let title = text.trim();
     (!title.is_empty()).then(|| title.chars().take(300).collect())
 }
 
@@ -580,50 +558,72 @@ mod tests {
     }
 
     #[test]
-    fn submit_run_maps_input_with_thread_context() {
-        let thread_dir = ThreadDir::from_path("/tmp/omini-server-bridge-thread".into());
-        let command = submit_run_command_from_protocol_request_for_thread(
-            client_proto::SubmitRunRequest {
-                input: client_proto::UserInput {
-                    text: "open @src/lib.rs".to_string(),
-                    context_refs: Some(vec![
-                        client_proto::ContextRef::File {
-                            path: "src/lib.rs".to_string(),
-                            label: None,
-                        },
-                        client_proto::ContextRef::Url {
-                            url: "https://example.com".to_string(),
-                            label: None,
-                        },
-                    ]),
-                    attachments: Some(vec![client_proto::AttachmentRef::LocalPath {
-                        path: "/tmp/diagram.png".to_string(),
-                        mime_type: Some("image/png".to_string()),
-                        name: None,
-                    }]),
-                },
-                client_echo_id: Some("echo-1".to_string()),
-                mode: client_proto::RunInputMode::Intervene,
+    fn project_references_are_normalized_without_changing_part_order() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut parts = vec![
+            client_proto::InputPart::Text {
+                text: "before ".to_string(),
             },
-            &thread_dir,
-        )
-        .expect("local attachments do not require an existing file");
+            client_proto::InputPart::File {
+                path: "src/event/bridge.rs".to_string(),
+                label: Some("bridge".to_string()),
+            },
+            client_proto::InputPart::Directory {
+                path: "src/event".to_string(),
+                label: None,
+            },
+            client_proto::InputPart::Text {
+                text: " after".to_string(),
+            },
+        ];
 
-        assert_eq!(
-            command.mode,
-            runtime_contract::thread::RunInputMode::Intervene
-        );
-        assert_eq!(command.client_echo_id.as_deref(), Some("echo-1"));
-        assert_eq!(command.draft.text, "open @src/lib.rs");
-        assert_eq!(command.draft.mentions.len(), 1);
-        assert_eq!(
-            command.draft.mentions[0].kind,
-            domain::display::MentionKind::File
-        );
-        assert_eq!(command.draft.mentions[0].start_char, 5);
-        assert_eq!(command.draft.mentions[0].end_char, 16);
-        assert_eq!(command.draft.images.len(), 1);
-        assert_eq!(command.draft.images[0].file_name, "diagram.png");
+        normalize_input_parts(&mut parts, root).expect("project references should validate");
+
+        assert!(matches!(parts[0], client_proto::InputPart::Text { .. }));
+        assert!(matches!(parts[1], client_proto::InputPart::File { .. }));
+        assert!(matches!(
+            parts[2],
+            client_proto::InputPart::Directory { .. }
+        ));
+        assert!(matches!(parts[3], client_proto::InputPart::Text { .. }));
+    }
+
+    #[test]
+    fn duplicate_attachment_ids_are_rejected() {
+        let error = validate_attachment_ids(&["same".to_string(), "same".to_string()])
+            .expect_err("duplicates must be rejected");
+        assert_eq!(error.code(), "invalid_input_part");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_references_reject_parent_absolute_and_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let base =
+            std::env::temp_dir().join(format!("omini-input-reference-{}", uuid::Uuid::new_v4()));
+        let project = base.join("project");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"secret").unwrap();
+        symlink(&outside, project.join("escape")).unwrap();
+
+        for path in [
+            "../outside/secret.txt",
+            "/tmp/absolute",
+            "escape/secret.txt",
+        ] {
+            let mut parts = vec![client_proto::InputPart::File {
+                path: path.to_string(),
+                label: None,
+            }];
+            let error = normalize_input_parts(&mut parts, &project)
+                .expect_err("unsafe project reference must fail");
+            assert_eq!(error.code(), "invalid_input_part");
+        }
+
+        std::fs::remove_dir_all(base).unwrap();
     }
 
     #[test]

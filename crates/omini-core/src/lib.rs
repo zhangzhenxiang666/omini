@@ -54,7 +54,8 @@ pub fn project_agents_snapshot(settings: &Settings) -> thread_types::AgentsSnaps
 }
 
 pub fn project_skill_summaries(cwd: &Path) -> Vec<thread_types::SkillSummarySnapshot> {
-    user_invocable_skill_summaries(cwd)
+    let registry = crate::skills::load_skill_registry(cwd);
+    user_invocable_skill_summaries(&registry)
 }
 
 pub fn save_project_agent(
@@ -266,13 +267,8 @@ impl AgentCoreThread {
     }
 
     pub fn list_skills(&self) -> Vec<thread_types::SkillSummarySnapshot> {
-        let settings = self.settings.read().expect("core settings lock poisoned");
-        user_invocable_skill_summaries(&settings.cwd)
-    }
-
-    pub fn get_skill(&self, skill_name: &str) -> Option<thread_types::SkillDetailSnapshot> {
-        let settings = self.settings.read().expect("core settings lock poisoned");
-        skill_detail_snapshot(&settings.cwd, skill_name)
+        let registry = self.capabilities.skill_registry();
+        user_invocable_skill_summaries(&registry)
     }
 
     pub fn runtime_skills(&self) -> Vec<thread_types::RuntimeSkillSnapshot> {
@@ -312,18 +308,61 @@ impl AgentCoreThread {
         &self,
         command: thread_types::SubmitRunCommand,
     ) -> Result<thread_types::RunSubmitted, CoreError> {
+        let command = self.prepare_run(command)?;
+        self.submit_prepared_run(command).await
+    }
+
+    pub fn prepare_run(
+        &self,
+        command: thread_types::SubmitRunCommand,
+    ) -> Result<thread_types::PreparedRunCommand, CoreError> {
         let thread_types::SubmitRunCommand {
-            draft,
+            input,
             client_echo_id,
-            mode,
+            intent,
         } = command;
-        let event = match mode {
-            thread_types::RunInputMode::Submit => ServerToRuntimeEvent::SendMessage {
-                draft,
-                client_echo_id,
-            },
-            thread_types::RunInputMode::Intervene => ServerToRuntimeEvent::InterveneMessage {
-                draft,
+        let command = match intent {
+            thread_types::RunIntent::ExecuteCommand(command) => Some(command),
+            thread_types::RunIntent::SubmitMessage | thread_types::RunIntent::InterveneMessage => {
+                None
+            }
+        };
+        let settings = self
+            .settings
+            .read()
+            .expect("core settings lock poisoned")
+            .clone();
+        let submission = crate::runtime::user_input::prepare_submission(
+            input,
+            command,
+            &settings,
+            &self.capabilities,
+        )?;
+        Ok(thread_types::PreparedRunCommand {
+            submission,
+            client_echo_id,
+            intent,
+        })
+    }
+
+    pub async fn submit_prepared_run(
+        &self,
+        command: thread_types::PreparedRunCommand,
+    ) -> Result<thread_types::RunSubmitted, CoreError> {
+        let thread_types::PreparedRunCommand {
+            submission,
+            client_echo_id,
+            intent,
+        } = command;
+        let event = match intent {
+            thread_types::RunIntent::SubmitMessage | thread_types::RunIntent::ExecuteCommand(_) => {
+                ServerToRuntimeEvent::SendMessage {
+                    submission,
+                    client_echo_id,
+                }
+            }
+            thread_types::RunIntent::InterveneMessage => ServerToRuntimeEvent::InterveneMessage {
+                submission,
                 client_echo_id,
             },
         };
@@ -466,35 +505,21 @@ fn agent_record_id(record: &subagent_types::AgentRecord) -> String {
         .unwrap_or_else(|| record.name.clone())
 }
 
-fn user_invocable_skill_summaries(cwd: &Path) -> Vec<thread_types::SkillSummarySnapshot> {
-    let mut skills = crate::skills::load_skill_registry(cwd)
+fn user_invocable_skill_summaries(
+    registry: &crate::skills::SkillRegistry,
+) -> Vec<thread_types::SkillSummarySnapshot> {
+    let mut skills = registry
         .skills()
         .filter(|skill| skill.user_invocable)
         .map(|skill| thread_types::SkillSummarySnapshot {
             name: skill.name.clone(),
             description: skill.description.clone(),
             short_description: skill.short_description.clone(),
+            argument_hint: skill.argument_hint.clone(),
         })
         .collect::<Vec<_>>();
     skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
-}
-
-fn skill_detail_snapshot(
-    cwd: &Path,
-    skill_name: &str,
-) -> Option<thread_types::SkillDetailSnapshot> {
-    let registry = crate::skills::load_skill_registry(cwd);
-    registry
-        .get(skill_name)
-        .map(|skill| thread_types::SkillDetailSnapshot {
-            name: skill.name.clone(),
-            description: skill.description.clone(),
-            short_description: skill.short_description.clone(),
-            body: skill.body.clone(),
-            directory: skill.directory.clone(),
-            user_invocable: skill.user_invocable,
-        })
 }
 
 fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {

@@ -1,171 +1,131 @@
-use omini_protocol::{AttachmentRef, ContextRef, RunInputMode, SubmitRunRequest, UserInput};
+use omini_protocol::{InputPart, RunCommand, SubmitRunRequest, UserInput};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 #[test]
-fn context_ref_variants_preserve_tags_targets_and_labels() {
+fn input_parts_preserve_exact_order_and_wire_tags() {
+    let input = UserInput {
+        parts: vec![
+            InputPart::Text {
+                text: "before ".to_string(),
+            },
+            InputPart::Skill {
+                name: "review".to_string(),
+            },
+            InputPart::File {
+                path: "src/main.rs".to_string(),
+                label: Some("main".to_string()),
+            },
+            InputPart::Directory {
+                path: "src".to_string(),
+                label: None,
+            },
+            InputPart::Subagent {
+                name: "explorer".to_string(),
+                label: Some("research".to_string()),
+            },
+            InputPart::Text {
+                text: " after".to_string(),
+            },
+        ],
+        attachment_ids: vec!["att-b".to_string(), "att-a".to_string()],
+    };
+    let wire = serde_json::to_value(&input).unwrap();
+    assert_eq!(
+        wire,
+        json!({
+            "parts": [
+                {"type": "text", "text": "before "},
+                {"type": "skill", "name": "review"},
+                {"type": "file", "path": "src/main.rs", "label": "main"},
+                {"type": "directory", "path": "src"},
+                {"type": "subagent", "name": "explorer", "label": "research"},
+                {"type": "text", "text": " after"}
+            ],
+            "attachment_ids": ["att-b", "att-a"]
+        })
+    );
+    assert_eq!(serde_json::from_value::<UserInput>(wire).unwrap(), input);
+}
+
+#[test]
+fn submit_intervene_and_init_use_exact_tagged_shapes() {
+    let input = UserInput::plain("notes".to_string());
     let cases = [
         (
-            ContextRef::File {
-                path: "src/main.rs".to_string(),
-                label: None,
+            SubmitRunRequest::SubmitMessage {
+                input: input.clone(),
+                client_echo_id: Some("echo-1".to_string()),
             },
-            "src/main.rs",
-            "src/main.rs",
-            json!({ "kind": "file", "path": "src/main.rs" }),
+            json!({
+                "type": "submit_message",
+                "input": {"parts": [{"type": "text", "text": "notes"}]},
+                "client_echo_id": "echo-1"
+            }),
         ),
         (
-            ContextRef::Directory {
-                path: "src".to_string(),
-                label: Some("source".to_string()),
+            SubmitRunRequest::InterveneMessage {
+                input: input.clone(),
+                client_echo_id: None,
             },
-            "src",
-            "source",
-            json!({ "kind": "directory", "path": "src", "label": "source" }),
+            json!({
+                "type": "intervene_message",
+                "input": {"parts": [{"type": "text", "text": "notes"}]}
+            }),
         ),
         (
-            ContextRef::Subagent {
-                name: "explorer".to_string(),
-                label: None,
+            SubmitRunRequest::ExecuteCommand {
+                command: RunCommand::Init,
+                input,
+                client_echo_id: None,
             },
-            "explorer",
-            "explorer",
-            json!({ "kind": "subagent", "name": "explorer" }),
-        ),
-        (
-            ContextRef::Url {
-                url: "https://example.test/docs".to_string(),
-                label: Some("docs".to_string()),
-            },
-            "https://example.test/docs",
-            "docs",
-            json!({ "kind": "url", "url": "https://example.test/docs", "label": "docs" }),
+            json!({
+                "type": "execute_command",
+                "command": {"type": "init"},
+                "input": {"parts": [{"type": "text", "text": "notes"}]}
+            }),
         ),
     ];
 
-    for (reference, target, label, wire) in cases {
-        assert_eq!(reference.target(), target);
-        assert_eq!(reference.label(), label);
-        assert_eq!(serde_json::to_value(&reference).unwrap(), wire);
+    for (request, wire) in cases {
+        assert_eq!(serde_json::to_value(&request).unwrap(), wire);
         assert_eq!(
-            serde_json::from_value::<ContextRef>(wire).unwrap(),
-            reference
+            serde_json::from_value::<SubmitRunRequest>(wire).unwrap(),
+            request
         );
     }
 }
 
 #[test]
-fn context_ref_unknown_kind_is_data_error() {
-    assert_data_error::<ContextRef>(
-        json!({ "kind": "command", "value": "ls" }),
-        "unknown variant",
-    );
+fn unknown_variants_and_legacy_shape_are_rejected() {
+    assert_data_error::<InputPart>(json!({"type": "url", "url": "https://example.test"}));
+    assert_data_error::<SubmitRunRequest>(json!({
+        "type": "unknown",
+        "input": {"parts": [], "attachment_ids": []}
+    }));
+    assert_data_error::<SubmitRunRequest>(json!({
+        "text": "legacy",
+        "context_refs": [],
+        "attachments": []
+    }));
+    assert_data_error::<SubmitRunRequest>(json!({
+        "type": "submit_message",
+        "input": {
+            "parts": [{"type": "text", "text": "new"}],
+            "text": "legacy"
+        }
+    }));
 }
 
 #[test]
-fn attachment_variants_preserve_identity_and_optional_metadata() {
-    let local = AttachmentRef::LocalPath {
-        path: "/tmp/diagram.png".to_string(),
-        mime_type: None,
-        name: None,
-    };
-    let uploaded = AttachmentRef::Uploaded {
-        attachment_id: "att_1".to_string(),
-        mime_type: "image/png".to_string(),
-        name: Some("diagram.png".to_string()),
-    };
-
-    assert_eq!(local.name(), None);
-    assert_eq!(local.mime_type(), None);
-    assert_eq!(
-        serde_json::to_value(&local).unwrap(),
-        json!({ "kind": "local_path", "path": "/tmp/diagram.png" })
-    );
-    assert_eq!(uploaded.name(), Some("diagram.png"));
-    assert_eq!(uploaded.mime_type(), Some("image/png"));
-    assert_eq!(
-        serde_json::to_value(&uploaded).unwrap(),
-        json!({
-            "kind": "uploaded",
-            "attachment_id": "att_1",
-            "mime_type": "image/png",
-            "name": "diagram.png"
-        })
-    );
+fn protocol_revision_is_two() {
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 2);
 }
 
-#[test]
-fn uploaded_attachment_missing_mime_type_is_data_error() {
-    assert_data_error::<AttachmentRef>(
-        json!({ "kind": "uploaded", "attachment_id": "att_1" }),
-        "missing field",
-    );
-}
-
-#[test]
-fn submit_run_request_preserves_complete_input_and_mode() {
-    let request = SubmitRunRequest {
-        input: UserInput {
-            text: "review @main".to_string(),
-            context_refs: Some(vec![ContextRef::File {
-                path: "src/main.rs".to_string(),
-                label: Some("main".to_string()),
-            }]),
-            attachments: Some(vec![AttachmentRef::Uploaded {
-                attachment_id: "att_1".to_string(),
-                mime_type: "image/png".to_string(),
-                name: None,
-            }]),
-        },
-        client_echo_id: Some("echo_1".to_string()),
-        mode: RunInputMode::Intervene,
-    };
-
-    let wire = serde_json::to_value(&request).unwrap();
-    assert_eq!(
-        wire,
-        json!({
-            "input": {
-                "text": "review @main",
-                "context_refs": [{ "kind": "file", "path": "src/main.rs", "label": "main" }],
-                "attachments": [{ "kind": "uploaded", "attachment_id": "att_1", "mime_type": "image/png" }]
-            },
-            "client_echo_id": "echo_1",
-            "mode": "intervene"
-        })
-    );
-    assert_eq!(
-        serde_json::from_value::<SubmitRunRequest>(wire).unwrap(),
-        request
-    );
-}
-
-#[test]
-fn run_input_mode_variants_use_stable_wire_names() {
-    for (mode, expected) in [
-        (RunInputMode::Submit, "submit"),
-        (RunInputMode::Intervene, "intervene"),
-    ] {
-        assert_eq!(serde_json::to_value(mode).unwrap(), json!(expected));
-    }
-}
-
-#[test]
-fn submit_run_request_missing_mode_is_data_error() {
-    assert_data_error::<SubmitRunRequest>(json!({ "input": { "text": "hello" } }), "missing field");
-}
-
-fn assert_data_error<T>(value: Value, reason: &str)
+fn assert_data_error<T>(value: Value)
 where
-    T: DeserializeOwned,
+    T: DeserializeOwned + std::fmt::Debug,
 {
-    let error = match serde_json::from_value::<T>(value) {
-        Ok(_) => panic!("invalid protocol shape must fail"),
-        Err(error) => error,
-    };
+    let error = serde_json::from_value::<T>(value).expect_err("invalid shape must fail");
     assert!(error.is_data(), "expected data error, got: {error}");
-    assert!(
-        error.to_string().contains(reason),
-        "unexpected error: {error}"
-    );
 }
