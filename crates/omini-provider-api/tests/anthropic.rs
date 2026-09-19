@@ -218,3 +218,73 @@ async fn anthropic_stream_without_message_stop_returns_unexpected_end() {
     assert_eq!(events.len(), 1);
     assert!(matches!(events[0], Err(StreamError::UnexpectedEnd)));
 }
+
+#[tokio::test]
+// 回归：多字节字符被 TCP chunk 边界拆开时，文本必须无损送达（不能出现 U+FFFD）。
+async fn anthropic_stream_multibyte_text_survives_split_across_tcp_chunks() {
+    let body = concat!(
+        "event: message_start\ndata: {}\n\n",
+        "event: content_block_start\ndata: {\"content_block\":{\"type\":\"text\"}}\n\n",
+        "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"账号规模化\"}}\n\n",
+        "event: content_block_stop\ndata: {}\n\n",
+        "event: message_stop\ndata: {}\n\n"
+    );
+    // 在 “规” 的首字节之后切分，模拟网络分块落在多字节字符中间
+    let split = body
+        .as_bytes()
+        .windows("规".len())
+        .position(|window| window == "规".as_bytes())
+        .expect("body should contain the multibyte character")
+        + 1;
+    let server = TestServer::spawn(vec![TestResponse::sse_chunked(body.as_bytes(), &[split])]);
+    let messages = vec![Message::from_user_text("hello".into())];
+
+    let events = client(ProviderEndpointKind::Anthropic, server.base_url())
+        .invoke(request(&messages))
+        .await
+        .expect("Anthropic request should start")
+        .collect::<Vec<_>>()
+        .await;
+    server.next_request();
+    server.finish();
+
+    assert_eq!(events.len(), 2);
+    assert!(matches!(&events[0], Ok(ApiEvent::Text(text)) if text == "账号规模化"));
+    let Ok(ApiEvent::Done(done)) = &events[1] else {
+        panic!("stream should finish with a completion: {events:?}");
+    };
+    assert_eq!(
+        done.message.content,
+        vec![ContentBlock::from_text("账号规模化".into())]
+    );
+}
+
+#[tokio::test]
+// 反向：响应含非法 UTF-8 时必须以 SSE 错误终止，不能 lossy 解码后继续产出乱码。
+async fn anthropic_stream_invalid_utf8_returns_sse_error_without_events() {
+    let mut body = concat!(
+        "event: message_start\ndata: {}\n\n",
+        "event: content_block_start\ndata: {\"content_block\":{\"type\":\"text\"}}\n\n"
+    )
+    .as_bytes()
+    .to_vec();
+    body.extend_from_slice(
+        b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"bad \xff byte\"}}\n\n",
+    );
+    let server = TestServer::spawn(vec![TestResponse::sse_chunked(&body, &[])]);
+    let messages = vec![Message::from_user_text("hello".into())];
+
+    let events = client(ProviderEndpointKind::Anthropic, server.base_url())
+        .invoke(request(&messages))
+        .await
+        .expect("Anthropic request should start")
+        .collect::<Vec<_>>()
+        .await;
+    server.next_request();
+    server.finish();
+
+    assert!(matches!(
+        events.as_slice(),
+        [Err(StreamError::Sse(message))] if message.contains("not valid UTF-8")
+    ));
+}

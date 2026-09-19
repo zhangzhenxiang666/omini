@@ -102,254 +102,250 @@ pub async fn invoke_openai(
 
     let (tx, result_stream) = api_channel(256);
 
-    tokio::spawn(async move {
-        // 文本累积（OpenAI 的 content 不分块类型，统一累积）
-        let mut accumulated_text: Option<String> = None;
-        // 思考内容累积（reasoning_content）
-        let mut accumulated_reasoning: Option<String> = None;
-        // 工具调用累积（按 tool_call.index 索引）
-        let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
-        let mut next_expected_tool_index: usize = 0;
-        // 最终组装
-        let mut content_blocks: Vec<ContentBlock> = Vec::new();
-        let mut usage = Usage {
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-        };
-        let mut finish_reason: FinishReason = FinishReason::Stop;
-        let mut saw_finish_reason = false;
-        let mut saw_done = false;
+    tokio::spawn(
+        async move {
+            // 文本累积（OpenAI 的 content 不分块类型，统一累积）
+            let mut accumulated_text: Option<String> = None;
+            // 思考内容累积（reasoning_content）
+            let mut accumulated_reasoning: Option<String> = None;
+            // 工具调用累积（按 tool_call.index 索引）
+            let mut tool_calls: HashMap<usize, ToolCallAcc> = HashMap::new();
+            let mut next_expected_tool_index: usize = 0;
+            // 最终组装
+            let mut content_blocks: Vec<ContentBlock> = Vec::new();
+            let mut usage = Usage {
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+            };
+            let mut finish_reason: FinishReason = FinishReason::Stop;
+            let mut saw_finish_reason = false;
+            let mut saw_done = false;
 
-        let mut stream = Box::pin(
-            response
-                .bytes_stream()
-                .into_sse_stream()
-                .timeout(Duration::from_secs(90)),
-        );
+            let mut stream = Box::pin(
+                response
+                    .bytes_stream()
+                    .into_sse_stream()
+                    .timeout(Duration::from_secs(90)),
+            );
 
-        // 连续 SSE 解析错误上限
-        const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-        let mut consecutive_errors: u32 = 0;
-
-        'stream: while let Some(result) = stream.next().await {
-            match result {
-                Ok(Ok(sse_event)) => {
-                    consecutive_errors = 0;
-
-                    // OpenAI 用 [DONE] 结尾
-                    if sse_event.data == "[DONE]" {
-                        saw_done = true;
-                        break 'stream;
-                    }
-
-                    if sse_event.data.is_empty() {
-                        continue;
-                    }
-
-                    let data: Value = match serde_json::from_str(&sse_event.data) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!(msg = "Failed to parse SSE data", error = %e);
-                            let _ = tx.send(Err(StreamError::Json(e))).await;
-                            return;
+            'stream: while let Some(result) = stream.next().await {
+                match result {
+                    Ok(Ok(sse_event)) => {
+                        // OpenAI 用 [DONE] 结尾
+                        if sse_event.data == "[DONE]" {
+                            saw_done = true;
+                            break 'stream;
                         }
-                    };
 
-                    // usage
-                    if let Some(value) = data.get("usage") {
-                        update_usage_from_value(&mut usage, value);
-                    }
+                        if sse_event.data.is_empty() {
+                            continue;
+                        }
 
-                    let choice = match data
-                        .get("choices")
-                        .and_then(|a| a.as_array())
-                        .and_then(|a| a.first())
-                    {
-                        Some(c) => c,
-                        None => continue,
-                    };
-
-                    // finish_reason
-                    let current_finish_reason = choice
-                        .get("finish_reason")
-                        .and_then(|v| v.as_str())
-                        .filter(|r| !r.is_empty());
-                    if let Some(reason) = current_finish_reason {
-                        saw_finish_reason = true;
-                        finish_reason = match reason {
-                            "stop" => FinishReason::Stop,
-                            "length" => FinishReason::Length,
-                            "tool_calls" => FinishReason::ToolUse,
-                            other => FinishReason::Error(other.to_string()),
+                        let data: Value = match serde_json::from_str(&sse_event.data) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(msg = "Failed to parse SSE data", error = %e);
+                                let _ = tx.send(Err(StreamError::Json(e))).await;
+                                return;
+                            }
                         };
-                    }
 
-                    if let Some(delta) = choice.get("delta") {
-                        // content delta
-                        if let Some(text) = delta
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .filter(|t| !t.is_empty())
-                        {
-                            accumulated_text
-                                .get_or_insert_with(String::new)
-                                .push_str(text);
-
-                            if tx.send(Ok(ApiEvent::Text(text.to_string()))).await.is_err() {
-                                return;
-                            }
+                        // usage
+                        if let Some(value) = data.get("usage") {
+                            update_usage_from_value(&mut usage, value);
                         }
 
-                        // reasoning_content delta
-                        if let Some(thinking) = delta
-                            .get("reasoning_content")
-                            .or_else(|| delta.get("reasoning"))
-                            .and_then(|v| v.as_str())
-                            .filter(|t| !t.is_empty())
+                        let choice = match data
+                            .get("choices")
+                            .and_then(|a| a.as_array())
+                            .and_then(|a| a.first())
                         {
-                            accumulated_reasoning
-                                .get_or_insert_with(String::new)
-                                .push_str(thinking);
+                            Some(c) => c,
+                            None => continue,
+                        };
 
-                            if tx
-                                .send(Ok(ApiEvent::Thinking(thinking.to_string())))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
+                        // finish_reason
+                        let current_finish_reason = choice
+                            .get("finish_reason")
+                            .and_then(|v| v.as_str())
+                            .filter(|r| !r.is_empty());
+                        if let Some(reason) = current_finish_reason {
+                            saw_finish_reason = true;
+                            finish_reason = match reason {
+                                "stop" => FinishReason::Stop,
+                                "length" => FinishReason::Length,
+                                "tool_calls" => FinishReason::ToolUse,
+                                other => FinishReason::Error(other.to_string()),
+                            };
                         }
 
-                        // tool_calls delta
-                        if let Some(tc_array) = delta.get("tool_calls").and_then(|v| v.as_array()) {
-                            let mut min_seen_index: Option<usize> = None;
-                            for tc in tc_array {
-                                let idx =
-                                    tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                                min_seen_index =
-                                    Some(min_seen_index.map_or(idx, |min| min.min(idx)));
-
-                                let entry = tool_calls.entry(idx).or_insert_with(ToolCallAcc::new);
-
-                                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                                    entry.id = Some(id.to_string());
-                                }
-
-                                if let Some(name) = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("name"))
-                                    .and_then(|v| v.as_str())
-                                {
-                                    entry.name = Some(name.to_string());
-                                }
-
-                                if let Some(args) = tc
-                                    .get("function")
-                                    .and_then(|f| f.get("arguments"))
-                                    .and_then(|v| v.as_str())
-                                {
-                                    entry.arguments.push_str(args);
-                                }
-                            }
-
-                            if let Some(min_seen_index) = min_seen_index
-                                && min_seen_index > next_expected_tool_index
+                        if let Some(delta) = choice.get("delta") {
+                            // content delta
+                            if let Some(text) = delta
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .filter(|t| !t.is_empty())
                             {
-                                push_accumulated_blocks(
-                                    &mut accumulated_text,
-                                    &mut accumulated_reasoning,
-                                    &mut content_blocks,
-                                );
-                                if let Err(err) = emit_tool_calls_before_index(
-                                    &mut tool_calls,
-                                    &mut next_expected_tool_index,
-                                    min_seen_index,
-                                    &mut content_blocks,
-                                    &tx,
-                                )
-                                .await
-                                {
-                                    let _ = tx.send(Err(err)).await;
+                                accumulated_text
+                                    .get_or_insert_with(String::new)
+                                    .push_str(text);
+
+                                if tx.send(Ok(ApiEvent::Text(text.to_string()))).await.is_err() {
                                     return;
                                 }
                             }
+
+                            // reasoning_content delta
+                            if let Some(thinking) = delta
+                                .get("reasoning_content")
+                                .or_else(|| delta.get("reasoning"))
+                                .and_then(|v| v.as_str())
+                                .filter(|t| !t.is_empty())
+                            {
+                                accumulated_reasoning
+                                    .get_or_insert_with(String::new)
+                                    .push_str(thinking);
+
+                                if tx
+                                    .send(Ok(ApiEvent::Thinking(thinking.to_string())))
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+
+                            // tool_calls delta
+                            if let Some(tc_array) =
+                                delta.get("tool_calls").and_then(|v| v.as_array())
+                            {
+                                let mut min_seen_index: Option<usize> = None;
+                                for tc in tc_array {
+                                    let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0)
+                                        as usize;
+                                    min_seen_index =
+                                        Some(min_seen_index.map_or(idx, |min| min.min(idx)));
+
+                                    let entry =
+                                        tool_calls.entry(idx).or_insert_with(ToolCallAcc::new);
+
+                                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                                        entry.id = Some(id.to_string());
+                                    }
+
+                                    if let Some(name) = tc
+                                        .get("function")
+                                        .and_then(|f| f.get("name"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        entry.name = Some(name.to_string());
+                                    }
+
+                                    if let Some(args) = tc
+                                        .get("function")
+                                        .and_then(|f| f.get("arguments"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        entry.arguments.push_str(args);
+                                    }
+                                }
+
+                                if let Some(min_seen_index) = min_seen_index
+                                    && min_seen_index > next_expected_tool_index
+                                {
+                                    push_accumulated_blocks(
+                                        &mut accumulated_text,
+                                        &mut accumulated_reasoning,
+                                        &mut content_blocks,
+                                    );
+                                    if let Err(err) = emit_tool_calls_before_index(
+                                        &mut tool_calls,
+                                        &mut next_expected_tool_index,
+                                        min_seen_index,
+                                        &mut content_blocks,
+                                        &tx,
+                                    )
+                                    .await
+                                    {
+                                        let _ = tx.send(Err(err)).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+
+                        if current_finish_reason == Some("tool_calls") {
+                            push_accumulated_blocks(
+                                &mut accumulated_text,
+                                &mut accumulated_reasoning,
+                                &mut content_blocks,
+                            );
+                            if let Err(err) = emit_all_pending_tool_calls(
+                                &mut tool_calls,
+                                &mut next_expected_tool_index,
+                                &mut content_blocks,
+                                &tx,
+                            )
+                            .await
+                            {
+                                let _ = tx.send(Err(err)).await;
+                                return;
+                            }
                         }
                     }
 
-                    if current_finish_reason == Some("tool_calls") {
-                        push_accumulated_blocks(
-                            &mut accumulated_text,
-                            &mut accumulated_reasoning,
-                            &mut content_blocks,
-                        );
-                        if let Err(err) = emit_all_pending_tool_calls(
-                            &mut tool_calls,
-                            &mut next_expected_tool_index,
-                            &mut content_blocks,
-                            &tx,
-                        )
-                        .await
-                        {
-                            let _ = tx.send(Err(err)).await;
-                            return;
-                        }
-                    }
-                }
-
-                Ok(Err(err)) => {
-                    consecutive_errors += 1;
-                    tracing::warn!(msg = "SSE parse error", error = %err, consecutive_errors, max = MAX_CONSECUTIVE_ERRORS);
-                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                        tracing::error!("Too many consecutive SSE errors, stopping stream");
+                    // SSE 解析层错误（传输失败 / 非法 UTF-8 / 缓冲区溢出）后流已终止：
+                    // 立即上报并结束，避免把错误前已累积的文本或工具参数当作完整结果提交。
+                    Ok(Err(err)) => {
+                        tracing::warn!(msg = "SSE stream error", error = %err);
                         let _ = tx.send(Err(StreamError::Sse(err.to_string()))).await;
                         return;
                     }
-                    continue;
-                }
 
-                Err(_elapsed) => {
-                    tracing::warn!("SSE stream timed out after 90s");
-                    let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
-                    return;
+                    Err(_elapsed) => {
+                        tracing::warn!("SSE stream timed out after 90s");
+                        let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
+                        return;
+                    }
                 }
             }
+
+            if !saw_done || !saw_finish_reason {
+                let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
+                return;
+            }
+
+            push_accumulated_blocks(
+                &mut accumulated_text,
+                &mut accumulated_reasoning,
+                &mut content_blocks,
+            );
+
+            if let Err(err) = emit_all_pending_tool_calls(
+                &mut tool_calls,
+                &mut next_expected_tool_index,
+                &mut content_blocks,
+                &tx,
+            )
+            .await
+            {
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+
+            // 发送 Done
+            let completion = ApiCompletion {
+                message: Message::new(Role::Assistant, std::mem::take(&mut content_blocks)),
+                finish_reason,
+                usage,
+            };
+            let _ = tx.send(Ok(ApiEvent::Done(completion))).await;
+
+            tracing::debug!("SSE stream task finished, channel closed");
         }
-
-        if !saw_done || !saw_finish_reason {
-            let _ = tx.send(Err(StreamError::UnexpectedEnd)).await;
-            return;
-        }
-
-        push_accumulated_blocks(
-            &mut accumulated_text,
-            &mut accumulated_reasoning,
-            &mut content_blocks,
-        );
-
-        if let Err(err) = emit_all_pending_tool_calls(
-            &mut tool_calls,
-            &mut next_expected_tool_index,
-            &mut content_blocks,
-            &tx,
-        )
-        .await
-        {
-            let _ = tx.send(Err(err)).await;
-            return;
-        }
-
-        // 发送 Done
-        let completion = ApiCompletion {
-            message: Message::new(Role::Assistant, std::mem::take(&mut content_blocks)),
-            finish_reason,
-            usage,
-        };
-        let _ = tx.send(Ok(ApiEvent::Done(completion))).await;
-
-        tracing::debug!("SSE stream task finished, channel closed");
-    }
-    .in_current_span());
+        .in_current_span(),
+    );
     Ok(result_stream)
 }
 

@@ -24,8 +24,10 @@ pub struct RecordedRequest {
 pub struct TestResponse {
     status: u16,
     reason: &'static str,
-    body: String,
+    body: Vec<u8>,
     content_type: &'static str,
+    /// 按字节偏移切好的响应体分块；`None` 表示一次性写入。
+    chunks: Option<Vec<Vec<u8>>>,
 }
 
 impl TestResponse {
@@ -33,8 +35,32 @@ impl TestResponse {
         Self {
             status: 200,
             reason: "OK",
-            body: body.into(),
+            body: body.into().into_bytes(),
             content_type: "text/event-stream",
+            chunks: None,
+        }
+    }
+
+    /// 构造按给定字节偏移分块写入的 SSE 响应。
+    ///
+    /// 每块单独 flush 并短暂间隔，确保 reqwest 的 `bytes_stream` 分批产出，
+    /// 用于验证解析器在任意 chunk 边界（包括 UTF-8 字符中间）下的正确性。
+    /// 接收字节而非字符串，以支持含非法 UTF-8 的用例。
+    #[allow(dead_code)] // 共享模块会被每个独立集成测试目标单独编译。
+    pub fn sse_chunked(body: &[u8], split_offsets: &[usize]) -> Self {
+        let mut chunks = Vec::new();
+        let mut start = 0;
+        for offset in split_offsets {
+            chunks.push(body[start..*offset].to_vec());
+            start = *offset;
+        }
+        chunks.push(body[start..].to_vec());
+        Self {
+            status: 200,
+            reason: "OK",
+            body: body.to_vec(),
+            content_type: "text/event-stream",
+            chunks: Some(chunks),
         }
     }
 
@@ -43,8 +69,9 @@ impl TestResponse {
         Self {
             status,
             reason,
-            body: body.into(),
+            body: body.into().into_bytes(),
             content_type: "text/plain",
+            chunks: None,
         }
     }
 }
@@ -183,16 +210,38 @@ fn read_request(stream: &mut TcpStream) -> RecordedRequest {
 }
 
 fn write_response(stream: &mut TcpStream, response: TestResponse) {
-    let text = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+    let header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         response.status,
         response.reason,
         response.content_type,
         response.body.len(),
-        response.body,
     );
     stream
-        .write_all(text.as_bytes())
-        .expect("test server should write response");
-    stream.flush().expect("test server should flush response");
+        .write_all(header.as_bytes())
+        .expect("test server should write response header");
+    stream
+        .flush()
+        .expect("test server should flush response header");
+
+    match response.chunks {
+        // 分块模式：每块 flush 后短暂等待，保证独立成 TCP 段被客户端分批读到
+        Some(chunks) => {
+            for chunk in chunks {
+                stream
+                    .write_all(&chunk)
+                    .expect("test server should write response chunk");
+                stream
+                    .flush()
+                    .expect("test server should flush response chunk");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        None => {
+            stream
+                .write_all(&response.body)
+                .expect("test server should write response");
+            stream.flush().expect("test server should flush response");
+        }
+    }
 }

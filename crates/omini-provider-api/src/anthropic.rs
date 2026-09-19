@@ -138,15 +138,9 @@ pub async fn invoke_anthropic(
                     .timeout(Duration::from_secs(90)),
             );
 
-            // 连续 SSE 解析错误上限
-            const MAX_CONSECUTIVE_ERRORS: u32 = 10;
-            let mut consecutive_errors: u32 = 0;
-
             'stream: while let Some(result) = stream.next().await {
                 match result {
                     Ok(Ok(sse_event)) => {
-                        consecutive_errors = 0;
-
                         // 跳过心跳
                         if sse_event.event == "ping" || sse_event.data.is_empty() {
                             continue;
@@ -352,20 +346,12 @@ pub async fn invoke_anthropic(
                         }
                     }
 
-                    // SSE 解析层错误
+                    // SSE 解析层错误（传输失败 / 非法 UTF-8 / 缓冲区溢出）后流已终止：
+                    // 立即上报并结束，避免把错误前已累积的文本或工具参数当作完整结果提交。
                     Ok(Err(err)) => {
-                        consecutive_errors += 1;
-                        tracing::warn!(
-                            msg = "SSE parse error",
-                            error = %err,
-                            consecutive_errors,
-                            max = MAX_CONSECUTIVE_ERRORS,
-                        );
-                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            tracing::error!("Too many consecutive SSE errors, stopping stream");
-                            break 'stream;
-                        }
-                        continue;
+                        tracing::warn!(msg = "SSE stream error", error = %err);
+                        let _ = tx.send(Err(crate::StreamError::Sse(err.to_string()))).await;
+                        return;
                     }
 
                     // -- 超时：90s 内没有收到任何数据 --

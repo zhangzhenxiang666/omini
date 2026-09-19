@@ -3,8 +3,10 @@
 //! 将字节流按 SSE 协议解析为结构化的 [`SseEvent`]。
 //! 替代外部 `eventsource-stream` crate，提供轻量可控的实现。
 
-use bytes::Bytes;
+use bytes::{Buf, Bytes, BytesMut};
+use std::fmt;
 use std::pin::Pin;
+use std::str::Utf8Error;
 use std::task::{Context, Poll};
 use tokio_stream::Stream;
 
@@ -17,12 +19,52 @@ pub struct SseEvent {
 
 const MAX_BUFFER_SIZE: usize = 1024 * 1024; // 1MB 上限
 
+/// 从传输字节流组装 SSE 事件时可能发生的错误。
+///
+/// 网络分块与 UTF-8 字符边界没有任何对齐保证，因此解码只能发生在完整 SSE
+/// 事件形成之后。非法 UTF-8 和缓冲区溢出都属于不可恢复的响应损坏，调用方应
+/// 终止当前 Provider 流并按既有策略重试，而不是继续提交部分结果。
+#[derive(Debug)]
+pub enum SseStreamError<E> {
+    Transport(E),
+    InvalidUtf8(Utf8Error),
+    BufferOverflow { size: usize, max: usize },
+}
+
+impl<E: fmt::Display> fmt::Display for SseStreamError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Transport(error) => write!(formatter, "transport error: {error}"),
+            Self::InvalidUtf8(error) => {
+                write!(formatter, "SSE event is not valid UTF-8: {error}")
+            }
+            Self::BufferOverflow { size, max } => {
+                write!(formatter, "SSE buffer size {size} exceeds limit {max}")
+            }
+        }
+    }
+}
+
+impl<E> std::error::Error for SseStreamError<E>
+where
+    E: std::error::Error + 'static,
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Transport(error) => Some(error),
+            Self::InvalidUtf8(error) => Some(error),
+            Self::BufferOverflow { .. } => None,
+        }
+    }
+}
+
 pin_project_lite::pin_project! {
     /// 将字节流按 SSE 协议解析为事件流的适配器。
     pub struct SseStream<S> {
         #[pin]
         inner: S,
-        buffer: String,
+        buffer: BytesMut,
+        terminated: bool,
     }
 }
 
@@ -30,7 +72,8 @@ impl<S> SseStream<S> {
     pub fn new(inner: S) -> Self {
         Self {
             inner,
-            buffer: String::new(),
+            buffer: BytesMut::new(),
+            terminated: false,
         }
     }
 }
@@ -40,16 +83,28 @@ where
     S: Stream<Item = Result<Bytes, E>>,
     E: std::fmt::Display,
 {
-    type Item = Result<SseEvent, E>;
+    type Item = Result<SseEvent, SseStreamError<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
+        if *this.terminated {
+            return Poll::Ready(None);
+        }
+
         loop {
             if let Some((pos, delimiter_len)) = next_event_delimiter(this.buffer) {
-                let event_text = this.buffer[..pos].to_string();
-                this.buffer.drain(..pos + delimiter_len);
-                let event = parse_sse_event(&event_text);
+                let event_bytes = this.buffer.split_to(pos);
+                this.buffer.advance(delimiter_len);
+                let event_text = match std::str::from_utf8(&event_bytes) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        this.buffer.clear();
+                        *this.terminated = true;
+                        return Poll::Ready(Some(Err(SseStreamError::InvalidUtf8(error))));
+                    }
+                };
+                let event = parse_sse_event(event_text);
                 if !event.data.is_empty() {
                     return Poll::Ready(Some(Ok(event)));
                 }
@@ -58,24 +113,33 @@ where
 
             match this.inner.as_mut().poll_next(cx) {
                 Poll::Ready(Some(Ok(bytes))) => {
-                    if this.buffer.len() + bytes.len() > MAX_BUFFER_SIZE {
-                        tracing::error!(
-                            msg = "SSE buffer overflow, clearing buffer",
-                            buffer_size = this.buffer.len(),
-                            incoming_bytes = bytes.len(),
-                            max_size = MAX_BUFFER_SIZE,
-                        );
+                    let next_size = this.buffer.len().saturating_add(bytes.len());
+                    if next_size > MAX_BUFFER_SIZE {
                         this.buffer.clear();
+                        *this.terminated = true;
+                        return Poll::Ready(Some(Err(SseStreamError::BufferOverflow {
+                            size: next_size,
+                            max: MAX_BUFFER_SIZE,
+                        })));
                     }
-                    this.buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    this.buffer.extend_from_slice(&bytes);
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(e)));
+                    this.buffer.clear();
+                    *this.terminated = true;
+                    return Poll::Ready(Some(Err(SseStreamError::Transport(e))));
                 }
                 Poll::Ready(None) => {
+                    *this.terminated = true;
                     if !this.buffer.is_empty() {
-                        let event = parse_sse_event(this.buffer);
-                        this.buffer.clear();
+                        let event_bytes = this.buffer.split();
+                        let event_text = match std::str::from_utf8(&event_bytes) {
+                            Ok(text) => text,
+                            Err(error) => {
+                                return Poll::Ready(Some(Err(SseStreamError::InvalidUtf8(error))));
+                            }
+                        };
+                        let event = parse_sse_event(event_text);
                         if !event.data.is_empty() {
                             return Poll::Ready(Some(Ok(event)));
                         }
@@ -88,13 +152,21 @@ where
     }
 }
 
-fn next_event_delimiter(buffer: &str) -> Option<(usize, usize)> {
-    match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
+fn next_event_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    let lf = find_bytes(buffer, b"\n\n");
+    let crlf = find_bytes(buffer, b"\r\n\r\n");
+    match (lf, crlf) {
         (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
         (Some(lf), _) => Some((lf, 2)),
         (None, Some(crlf)) => Some((crlf, 4)),
         (None, None) => None,
     }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
 }
 
 fn parse_sse_event(text: &str) -> SseEvent {
