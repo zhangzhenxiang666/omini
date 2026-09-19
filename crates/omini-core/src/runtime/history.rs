@@ -1,8 +1,6 @@
 use crate::runtime::service::RunStart;
-use chrono::Utc;
 use omini_domain::display::{DisplayPlan, DisplaySummary};
 use omini_domain::events::ActiveProfile;
-use omini_domain::input::DisplayUserInput;
 use omini_domain::message::{ContentBlock, Message, Role, TextBlock};
 use omini_domain::proposed_plan::strip_proposed_plan_blocks;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
@@ -29,8 +27,8 @@ pub async fn persist_initial_user_message(
             )
             .await;
         }
-        RunStart::SplitUserInput { display } => {
-            persist_split_user_input(thread_id, llm_message, display, persistence_tx).await;
+        RunStart::UserInput => {
+            persist_llm_history_only(thread_id, &llm_message, persistence_tx).await;
         }
         RunStart::PendingAgentTaskNotification | RunStart::PersistedAgentTaskNotification => {}
     }
@@ -56,23 +54,6 @@ pub async fn persist_llm_history_only(
         .send(RuntimePersistenceEvent::AppendLlmMessage {
             thread_id: thread_id.to_string(),
             message: msg.clone(),
-            created_at: Utc::now(),
-        })
-        .await;
-}
-
-pub async fn persist_split_user_input(
-    thread_id: &str,
-    llm_msg: Message,
-    display: DisplayUserInput,
-    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
-) {
-    persist_llm_history_only(thread_id, &llm_msg, persistence_tx).await;
-    let _ = persistence_tx
-        .send(RuntimePersistenceEvent::InsertUserInput {
-            thread_id: thread_id.to_string(),
-            display,
-            created_at: Utc::now(),
         })
         .await;
 }
@@ -84,14 +65,13 @@ pub async fn persist_ui_message(
     model_ref: &str,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
+    // UI 行的 content 是按 active_profile 剥离 plan 块后的展示块；剥离必须在
+    // 发射时刻完成，因为 profile 快照属于 core，server 侧无法复现。
     let _ = persistence_tx
-        .send(RuntimePersistenceEvent::InsertMessage {
+        .send(RuntimePersistenceEvent::UiMessageAppended {
             thread_id: thread_id.to_string(),
-            role: msg.role.to_string(),
+            message: Message::new(msg.role.clone(), ui_message_blocks(msg, active_profile)),
             model_ref: model_ref_for_role(msg.role.clone(), model_ref),
-            blocks: ui_message_blocks(msg, active_profile),
-            kind: "normal".to_string(),
-            created_at: Utc::now(),
         })
         .await;
 }

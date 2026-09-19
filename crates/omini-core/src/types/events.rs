@@ -3,7 +3,6 @@ use omini_domain::events::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, ToolPauseRequest,
 };
-use omini_domain::input::PreparedUserSubmission;
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
@@ -14,11 +13,9 @@ use tokio::sync::oneshot;
 /// `omini_runtime_contract::RuntimeToServerEvent`。
 #[derive(Debug)]
 pub enum EngineToRuntimeEvent {
-    /// 一条携带原始 typed input 展示快照的用户消息已进入历史。
-    UserInputProduced {
-        submission: PreparedUserSubmission,
-        client_echo_id: Option<String>,
-    },
+    /// 一条用户消息在安全输入边界提交进 LLM 上下文。展示行与 echo 不随行：
+    /// 它们由 server 在接收输入时直接落库与广播，两条数据流各自独立。
+    UserMessageProduced(Message),
 
     /// Agent task completion 已到达安全输入边界，等待原子持久化后进入内存历史。
     AgentTaskNotificationsProduced {
@@ -68,15 +65,15 @@ pub enum EngineToRuntimeEvent {
     UsageRecorded(Usage),
     /// 当前 engine/thread 开始快速收缩上下文。
     #[allow(dead_code)]
-    // The runtime intentionally suppresses shrink progress from UI projection.
+    // runtime 有意不在 UI 投影中呈现快速收缩进度。
     CompactShrinkStarted(CompactEvent),
     /// 当前 engine/thread 完成快速收缩上下文。
     #[allow(dead_code)]
-    // The runtime intentionally suppresses shrink progress from UI projection.
+    // runtime 有意不在 UI 投影中呈现快速收缩进度。
     CompactShrinkFinished(CompactShrinkFinishedEvent),
     /// 当前 engine/thread 快速收缩上下文失败。
     #[allow(dead_code)]
-    // The runtime intentionally suppresses shrink progress from UI projection.
+    // runtime 有意不在 UI 投影中呈现快速收缩进度。
     CompactShrinkFailed(CompactShrinkFailedEvent),
     /// 当前 engine/thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),

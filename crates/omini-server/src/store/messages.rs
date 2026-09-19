@@ -30,29 +30,6 @@ impl Database {
         finish_prepared_write(result.map(|_| ()), &prepared.created_files)
     }
 
-    pub async fn insert_display_message(
-        &self,
-        thread_id: &str,
-        display: &DisplayMessage,
-        model_ref: Option<&str>,
-        created_at: DateTime<Utc>,
-        thread_dir: &ThreadDir,
-    ) -> Result<(), StoreError> {
-        insert_ui_json(
-            &self.pool,
-            NewUiJson {
-                thread_id,
-                role: &display.role.to_string(),
-                model_ref,
-                content: &serde_json::to_string(display)?,
-                kind: "display",
-                created_at,
-            },
-            thread_dir,
-        )
-        .await
-    }
-
     pub async fn insert_user_input(
         &self,
         thread_id: &str,

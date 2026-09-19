@@ -6,7 +6,6 @@ use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
 use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
 use omini_domain::events::{ActiveProfile, AgentTaskStatus, ToolPauseResponse};
-use omini_domain::input::PreparedUserSubmission;
 use omini_domain::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
@@ -60,8 +59,7 @@ pub struct QueryEngine {
 }
 
 struct PendingUserMessage {
-    submission: PreparedUserSubmission,
-    client_echo_id: Option<String>,
+    message: Message,
 }
 
 impl QueryEngine {
@@ -94,19 +92,11 @@ impl QueryEngine {
     }
 
     /// 将用户干预消息排队，在当前 Turn 收尾后注入历史。
-    pub fn enqueue_user_message(
-        &self,
-        submission: PreparedUserSubmission,
-        client_echo_id: Option<String>,
-    ) {
-        let mut pending = self
-            .pending_user_messages
+    pub fn enqueue_user_message(&self, message: Message) {
+        self.pending_user_messages
             .lock()
-            .expect("pending user messages mutex poisoned");
-        pending.push_back(PendingUserMessage {
-            submission,
-            client_echo_id,
-        });
+            .expect("pending user messages mutex poisoned")
+            .push_back(PendingUserMessage { message });
     }
 
     pub fn enqueue_agent_task_completion(&self, completion: AgentTaskCompletion) {
@@ -314,12 +304,9 @@ impl QueryEngine {
 
         let injected = !pending.is_empty();
         for pending in pending {
-            messages.push(pending.submission.llm_message.clone());
+            messages.push(pending.message.clone());
             let _ = event_tx
-                .send(EngineToRuntimeEvent::UserInputProduced {
-                    submission: pending.submission,
-                    client_echo_id: pending.client_echo_id,
-                })
+                .send(EngineToRuntimeEvent::UserMessageProduced(pending.message))
                 .await;
         }
         injected

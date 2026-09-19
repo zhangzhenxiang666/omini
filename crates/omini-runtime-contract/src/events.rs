@@ -5,8 +5,7 @@ use omini_domain::events::{
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
     SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest, ToolPauseResponse,
 };
-use omini_domain::input::PreparedUserSubmission;
-use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
 use serde::{Deserialize, Serialize};
 
@@ -15,10 +14,10 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerToRuntimeEvent {
     CancelRun,
+    /// 用户消息的 LLM 上下文行。展示行与 echo 由 server 在接收路径直接处理,
+    /// 不进入 runtime;语义见 `submit_run` 的所有权划分。
     SendMessage {
-        submission: PreparedUserSubmission,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_echo_id: Option<String>,
+        message: Message,
     },
     CompactContext {
         instructions: Option<String>,
@@ -28,10 +27,9 @@ pub enum ServerToRuntimeEvent {
     ),
     ToggleActiveProfile,
     SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
+    /// 运行中插话的 LLM 上下文行,在安全输入边界提交;展示行与 echo 同样由 server 处理。
     InterveneMessage {
-        submission: PreparedUserSubmission,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_echo_id: Option<String>,
+        message: Message,
     },
     ModelSelected {
         provider: String,

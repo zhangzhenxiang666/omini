@@ -6,7 +6,6 @@ use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
-use omini_domain::input::DisplayUserInput;
 use omini_domain::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
@@ -52,8 +51,8 @@ pub struct AgentRuntimeDeps {
 pub enum RunStart {
     /// 启动前将最新 runtime 消息同时写入 LLM 历史和 UI 历史。
     UserMessage,
-    /// 启动前将最新 runtime 消息写入 LLM 上下文，将 UI-only display 消息写入 UI 历史。
-    SplitUserInput { display: DisplayUserInput },
+    /// 用户消息的展示行与 echo 已由 server 处理，启动前只需追加 LLM 上下文行。
+    UserInput,
     /// 由待持久化的 Agent task completion 启动；落库前禁止请求 provider。
     PendingAgentTaskNotification,
     /// 通知已在上一个 query 的终止边界持久化，只需继续请求 provider。
@@ -64,7 +63,7 @@ impl RunStart {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::UserMessage => "user_message",
-            Self::SplitUserInput { .. } => "split_user_input",
+            Self::UserInput => "user_input",
             Self::PendingAgentTaskNotification => "pending_agent_task_notification",
             Self::PersistedAgentTaskNotification => "persisted_agent_task_notification",
         }
@@ -118,14 +117,10 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
+    /// 测试专用构造：固定 Main profile，现场加载能力句柄后走生产构造路径。
     #[cfg(test)]
-    pub fn new(channels: AgentRuntimeChannels, mut deps: AgentRuntimeDeps) -> Self {
+    pub fn new_for_test(channels: AgentRuntimeChannels, mut deps: AgentRuntimeDeps) -> Self {
         deps.active_profile = ActiveProfile::Main;
-        Self::new_with_active_profile(channels, deps)
-    }
-
-    #[cfg(test)]
-    pub fn new_with_active_profile(channels: AgentRuntimeChannels, deps: AgentRuntimeDeps) -> Self {
         let handles = RuntimeCapabilityHandles::load(&deps.settings);
         Self::with_capability_handles(channels, deps, handles)
     }
@@ -271,9 +266,6 @@ mod tests {
         PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
         ToolPauseResponse,
     };
-    use omini_domain::input::{
-        DisplayUserInput, InputPart, PreparedUserSubmission, UserInputIntent,
-    };
     use omini_domain::message::{ContentBlock, Role};
     use omini_domain::usage::Usage;
     use std::collections::HashMap;
@@ -361,7 +353,7 @@ thinking = true
     /// 为测试在 project 下建一个 thread，并返回其 id 与目录。
     ///
     /// 新架构下 `AgentRuntime` 必须依赖一个已存在的 thread,不再自己生成 UUID。
-    /// 测试中用这个 helper 模拟 server 的预创建行为,然后把结果传给 `AgentRuntime::new`。
+    /// 测试中用这个 helper 模拟 server 的预创建行为,然后把结果传给 `AgentRuntime::new_for_test`。
     fn create_test_thread(project: &ProjectDir) -> (String, ThreadDir) {
         let thread_id = Uuid::new_v4().to_string();
         let thread_dir = project
@@ -370,7 +362,7 @@ thinking = true
         (thread_id, thread_dir)
     }
 
-    /// 把 `AgentRuntime::new` 的样板参数(channel 等)收口,只暴露 `settings` / `project`。
+    /// 把 `AgentRuntime::new_for_test` 的样板参数(channel 等)收口,只暴露 `settings` / `project`。
     ///
     /// 用法示例:
     /// ```ignore
@@ -399,7 +391,7 @@ thinking = true
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
-        let runtime = AgentRuntime::new(channels, deps);
+        let runtime = AgentRuntime::new_for_test(channels, deps);
         (runtime, event_rx)
     }
 
@@ -433,7 +425,7 @@ thinking = true
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
-        let runtime = AgentRuntime::new(channels, deps);
+        let runtime = AgentRuntime::new_for_test(channels, deps);
         (runtime, event_rx, persistence_rx)
     }
 
@@ -475,10 +467,10 @@ thinking = true
     }
 
     #[tokio::test]
-    async fn submit_user_message_emits_ui_echo_before_run_starts() {
+    async fn submit_user_message_starts_run_without_ui_echo() {
         ensure_test_persistence().await;
 
-        let root = unique_temp_root("submit-user-message-echo");
+        let root = unique_temp_root("submit-user-message-no-echo");
         let cwd = root.join("workspace");
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
@@ -491,41 +483,22 @@ thinking = true
         cancel_next_run(&runtime);
 
         runtime
-            .submit_user_message(
-                PreparedUserSubmission {
-                    llm_message: Message::from_user_text("hello".to_string()),
-                    display: DisplayUserInput {
-                        role: Role::User,
-                        intent: UserInputIntent::Message,
-                        parts: vec![InputPart::Text {
-                            text: "hello".to_string(),
-                        }],
-                        attachments: Vec::new(),
-                    },
-                },
-                Some("echo-1".to_string()),
-            )
+            .submit_user_message(Message::from_user_text("hello".to_string()))
             .await;
 
         let events = drain_events(&mut event_rx);
-        let injected = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    event,
-                    RuntimeToServerEvent::UserMessageInjected {
-                        item: HistoryItem::UserInput(input),
-                        client_echo_id,
-                    } if input.text() == "hello"
-                        && client_echo_id.as_deref() == Some("echo-1")
-                )
-            })
-            .expect("user message should be echoed to UI");
-        let started = events
-            .iter()
-            .position(|event| matches!(event, RuntimeToServerEvent::RunStarted))
-            .expect("run should start");
-        assert!(injected < started);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeToServerEvent::UserMessageInjected { .. })),
+            "user message echo is server-owned and must not be emitted by runtime"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeToServerEvent::RunStarted)),
+            "run should start"
+        );
     }
 
     #[tokio::test]
@@ -597,7 +570,7 @@ thinking = true
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
-        let mut runtime = AgentRuntime::new(channels, deps);
+        let mut runtime = AgentRuntime::new_for_test(channels, deps);
         drain_events(&mut event_rx);
 
         let mut active_profile = runtime.active_profile();
@@ -878,25 +851,18 @@ thinking = true
         let mut saw_llm_message = false;
         while let Ok(event) = persistence_rx.try_recv() {
             match event {
-                RuntimePersistenceEvent::InsertMessage {
-                    role,
-                    model_ref,
-                    kind,
-                    blocks,
-                    ..
-                } if role == "assistant" && kind == "normal" => {
+                RuntimePersistenceEvent::UiMessageAppended {
+                    message, model_ref, ..
+                } => {
                     assert_eq!(model_ref.as_deref(), Some("test/model"));
                     assert!(
                         normal_event.is_none(),
-                        "exactly one InsertMessage(kind=normal) should arrive"
+                        "exactly one UiMessageAppended should arrive"
                     );
-                    normal_event = Some(RuntimePersistenceEvent::InsertMessage {
+                    normal_event = Some(RuntimePersistenceEvent::UiMessageAppended {
                         thread_id: thread_id.clone(),
-                        role,
+                        message,
                         model_ref: Some("test/model".to_string()),
-                        blocks,
-                        kind,
-                        created_at: chrono::Utc::now(),
                     });
                 }
                 RuntimePersistenceEvent::InsertPlanMessage { .. } => {
@@ -914,11 +880,12 @@ thinking = true
             !saw_plan_event,
             "InsertPlanMessage must not come from persist_one"
         );
-        let RuntimePersistenceEvent::InsertMessage { blocks, .. } =
-            normal_event.expect("InsertMessage(kind=normal) should arrive")
+        let RuntimePersistenceEvent::UiMessageAppended { message, .. } =
+            normal_event.expect("UiMessageAppended should arrive")
         else {
             unreachable!();
         };
+        let blocks = &message.content;
         let ContentBlock::Text(text_block) = blocks
             .first()
             .expect("stripped message should keep at least one text block")
@@ -968,20 +935,15 @@ thinking = true
 
         let mut normal_blocks: Option<Vec<ContentBlock>> = None;
         while let Ok(event) = persistence_rx.try_recv() {
-            if let RuntimePersistenceEvent::InsertMessage {
-                role, kind, blocks, ..
-            } = event
-                && role == "assistant"
-                && kind == "normal"
-            {
+            if let RuntimePersistenceEvent::UiMessageAppended { message, .. } = event {
                 assert!(
                     normal_blocks.is_none(),
-                    "exactly one InsertMessage(kind=normal) should arrive"
+                    "exactly one UiMessageAppended should arrive"
                 );
-                normal_blocks = Some(blocks);
+                normal_blocks = Some(message.content);
             }
         }
-        let blocks = normal_blocks.expect("InsertMessage(kind=normal) should arrive");
+        let blocks = normal_blocks.expect("UiMessageAppended should arrive");
         let ContentBlock::Text(text_block) = blocks
             .first()
             .expect("non-plan message should keep at least one text block")
@@ -1028,7 +990,7 @@ thinking = true
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
         };
-        let mut runtime = AgentRuntime::new(channels, deps);
+        let mut runtime = AgentRuntime::new_for_test(channels, deps);
 
         runtime.messages = vec![Message::from_user_text("seed".to_string())];
         let thread_id = runtime.thread_id.clone();
@@ -1397,10 +1359,10 @@ thinking = true
     }
 
     #[tokio::test]
-    async fn event_processor_forwards_produced_user_message_to_ui() {
+    async fn event_processor_persists_produced_user_message_llm_history_only() {
         ensure_test_persistence().await;
 
-        let root = unique_temp_root("produced-user-message-ui");
+        let root = unique_temp_root("produced-user-message-llm-only");
         let cwd = root.join("workspace");
         std::fs::create_dir_all(&cwd).expect("failed to create cwd");
         let config = test_user_config();
@@ -1426,54 +1388,31 @@ thinking = true
         let message = Message::from_user_text("intervention".to_string());
 
         engine_tx
-            .send(EngineToRuntimeEvent::UserInputProduced {
-                submission: PreparedUserSubmission {
-                    llm_message: message.clone(),
-                    display: DisplayUserInput {
-                        role: Role::User,
-                        intent: UserInputIntent::Message,
-                        parts: vec![InputPart::Text {
-                            text: "intervention".to_string(),
-                        }],
-                        attachments: Vec::new(),
-                    },
-                },
-                client_echo_id: Some("echo-intervention".to_string()),
-            })
+            .send(EngineToRuntimeEvent::UserMessageProduced(message.clone()))
             .await
             .expect("user message event should send");
+        drop(engine_tx);
+        processor.await.expect("processor should finish");
 
-        let event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
-            .await
-            .expect("ui user message event should arrive")
-            .expect("ui event channel should stay open");
-        let RuntimeToServerEvent::UserMessageInjected {
-            item: HistoryItem::UserInput(event_input),
-            client_echo_id,
-        } = event
-        else {
-            panic!("expected user message injection");
-        };
-        assert_eq!(event_input.text(), "intervention");
-        assert_eq!(client_echo_id.as_deref(), Some("echo-intervention"));
-
-        let mut saw_persistence_event = false;
+        // 展示行与 echo 由 server 在接收输入时处理，runtime 只追加 LLM 上下文行。
+        let mut saw_llm_append = false;
         while let Ok(event) = persistence_rx.try_recv() {
-            if let RuntimePersistenceEvent::InsertUserInput {
+            if let RuntimePersistenceEvent::AppendLlmMessage {
                 thread_id: event_thread_id,
-                display,
+                message: event_message,
                 ..
             } = event
                 && event_thread_id == thread_id
-                && display.text() == "intervention"
+                && event_message == message
             {
-                saw_persistence_event = true;
+                saw_llm_append = true;
             }
         }
-        assert!(saw_persistence_event);
-
-        drop(engine_tx);
-        processor.await.expect("processor should finish");
+        assert!(saw_llm_append);
+        assert!(
+            event_rx.try_recv().is_err(),
+            "no UI event should be emitted for the user message"
+        );
     }
 
     #[tokio::test]
@@ -1614,11 +1553,12 @@ thinking = true
                 } if thread_id == expected_thread_id && message == llm_msg => {
                     saw_llm_message = true;
                 }
-                RuntimePersistenceEvent::InsertMessage {
-                    thread_id, blocks, ..
-                } if thread_id == expected_thread_id && blocks == display_msg.content => {
+                RuntimePersistenceEvent::UiMessageAppended {
+                    thread_id, message, ..
+                } if thread_id == expected_thread_id && message.content == display_msg.content => {
                     assert!(
-                        !blocks
+                        !message
+                            .content
                             .iter()
                             .any(|block| matches!(block, ContentBlock::Image(_)))
                     );

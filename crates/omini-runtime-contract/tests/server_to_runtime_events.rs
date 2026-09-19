@@ -2,8 +2,7 @@ use omini_domain::config::ThinkingEffort;
 use omini_domain::events::{
     ActiveProfile, PlanApprovalAction, PlanExecutionProfile, ToolPauseResponse,
 };
-use omini_domain::input::{DisplayUserInput, InputPart, PreparedUserSubmission, UserInputIntent};
-use omini_domain::message::{Message, Role};
+use omini_domain::message::Message;
 use omini_runtime_contract::ServerToRuntimeEvent;
 use serde_json::{Value, json};
 
@@ -16,12 +15,11 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
         ),
         (
             ServerToRuntimeEvent::SendMessage {
-                submission: submission("hello"),
-                client_echo_id: None,
+                message: user_message("hello"),
             },
             json!({
                 "type": "send_message",
-                "submission": submission_json("hello")
+                "message": message_json("hello")
             }),
         ),
         (
@@ -44,13 +42,11 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
         ),
         (
             ServerToRuntimeEvent::InterveneMessage {
-                submission: submission("补充说明"),
-                client_echo_id: Some("echo-1".into()),
+                message: user_message("补充说明"),
             },
             json!({
                 "type": "intervene_message",
-                "submission": submission_json("补充说明"),
-                "client_echo_id": "echo-1"
+                "message": message_json("补充说明")
             }),
         ),
         (
@@ -169,39 +165,6 @@ fn scalar_events_all_values_use_named_payload_fields() {
 }
 
 #[test]
-fn message_events_missing_or_null_echo_id_default_to_none_and_are_omitted() {
-    for event_type in ["send_message", "intervene_message"] {
-        let canonical = json!({
-            "type": event_type,
-            "submission": submission_json("")
-        });
-
-        for input in [
-            canonical.clone(),
-            json!({
-                "type": event_type,
-                "submission": submission_json(""),
-                "client_echo_id": null
-            }),
-        ] {
-            let event: ServerToRuntimeEvent =
-                serde_json::from_value(input).expect("absent echo id should deserialize");
-            match &event {
-                ServerToRuntimeEvent::SendMessage { client_echo_id, .. }
-                | ServerToRuntimeEvent::InterveneMessage { client_echo_id, .. } => {
-                    assert_eq!(client_echo_id, &None);
-                }
-                _ => panic!("expected a message event"),
-            }
-            assert_eq!(
-                serde_json::to_value(event).expect("message event should serialize"),
-                canonical
-            );
-        }
-    }
-}
-
-#[test]
 fn nullable_fields_missing_or_null_default_to_none_and_serialize_as_null() {
     for (input, canonical) in [
         (
@@ -266,18 +229,7 @@ fn server_to_runtime_event_malformed_shapes_are_rejected_with_stable_reasons() {
             json!({"type": "set_active_profile", "plan": null}),
             "missing field `profile`",
         ),
-        (
-            json!({"type": "send_message"}),
-            "missing field `submission`",
-        ),
-        (
-            json!({
-                "type": "send_message",
-                "submission": submission_json("hello"),
-                "client_echo_id": 1
-            }),
-            "expected a string",
-        ),
+        (json!({"type": "send_message"}), "missing field `message`"),
         (
             json!({
                 "type": "resolve_plan_approval",
@@ -291,23 +243,12 @@ fn server_to_runtime_event_malformed_shapes_are_rejected_with_stable_reasons() {
     }
 }
 
-fn submission(text: &str) -> PreparedUserSubmission {
-    let parts = vec![InputPart::Text {
-        text: text.to_string(),
-    }];
-    PreparedUserSubmission {
-        llm_message: Message::from_user_text(text.to_string()),
-        display: DisplayUserInput {
-            role: Role::User,
-            intent: UserInputIntent::Message,
-            parts,
-            attachments: Vec::new(),
-        },
-    }
+fn user_message(text: &str) -> Message {
+    Message::from_user_text(text.to_string())
 }
 
-fn submission_json(text: &str) -> Value {
-    serde_json::to_value(submission(text)).expect("submission should encode")
+fn message_json(text: &str) -> Value {
+    serde_json::to_value(user_message(text)).expect("message should encode")
 }
 
 fn server_event_type(event: &ServerToRuntimeEvent) -> &'static str {

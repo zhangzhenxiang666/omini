@@ -4,21 +4,21 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use omini_config::Settings;
 use omini_domain::config::InputModality;
-use omini_domain::input::{
-    DisplayUserInput, InputPart, PreparedUserSubmission, RunCommand, RuntimeUserInput,
-    UserInputIntent,
-};
+use omini_domain::input::{InputPart, RunCommand, RuntimeUserInput};
 use omini_domain::message::{ContentBlock, Message, Role};
 use sha2::{Digest, Sha256};
 
 pub const INIT_PROMPT: &str = include_str!("../prompts/init.txt");
 
+/// 校验并构建用户输入的 LLM 上下文消息：skill 展开、init prompt 注入、
+/// 附件完整性校验与 base64 编码都是 core 知识，因此留在这里。
+/// 用户级展示视图（`DisplayUserInput`）与此无关，由 server 在接收路径构建。
 pub fn prepare_submission(
     input: RuntimeUserInput,
     command: Option<RunCommand>,
     settings: &Settings,
     capabilities: &CapabilityStore,
-) -> Result<PreparedUserSubmission, CoreError> {
+) -> Result<Message, CoreError> {
     validate_non_empty(&input, command)?;
     if !input.attachments.is_empty() && !settings.supports_input_modality(InputModality::Image) {
         return Err(CoreError::invalid_input(
@@ -118,22 +118,7 @@ pub fn prepare_submission(
         ));
     }
 
-    let intent = match command {
-        Some(command) => UserInputIntent::Command { command },
-        None => UserInputIntent::Message,
-    };
-    Ok(PreparedUserSubmission {
-        llm_message: Message::new(Role::User, content),
-        display: DisplayUserInput {
-            role: Role::User,
-            intent,
-            parts: input.parts,
-            attachments: attachments
-                .into_iter()
-                .map(|attachment| attachment.metadata)
-                .collect(),
-        },
-    })
+    Ok(Message::new(Role::User, content))
 }
 
 fn validate_non_empty(
@@ -160,7 +145,7 @@ mod tests {
     use omini_domain::input::{AttachmentMetadata, ResolvedAttachment};
 
     #[test]
-    fn expands_parts_in_their_original_order_and_keeps_display_raw() {
+    fn expands_parts_in_their_original_order() {
         let root = TestTempDir::new("typed-input-order");
         root.write(
             ".omini/skills/ordered/SKILL.md",
@@ -184,9 +169,9 @@ mod tests {
             },
         ];
 
-        let prepared = prepare_submission(
+        let message = prepare_submission(
             RuntimeUserInput {
-                parts: parts.clone(),
+                parts,
                 attachments: Vec::new(),
             },
             None,
@@ -195,8 +180,7 @@ mod tests {
         )
         .expect("input should prepare");
 
-        let texts = prepared
-            .llm_message
+        let texts = message
             .content
             .iter()
             .map(|block| match block {
@@ -208,14 +192,6 @@ mod tests {
         assert!(texts[1].contains("SKILL BODY"));
         assert_eq!(texts[2], "File: src/lib.rs. Read this file if needed.");
         assert_eq!(texts[3], " after");
-        assert_eq!(prepared.display.parts, parts);
-        assert!(
-            !prepared
-                .display
-                .display_message()
-                .text
-                .contains("SKILL BODY")
-        );
     }
 
     #[test]
@@ -274,17 +250,9 @@ mod tests {
 
         let vision_settings = crate::test_support::settings(root.path(), true);
         let vision_capabilities = CapabilityStore::load(&vision_settings);
-        let prepared = prepare_submission(input, None, &vision_settings, &vision_capabilities)
+        let message = prepare_submission(input, None, &vision_settings, &vision_capabilities)
             .expect("vision model should accept images");
-        assert_eq!(prepared.display.attachments[0].attachment_id, "a");
-        assert_eq!(prepared.display.attachments[1].attachment_id, "b");
-        assert!(
-            prepared
-                .llm_message
-                .content
-                .iter()
-                .all(ContentBlock::is_image)
-        );
+        assert!(message.content.iter().all(ContentBlock::is_image));
 
         let corrupt = RuntimeUserInput {
             parts: Vec::new(),
@@ -305,11 +273,11 @@ mod tests {
     }
 
     #[test]
-    fn init_prompt_is_core_owned_and_not_exposed_in_display_history() {
+    fn init_prompt_is_core_owned() {
         let root = TestTempDir::new("typed-input-init");
         let settings = crate::test_support::settings(root.path(), false);
         let capabilities = CapabilityStore::load(&settings);
-        let prepared = prepare_submission(
+        let message = prepare_submission(
             RuntimeUserInput {
                 parts: Vec::new(),
                 attachments: Vec::new(),
@@ -320,15 +288,6 @@ mod tests {
         )
         .expect("empty init command should prepare");
 
-        assert!(matches!(
-            prepared.llm_message.content[0],
-            ContentBlock::Text(_)
-        ));
-        assert_eq!(prepared.display.display_message().text, "/init");
-        assert!(
-            !serde_json::to_string(&prepared.display)
-                .expect("display should encode")
-                .contains("repository-initialization")
-        );
+        assert!(matches!(message.content[0], ContentBlock::Text(_)));
     }
 }

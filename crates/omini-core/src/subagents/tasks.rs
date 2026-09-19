@@ -328,7 +328,6 @@ impl AgentTaskSupervisor {
             .persistence_tx
             .send(RuntimePersistenceEvent::SetAgentTasksCancelling {
                 task_ids: cancelling_ids,
-                updated_at: Utc::now(),
             })
             .await;
         ToolResult::ok(response)
@@ -695,15 +694,9 @@ impl AgentTaskSupervisor {
                         warnings.push(error);
                     }
                 }
-                EngineToRuntimeEvent::UserInputProduced { submission, .. } => {
+                EngineToRuntimeEvent::UserMessageProduced(message) => {
                     if let Err(error) = self
-                        .persist_agent_message(
-                            info,
-                            submission.llm_message,
-                            Some(model_ref),
-                            true,
-                            true,
-                        )
+                        .persist_agent_message(info, message, Some(model_ref), true, true)
                         .await
                     {
                         warnings.push(error);
@@ -743,7 +736,6 @@ impl AgentTaskSupervisor {
                             thread_id,
                             expected_version,
                             messages,
-                            created_at: Utc::now(),
                             ack,
                         })
                         .await;
@@ -858,7 +850,6 @@ impl AgentTaskSupervisor {
                     .flatten(),
                 persist_llm_history,
                 display_in_ui,
-                created_at: Utc::now(),
                 ack: ack_tx,
             })
             .await

@@ -33,23 +33,13 @@ impl AgentRuntime {
                         .expect("active profile lock poisoned");
                     match event {
                         // ===== 需要持久化的事件 =====
-                        EngineToRuntimeEvent::UserInputProduced {
-                            submission,
-                            client_echo_id,
-                        } => {
-                            history::persist_split_user_input(
+                        EngineToRuntimeEvent::UserMessageProduced(message) => {
+                            history::persist_llm_history_only(
                                 &thread_id,
-                                submission.llm_message.clone(),
-                                submission.display.clone(),
+                                &message,
                                 &persistence_tx,
                             )
                             .await;
-                            let _ = event_tx
-                                .send(RuntimeToServerEvent::UserMessageInjected {
-                                    item: HistoryItem::UserInput(submission.display),
-                                    client_echo_id,
-                                })
-                                .await;
                         }
                         EngineToRuntimeEvent::AgentTaskNotificationsProduced {
                             notification,
@@ -65,7 +55,6 @@ impl AgentRuntime {
                                     notification: notification.clone(),
                                     llm_message,
                                     task_ids: task_ids.clone(),
-                                    created_at: Utc::now(),
                                     ack: persistence_ack,
                                 })
                                 .await
@@ -108,7 +97,6 @@ impl AgentRuntime {
                                     thread_id: compacted_thread_id,
                                     expected_version,
                                     messages,
-                                    created_at: Utc::now(),
                                     ack,
                                 })
                                 .await;

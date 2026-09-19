@@ -175,15 +175,15 @@ impl RuntimeReplayBuffer {
     ) {
         // 持久化成功意味着对应 UI 片段下一次会从 snapshot 恢复，应从 replay 中裁掉。
         match event {
-            runtime_contract::RuntimePersistenceEvent::InsertMessage {
+            runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
                 thread_id,
-                role,
-                blocks,
+                message,
                 ..
             } if thread_id == owner_thread_id => {
-                if role == "assistant" {
+                if message.role == domain::message::Role::Assistant {
                     self.drop_current_assistant_tail();
-                } else if blocks
+                } else if message
+                    .content
                     .iter()
                     .any(domain::message::ContentBlock::is_tool_result)
                 {
@@ -191,11 +191,6 @@ impl RuntimeReplayBuffer {
                 } else {
                     self.drop_pending_user_injection();
                 }
-            }
-            runtime_contract::RuntimePersistenceEvent::InsertDisplayMessage {
-                thread_id, ..
-            } if thread_id == owner_thread_id => {
-                self.drop_pending_user_injection();
             }
             runtime_contract::RuntimePersistenceEvent::InsertCompactSummaryMessage {
                 thread_id,
@@ -738,16 +733,13 @@ mod tests {
 
     fn persisted_message(
         thread_id: &str,
-        role: &str,
+        role: domain::message::Role,
         blocks: Vec<domain::message::ContentBlock>,
     ) -> runtime_contract::RuntimePersistenceEvent {
-        runtime_contract::RuntimePersistenceEvent::InsertMessage {
+        runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
             thread_id: thread_id.to_string(),
-            role: role.to_string(),
-            model_ref: (role == "assistant").then(|| "test/model".to_string()),
-            blocks,
-            kind: "normal".to_string(),
-            created_at: fixed_time(),
+            message: domain::message::Message::new(role.clone(), blocks),
+            model_ref: (role == domain::message::Role::Assistant).then(|| "test/model".to_string()),
         }
     }
 
@@ -922,7 +914,7 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                "user",
+                domain::message::Role::User,
                 vec![domain::message::ContentBlock::from_text(
                     "hello".to_string(),
                 )],
@@ -947,7 +939,7 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                "assistant",
+                domain::message::Role::Assistant,
                 vec![
                     domain::message::ContentBlock::from_thinking("thinking".to_string()),
                     domain::message::ContentBlock::from_text("answer".to_string()),
@@ -1017,7 +1009,7 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                "user",
+                domain::message::Role::User,
                 vec![domain::message::ContentBlock::from_tool_result(
                     "tool_1".to_string(),
                     false,

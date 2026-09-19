@@ -1,6 +1,7 @@
 use omini_domain::config::{ProviderInfo, ThinkingEffort};
 use omini_domain::events::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
-use omini_domain::input::{PreparedUserSubmission, RunCommand, RuntimeUserInput};
+use omini_domain::input::{RunCommand, RuntimeUserInput};
+use omini_domain::message::Message;
 use omini_domain::subagents::AgentRecord;
 use std::path::PathBuf;
 
@@ -18,9 +19,14 @@ pub struct SubmitRunCommand {
     pub intent: RunIntent,
 }
 
+/// 校验与 LLM 消息构建完成、待派发给 runtime 的运行命令。
+///
+/// `input` 与 `client_echo_id` 是调用方提交数据的原样回传：展示行入库与
+/// echo 广播由 server 在派发前完成，core 不承载用户级展示数据。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRunCommand {
-    pub submission: PreparedUserSubmission,
+    pub message: Message,
+    pub input: RuntimeUserInput,
     pub client_echo_id: Option<String>,
     pub intent: RunIntent,
 }

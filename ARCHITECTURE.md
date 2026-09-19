@@ -39,8 +39,9 @@ The main dependency rules are:
   persistence, transport envelopes, and UI state stay with their owning crates.
 - Provider, MCP, and permission implementations remain independent services consumed by
   core rather than leaking through protocol or runtime-contract types.
-- Server persistence consumes `RuntimePersistenceEvent`; SQLite schema, transactions,
-  and replay remain server concerns.
+- Server persistence consumes `RuntimePersistenceEvent`; persistence events carry
+  domain-fact vocabulary (row timestamps are stamped server-side), while SQLite schema,
+  transactions, and replay remain server concerns.
 - Server code uses core's public project/thread capabilities instead of deep-linking
   into skills, agent tasks, tools, or engine internals.
 
@@ -68,9 +69,14 @@ belongs to a project.
 3. `omini-tui` creates or selects a thread, claims controller status, and subscribes to
    its event stream.
 4. The server validates requests and controller ownership, then invokes the relevant
-   core capability through the runtime boundary.
+   core capability through the runtime boundary. For run submissions it additionally
+   commits the user-facing display row (timestamped at speaking time) and broadcasts
+   the user-message echo before dispatching, so replay history follows speaking-time
+   order.
 5. Core runs the agent and emits runtime and persistence events. The server persists,
-   projects, and broadcasts them to the controller and observers.
+   projects, and broadcasts them to the controller and observers. Core appends the
+   user message to LLM context only at safe input boundaries (run start, or the
+   mid-run intervention drain point), never carrying user-facing display data.
 6. Reconnecting clients reopen the project by UUID; the current path is not used as
    project identity.
 
@@ -85,6 +91,14 @@ The server owns project-path canonicalization, attachment ownership and integrit
 and controller checks. Core owns SkillRegistry validation, skill and `/init` prompt
 expansion, subagent validation, model modality checks, and construction of the single
 Provider user message. These checks complete before a run is dispatched.
+
+User input lifecycle is split by ownership. After validation succeeds, the server
+persists the display row and broadcasts the echo immediately (both idle submit and
+mid-run intervention); it then dispatches only the constructed LLM message into core.
+Core appends that message to LLM history at the safe input boundary and emits a
+`UserMessageProduced` event without display payload. Consequently replay shows user
+messages in speaking-time order, which for mid-run interventions may differ from the
+LLM context order — the same view a live client already sees.
 
 UI history persists typed user intent and attachment metadata separately from LLM
 history. Expanded skill bodies, the internal `/init` prompt, and base64 image blocks

@@ -1,8 +1,12 @@
+use crate::event::bridge::runtime_event_from_runtime_contract_event;
 use crate::{store, thread::ThreadRuntime};
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
-use omini_domain::input::{AttachmentMetadata, ResolvedAttachment};
+use omini_domain::display::HistoryItem;
+use omini_domain::input::{
+    AttachmentMetadata, DisplayUserInput, ResolvedAttachment, UserInputIntent,
+};
 use omini_runtime_contract as runtime_contract;
 
 impl ThreadRuntime {
@@ -185,7 +189,39 @@ impl ThreadRuntime {
         &self,
         command: runtime_contract::thread::PreparedRunCommand,
     ) -> Result<runtime_contract::thread::RunSubmitted, CoreError> {
+        self.commit_user_input_display(&command).await?;
         self.core.submit_prepared_run(command).await
+    }
+
+    /// 用户输入生命周期中属于 server 的部分：展示行立即落库（时间戳 = 发言时刻，
+    /// 因此 replay 呈现发言时间视角），echo 随后在本地事件通道广播，两者都先于
+    /// core 派发完成。core 只在安全输入边界提交 LLM 上下文行。
+    async fn commit_user_input_display(
+        &self,
+        command: &runtime_contract::thread::PreparedRunCommand,
+    ) -> Result<(), CoreError> {
+        let intent = match command.intent {
+            runtime_contract::thread::RunIntent::SubmitMessage
+            | runtime_contract::thread::RunIntent::InterveneMessage => UserInputIntent::Message,
+            runtime_contract::thread::RunIntent::ExecuteCommand(command) => {
+                UserInputIntent::Command { command }
+            }
+        };
+        let display = DisplayUserInput::from_runtime_input(&command.input, intent);
+        self.db
+            .insert_user_input(&self.thread_id, &display, Utc::now(), &self.thread_dir())
+            .await
+            .map_err(|error| {
+                CoreError::persistence("failed to persist user input", error.to_string())
+            })?;
+        let echo = runtime_event_from_runtime_contract_event(
+            runtime_contract::events::RuntimeToServerEvent::UserMessageInjected {
+                item: HistoryItem::UserInput(display),
+                client_echo_id: command.client_echo_id.clone(),
+            },
+        )?;
+        self.broadcast_server_local_event(echo);
+        Ok(())
     }
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {

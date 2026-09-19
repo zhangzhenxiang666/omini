@@ -332,14 +332,15 @@ impl AgentCoreThread {
             .read()
             .expect("core settings lock poisoned")
             .clone();
-        let submission = crate::runtime::user_input::prepare_submission(
-            input,
+        let message = crate::runtime::user_input::prepare_submission(
+            input.clone(),
             command,
             &settings,
             &self.capabilities,
         )?;
         Ok(thread_types::PreparedRunCommand {
-            submission,
+            message,
+            input,
             client_echo_id,
             intent,
         })
@@ -349,21 +350,14 @@ impl AgentCoreThread {
         &self,
         command: thread_types::PreparedRunCommand,
     ) -> Result<thread_types::RunSubmitted, CoreError> {
-        let thread_types::PreparedRunCommand {
-            submission,
-            client_echo_id,
-            intent,
-        } = command;
-        let event = match intent {
+        let event = match command.intent {
             thread_types::RunIntent::SubmitMessage | thread_types::RunIntent::ExecuteCommand(_) => {
                 ServerToRuntimeEvent::SendMessage {
-                    submission,
-                    client_echo_id,
+                    message: command.message,
                 }
             }
             thread_types::RunIntent::InterveneMessage => ServerToRuntimeEvent::InterveneMessage {
-                submission,
-                client_echo_id,
+                message: command.message,
             },
         };
         self.send_to_runtime(event).await?;

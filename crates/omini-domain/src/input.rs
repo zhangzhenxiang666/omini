@@ -1,4 +1,3 @@
-use crate::message::Message;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -73,6 +72,23 @@ pub struct DisplayUserInput {
 }
 
 impl DisplayUserInput {
+    /// 用户级展示视图是原始 typed input 的纯投影，由输入接收方（server）构建；
+    /// LLM 上下文行由 core 在安全边界提交，两条数据流各自独立。
+    pub fn from_runtime_input(input: &RuntimeUserInput, intent: UserInputIntent) -> Self {
+        let mut attachments = input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.metadata.clone())
+            .collect::<Vec<_>>();
+        attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+        Self {
+            role: crate::message::Role::User,
+            intent,
+            parts: input.parts.clone(),
+            attachments,
+        }
+    }
+
     pub fn text(&self) -> String {
         self.parts
             .iter()
@@ -159,8 +175,66 @@ fn push_display_mention(
     });
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct PreparedUserSubmission {
-    pub llm_message: Message,
-    pub display: DisplayUserInput,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_projection_keeps_parts_raw_and_sorts_attachments() {
+        let attachment = |id: &str| ResolvedAttachment {
+            metadata: AttachmentMetadata {
+                attachment_id: id.to_string(),
+                mime_type: "image/png".to_string(),
+                size: 1,
+                name: format!("{id}.png"),
+            },
+            sha256: "0".repeat(64),
+            source_path: PathBuf::from(id),
+        };
+        let input = RuntimeUserInput {
+            parts: vec![
+                InputPart::Skill {
+                    name: "ordered".to_string(),
+                },
+                InputPart::Text {
+                    text: "hello".to_string(),
+                },
+            ],
+            attachments: vec![attachment("b"), attachment("a")],
+        };
+
+        let display = DisplayUserInput::from_runtime_input(&input, UserInputIntent::Message);
+
+        assert_eq!(display.parts, input.parts);
+        assert_eq!(
+            display
+                .attachments
+                .iter()
+                .map(|metadata| metadata.attachment_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        // display 只保留原始 parts 与附件元数据，不包含 skill 展开后的正文。
+        assert_eq!(
+            display.display_message().text,
+            "/orderedhello [Image: a.png] [Image: b.png]"
+        );
+    }
+
+    #[test]
+    fn init_command_display_shows_slash_invocation() {
+        let input = RuntimeUserInput {
+            parts: Vec::new(),
+            attachments: Vec::new(),
+        };
+
+        let display = DisplayUserInput::from_runtime_input(
+            &input,
+            UserInputIntent::Command {
+                command: RunCommand::Init,
+            },
+        );
+
+        assert_eq!(display.display_message().text, "/init");
+    }
 }

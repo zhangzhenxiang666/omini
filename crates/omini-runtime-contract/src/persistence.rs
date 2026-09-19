@@ -1,8 +1,7 @@
 use chrono::{DateTime, Utc};
-use omini_domain::display::{AgentTaskNotification, DisplayMessage, DisplayPlan, DisplaySummary};
+use omini_domain::display::{AgentTaskNotification, DisplayPlan, DisplaySummary};
 use omini_domain::events::{AgentTaskInfo, AgentTaskResult, AgentTaskStatus};
-use omini_domain::input::DisplayUserInput;
-use omini_domain::message::{ContentBlock, Message};
+use omini_domain::message::Message;
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
 
@@ -25,9 +24,14 @@ pub struct ThreadRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// core 发往 server 的持久化意图词汇表。
+///
+/// 描述"发生了什么领域事实、要如何入库"，不是 SQL schema 的镜像：行级时间戳由
+/// server 在应用事件时打点（持久化通道严格有序，打点位置不影响顺序语义），字段里
+/// 保留的时间戳（`ThreadRecord`、任务 `completed_at` 等）本身是领域事实。
+/// role/kind 等字符串形状的 SQL 词汇由 server 从领域类型派生。
 #[derive(Debug)]
 pub enum RuntimePersistenceEvent {
-    CreateThread(ThreadRecord),
     /// 原子创建子线程、task 记录和初始用户消息。
     CreateAgentTask {
         task: Box<AgentTaskInfo>,
@@ -42,7 +46,6 @@ pub enum RuntimePersistenceEvent {
         model_ref: Option<String>,
         persist_llm_history: bool,
         display_in_ui: bool,
-        created_at: DateTime<Utc>,
         ack: oneshot::Sender<Result<(), String>>,
     },
     /// 持久化通道严格有序，因此只有全部子线程消息处理完后才会提交终态。
@@ -55,14 +58,12 @@ pub enum RuntimePersistenceEvent {
     },
     SetAgentTasksCancelling {
         task_ids: Vec<String>,
-        updated_at: DateTime<Utc>,
     },
     InsertAgentTaskNotification {
         owner_thread_id: String,
         notification: AgentTaskNotification,
         llm_message: Message,
         task_ids: Vec<String>,
-        created_at: DateTime<Utc>,
         ack: oneshot::Sender<Result<(), String>>,
     },
     UpdateThreadUpdatedAt {
@@ -78,24 +79,12 @@ pub enum RuntimePersistenceEvent {
         thread_id: String,
         thinking_effort: Option<String>,
     },
-    InsertMessage {
+    /// 一条写入 UI 历史的展示消息。`message.content` 是 core 按 active_profile
+    /// 剥离 plan 块后的 UI 展示块；role/kind/行时间戳等 SQL 形状由 server 派生。
+    UiMessageAppended {
         thread_id: String,
-        role: String,
+        message: Message,
         model_ref: Option<String>,
-        blocks: Vec<ContentBlock>,
-        kind: String,
-        created_at: DateTime<Utc>,
-    },
-    InsertDisplayMessage {
-        thread_id: String,
-        display: DisplayMessage,
-        model_ref: Option<String>,
-        created_at: DateTime<Utc>,
-    },
-    InsertUserInput {
-        thread_id: String,
-        display: DisplayUserInput,
-        created_at: DateTime<Utc>,
     },
     InsertPlanMessage {
         thread_id: String,
@@ -110,13 +99,11 @@ pub enum RuntimePersistenceEvent {
     AppendLlmMessage {
         thread_id: String,
         message: Message,
-        created_at: DateTime<Utc>,
     },
     ReplaceLlmContext {
         thread_id: String,
         expected_version: i64,
         messages: Vec<Message>,
-        created_at: DateTime<Utc>,
         ack: oneshot::Sender<Result<i64, String>>,
     },
     RecordThreadUsage {

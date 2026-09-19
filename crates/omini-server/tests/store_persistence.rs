@@ -60,28 +60,12 @@ async fn typed_user_input_history_does_not_expose_expanded_llm_text() {
     };
     let expanded = Message::from_user_text("INTERNAL EXPANDED INIT PROMPT".to_string());
 
-    db.apply_persistence_event(
-        &RuntimePersistenceEvent::InsertUserInput {
-            thread_id: "typed".to_string(),
-            display: display.clone(),
-            created_at: fixed_time(),
-        },
-        TEST_PROJECT_ID,
-        &project,
-    )
-    .await
-    .unwrap();
-    db.apply_persistence_event(
-        &RuntimePersistenceEvent::AppendLlmMessage {
-            thread_id: "typed".to_string(),
-            message: expanded.clone(),
-            created_at: fixed_time(),
-        },
-        TEST_PROJECT_ID,
-        &project,
-    )
-    .await
-    .unwrap();
+    db.insert_user_input("typed", &display, fixed_time(), &project.thread("typed"))
+        .await
+        .unwrap();
+    db.append_llm_message("typed", &expanded, fixed_time(), &project.thread("typed"))
+        .await
+        .unwrap();
 
     assert_eq!(
         history::load_messages(&db, "typed", &project.thread("typed")).await,

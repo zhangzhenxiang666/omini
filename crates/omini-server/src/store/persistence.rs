@@ -49,10 +49,6 @@ impl Database {
         project: &ProjectDir,
     ) -> Result<(), StoreError> {
         match event {
-            RuntimePersistenceEvent::CreateThread(thread) => {
-                self.create_thread(&thread_from_runtime(project_id, thread))
-                    .await
-            }
             RuntimePersistenceEvent::CreateAgentTask {
                 task,
                 thread,
@@ -68,7 +64,6 @@ impl Database {
                 model_ref,
                 persist_llm_history,
                 display_in_ui,
-                created_at,
                 ..
             } => {
                 self.persist_agent_message(AgentMessagePersistence {
@@ -77,7 +72,7 @@ impl Database {
                     model_ref: model_ref.as_deref(),
                     persist_llm_history: *persist_llm_history,
                     display_in_ui: *display_in_ui,
-                    created_at: *created_at,
+                    created_at: Utc::now(),
                     project,
                 })
                 .await
@@ -92,16 +87,14 @@ impl Database {
                 self.finish_agent_task(task_id, *status, result, *completed_at)
                     .await
             }
-            RuntimePersistenceEvent::SetAgentTasksCancelling {
-                task_ids,
-                updated_at,
-            } => self.set_agent_tasks_cancelling(task_ids, *updated_at).await,
+            RuntimePersistenceEvent::SetAgentTasksCancelling { task_ids } => {
+                self.set_agent_tasks_cancelling(task_ids, Utc::now()).await
+            }
             RuntimePersistenceEvent::InsertAgentTaskNotification {
                 owner_thread_id,
                 notification,
                 llm_message,
                 task_ids,
-                created_at,
                 ..
             } => {
                 self.insert_agent_task_notification(
@@ -109,7 +102,7 @@ impl Database {
                     notification,
                     llm_message,
                     task_ids,
-                    *created_at,
+                    Utc::now(),
                 )
                 .await
             }
@@ -132,49 +125,23 @@ impl Database {
                 self.update_thread_thinking_effort(thread_id, thinking_effort.as_deref())
                     .await
             }
-            RuntimePersistenceEvent::InsertMessage {
+            RuntimePersistenceEvent::UiMessageAppended {
                 thread_id,
-                role,
+                message,
                 model_ref,
-                blocks,
-                kind,
-                created_at,
             } => {
                 self.insert_message(
                     &NewMessage {
                         thread_id: thread_id.clone(),
-                        role: role.clone(),
+                        role: message.role.to_string(),
                         model_ref: model_ref.clone(),
-                        blocks: blocks.clone(),
-                        kind: kind.clone(),
-                        created_at: *created_at,
+                        blocks: message.content.clone(),
+                        kind: "normal".to_string(),
+                        created_at: Utc::now(),
                     },
                     &project.thread(thread_id),
                 )
                 .await
-            }
-            RuntimePersistenceEvent::InsertDisplayMessage {
-                thread_id,
-                display,
-                model_ref,
-                created_at,
-            } => {
-                self.insert_display_message(
-                    thread_id,
-                    display,
-                    model_ref.as_deref(),
-                    *created_at,
-                    &project.thread(thread_id),
-                )
-                .await
-            }
-            RuntimePersistenceEvent::InsertUserInput {
-                thread_id,
-                display,
-                created_at,
-            } => {
-                self.insert_user_input(thread_id, display, *created_at, &project.thread(thread_id))
-                    .await
             }
             RuntimePersistenceEvent::InsertPlanMessage {
                 thread_id,
@@ -197,26 +164,21 @@ impl Database {
                 )
                 .await
             }
-            RuntimePersistenceEvent::AppendLlmMessage {
-                thread_id,
-                message,
-                created_at,
-            } => {
-                self.append_llm_message(thread_id, message, *created_at, &project.thread(thread_id))
+            RuntimePersistenceEvent::AppendLlmMessage { thread_id, message } => {
+                self.append_llm_message(thread_id, message, Utc::now(), &project.thread(thread_id))
                     .await
             }
             RuntimePersistenceEvent::ReplaceLlmContext {
                 thread_id,
                 expected_version,
                 messages,
-                created_at,
                 ..
             } => self
                 .replace_llm_context(
                     thread_id,
                     *expected_version,
                     messages,
-                    *created_at,
+                    Utc::now(),
                     &project.thread(thread_id),
                 )
                 .await

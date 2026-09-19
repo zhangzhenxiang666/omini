@@ -214,7 +214,6 @@ pub async fn execute_manual_compact(
                                 thread_id: compacted_thread_id,
                                 expected_version,
                                 messages,
-                                created_at: Utc::now(),
                                 ack,
                             })
                             .await;
