@@ -1,7 +1,6 @@
 use omini_protocol::{
     AckResponse, AgentRecord, AgentSourceKind, CreateProjectRequest, CreateThreadRequest,
     GenerateAgentRequest, GenerateAgentResponse, ProjectPathStatus, ProtocolError, SetModelRequest,
-    SetThinkingDisplayRequest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -64,21 +63,17 @@ fn create_thread_request_partial_model_override_preserves_missing_model() {
 }
 
 #[test]
-fn model_and_display_requests_omit_unset_optional_fields() {
+fn model_requests_omit_unset_optional_fields() {
     let model = SetModelRequest {
         provider: "openai".to_string(),
         model: "gpt-test".to_string(),
         thinking_effort: None,
     };
-    let display: SetThinkingDisplayRequest = serde_json::from_value(json!({ "show": null }))
-        .expect("null display preference should retain toggle semantics");
 
     assert_eq!(
         serde_json::to_value(model).unwrap(),
         json!({ "provider": "openai", "model": "gpt-test" })
     );
-    assert_eq!(display.show, None);
-    assert_eq!(serde_json::to_value(display).unwrap(), json!({}));
 }
 
 #[test]

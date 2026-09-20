@@ -1,7 +1,7 @@
 mod support;
 
 use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
-use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_domain::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
 use omini_domain::tool::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, StreamError};
 use serde_json::{Map, json};
@@ -25,8 +25,7 @@ fn request<'a>(messages: &'a [Message]) -> ApiRequest<'a> {
 }
 
 #[tokio::test]
-async fn anthropic_request_default_fields_cache_last_block_and_strip_tool_metadata() {
-    let server = TestServer::spawn(vec![TestResponse::sse("event: message_stop\ndata: {}\n\n")]);
+async fn anthropic_request_default_fields_cache_last_block_and_strip_tool_metadata() {    let server = TestServer::spawn(vec![TestResponse::sse("event: message_stop\ndata: {}\n\n")]);
     let metadata = Map::from_iter([(String::from("permission_denied"), json!(true))]);
     let messages = vec![Message::new(
         Role::User,
@@ -69,6 +68,35 @@ async fn anthropic_request_default_fields_cache_last_block_and_strip_tool_metada
     assert!(content[0].get("cache_control").is_none());
     assert!(content[1].get("metadata").is_none());
     assert_eq!(content[1]["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[tokio::test]
+async fn anthropic_request_strips_thinking_duration_ms() {
+    // duration_ms 是本地 UI 显示元数据，不允许泄漏进 Anthropic API 请求体
+    let server = TestServer::spawn(vec![TestResponse::sse("event: message_stop\ndata: {}\n\n")]);
+    let messages = vec![Message::new(
+        Role::Assistant,
+        vec![ContentBlock::Thinking(ThinkingBlock {
+            thinking: "reasoning".into(),
+            duration_ms: Some(5300),
+        })],
+    )];
+
+    client(ProviderEndpointKind::Anthropic, server.base_url())
+        .invoke(request(&messages))
+        .await
+        .expect("Anthropic request should start")
+        .collect::<Vec<_>>()
+        .await;
+    let recorded = server.next_request();
+    server.finish();
+
+    let content = recorded.body["messages"][0]["content"]
+        .as_array()
+        .expect("message content should be an array");
+    assert_eq!(content[0]["type"], json!("thinking"));
+    assert_eq!(content[0]["thinking"], json!("reasoning"));
+    assert!(content[0].get("duration_ms").is_none());
 }
 
 #[tokio::test]

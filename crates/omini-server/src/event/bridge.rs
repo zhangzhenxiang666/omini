@@ -368,14 +368,8 @@ pub fn runtime_event_from_runtime_contract_event(
     ))
 }
 
-pub fn thinking_display_changed_protocol_event(show: bool) -> client_proto::RuntimeEvent {
-    client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThinkingDisplayChanged(
-        client_proto::ThinkingDisplayChangedEvent { show },
-    ))
-}
-
 /// Server 端直接构造的 thread title 变更事件。新架构下 title 由 server 编排层
-/// 负责,绕开 core 内部事件通道 —— 这里和 `thinking_display_changed_event` 对称。
+/// 负责,绕开 core 内部事件通道。
 pub fn thread_title_changed_protocol_event(title: Option<String>) -> client_proto::RuntimeEvent {
     client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThreadTitleChanged(
         client_proto::ThreadTitleChangedEvent { title },
@@ -755,18 +749,5 @@ mod tests {
                 },
             )
         );
-    }
-
-    #[test]
-    fn thinking_display_changed_is_typed() {
-        let event = thinking_display_changed_protocol_event(false);
-
-        assert_eq!(event.kind(), "thinking_display_changed");
-        assert!(matches!(
-            event.event,
-            client_proto::TypedRuntimeEvent::ThinkingDisplayChanged(
-                client_proto::ThinkingDisplayChangedEvent { show: false }
-            )
-        ));
     }
 }

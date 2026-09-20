@@ -21,11 +21,6 @@ impl ProjectManager {
             .join("AGENTS.md")
             .metadata()
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-        let show_thinking_blocks = self
-            .project
-            .load_state()
-            .map(|state| state.show_thinking_blocks)
-            .unwrap_or(true);
         let agents = omini_core::project_agents_snapshot(&settings)
             .records
             .into_iter()
@@ -58,7 +53,6 @@ impl ProjectManager {
             context_window,
             mcp_server_count,
             has_project_instructions,
-            show_thinking_blocks,
             agents,
             skills,
             git_branch: git::detect_git_branch(&self.cwd),

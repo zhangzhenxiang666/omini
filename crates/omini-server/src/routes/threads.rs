@@ -158,22 +158,6 @@ pub async fn toggle_profile(
         .map_err(core_error)
 }
 
-/// 设置当前线程是否显示思考内容。
-#[axum::debug_handler]
-pub async fn set_thinking_display(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::SetThinkingDisplayRequest>,
-) -> ApiResult<client_proto::AckResponse> {
-    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
-    thread
-        .set_thinking_display(request)
-        .map(|_| Json(client_proto::AckResponse::ok()))
-        .map_err(core_error)
-}
-
 /// 加载并打开指定的已有线程。
 #[axum::debug_handler]
 pub async fn open_thread(

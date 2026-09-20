@@ -6,8 +6,9 @@ use super::{
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    build_bordered_lines, build_thinking_lines, render_get_task, render_tool,
-    tool_error_display_text, truncate_display_width,
+    activity_summary_line, build_bordered_lines, format_thinking_duration, is_special_tool,
+    render_get_task, render_tool, render_tool_compact, thinking_duration_line,
+    tool_category, tool_error_display_text, truncate_display_width, ToolCategory,
 };
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::{ContentBlock, ToolUseBlock};
@@ -151,8 +152,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     //    含未完成工具（pending tool use）的消息不进入缓存，而是作为 live 段每帧重渲染。
 
     let live_start = state.live_message_start.min(state.messages.len());
-    let dims_match = state.render_cache.completed_content_width == content_width
-        && state.render_cache.completed_show_thinking == state.show_thinking_blocks;
+    let dims_match = state.render_cache.completed_content_width == content_width;
 
     if state.render_cache.completed_message_count == 0 || !dims_match {
         // 缓存完全失效或维度变化 → 全量重建到 live 边界
@@ -161,7 +161,6 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         state.render_cache.completed_selectable = sel;
         state.render_cache.completed_message_count = live_start;
         state.render_cache.completed_content_width = content_width;
-        state.render_cache.completed_show_thinking = state.show_thinking_blocks;
     } else if state.render_cache.completed_message_count < live_start {
         // 增量追加到 live 边界
         let start_idx = state.render_cache.completed_message_count;
@@ -542,6 +541,23 @@ fn render_single_ui_message(
             let msg_idx = *rendered_msg_idx;
             *rendered_msg_idx += 1;
 
+            // Claude Code 式活动收缩：assistant 消息的 thinking 时长与常规工具
+            // 聚合为一行摘要（`· Thought for 12s, ran 1 shell command`），
+            // 各工具结果首行依次挂在 └ 下；特殊交互工具与正文保持独立渲染。
+            if message.role == omini_domain::message::Role::Assistant {
+                let summary_lines = render_activity_summary(
+                    message,
+                    rendered_messages,
+                    tool_result_map,
+                    consumed,
+                    content_width,
+                );
+                if !summary_lines.is_empty() {
+                    selectable_lines.extend(summary_lines.iter().map(line_to_plain_text));
+                    all_lines.extend(summary_lines);
+                }
+            }
+
             for (block_idx, block) in message.content.iter().enumerate() {
                 if let ContentBlock::ToolResult(_) = block
                     && consumed.contains(&(msg_idx, block_idx))
@@ -590,7 +606,13 @@ fn render_single_ui_message(
                         block_lines.append(&mut lines);
                     }
                     ContentBlock::Image(_) => {}
+                    // thinking 块已并入活动聚合摘要；思考内容文本不再展示
+                    ContentBlock::Thinking(_) => continue,
                     ContentBlock::ToolUse(tu) => {
+                        // 常规工具已由活动聚合摘要渲染（主行统计 + └ 结果首行）
+                        if !is_special_tool(tu) {
+                            continue;
+                        }
                         let tool_pause = state.tool_pause_for_tool_use(&tu.id);
                         let tool_pause_active =
                             tool_pause.map(|pause| state.is_active_tool_pause(pause));
@@ -671,13 +693,6 @@ fn render_single_ui_message(
                             block_lines.extend(tool_lines);
                         }
                     }
-                    ContentBlock::Thinking(tb) => {
-                        if !state.show_thinking_blocks {
-                            continue;
-                        }
-                        let mut lines = build_thinking_lines(&tb.thinking, content_width);
-                        block_lines.append(&mut lines);
-                    }
                     ContentBlock::ToolResult(tr) => {
                         let color = if tr.is_error {
                             Color::Rgb(255, 100, 100)
@@ -748,15 +763,22 @@ fn render_pending_assistant_lines(
             }
             ContentBlock::Image(_) => {}
             ContentBlock::Thinking(tb) => {
-                if !state.show_thinking_blocks {
-                    continue;
-                }
-                let mut lines = build_thinking_lines(&tb.thinking, content_width);
-                block_lines.append(&mut lines);
+                // 思考内容不再展示；进行中的段显示动态计时，已结算的段显示静态时长
+                let label = if let Some(ms) = tb.duration_ms {
+                    format!("· Thought for {}", format_thinking_duration(ms))
+                } else if let Some(started_at) = state.thinking_started_at {
+                    let secs = started_at.elapsed().as_secs();
+                    if secs >= 1 {
+                        format!("· Thinking for {secs}s...")
+                    } else {
+                        "· Thinking...".to_string()
+                    }
+                } else {
+                    "· Thinking...".to_string()
+                };
+                block_lines.push(thinking_duration_line(&label));
             }
             ContentBlock::ToolUse(tu) => {
-                let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                let tool_pause_active = tool_pause.map(|pause| state.is_active_tool_pause(pause));
                 if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
                     let node = state
                         .subagents_by_tool_use
@@ -785,8 +807,11 @@ fn render_pending_assistant_lines(
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }
-                } else {
-                    // 检查是否有对应的 ToolResult
+                } else if is_special_tool(tu) {
+                    // 特殊交互工具（ask_user/todo_write/view_image）保持详细渲染
+                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                    let tool_pause_active =
+                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
                     let tr = tr_indices.get(&tu.id).and_then(|&bi| {
                         if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
                             consumed_tr.insert(bi);
@@ -804,6 +829,38 @@ fn render_pending_assistant_lines(
                         Some(state.status_bar.cwd.as_path()),
                     );
                     block_lines.extend(tool_lines);
+                } else {
+                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
+                    let tool_pause_active =
+                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
+                    // 检查是否有对应的 ToolResult
+                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
+                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
+                            consumed_tr.insert(bi);
+                            Some(tr.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    if tr.is_none() && tool_pause.is_some() {
+                        // 权限确认等待期间保持带确认预览的等待渲染
+                        block_lines.extend(render_tool(
+                            tu,
+                            None,
+                            tool_pause,
+                            tool_pause_active,
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        ));
+                    } else {
+                        // 常规工具紧凑形态：主行 + 结果首行，与完成态聚合摘要的子行一致
+                        block_lines.extend(render_tool_compact(
+                            tu,
+                            tr.as_ref(),
+                            content_width,
+                            Some(state.status_bar.cwd.as_path()),
+                        ));
+                    }
                 }
             }
             ContentBlock::ToolResult(tr) => {
@@ -848,6 +905,94 @@ fn get_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'
         .map(|node| (node.agent_label.as_str(), node.title.as_str()))
 }
 
+/// 渲染 assistant 消息的活动聚合摘要块：`· Thought for 12s, ran 1 shell command`
+/// 主行 + 各常规工具结果首行的 `└` 挂接行。
+///
+/// thinking 时长取消息内所有已测量 Thinking 块之和（旧记录无数据则不计）；
+/// 常规工具按类别统计，其配对的 ToolResult 位置标记进 `consumed` 防止重复渲染。
+/// 无思考数据且无常规工具时返回空（如纯文本回复或仅特殊工具）。
+fn render_activity_summary(
+    message: &omini_domain::message::Message,
+    rendered_messages: &[&omini_domain::message::Message],
+    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    consumed: &mut HashSet<(usize, usize)>,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let mut thinking_ms: Option<u64> = None;
+    for block in &message.content {
+        if let ContentBlock::Thinking(tb) = block
+            && let Some(ms) = tb.duration_ms
+        {
+            thinking_ms = Some(thinking_ms.unwrap_or(0) + ms);
+        }
+    }
+
+    // 常规工具按类别聚合计数，同时保持出现顺序用于结果首行挂接
+    let mut tool_counts: Vec<(ToolCategory, usize)> = Vec::new();
+    let mut compact_tools: Vec<(
+        &ToolUseBlock,
+        Option<&omini_domain::message::ToolResultBlock>,
+    )> = Vec::new();
+    for block in &message.content {
+        let ContentBlock::ToolUse(tu) = block else {
+            continue;
+        };
+        if is_special_tool(tu) {
+            continue;
+        }
+        let category = tool_category(tu);
+        if let Some((_, count)) = tool_counts.iter_mut().find(|(c, _)| *c == category) {
+            *count += 1;
+        } else {
+            tool_counts.push((category, 1));
+        }
+
+        let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
+            positions.first().and_then(|&(mi, bi)| {
+                if let ContentBlock::ToolResult(tr) = &rendered_messages[mi].content[bi] {
+                    Some(tr)
+                } else {
+                    None
+                }
+            })
+        });
+        compact_tools.push((tu, tool_result));
+        if let Some(positions) = tool_result_map.get(&tu.id) {
+            for pos in positions {
+                consumed.insert(*pos);
+            }
+        }
+    }
+
+    let Some(summary) = activity_summary_line(thinking_ms, &tool_counts, content_width) else {
+        return Vec::new();
+    };
+
+    let mut lines = vec![summary];
+    let detail_style = Style::default().fg(Color::Rgb(140, 145, 155));
+    let error_style = Style::default().fg(Color::Rgb(255, 100, 100));
+    for (_tool_use, tool_result) in compact_tools {
+        let Some(tr) = tool_result else {
+            continue;
+        };
+        let content = if tr.is_error {
+            tool_error_display_text(&tr.content)
+        } else {
+            tr.content.trim().to_string()
+        };
+        let Some(first) = content.lines().map(str::trim).find(|l| !l.is_empty()) else {
+            continue;
+        };
+        let width = content_width.saturating_sub(UnicodeWidthStr::width("  └ "));
+        let style = if tr.is_error { error_style } else { detail_style };
+        lines.push(Line::from(vec![
+            Span::raw("  └ "),
+            Span::styled(truncate_display_width(first, width), style),
+        ]));
+    }
+    lines
+}
+
 /// 渲染 pending_proposed_plan。
 fn render_pending_plan_lines(
     plan_text: &str,
@@ -881,6 +1026,7 @@ fn render_pending_compact_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omini_domain::message::ThinkingBlock;
     use omini_domain::message::{ContentBlock, Message, Role};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -935,14 +1081,17 @@ mod tests {
     }
 
     #[test]
-    fn thinking_blocks_render_when_enabled() {
+    fn thinking_duration_renders_in_activity_summary() {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.messages.push(UiMessage::Message(Message::new(
             Role::Assistant,
             vec![
-                ContentBlock::from_thinking("checking context".to_string()),
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "checking context".to_string(),
+                    duration_ms: Some(5300),
+                }),
                 ContentBlock::from_text("done".to_string()),
             ],
         )));
@@ -951,20 +1100,19 @@ mod tests {
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
             .unwrap();
 
-        assert!(
-            state
-                .selectable_message_lines
-                .iter()
-                .any(|line| line.contains("Thinking: checking context"))
-        );
+        let rendered = state.selectable_message_lines.join("\n");
+        assert!(rendered.contains("Thought for 5s"), "rendered: {rendered}");
+        // 思考内容文本不再展示
+        assert!(!rendered.contains("checking context"));
+        assert!(rendered.contains("done"));
     }
 
     #[test]
-    fn thinking_blocks_are_hidden_when_disabled() {
+    fn thinking_without_duration_renders_no_thinking_line() {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.show_thinking_blocks = false;
+        // 旧持久化记录：无 duration_ms，也没有工具活动 → 不渲染任何思考行
         state.messages.push(UiMessage::Message(Message::new(
             Role::Assistant,
             vec![
@@ -977,17 +1125,46 @@ mod tests {
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
             .unwrap();
 
+        let rendered = state.selectable_message_lines.join("\n");
+        assert!(!rendered.contains("Thought for"));
+        assert!(!rendered.contains("checking context"));
+        assert!(rendered.contains("done"));
+    }
+
+    #[test]
+    fn activity_summary_aggregates_thinking_and_regular_tools() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let bash_input = HashMap::from([(
+            "command".to_string(),
+            serde_json::json!("git status"),
+        )]);
+        state.messages.push(UiMessage::Message(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "let me check".to_string(),
+                    duration_ms: Some(12_000),
+                }),
+                ContentBlock::from_tool_use("t1".to_string(), "bash".to_string(), bash_input),
+                ContentBlock::from_tool_result("t1".to_string(), false, "On branch main\n".to_string()),
+                ContentBlock::from_text("fixed".to_string()),
+            ],
+        )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
         assert!(
-            !state
-                .selectable_message_lines
-                .iter()
-                .any(|line| line.contains("Thinking: checking context"))
+            rendered.contains("Thought for 12s, ran 1 shell command"),
+            "rendered: {rendered}"
         );
-        assert!(
-            state
-                .selectable_message_lines
-                .iter()
-                .any(|line| line.contains("done"))
-        );
+        assert!(rendered.contains("└ On branch main"));
+        assert!(rendered.contains("fixed"));
+        // 常规工具不再展开独立主行
+        assert!(!rendered.contains("· Bash"));
     }
 }

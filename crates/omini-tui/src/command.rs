@@ -32,14 +32,6 @@ pub fn builtin_command_summaries() -> Vec<CommandSummary> {
         ),
         builtin("init", &[], "分析项目并生成 AGENTS.md", 50, true, None),
         builtin("rename", &[], "重命名当前会话", 60, true, Some("<name>")),
-        builtin(
-            "thinking",
-            &[],
-            "开启/关闭消息区 thinking 块展示",
-            80,
-            true,
-            Some("[on | off]"),
-        ),
         builtin("help", &["?"], "显示帮助", 900, false, None),
         builtin("exit", &["quit"], "退出程序", 1000, false, None),
     ]

@@ -12,18 +12,12 @@ impl ProjectManager {
         &self,
     ) -> Result<client_proto::ProjectRuntimeConfigResponse, CoreError> {
         let settings = self.fresh_settings_with_state()?;
-        let show_thinking_blocks = self
-            .project
-            .load_state()
-            .map(|state| state.show_thinking_blocks)
-            .unwrap_or(true);
         let model = settings.active_model();
         Ok(client_proto::ProjectRuntimeConfigResponse {
             context_window: Some(model.context_window),
             active_provider: model.provider_id.clone(),
             model: model.model_id.clone(),
             thinking_effort: model.thinking_effort,
-            show_thinking_blocks,
         })
     }
 
@@ -101,21 +95,6 @@ impl ProjectManager {
             .load_state()
             .map_err(|error| CoreError::project_state("failed to load project state", error))?;
         state.thinking_effort = selected.thinking_effort;
-        self.project
-            .save_state(&state)
-            .map_err(|error| CoreError::project_state("failed to save project state", error))?;
-        self.project_runtime_config_response()
-    }
-
-    pub fn set_thinking_display(
-        &self,
-        request: client_proto::SetThinkingDisplayRequest,
-    ) -> Result<client_proto::ProjectRuntimeConfigResponse, CoreError> {
-        let mut state = self
-            .project
-            .load_state()
-            .map_err(|error| CoreError::project_state("failed to load project state", error))?;
-        state.show_thinking_blocks = request.show.unwrap_or(!state.show_thinking_blocks);
         self.project
             .save_state(&state)
             .map_err(|error| CoreError::project_state("failed to save project state", error))?;

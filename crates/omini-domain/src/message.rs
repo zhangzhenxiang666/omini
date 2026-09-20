@@ -52,6 +52,11 @@ pub struct ToolResultBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ThinkingBlock {
     pub thinking: String,
+    /// 该 thinking 段持续的毫秒数，由 core 引擎按 delta 到达时间测量。
+    /// 仅用于 UI 显示与持久化回放；发往 Anthropic 前由 provider 剥离。
+    /// 旧持久化记录无此字段，反序列化为 None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -81,7 +86,10 @@ impl std::fmt::Display for Role {
 
 impl ContentBlock {
     pub fn from_thinking(thinking: String) -> Self {
-        Self::Thinking(ThinkingBlock { thinking })
+        Self::Thinking(ThinkingBlock {
+            thinking,
+            duration_ms: None,
+        })
     }
 
     pub fn from_text(text: String) -> Self {

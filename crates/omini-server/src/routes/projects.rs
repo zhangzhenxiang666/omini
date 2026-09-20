@@ -125,17 +125,3 @@ pub async fn set_thinking_effort(
         .map(Json)
         .map_err(core_error)
 }
-
-/// 设置项目默认 thinking 块显示偏好。
-#[axum::debug_handler]
-pub async fn set_thinking_display(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path(project_id): Path<String>,
-    Json(request): Json<protocol::SetThinkingDisplayRequest>,
-) -> ApiResult<protocol::ProjectRuntimeConfigResponse> {
-    let project = require_project(&manager, &project_id).await?;
-    project
-        .set_thinking_display(request)
-        .map(Json)
-        .map_err(core_error)
-}

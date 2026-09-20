@@ -286,10 +286,10 @@ impl UiState {
                 self.main_query_active = true;
                 self.show_start_screen = false;
                 self.manual_compact_running = false;
-                self.activity_status_title = None;
                 self.pending_assistant = None;
                 self.pending_proposed_plan = None;
                 self.pending_compact_summary = None;
+                self.thinking_started_at = None;
                 self.clear_run_dividers();
                 // 重连状态同步可能已校准活动计时器，避免被 replay 的 RunStarted 重置。
                 if self.run_timer.is_none() {
@@ -315,17 +315,22 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::TurnStarted => {
+                // 上轮残留的思考计时先结算，再提交 pending_assistant
+                self.settle_active_thinking_segment();
                 // 如果上轮还有未提交的 pending_assistant，先推入 messages
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
                     self.messages.push(UiMessage::Message(msg));
                 }
-                self.activity_status_title = None;
                 self.agent_status = AgentStatus::Thinking;
             }
             RuntimeToUiEvent::ThinkingDelta(t) => {
                 self.agent_status = AgentStatus::Thinking;
+                // 首个 delta 开启本地计时；结束由 text/tool/turn 结算
+                if self.thinking_started_at.is_none() {
+                    self.thinking_started_at = Some(std::time::Instant::now());
+                }
                 let pending = self
                     .pending_assistant
                     .get_or_insert_with(|| Message::new(Role::Assistant, Vec::new()));
@@ -334,14 +339,9 @@ impl UiState {
                 } else {
                     pending.content.push(ContentBlock::from_thinking(t));
                 }
-                if self.activity_status_title.is_none()
-                    && let Some(title) = pending_activity_title(pending)
-                {
-                    self.activity_status_title = Some(title);
-                }
             }
             RuntimeToUiEvent::TextDelta(t) => {
-                self.activity_status_title = None;
+                self.settle_active_thinking_segment();
                 self.agent_status = AgentStatus::Working;
                 let pending = self
                     .pending_assistant
@@ -353,14 +353,14 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::ProposedPlanDelta(t) => {
-                self.activity_status_title = None;
+                self.settle_active_thinking_segment();
                 self.agent_status = AgentStatus::Working;
                 self.pending_proposed_plan
                     .get_or_insert_with(String::new)
                     .push_str(&t);
             }
             RuntimeToUiEvent::ToolUse(tu) => {
-                self.activity_status_title = None;
+                self.settle_active_thinking_segment();
                 self.running_tools.insert(tu.id.clone());
                 let pending = self
                     .pending_assistant
@@ -370,7 +370,7 @@ impl UiState {
             }
             RuntimeToUiEvent::ToolResult(tr) => {
                 let tool_use_id = tr.tool_use_id.clone();
-                self.activity_status_title = None;
+                self.settle_active_thinking_segment();
                 self.finish_subagent_for_tool_result(&tr);
                 self.running_tools.remove(&tr.tool_use_id);
                 let removed_active = self.remove_tool_pause(&tr.tool_use_id);
@@ -394,6 +394,7 @@ impl UiState {
                 self.on_tool_result(&tool_use_id);
             }
             RuntimeToUiEvent::TurnEnded => {
+                self.settle_active_thinking_segment();
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
@@ -410,7 +411,6 @@ impl UiState {
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
-                self.activity_status_title = None;
                 self.agent_status = AgentStatus::Working;
                 self.update_live_boundary();
             }
@@ -419,6 +419,7 @@ impl UiState {
             }
             RuntimeToUiEvent::RunFinished => {
                 self.main_query_active = false;
+                self.settle_active_thinking_segment();
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
@@ -440,7 +441,6 @@ impl UiState {
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
-                self.activity_status_title = None;
                 self.refresh_input_placeholder();
                 self.agent_status = AgentStatus::Idle;
                 self.update_live_boundary();
@@ -451,7 +451,6 @@ impl UiState {
                     self.prepare_active_tool_pause();
                 }
                 self.pause_run_timer();
-                self.activity_status_title = None;
                 self.agent_status = AgentStatus::AwaitingInput;
             }
             RuntimeToUiEvent::PlanSubmitted(plan) => {
@@ -552,10 +551,6 @@ impl UiState {
                 self.interaction_step = None;
                 self.interaction_request = None;
             }
-            RuntimeToUiEvent::ThinkingDisplayChanged { show } => {
-                self.show_thinking_blocks = show;
-                self.invalidate_completed_cache();
-            }
             RuntimeToUiEvent::UsageChanged(usage) => {
                 self.status_bar.current_context_tokens = usage.current_context_tokens;
                 self.status_bar.total_tokens = usage.total_tokens;
@@ -579,7 +574,6 @@ impl UiState {
                 if event.trigger == CompactTrigger::Manual {
                     self.begin_manual_compact();
                 }
-                self.activity_status_title = None;
                 self.pending_compact_summary = Some(String::new());
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -589,7 +583,6 @@ impl UiState {
                 if event.trigger == CompactTrigger::Manual {
                     self.begin_manual_compact();
                 }
-                self.activity_status_title = None;
                 self.pending_compact_summary
                     .get_or_insert_with(String::new)
                     .push_str(&event.delta);
@@ -616,7 +609,6 @@ impl UiState {
                 if trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
                 }
-                self.activity_status_title = None;
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -634,7 +626,6 @@ impl UiState {
                 if event.trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
                 }
-                self.activity_status_title = None;
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -791,9 +782,9 @@ impl UiState {
         self.pending_assistant = None;
         self.pending_proposed_plan = None;
         self.pending_compact_summary = None;
+        self.thinking_started_at = None;
         self.pending_intervention_client_echo_id = None;
         self.main_query_active = false;
-        self.activity_status_title = None;
         self.run_timer = None;
         self.manual_compact_running = false;
         self.queued_user_inputs.clear();
@@ -811,63 +802,6 @@ impl UiState {
         self.scroll_to_bottom();
         self.rebuild_pending_tool_map();
     }
-}
-
-const ACTIVITY_STATUS_TITLE_MAX_CHARS: usize = 48;
-
-fn pending_activity_title(message: &Message) -> Option<String> {
-    message.content.iter().find_map(|block| {
-        if let ContentBlock::Thinking(thinking) = block {
-            extract_first_bold_title(&thinking.thinking)
-        } else {
-            None
-        }
-    })
-}
-
-fn extract_first_bold_title(text: &str) -> Option<String> {
-    // 只在第一句中搜索加粗标题
-    let first_sentence = text
-        .find(['。', '.', '？', '?', '！', '!', '\n'])
-        .map(|end| &text[..end])
-        .unwrap_or(text);
-
-    let bytes = first_sentence.as_bytes();
-    let mut start = None;
-    let mut idx = 0;
-
-    while idx + 1 < bytes.len() {
-        if bytes[idx] == b'*' && bytes[idx + 1] == b'*' {
-            if let Some(start_idx) = start {
-                return normalize_activity_title(&first_sentence[start_idx..idx]);
-            }
-            start = Some(idx + 2);
-            idx += 2;
-            continue;
-        }
-        idx += 1;
-    }
-
-    None
-}
-
-fn normalize_activity_title(title: &str) -> Option<String> {
-    let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if normalized.is_empty() {
-        return None;
-    }
-
-    let char_count = normalized.chars().count();
-    if char_count <= ACTIVITY_STATUS_TITLE_MAX_CHARS {
-        return Some(normalized);
-    }
-
-    let mut truncated = normalized
-        .chars()
-        .take(ACTIVITY_STATUS_TITLE_MAX_CHARS.saturating_sub(1))
-        .collect::<String>();
-    truncated.push('…');
-    Some(truncated)
 }
 
 fn compact_summary_failed_text(
@@ -1041,19 +975,6 @@ mod tests {
     }
 
     #[test]
-    fn thinking_display_changed_updates_ui_state() {
-        let mut state = UiState::new();
-
-        state.apply_event(RuntimeToUiEvent::ThinkingDisplayChanged { show: false });
-
-        assert!(!state.show_thinking_blocks);
-
-        state.apply_event(RuntimeToUiEvent::ThinkingDisplayChanged { show: true });
-
-        assert!(state.show_thinking_blocks);
-    }
-
-    #[test]
     fn user_message_injected_does_not_duplicate_optimistic_echo() {
         let mut state = UiState::new();
         let message = Message::from_user_text("hello".to_string());
@@ -1112,74 +1033,62 @@ mod tests {
     }
 
     #[test]
-    fn extracts_activity_title_from_first_sentence_bold_text() {
-        assert_eq!(
-            extract_first_bold_title("先看看 **分析代码结构** 再行动").as_deref(),
-            Some("分析代码结构")
-        );
-        // 换行符截断第一句，跨行加粗不再匹配
-        assert_eq!(extract_first_bold_title("** 分析   当前\n改动 **"), None);
-        assert_eq!(extract_first_bold_title("还没闭合 **分析代码"), None);
-        assert_eq!(extract_first_bold_title("空标题 **** 后面"), None);
-        assert_eq!(
-            extract_first_bold_title("**第一步** 然后 **第二步**").as_deref(),
-            Some("第一步")
-        );
-        // 第一句有句号时，只在第一句内搜索
-        assert_eq!(
-            extract_first_bold_title("让我先 **分析代码结构**。然后 **执行修改**。").as_deref(),
-            Some("分析代码结构")
-        );
-        // 加粗在第二句时不匹配
-        assert_eq!(
-            extract_first_bold_title("让我先分析代码结构。然后 **执行修改**。"),
-            None
-        );
-        // 句号分隔：第一句内无加粗
-        assert_eq!(
-            extract_first_bold_title("先想一下。接下来 **分析代码结构**。"),
-            None
-        );
-    }
-
-    #[test]
-    fn thinking_delta_sets_activity_title_after_bold_closes() {
+    fn thinking_delta_starts_timer_and_text_delta_settles_duration() {
         let mut state = UiState::new();
 
         state.apply_event(RuntimeToUiEvent::RunStarted);
-        state.apply_event(RuntimeToUiEvent::ThinkingDelta("**分析".to_string()));
+        assert_eq!(state.thinking_started_at, None);
 
-        assert_eq!(state.activity_status_title, None);
+        state.apply_event(RuntimeToUiEvent::ThinkingDelta("分析".to_string()));
+        assert!(state.thinking_started_at.is_some());
 
-        state.apply_event(RuntimeToUiEvent::ThinkingDelta("代码结构**".to_string()));
-
-        assert_eq!(state.activity_status_title.as_deref(), Some("分析代码结构"));
-    }
-
-    #[test]
-    fn working_events_clear_activity_title() {
-        let mut state = UiState::new();
-
-        state.apply_event(RuntimeToUiEvent::RunStarted);
-        state.apply_event(RuntimeToUiEvent::ThinkingDelta(
-            "**分析代码结构**".to_string(),
+        // 首个非思考内容到达时结算：计时关闭，时长写入未计时的 Thinking 块
+        state.apply_event(RuntimeToUiEvent::TextDelta("结论".to_string()));
+        assert_eq!(state.thinking_started_at, None);
+        let pending = state.pending_assistant.as_ref().expect("pending exists");
+        assert!(matches!(
+            pending.content.first(),
+            Some(ContentBlock::Thinking(tb)) if tb.duration_ms.is_some()
         ));
-        assert_eq!(state.activity_status_title.as_deref(), Some("分析代码结构"));
-
-        state.apply_event(RuntimeToUiEvent::TextDelta("开始处理".to_string()));
-
-        assert_eq!(state.activity_status_title, None);
-        assert_eq!(state.agent_status, AgentStatus::Working);
     }
 
     #[test]
-    fn run_started_clears_previous_activity_title() {
+    fn settle_writes_only_the_latest_unmeasured_thinking_block() {
         let mut state = UiState::new();
-        state.activity_status_title = Some("旧标题".to_string());
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        state.apply_event(RuntimeToUiEvent::ThinkingDelta("第一段".to_string()));
+        state.apply_event(RuntimeToUiEvent::TextDelta("正文".to_string()));
+
+        // 第二段思考：只结算到最后一个未计时块，第一段的时长不被覆盖
+        state.apply_event(RuntimeToUiEvent::ThinkingDelta("第二段".to_string()));
+        let first_ms = match state.pending_assistant.as_ref().unwrap().content.first() {
+            Some(ContentBlock::Thinking(tb)) => tb.duration_ms,
+            _ => panic!("first block should be thinking"),
+        };
+        state.apply_event(RuntimeToUiEvent::TurnEnded);
+
+        let blocks = &state.messages.last().unwrap().as_message().unwrap().content;
+        let durations: Vec<Option<u64>> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Thinking(tb) => Some(tb.duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(durations.len(), 2);
+        assert!(durations.iter().all(Option::is_some));
+        assert_eq!(durations[0], first_ms);
+    }
+
+    #[test]
+    fn run_started_and_thread_snapshot_reset_thinking_timer() {
+        let mut state = UiState::new();
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        state.apply_event(RuntimeToUiEvent::ThinkingDelta("思考".to_string()));
+        assert!(state.thinking_started_at.is_some());
 
         state.apply_event(RuntimeToUiEvent::RunStarted);
-
-        assert_eq!(state.activity_status_title, None);
+        assert_eq!(state.thinking_started_at, None);
     }
 
     #[test]

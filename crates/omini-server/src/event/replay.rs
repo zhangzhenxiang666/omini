@@ -28,7 +28,6 @@ pub struct RuntimeReplayBuffer {
     pending_plan_approval: Option<SequencedRuntimeEvent>,
     // server/core 的轻量 UI 状态事件不一定落在消息 snapshot 中；每类只保留最新值。
     latest_thread_title: Option<SequencedRuntimeEvent>,
-    latest_thinking_display: Option<SequencedRuntimeEvent>,
     latest_agent_management: Option<SequencedRuntimeEvent>,
     // Agent task 流不依赖前台运行生命周期，并按 task ID 相互隔离。
     agent_streams: HashMap<String, AgentStreamReplay>,
@@ -76,9 +75,6 @@ impl RuntimeReplayBuffer {
             }
             "thread_title_changed" => {
                 self.latest_thread_title = Some(event);
-            }
-            "thinking_display_changed" => {
-                self.latest_thinking_display = Some(event);
             }
             "agent_management_updated" => {
                 self.latest_agent_management = Some(event);
@@ -132,7 +128,6 @@ impl RuntimeReplayBuffer {
                 + self.compact_tail.len()
                 + usize::from(self.pending_plan_approval.is_some())
                 + usize::from(self.latest_thread_title.is_some())
-                + usize::from(self.latest_thinking_display.is_some())
                 + usize::from(self.latest_agent_management.is_some())
                 + self
                     .agent_streams
@@ -153,9 +148,6 @@ impl RuntimeReplayBuffer {
         }
         replay.extend(self.compact_tail.iter().cloned());
         if let Some(event) = &self.latest_thread_title {
-            replay.push(event.clone());
-        }
-        if let Some(event) = &self.latest_thinking_display {
             replay.push(event.clone());
         }
         if let Some(event) = &self.latest_agent_management {
@@ -372,7 +364,8 @@ impl RuntimeReplayBuffer {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
             && thread_messages.iter().any(|message| {
-                message.role == domain::message::Role::Assistant && message.content == blocks
+                message.role == domain::message::Role::Assistant
+                    && strip_thinking_durations(&message.content) == blocks
             })
     }
 
@@ -439,6 +432,21 @@ fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::mess
             _ => None,
         })
         .collect()
+}
+
+/// 剥离 Thinking 块的思考时长后再比较。
+/// delta 重建的尾部块不带时长（时长由 engine 在 turn 结束时写入持久化消息），
+/// 全等比较前需先剥离该显示元数据，否则去重失效会导致重连时重放已持久化内容。
+fn strip_thinking_durations(
+    content: &[domain::message::ContentBlock],
+) -> Vec<domain::message::ContentBlock> {
+    let mut content = content.to_vec();
+    for block in &mut content {
+        if let domain::message::ContentBlock::Thinking(thinking) = block {
+            thinking.duration_ms = None;
+        }
+    }
+    content
 }
 
 /// 将连续文本或 thinking delta 合并成可比较的 `ContentBlock`。
@@ -565,8 +573,7 @@ mod tests {
 
     use super::*;
     use crate::event::bridge::{
-        runtime_event_from_runtime_contract_event, thinking_display_changed_protocol_event,
-        thread_title_changed_protocol_event,
+        runtime_event_from_runtime_contract_event, thread_title_changed_protocol_event,
     };
     use std::{collections::HashMap, path::PathBuf};
 
@@ -768,18 +775,14 @@ mod tests {
             1,
             thread_title_changed_protocol_event(Some("old".to_string())),
         ));
-        buffer.record(SequencedRuntimeEvent {
-            seq: 2,
-            event: thinking_display_changed_protocol_event(false),
-        });
         buffer.record(runtime_event(
-            3,
+            2,
             runtime_contract::RuntimeToServerEvent::AgentManagementUpdated {
                 records: Vec::new(),
             },
         ));
         buffer.record(sequenced_runtime_event(
-            4,
+            3,
             thread_title_changed_protocol_event(Some("new".to_string())),
         ));
 
@@ -787,21 +790,17 @@ mod tests {
 
         assert_eq!(
             replay.iter().map(|event| event.seq).collect::<Vec<_>>(),
-            vec![2, 3, 4]
+            vec![2, 3]
         );
         assert_eq!(
             replay
                 .iter()
                 .map(|event| event.event.kind())
                 .collect::<Vec<_>>(),
-            vec![
-                "thinking_display_changed",
-                "agent_management_updated",
-                "thread_title_changed"
-            ]
+            vec!["agent_management_updated", "thread_title_changed"]
         );
         assert!(matches!(
-            &replay[2].event.event,
+            &replay[1].event.event,
             client_proto::TypedRuntimeEvent::ThreadTitleChanged(event)
                 if event.title.as_deref() == Some("new")
         ));
@@ -992,6 +991,32 @@ mod tests {
         });
 
         // LLM 级去重使用单独传入的当前 context 消息。
+        buffer.record_snapshot(&snapshot(Vec::new()), &[assistant]);
+
+        assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
+    }
+
+    #[test]
+    fn replay_buffer_drops_assistant_tail_with_thinking_duration_in_snapshot() {
+        // 持久化消息的 thinking 块带 engine 测量的时长，而 delta 重建块没有；
+        // 去重比较必须剥离时长，否则重连会重放已持久化的思考/正文 delta。
+        let assistant = domain::message::Message::new(
+            domain::message::Role::Assistant,
+            vec![
+                domain::message::ContentBlock::Thinking(domain::message::ThinkingBlock {
+                    thinking: "thinking".to_string(),
+                    duration_ms: Some(5300),
+                }),
+                domain::message::ContentBlock::from_text("answer".to_string()),
+            ],
+        );
+        let mut buffer = RuntimeReplayBuffer::default();
+
+        buffer.record(sequenced(1, "run_started"));
+        buffer.record(sequenced(2, "turn_started"));
+        buffer.record(delta(3, "thinking_delta", "thinking"));
+        buffer.record(delta(4, "text_delta", "answer"));
+
         buffer.record_snapshot(&snapshot(Vec::new()), &[assistant]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);

@@ -1,4 +1,4 @@
-use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_domain::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -98,6 +98,49 @@ fn tool_result_nonempty_metadata_is_preserved() {
         serde_json::from_value(value.clone()).expect("metadata should deserialize");
     assert_eq!(
         serde_json::to_value(block).expect("metadata should serialize"),
+        value
+    );
+}
+
+#[test]
+fn thinking_duration_defaults_to_none_and_is_omitted() {
+    // 旧持久化记录没有 duration_ms 字段，必须能反序列化为 None 且序列化时省略
+    let value = json!({"type": "thinking", "thinking": "reason"});
+
+    let block: ContentBlock =
+        serde_json::from_value(value.clone()).expect("thinking should deserialize");
+    assert!(matches!(
+        &block,
+        ContentBlock::Thinking(ThinkingBlock {
+            duration_ms: None,
+            ..
+        })
+    ));
+    assert_eq!(
+        serde_json::to_value(block).expect("thinking should serialize"),
+        value
+    );
+}
+
+#[test]
+fn thinking_duration_is_preserved_when_present() {
+    let value = json!({
+        "type": "thinking",
+        "thinking": "reason",
+        "duration_ms": 5300
+    });
+
+    let block: ContentBlock =
+        serde_json::from_value(value.clone()).expect("duration should deserialize");
+    assert!(matches!(
+        &block,
+        ContentBlock::Thinking(ThinkingBlock {
+            duration_ms: Some(5300),
+            ..
+        })
+    ));
+    assert_eq!(
+        serde_json::to_value(block).expect("duration should serialize"),
         value
     );
 }

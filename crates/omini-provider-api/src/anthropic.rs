@@ -389,6 +389,7 @@ fn system_with_cache_control(system_prompt: &str) -> Value {
 fn messages_with_cache_control(messages: &[Message]) -> Result<Value, serde_json::Error> {
     let mut value = serde_json::to_value(messages)?;
     strip_tool_result_metadata(&mut value);
+    strip_thinking_durations(&mut value);
     if let Some(content_block) = value
         .as_array_mut()
         .and_then(|messages| messages.last_mut())
@@ -400,6 +401,27 @@ fn messages_with_cache_control(messages: &[Message]) -> Result<Value, serde_json
         content_block.insert("cache_control".to_string(), cache_control());
     }
     Ok(value)
+}
+
+/// 剥离 thinking 块的 duration_ms —— 它是本地 UI 显示元数据，不属于 API 协议。
+fn strip_thinking_durations(value: &mut Value) {
+    let Some(messages) = value.as_array_mut() else {
+        return;
+    };
+
+    for message in messages {
+        let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+
+        for block in content {
+            if block.get("type").and_then(Value::as_str) == Some("thinking")
+                && let Some(object) = block.as_object_mut()
+            {
+                object.remove("duration_ms");
+            }
+        }
+    }
 }
 
 fn strip_tool_result_metadata(value: &mut Value) {

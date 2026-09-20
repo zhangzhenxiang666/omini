@@ -129,8 +129,6 @@ pub struct OpenProjectResponse {
     pub mcp_server_count: usize,
     /// 项目是否存在可注入的本地 instructions。
     pub has_project_instructions: bool,
-    /// TUI 是否应默认展示 thinking 内容块。
-    pub show_thinking_blocks: bool,
     /// open 时可用于 @mention 或 agent 管理入口的 agent 摘要。
     pub agents: Vec<AgentSummary>,
     /// open 时可用于 slash skill 列表的用户可调用 skill 摘要。
@@ -198,7 +196,6 @@ pub struct ProjectRuntimeConfigResponse {
     pub thinking_effort: Option<ThinkingEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-    pub show_thinking_blocks: bool,
 }
 
 /// WebSocket runtime 事件直接承载 typed protocol event。
@@ -230,7 +227,6 @@ pub enum TypedRuntimeEvent {
     RunFinished,
     Notification(NotificationEvent),
     ModelChanged(ModelChangedEvent),
-    ThinkingDisplayChanged(ThinkingDisplayChangedEvent),
     UsageChanged(ThreadUsageSnapshot),
     UsageTotalsChanged(UsageTotalsChangedEvent),
     ActiveProfileChanged(ActiveProfileChangedEvent),
@@ -269,7 +265,6 @@ impl TypedRuntimeEvent {
             Self::RunFinished => "run_finished",
             Self::Notification(_) => "notification",
             Self::ModelChanged(_) => "model_changed",
-            Self::ThinkingDisplayChanged(_) => "thinking_display_changed",
             Self::UsageChanged(_) => "usage_changed",
             Self::UsageTotalsChanged(_) => "usage_totals_changed",
             Self::ActiveProfileChanged(_) => "active_profile_changed",
@@ -332,12 +327,6 @@ pub struct ModelChangedEvent {
     pub thinking_effort: Option<ThinkingEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u32>,
-}
-
-/// 当前线程 thinking 块显示偏好已变化。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ThinkingDisplayChangedEvent {
-    pub show: bool,
 }
 
 /// 当前线程累计 token usage 已变化。
@@ -630,14 +619,6 @@ pub struct SetThinkingEffortRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetActiveProfileRequest {
     pub profile: ActiveProfile,
-}
-
-/// 设置当前线程 thinking 块显示偏好的请求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SetThinkingDisplayRequest {
-    /// 目标显示状态；为空时表示按当前偏好切换。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub show: Option<bool>,
 }
 
 /// 项目下可见线程列表响应。

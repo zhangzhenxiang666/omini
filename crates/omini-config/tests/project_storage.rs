@@ -166,7 +166,6 @@ fn missing_state_returns_defaults_without_creating_file() {
     assert_eq!(state.default_provider, None);
     assert_eq!(state.default_model, None);
     assert_eq!(state.thinking_effort, None);
-    assert!(state.show_thinking_blocks);
     assert_eq!(state.created_at, state.accessed_at);
     assert!(!project.state_path().exists());
 }
@@ -180,7 +179,6 @@ fn project_state_round_trip_preserves_exact_values() {
         default_provider: Some("anthropic".into()),
         default_model: Some("claude".into()),
         thinking_effort: Some(ThinkingEffort::XHigh),
-        show_thinking_blocks: false,
         created_at: fixed_time("2020-01-02T03:04:05Z"),
         accessed_at: fixed_time("2021-02-03T04:05:06Z"),
     };
@@ -191,13 +189,13 @@ fn project_state_round_trip_preserves_exact_values() {
     assert_eq!(loaded.default_provider, state.default_provider);
     assert_eq!(loaded.default_model, state.default_model);
     assert_eq!(loaded.thinking_effort, state.thinking_effort);
-    assert_eq!(loaded.show_thinking_blocks, state.show_thinking_blocks);
     assert_eq!(loaded.created_at, state.created_at);
     assert_eq!(loaded.accessed_at, state.accessed_at);
 }
 
 #[test]
-fn legacy_state_without_display_flag_defaults_to_visible() {
+fn legacy_state_with_removed_show_thinking_flag_still_loads() {
+    // 旧版本 state.toml 含已删除的 show_thinking_blocks 字段，反序列化必须容忍未知键
     let temp = TestTempDir::new("state-default-field");
     let project_path = temp.create_dir("project");
     temp.write(
@@ -206,6 +204,7 @@ fn legacy_state_without_display_flag_defaults_to_visible() {
 default_provider = "openai"
 default_model = "gpt-test"
 thinking_effort = "high"
+show_thinking_blocks = false
 created_at = "2020-01-02T03:04:05Z"
 accessed_at = "2020-01-02T03:04:06Z"
 "#,
@@ -217,7 +216,6 @@ accessed_at = "2020-01-02T03:04:06Z"
     assert_eq!(state.default_provider.as_deref(), Some("openai"));
     assert_eq!(state.default_model.as_deref(), Some("gpt-test"));
     assert_eq!(state.thinking_effort, Some(ThinkingEffort::High));
-    assert!(state.show_thinking_blocks);
     assert_eq!(state.created_at, fixed_time("2020-01-02T03:04:05Z"));
     assert_eq!(state.accessed_at, fixed_time("2020-01-02T03:04:06Z"));
 }
@@ -236,7 +234,6 @@ fn first_project_open_seeds_model_state_and_layout() {
     assert_eq!(state.default_provider.as_deref(), Some("openai"));
     assert_eq!(state.default_model.as_deref(), Some("gpt-test"));
     assert_eq!(state.thinking_effort, None);
-    assert!(state.show_thinking_blocks);
     assert_eq!(state.created_at, state.accessed_at);
     assert!(project.state_path().is_file());
 }
@@ -255,7 +252,6 @@ fn reopening_project_preserves_choices_and_refreshes_access_time() {
             default_provider: Some("custom-provider".into()),
             default_model: Some("custom-model".into()),
             thinking_effort: Some(ThinkingEffort::Max),
-            show_thinking_blocks: false,
             created_at: fixed_created,
             accessed_at: fixed_accessed,
         })
@@ -269,7 +265,6 @@ fn reopening_project_preserves_choices_and_refreshes_access_time() {
     assert_eq!(state.default_provider.as_deref(), Some("custom-provider"));
     assert_eq!(state.default_model.as_deref(), Some("custom-model"));
     assert_eq!(state.thinking_effort, Some(ThinkingEffort::Max));
-    assert!(!state.show_thinking_blocks);
     assert_eq!(state.created_at, fixed_created);
     assert!(state.accessed_at > fixed_accessed);
 }
@@ -297,7 +292,6 @@ fn saving_state_without_project_directory_returns_io_error() {
         default_provider: None,
         default_model: None,
         thinking_effort: None,
-        show_thinking_blocks: true,
         created_at: fixed_time("2020-01-02T03:04:05Z"),
         accessed_at: fixed_time("2020-01-02T03:04:05Z"),
     };

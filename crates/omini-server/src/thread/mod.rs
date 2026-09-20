@@ -22,7 +22,6 @@ mod build;
 mod controller;
 mod core;
 mod events;
-mod preferences;
 mod presence;
 mod snapshot;
 mod status;

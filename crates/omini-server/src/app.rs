@@ -97,10 +97,6 @@ fn project_routes() -> Router<AppState> {
             post(routes::projects::set_thinking_effort),
         )
         .route(
-            "/thinking-display",
-            post(routes::projects::set_thinking_display),
-        )
-        .route(
             "/agents",
             get(routes::agents::list_project_agents).post(routes::agents::save_project_agent),
         )
@@ -175,10 +171,6 @@ fn thread_configuration_routes() -> Router<AppState> {
         )
         .route("/profile", post(routes::threads::set_profile))
         .route("/profile/toggle", post(routes::threads::toggle_profile))
-        .route(
-            "/thinking-display",
-            post(routes::threads::set_thinking_display),
-        )
 }
 
 fn thread_lifecycle_routes() -> Router<AppState> {

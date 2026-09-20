@@ -154,10 +154,6 @@ fn typed_event_payloads() -> Vec<(&'static str, Value)> {
             json!({ "type": "model_changed", "provider": "openai", "model": "gpt-test" }),
         ),
         (
-            "thinking_display_changed",
-            json!({ "type": "thinking_display_changed", "show": true }),
-        ),
-        (
             "usage_changed",
             json!({
                 "type": "usage_changed",

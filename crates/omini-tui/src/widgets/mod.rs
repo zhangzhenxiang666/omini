@@ -213,93 +213,252 @@ pub fn display_path(path: &str, project_dir: Option<&Path>) -> String {
     path.to_string()
 }
 
-pub fn build_thinking_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
-    let available = content_width.saturating_sub(2);
-    let mut lines: Vec<Line> = Vec::new();
-
-    let border_style = Style::default().fg(Color::DarkGray);
-    let prefix_style = Style::default()
-        .fg(Color::Rgb(141, 119, 78))
-        .add_modifier(Modifier::ITALIC);
-    let text_style = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC);
-    let rail_spans = || vec![Span::styled("\u{2503}", border_style), Span::raw(" ")];
-
-    if text.is_empty() {
-        let mut spans = rail_spans();
-        spans.push(Span::styled("Thinking: ", prefix_style));
-        lines.push(Line::from(spans));
-        return lines;
+pub fn format_thinking_duration(duration_ms: u64) -> String {
+    if duration_ms < 1000 {
+        return "<1s".to_string();
     }
-
-    let prefix = "Thinking: ";
-    let prefix_w = UnicodeWidthStr::width(prefix);
-    let first_line_available = available.saturating_sub(prefix_w);
-    let logical_lines: Vec<&str> = text.split('\n').collect();
-
-    for (ll_idx, ll) in logical_lines.iter().enumerate() {
-        let is_first = ll_idx == 0;
-
-        if is_first && first_line_available == 0 {
-            let mut spans = rail_spans();
-            spans.push(Span::styled(prefix, prefix_style));
-            lines.push(Line::from(spans));
-            let wrapped = word_wrap(ll, available);
-            for wl in wrapped {
-                let mut spans = rail_spans();
-                spans.push(Span::styled(wl, text_style));
-                lines.push(Line::from(spans));
-            }
-            continue;
-        }
-
-        if ll.is_empty() {
-            if is_first {
-                let mut spans = rail_spans();
-                spans.push(Span::styled(prefix, prefix_style));
-                lines.push(Line::from(spans));
-            } else {
-                lines.push(Line::from(rail_spans()));
-            }
-            continue;
-        }
-
-        if is_first {
-            let first_w = UnicodeWidthStr::width(*ll);
-            if prefix_w + first_w <= available {
-                let mut spans = rail_spans();
-                spans.push(Span::styled(prefix, prefix_style));
-                spans.push(Span::styled(ll.to_string(), text_style));
-                lines.push(Line::from(spans));
-            } else {
-                let first_wrapped = word_wrap(ll, first_line_available);
-                let first_chunk = first_wrapped.first().cloned().unwrap_or_default();
-                let mut spans = rail_spans();
-                spans.push(Span::styled(prefix, prefix_style));
-                spans.push(Span::styled(first_chunk, text_style));
-                lines.push(Line::from(spans));
-                if first_wrapped.len() > 1 {
-                    let rest = first_wrapped[1..].join(" ");
-                    let rest_wrapped = word_wrap(&rest, available);
-                    for rl in rest_wrapped {
-                        let mut spans = rail_spans();
-                        spans.push(Span::styled(rl, text_style));
-                        lines.push(Line::from(spans));
-                    }
-                }
-            }
+    // 不足 1 秒的分量向下取整，零分量省略（"1m" 而非 "1m 0s"）
+    let total_secs = duration_ms / 1000;
+    let seconds = total_secs % 60;
+    let minutes = (total_secs / 60) % 60;
+    let hours = total_secs / 3600;
+    if hours > 0 {
+        if minutes > 0 {
+            format!("{hours}h {minutes}m")
         } else {
-            let wrapped = word_wrap(ll, available);
-            for wl in wrapped {
-                let mut spans = rail_spans();
-                spans.push(Span::styled(wl, text_style));
-                lines.push(Line::from(spans));
-            }
+            format!("{hours}h")
         }
+    } else if minutes > 0 {
+        if seconds > 0 {
+            format!("{minutes}m {seconds}s")
+        } else {
+            format!("{minutes}m")
+        }
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+/// 思考时长行：完成后为静态 "Thought for 5s"，流式期间由调用方传入动态已耗时。
+pub fn thinking_duration_line(label: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        label.to_string(),
+        Style::default()
+            .fg(Color::Rgb(0x7a, 0x82, 0x8e))
+            .add_modifier(Modifier::ITALIC),
+    ))
+}
+
+/// 常规工具（bash/read/edit/write/search/mcp/skill 等）的紧凑渲染：
+/// 主行 `· ToolName(args)` + 结果首行 `  └ ...`。
+/// 特殊交互工具（ask_user/todo_write/view_image/subagent/get_task）不走此路径。
+pub fn render_tool_compact(
+    tool_use: &ToolUseBlock,
+    tool_result: Option<&ToolResultBlock>,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Vec<Line<'static>> {
+    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
+    let title_style = tool_title_style(accent, tool_result.is_none());
+    let mut lines = if mcp::is_mcp_tool(tool_use) {
+        vec![mcp::title_line(tool_use, title_style, content_width, tool_result.is_none())]
+    } else {
+        vec![compact_tool_title_line(tool_use, title_style, content_width, project_dir)]
+    };
+
+    if let Some(tr) = tool_result
+        && let Some(first) = tool_result_first_line(tr)
+    {
+        let style = if tr.is_error {
+            Style::default().fg(Color::Rgb(255, 100, 100))
+        } else {
+            Style::default().fg(Color::Rgb(140, 145, 155))
+        };
+        let width = content_width.saturating_sub(UnicodeWidthStr::width("  └ "));
+        lines.push(Line::from(vec![
+            Span::raw("  └ "),
+            Span::styled(truncate_display_width(&first, width), style),
+        ]));
     }
 
     lines
+}
+
+/// 生成紧凑工具主行 `· ToolName(args)`；未覆盖的工具退化为 `· {name}`。
+fn compact_tool_title_line(
+    tool_use: &ToolUseBlock,
+    title_style: Style,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw("· ")];
+    match tool_use.name.as_str() {
+        "read" | "edit" | "write" => {
+            let title = match tool_use.name.as_str() {
+                "read" => "Read",
+                "edit" => "Edit",
+                _ => "Write",
+            };
+            spans.push(Span::styled(title, title_style));
+            spans.push(Span::raw(format!(
+                " {}",
+                compact_tool_path(tool_use, project_dir)
+            )));
+        }
+        "bash" => {
+            spans.push(Span::styled("Bash", title_style));
+            let command = tool_use
+                .input
+                .get("command")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .trim();
+            let used_width: usize = spans.iter().map(|span| span.width()).sum();
+            let command_width = content_width
+                .saturating_sub(used_width)
+                .saturating_sub(UnicodeWidthStr::width("()"));
+            spans.push(Span::raw("("));
+            spans.extend(bash_highlight::truncated_command_spans(
+                command,
+                command_width,
+                Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
+            ));
+            spans.push(Span::raw(")"));
+        }
+        "search" => {
+            spans.push(Span::styled("Search", title_style));
+            let query = tool_use
+                .input
+                .get("query")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            let used_width: usize = spans.iter().map(|span| span.width()).sum();
+            let width = content_width.saturating_sub(used_width + 1);
+            spans.push(Span::raw(format!(
+                " {}",
+                truncate_display_width(query, width)
+            )));
+        }
+        "skill" => {
+            let name = tool_use
+                .input
+                .get("name")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or("<unknown>");
+            spans.push(Span::styled("Skill", title_style));
+            spans.push(Span::raw(format!(" {name}")));
+        }
+        other => {
+            spans.push(Span::styled(other.to_string(), title_style));
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// 工具结果的首个非空行，用于 `└` 摘要挂接；错误结果先转换为用户可读文案。
+fn tool_result_first_line(tool_result: &ToolResultBlock) -> Option<String> {
+    let content = if tool_result.is_error {
+        tool_error_display_text(&tool_result.content)
+    } else {
+        tool_result.content.trim().to_string()
+    };
+    content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// 参与回合活动聚合的工具类别；决定摘要行里的统计短语。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ToolCategory {
+    Shell,
+    FileRead,
+    FileEdit,
+    FileWrite,
+    Search,
+    Skill,
+    McpTool,
+    Other(String),
+}
+
+/// 特殊交互工具不走紧凑聚合路径，保持独立的详细渲染。
+pub fn is_special_tool(tool_use: &ToolUseBlock) -> bool {
+    matches!(
+        tool_use.name.as_str(),
+        "ask_user" | "todo_write" | "view_image" | "spawn_agent" | "run_agent" | "get_task"
+    )
+}
+
+pub fn tool_category(tool_use: &ToolUseBlock) -> ToolCategory {
+    if mcp::is_mcp_tool(tool_use) {
+        return ToolCategory::McpTool;
+    }
+    match tool_use.name.as_str() {
+        "bash" => ToolCategory::Shell,
+        "read" => ToolCategory::FileRead,
+        "edit" => ToolCategory::FileEdit,
+        "write" => ToolCategory::FileWrite,
+        "search" => ToolCategory::Search,
+        "skill" => ToolCategory::Skill,
+        other => ToolCategory::Other(other.to_string()),
+    }
+}
+
+/// 回合活动摘要行：思考时长 + 工具统计聚合为一条，如
+/// `Thought for 12s, ran 1 shell command, read 1 file`。
+/// `thinking_ms` 为 None 时不输出思考部分（旧记录或非思考模型）。
+pub fn activity_summary_line(
+    thinking_ms: Option<u64>,
+    tool_counts: &[(ToolCategory, usize)],
+    content_width: usize,
+) -> Option<Line<'static>> {
+    let mut phrases: Vec<String> = Vec::new();
+    if let Some(ms) = thinking_ms {
+        phrases.push(format!("Thought for {}", format_thinking_duration(ms)));
+    }
+    for (category, count) in tool_counts {
+        phrases.push(category_phrase(category, *count));
+    }
+    if phrases.is_empty() {
+        return None;
+    }
+
+    // 无思考部分时首短语首字母大写，作为摘要行开头
+    if thinking_ms.is_none()
+        && let Some(first) = phrases.first_mut()
+    {
+        let mut chars = first.chars();
+        if let Some(head) = chars.next() {
+            *first = format!("{}{}", head.to_uppercase(), chars.as_str());
+        }
+    }
+
+    let style = Style::default()
+        .fg(Color::Rgb(0x7a, 0x82, 0x8e))
+        .add_modifier(Modifier::ITALIC);
+    let text = phrases.join(", ");
+    Some(Line::from(Span::styled(
+        truncate_display_width(&format!("· {text}"), content_width),
+        style,
+    )))
+}
+
+fn category_phrase(category: &ToolCategory, count: usize) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match category {
+        ToolCategory::Shell => format!("ran {count} shell command{plural}"),
+        ToolCategory::FileRead => format!("read {count} file{plural}"),
+        ToolCategory::FileEdit => format!("edited {count} file{plural}"),
+        ToolCategory::FileWrite => format!("wrote {count} file{plural}"),
+        ToolCategory::Search => format!("ran {count} search{plural}"),
+        ToolCategory::Skill => format!("used {count} skill{plural}"),
+        ToolCategory::McpTool => format!("called {count} MCP tool{plural}"),
+        ToolCategory::Other(name) => format!("used {name} ×{count}"),
+    }
 }
 
 pub fn render_tool(
@@ -601,11 +760,82 @@ mod tests {
     }
 
     #[test]
-    fn thinking_lines_render_with_left_rail() {
-        let lines = build_thinking_lines("checking context", 40);
+    fn format_thinking_duration_covers_subsecond_to_hours() {
+        assert_eq!(format_thinking_duration(0), "<1s");
+        assert_eq!(format_thinking_duration(999), "<1s");
+        assert_eq!(format_thinking_duration(1000), "1s");
+        assert_eq!(format_thinking_duration(5300), "5s");
+        assert_eq!(format_thinking_duration(59_999), "59s");
+        assert_eq!(format_thinking_duration(60_000), "1m");
+        assert_eq!(format_thinking_duration(80_000), "1m 20s");
+        assert_eq!(format_thinking_duration(3_900_000), "1h 5m");
+    }
 
-        assert_eq!(plain(&lines[0]), "\u{2503} Thinking: checking context");
-        assert_eq!(lines[0].spans[0].style.fg, Some(Color::DarkGray));
+    #[test]
+    fn activity_summary_combines_thinking_and_tool_counts() {
+        let counts = vec![
+            (ToolCategory::Shell, 2),
+            (ToolCategory::FileRead, 1),
+        ];
+        let line = activity_summary_line(Some(12_000), &counts, 80).expect("summary line");
+
+        assert_eq!(
+            plain(&line),
+            "· Thought for 12s, ran 2 shell commands, read 1 file"
+        );
+    }
+
+    #[test]
+    fn activity_summary_without_thinking_capitalizes_first_phrase() {
+        let counts = vec![(ToolCategory::Shell, 1)];
+        let line = activity_summary_line(None, &counts, 80).expect("summary line");
+
+        assert_eq!(plain(&line), "· Ran 1 shell command");
+    }
+
+    #[test]
+    fn activity_summary_empty_renders_nothing() {
+        assert!(activity_summary_line(None, &[], 80).is_none());
+        // 旧记录：thinking 无时长且无工具 → 不渲染
+        assert!(activity_summary_line(None, &[], 80).is_none());
+    }
+
+    #[test]
+    fn render_tool_compact_shows_title_and_result_first_line() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("command".to_string(), serde_json::json!("git status"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "bash".to_string(),
+            input,
+        };
+        let tool_result = ToolResultBlock {
+            tool_use_id: "toolu_1".to_string(),
+            is_error: false,
+            content: "On branch main\n\nnothing to commit".to_string(),
+            metadata: None,
+        };
+
+        let lines = render_tool_compact(&tool_use, Some(&tool_result), 80, None);
+
+        assert_eq!(plain(&lines[0]), "· Bash(git status)");
+        assert_eq!(plain(&lines[1]), "  └ On branch main");
+    }
+
+    #[test]
+    fn render_tool_compact_running_tool_has_no_detail_line() {
+        let mut input = std::collections::HashMap::new();
+        input.insert("file_path".to_string(), serde_json::json!("src/main.rs"));
+        let tool_use = ToolUseBlock {
+            id: "toolu_1".to_string(),
+            name: "read".to_string(),
+            input,
+        };
+
+        let lines = render_tool_compact(&tool_use, None, 80, None);
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(plain(&lines[0]), "· Read src/main.rs");
     }
 
     #[test]

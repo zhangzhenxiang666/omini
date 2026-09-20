@@ -385,7 +385,6 @@ pub struct RenderCache {
     pub completed_selectable: Vec<String>,
     pub completed_message_count: usize,
     pub completed_content_width: usize,
-    pub completed_show_thinking: bool,
 }
 
 #[derive(Debug)]
@@ -399,6 +398,10 @@ pub struct UiState {
     pub pending_proposed_plan: Option<String>,
     /// 正在流式构建中的 compact 摘要（含呼吸动画，不走缓存）
     pub pending_compact_summary: Option<String>,
+    /// 当前思考段的本地计时起点；收到首个 thinking delta 时开启，
+    /// 被 text/tool 事件结算写入 pending_assistant 的 Thinking 块 duration_ms。
+    /// 渲染层据此显示动态 "Thinking for Xs..."。
+    pub thinking_started_at: Option<std::time::Instant>,
     /// 渲染后的消息总行数（用于滚动条计算）
     pub total_lines: usize,
     /// 消息区域的位置和大小
@@ -440,8 +443,6 @@ pub struct UiState {
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     pub agent_status: AgentStatus,
-    /// 当前运行状态行优先展示的动态标题，通常从 thinking 内容的首个 Markdown 粗体标题提取。
-    pub activity_status_title: Option<String>,
     /// 手动 /compact 命令是否正在执行。compact 不走普通 query 生命周期。
     pub manual_compact_running: bool,
     /// 当前 query 的有效运行计时器；等待用户授权/回答时暂停。
@@ -514,8 +515,6 @@ pub struct UiState {
     pub interaction_step: Option<InteractionStep>,
     /// /help 底部抽屉状态。
     pub help_drawer: Option<HelpDrawerState>,
-    /// 是否在消息区展示 thinking 块。
-    pub show_thinking_blocks: bool,
     /// 渲染管线缓存，避免流式期间每帧全量重建。
     pub render_cache: RenderCache,
     /// 待审批的计划。
@@ -540,6 +539,7 @@ impl UiState {
             pending_assistant: None,
             pending_proposed_plan: None,
             pending_compact_summary: None,
+            thinking_started_at: None,
             total_lines: 0,
             messages_area: Rect::default(),
             selectable_message_lines: Vec::new(),
@@ -565,7 +565,6 @@ impl UiState {
             main_query_active: false,
             cursor_char: 0,
             agent_status: AgentStatus::Idle,
-            activity_status_title: None,
             manual_compact_running: false,
             run_timer: None,
             scroll_offset: 0,
@@ -601,7 +600,6 @@ impl UiState {
             interaction_request: None,
             interaction_step: None,
             help_drawer: None,
-            show_thinking_blocks: true,
             render_cache: RenderCache::default(),
             plan_approval: None,
             plan_approval_selected: 0,
@@ -813,7 +811,6 @@ impl UiState {
             if state == omini_protocol::ThreadRuntimeState::Idle {
                 self.manual_compact_running = false;
                 self.run_timer = None;
-                self.activity_status_title = None;
                 self.agent_status = AgentStatus::Idle;
             }
             return;
@@ -842,7 +839,6 @@ impl UiState {
             return;
         }
         self.prepare_active_tool_pause();
-        self.activity_status_title = None;
         self.agent_status = AgentStatus::AwaitingInput;
     }
 
@@ -885,9 +881,32 @@ impl UiState {
         });
     }
 
-    /// 使已完成消息的渲染缓存失效（消息列表变更、resize、thinking 切换时调用）。
+    /// 使已完成消息的渲染缓存失效（消息列表变更、resize 时调用）。
     pub fn invalidate_completed_cache(&mut self) {
         self.render_cache.completed_message_count = 0;
+    }
+
+    /// 结算当前思考计时段：把起点至今的耗时写入 `pending_assistant` 中
+    /// 最后一个未计时的 Thinking 块，并关闭计时。
+    /// 在首个非思考内容（text/tool/plan）到达或回合结束时调用；
+    /// 本地结算值用于流式显示，历史重载以 engine 测量的持久化值为准。
+    pub fn settle_active_thinking_segment(&mut self) {
+        let Some(started_at) = self.thinking_started_at.take() else {
+            return;
+        };
+        let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(pending) = &mut self.pending_assistant {
+            // 从后往前找当前正在累积（未计时）的 Thinking 块，
+            // 已计时的块属于更早的思考段，不能覆盖。
+            for block in pending.content.iter_mut().rev() {
+                if let omini_domain::message::ContentBlock::Thinking(tb) = block
+                    && tb.duration_ms.is_none()
+                {
+                    tb.duration_ms = Some(duration_ms);
+                    break;
+                }
+            }
+        }
     }
 
     /// 扫描指定消息，将其中的 ToolUse 块注册到 `pending_tool_message_map`。

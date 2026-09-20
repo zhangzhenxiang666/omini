@@ -50,7 +50,6 @@ async fn run_project_ui_async(connection: client::ProjectConnection) -> io::Resu
     state.status_bar.active_profile = ActiveProfile::Main;
     state.startup_mcp_server_count = open.mcp_server_count;
     state.startup_has_project_instructions = open.has_project_instructions;
-    state.show_thinking_blocks = open.show_thinking_blocks;
     state.status_bar.context_window = open.context_window;
     state.startup_recent_threads = open
         .threads

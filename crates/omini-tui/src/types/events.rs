@@ -30,8 +30,6 @@ pub enum UiToRuntimeEvent {
     CompactContext { instructions: Option<String> },
     /// 用户请求调整 thinking effort。
     SetThinkingEffort(ThinkingEffort),
-    /// 用户请求调整 thinking 块显示偏好。
-    SetThinkingDisplay { show: Option<bool> },
     /// 用户请求打开帮助抽屉。
     ShowHelp,
     /// 用户切换当前 active profile
@@ -169,10 +167,6 @@ pub enum RuntimeToUiEvent {
         model: String,
         thinking_effort: Option<ThinkingEffort>,
         context_window: Option<u32>,
-    },
-    /// thinking 块显示偏好已变更。
-    ThinkingDisplayChanged {
-        show: bool,
     },
     /// 当前会话 token usage 状态已变更。
     UsageChanged(ThreadUsageSnapshot),

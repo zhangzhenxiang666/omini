@@ -16,6 +16,7 @@ use omini_domain::tool::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, StreamError};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt;
@@ -106,6 +107,10 @@ impl QueryEngine {
         let mut stream_error = None;
         let mut stream_cancelled = false;
         let mut requested_finalization = None;
+        // 思考计时段：首个 thinking delta 到达时开启，被首个非思考内容（Text/ToolUse/Done）
+        // 或流结束结算。一个 Turn 可穿插多段思考（工具调用间），各自累积耗时。
+        let mut thinking_started_at: Option<Instant> = None;
+        let mut thinking_durations: Vec<Duration> = Vec::new();
 
         loop {
             let next = tokio::select! {
@@ -129,16 +134,21 @@ impl QueryEngine {
 
             match event {
                 Ok(ApiEvent::Text(delta)) => {
+                    close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
                     push_text_delta(&mut partial_blocks, &delta);
                     let _ = event_tx.send(EngineToRuntimeEvent::TextDelta(delta)).await;
                 }
                 Ok(ApiEvent::Thinking(delta)) => {
+                    if thinking_started_at.is_none() {
+                        thinking_started_at = Some(Instant::now());
+                    }
                     push_thinking_delta(&mut partial_blocks, &delta);
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::ThinkingDelta(delta))
                         .await;
                 }
                 Ok(ApiEvent::ToolUse(tool_use)) => {
+                    close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
                     partial_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::ToolUse(tool_use.clone()))
@@ -163,6 +173,7 @@ impl QueryEngine {
                     }
                 }
                 Ok(ApiEvent::Done(done)) => {
+                    close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
                     let _ = event_tx
                         .send(EngineToRuntimeEvent::UsageRecorded(done.usage))
                         .await;
@@ -175,7 +186,12 @@ impl QueryEngine {
             }
         }
 
+        // 流以思考结尾时的兜底结算（Err break / 意外结束 / Done 后残留）
+        close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
+
         if stream_cancelled || cancelled.load(Ordering::Relaxed) {
+            let mut partial_blocks = partial_blocks;
+            apply_thinking_durations(&mut partial_blocks, &thinking_durations);
             self.finish_interrupted_turn(
                 ctx.messages,
                 partial_blocks,
@@ -194,6 +210,8 @@ impl QueryEngine {
             let error = stream_error
                 .unwrap_or(RuntimeError::ProviderStream(StreamError::UnexpectedEnd))
                 .to_string();
+            let mut partial_blocks = partial_blocks;
+            apply_thinking_durations(&mut partial_blocks, &thinking_durations);
             self.finish_interrupted_turn(
                 ctx.messages,
                 partial_blocks,
@@ -212,7 +230,8 @@ impl QueryEngine {
         let assistant_index = if completion.message.content.is_empty() {
             None
         } else {
-            let message = completion.message;
+            let mut message = completion.message;
+            apply_thinking_durations(&mut message.content, &thinking_durations);
             let _ = event_tx
                 .send(EngineToRuntimeEvent::MessageProduced(message.clone()))
                 .await;
@@ -353,7 +372,32 @@ fn push_thinking_delta(blocks: &mut Vec<ContentBlock>, delta: &str) {
     } else {
         blocks.push(ContentBlock::Thinking(ThinkingBlock {
             thinking: delta.to_string(),
+            duration_ms: None,
         }));
+    }
+}
+
+/// 结束当前 thinking 计时段，把起点至今的耗时计入 durations。
+/// 段尚未开启时是空操作。
+fn close_thinking_segment(
+    thinking_started_at: &mut Option<Instant>,
+    thinking_durations: &mut Vec<Duration>,
+) {
+    if let Some(started_at) = thinking_started_at.take() {
+        thinking_durations.push(started_at.elapsed());
+    }
+}
+
+/// 将各 thinking 段的耗时按出现顺序写入 blocks 中的 Thinking 块。
+/// durations 少于 Thinking 块时（测量未覆盖，如旧流重放）剩余块保持 None。
+fn apply_thinking_durations(blocks: &mut [ContentBlock], durations: &[Duration]) {
+    let mut next_duration = durations.iter();
+    for block in blocks.iter_mut() {
+        if let ContentBlock::Thinking(thinking) = block
+            && let Some(duration) = next_duration.next()
+        {
+            thinking.duration_ms = Some(duration.as_millis() as u64);
+        }
     }
 }
 
@@ -442,6 +486,62 @@ mod tests {
         let results = vec![permission_denied_tool_result(false)];
 
         assert!(should_stop_after_denial(Some("main"), &results));
+    }
+
+    #[test]
+    fn apply_thinking_durations_writes_blocks_in_order() {
+        let mut blocks = vec![
+            ContentBlock::from_thinking("first".into()),
+            ContentBlock::from_text("answer".into()),
+            ContentBlock::from_thinking("second".into()),
+        ];
+
+        apply_thinking_durations(
+            &mut blocks,
+            &[Duration::from_millis(1500), Duration::from_millis(3200)],
+        );
+
+        let durations: Vec<Option<u64>> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking(tb) => Some(tb.duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(durations, vec![Some(1500), Some(3200)]);
+    }
+
+    #[test]
+    fn apply_thinking_durations_with_fewer_durations_leaves_remaining_none() {
+        let mut blocks = vec![
+            ContentBlock::from_thinking("first".into()),
+            ContentBlock::from_thinking("second".into()),
+        ];
+
+        apply_thinking_durations(&mut blocks, &[Duration::from_millis(700)]);
+
+        let durations: Vec<Option<u64>> = blocks
+            .iter()
+            .map(|block| match block {
+                ContentBlock::Thinking(tb) => tb.duration_ms,
+                _ => unreachable!("only thinking blocks are constructed"),
+            })
+            .collect();
+        assert_eq!(durations, vec![Some(700), None]);
+    }
+
+    #[test]
+    fn close_thinking_segment_records_elapsed_and_is_noop_when_closed() {
+        let mut started_at = Some(Instant::now());
+        let mut durations = Vec::new();
+
+        close_thinking_segment(&mut started_at, &mut durations);
+        assert_eq!(started_at, None);
+        assert_eq!(durations.len(), 1);
+
+        // 已关闭时再次结算不产生新段
+        close_thinking_segment(&mut started_at, &mut durations);
+        assert_eq!(durations.len(), 1);
     }
 
     #[test]

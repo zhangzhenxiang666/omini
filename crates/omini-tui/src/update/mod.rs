@@ -581,18 +581,6 @@ fn request_from_command_draft(state: &mut UiState, draft: UserDraft) -> Option<C
             input: protocol::command_input_from_draft(draft, "init"),
             client_echo_id: None,
         }),
-        "thinking" => match args.as_str() {
-            "" => Some(ClientRequest::ThinkingDisplaySet { show: None }),
-            "on" => Some(ClientRequest::ThinkingDisplaySet { show: Some(true) }),
-            "off" => Some(ClientRequest::ThinkingDisplaySet { show: Some(false) }),
-            _ => {
-                state.apply_event(RuntimeToUiEvent::error(format!(
-                    "无效的 thinking 展示设置 '{}'，可用值: on | off",
-                    args
-                )));
-                None
-            }
-        },
         "effort" => match args.parse() {
             Ok(effort) => Some(ClientRequest::ModelThinkingEffortSet { effort }),
             Err(()) => {

@@ -92,9 +92,6 @@ pub(crate) enum ClientRequest {
         model: String,
         thinking_effort: Option<protocol::ThinkingEffort>,
     },
-    ThinkingDisplaySet {
-        show: Option<bool>,
-    },
     AppShutdown,
 }
 
@@ -398,16 +395,6 @@ async fn handle_project_request(
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(ProjectAction::None)
         }
-        ClientRequest::ThinkingDisplaySet { show } => {
-            let config: protocol::ProjectRuntimeConfigResponse = post_json_without_client(
-                http,
-                &project_thinking_display_url(connection),
-                &protocol::SetThinkingDisplayRequest { show },
-            )
-            .await?;
-            apply_project_runtime_config(connection, event_tx, config).await?;
-            Ok(ProjectAction::None)
-        }
         ClientRequest::AppShutdown => {
             event_tx
                 .send(RuntimeToUiEvent::Shutdown)
@@ -480,7 +467,6 @@ async fn apply_project_runtime_config(
     connection.open.model = config.model.clone();
     connection.open.thinking_effort = config.thinking_effort;
     connection.open.context_window = config.context_window;
-    connection.open.show_thinking_blocks = config.show_thinking_blocks;
 
     event_tx
         .send(RuntimeToUiEvent::ModelChanged {
@@ -488,12 +474,6 @@ async fn apply_project_runtime_config(
             model: config.model,
             thinking_effort: config.thinking_effort.map(thinking_effort_from_protocol),
             context_window: config.context_window,
-        })
-        .await
-        .map_err(|_| "TUI event receiver closed".to_string())?;
-    event_tx
-        .send(RuntimeToUiEvent::ThinkingDisplayChanged {
-            show: config.show_thinking_blocks,
         })
         .await
         .map_err(|_| "TUI event receiver closed".to_string())
@@ -634,7 +614,6 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::AgentSave { .. } => "agent save",
         ClientRequest::AgentDelete { .. } => "agent delete",
         ClientRequest::AgentGenerate { .. } => "agent generate",
-        ClientRequest::ThinkingDisplaySet { .. } => "thinking display",
         ClientRequest::AppShutdown => "shutdown",
     }
 }
@@ -867,9 +846,6 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
             thinking_effort: event.thinking_effort,
             context_window: event.context_window,
         },
-        protocol::TypedRuntimeEvent::ThinkingDisplayChanged(event) => {
-            RuntimeToUiEvent::ThinkingDisplayChanged { show: event.show }
-        }
         protocol::TypedRuntimeEvent::UsageChanged(usage) => RuntimeToUiEvent::UsageChanged(usage),
         protocol::TypedRuntimeEvent::UsageTotalsChanged(event) => {
             RuntimeToUiEvent::UsageTotalsChanged {
@@ -1226,7 +1202,6 @@ async fn handle_local_request(
                 model,
                 thinking_effort: thinking_effort.or(connection.open.thinking_effort),
                 context_window: connection.open.context_window,
-                show_thinking_blocks: connection.open.show_thinking_blocks,
             };
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
@@ -1247,7 +1222,6 @@ async fn handle_local_request(
                 model: connection.open.model.clone(),
                 thinking_effort: Some(effort),
                 context_window: connection.open.context_window,
-                show_thinking_blocks: connection.open.show_thinking_blocks,
             };
             apply_project_runtime_config(connection, event_tx, config).await?;
         }
@@ -1361,15 +1335,6 @@ async fn handle_local_request(
             )
             .await?;
         }
-        ClientRequest::ThinkingDisplaySet { show } => {
-            post_json::<_, protocol::AckResponse>(
-                http,
-                &format!("{base}/thinking-display"),
-                client_id,
-                &protocol::SetThinkingDisplayRequest { show },
-            )
-            .await?;
-        }
         ClientRequest::AppShutdown => {
             event_tx
                 .send(RuntimeToUiEvent::Shutdown)
@@ -1404,13 +1369,6 @@ fn project_model_url(connection: &ProjectConnection) -> String {
 fn project_thinking_effort_url(connection: &ProjectConnection) -> String {
     format!(
         "http://{}/v1/projects/{}/thinking-effort",
-        connection.addr, connection.project_id
-    )
-}
-
-fn project_thinking_display_url(connection: &ProjectConnection) -> String {
-    format!(
-        "http://{}/v1/projects/{}/thinking-display",
         connection.addr, connection.project_id
     )
 }
@@ -1864,7 +1822,6 @@ mod tests {
                 context_window: None,
                 mcp_server_count: 0,
                 has_project_instructions: false,
-                show_thinking_blocks: true,
                 agents: Vec::new(),
                 skills: Vec::new(),
                 git_branch: None,

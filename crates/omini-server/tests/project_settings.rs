@@ -2,7 +2,7 @@ mod support;
 
 use omini_protocol::{
     CreateProjectRequest, ModelsResponse, ProjectRuntimeConfigResponse, SetModelRequest,
-    SetThinkingDisplayRequest, SetThinkingEffortRequest, ThinkingEffort,
+    SetThinkingEffortRequest, ThinkingEffort,
 };
 use reqwest::Method;
 
@@ -163,21 +163,8 @@ async fn project_model_without_thinking_clears_effort() {
             model: "fast".to_string(),
             thinking_effort: None,
             context_window: Some(1000),
-            show_thinking_blocks: true,
         }
     );
-
-    let (status, display): (_, ProjectRuntimeConfigResponse) = daemon
-        .send_json(
-            Method::POST,
-            &format!("/projects/{project_id}/thinking-display"),
-            None,
-            &SetThinkingDisplayRequest { show: Some(false) },
-        )
-        .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    assert!(!display.show_thinking_blocks);
-    assert_eq!(display.thinking_effort, None);
 
     daemon.shutdown().await;
 }

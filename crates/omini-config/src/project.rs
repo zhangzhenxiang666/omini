@@ -70,7 +70,6 @@ impl ProjectsDir {
                 default_provider: Some(selection.active_provider),
                 default_model: Some(selection.model),
                 thinking_effort: None,
-                show_thinking_blocks: true,
                 created_at: now,
                 accessed_at: now,
             })?;
@@ -114,7 +113,6 @@ impl ProjectDir {
                 default_provider: None,
                 default_model: None,
                 thinking_effort: None,
-                show_thinking_blocks: true,
                 created_at: now,
                 accessed_at: now,
             });
@@ -191,12 +189,6 @@ pub struct ProjectState {
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub thinking_effort: Option<ThinkingEffort>,
-    #[serde(default = "default_show_thinking_blocks")]
-    pub show_thinking_blocks: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub accessed_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn default_show_thinking_blocks() -> bool {
-    true
 }

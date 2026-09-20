@@ -90,7 +90,6 @@ impl RuntimeStatusProjection {
                 self.active_profile = event.profile;
             }
             client_proto::TypedRuntimeEvent::ThreadTitleChanged(_)
-            | client_proto::TypedRuntimeEvent::ThinkingDisplayChanged(_)
             | client_proto::TypedRuntimeEvent::AgentManagementUpdated { .. } => {}
             // 和 TUI 标签语义保持一致：run/turn 刚开始先显示 Thinking，直到可见输出或工具开始。
             client_proto::TypedRuntimeEvent::RunStarted => self.start_query(now),
