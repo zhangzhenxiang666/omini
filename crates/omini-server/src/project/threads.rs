@@ -726,7 +726,7 @@ mod tests {
 
         let to_thread_dir = project.thread(&to_thread_id);
         let plan_text = omini_core::compacted_plan_context("# Approved plan\n\n1. Execute it.");
-        let history = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        let history = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let history = manager
                     .db
@@ -736,7 +736,9 @@ mod tests {
                 if !history.is_empty() {
                     break history;
                 }
-                tokio::task::yield_now().await;
+                // 持久化由 runtime actor 异步完成；yield_now 热轮询会在慢速 CI 上
+                // 挤占同一 current-thread runtime 里的 actor 任务，改用短间隔轮询。
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
@@ -863,7 +865,7 @@ mod tests {
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
 
-        tokio::time::timeout(std::time::Duration::from_millis(500), async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 let current = manager
                     .db
