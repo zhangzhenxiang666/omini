@@ -6,9 +6,9 @@ use super::{
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    activity_summary_line, build_bordered_lines, format_thinking_duration, is_special_tool,
-    render_get_task, render_tool, render_tool_compact, thinking_duration_line,
-    tool_category, tool_error_display_text, truncate_display_width, ToolCategory,
+    ToolCategory, activity_summary_line, build_bordered_lines, format_thinking_duration,
+    is_special_tool, render_get_task, render_tool, render_tool_compact, thinking_duration_line,
+    tool_category, tool_error_display_text, truncate_display_width,
 };
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::{ContentBlock, ToolUseBlock};
@@ -984,7 +984,11 @@ fn render_activity_summary(
             continue;
         };
         let width = content_width.saturating_sub(UnicodeWidthStr::width("  └ "));
-        let style = if tr.is_error { error_style } else { detail_style };
+        let style = if tr.is_error {
+            error_style
+        } else {
+            detail_style
+        };
         lines.push(Line::from(vec![
             Span::raw("  └ "),
             Span::styled(truncate_display_width(first, width), style),
@@ -1136,10 +1140,7 @@ mod tests {
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        let bash_input = HashMap::from([(
-            "command".to_string(),
-            serde_json::json!("git status"),
-        )]);
+        let bash_input = HashMap::from([("command".to_string(), serde_json::json!("git status"))]);
         state.messages.push(UiMessage::Message(Message::new(
             Role::Assistant,
             vec![
@@ -1148,7 +1149,11 @@ mod tests {
                     duration_ms: Some(12_000),
                 }),
                 ContentBlock::from_tool_use("t1".to_string(), "bash".to_string(), bash_input),
-                ContentBlock::from_tool_result("t1".to_string(), false, "On branch main\n".to_string()),
+                ContentBlock::from_tool_result(
+                    "t1".to_string(),
+                    false,
+                    "On branch main\n".to_string(),
+                ),
                 ContentBlock::from_text("fixed".to_string()),
             ],
         )));

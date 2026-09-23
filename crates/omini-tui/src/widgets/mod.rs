@@ -261,9 +261,19 @@ pub fn render_tool_compact(
     let accent = Color::Rgb(0x42, 0xb3, 0xc2);
     let title_style = tool_title_style(accent, tool_result.is_none());
     let mut lines = if mcp::is_mcp_tool(tool_use) {
-        vec![mcp::title_line(tool_use, title_style, content_width, tool_result.is_none())]
+        vec![mcp::title_line(
+            tool_use,
+            title_style,
+            content_width,
+            tool_result.is_none(),
+        )]
     } else {
-        vec![compact_tool_title_line(tool_use, title_style, content_width, project_dir)]
+        vec![compact_tool_title_line(
+            tool_use,
+            title_style,
+            content_width,
+            project_dir,
+        )]
     };
 
     if let Some(tr) = tool_result
@@ -773,10 +783,7 @@ mod tests {
 
     #[test]
     fn activity_summary_combines_thinking_and_tool_counts() {
-        let counts = vec![
-            (ToolCategory::Shell, 2),
-            (ToolCategory::FileRead, 1),
-        ];
+        let counts = vec![(ToolCategory::Shell, 2), (ToolCategory::FileRead, 1)];
         let line = activity_summary_line(Some(12_000), &counts, 80).expect("summary line");
 
         assert_eq!(

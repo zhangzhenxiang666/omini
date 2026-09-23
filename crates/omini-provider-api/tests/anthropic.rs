@@ -25,7 +25,8 @@ fn request<'a>(messages: &'a [Message]) -> ApiRequest<'a> {
 }
 
 #[tokio::test]
-async fn anthropic_request_default_fields_cache_last_block_and_strip_tool_metadata() {    let server = TestServer::spawn(vec![TestResponse::sse("event: message_stop\ndata: {}\n\n")]);
+async fn anthropic_request_default_fields_cache_last_block_and_strip_tool_metadata() {
+    let server = TestServer::spawn(vec![TestResponse::sse("event: message_stop\ndata: {}\n\n")]);
     let metadata = Map::from_iter([(String::from("permission_denied"), json!(true))]);
     let messages = vec![Message::new(
         Role::User,
