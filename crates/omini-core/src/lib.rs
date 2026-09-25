@@ -1,8 +1,7 @@
-//! Core implementation for the local Omini daemon.
+//! 本地 Omini daemon 的核心实现。
 //!
-//! `pub` is reserved for the server-facing facade in this module. A
-//! `pub(crate) mod` establishes a crate-internal subsystem boundary; members
-//! inside it use `pub` unless a narrower child-module boundary is intentional.
+//! 本模块中的 `pub` 保留给面向 server 的 facade。`pub(crate) mod` 用于建立 crate 内部的子系统边界；
+//! 子系统中的成员使用 `pub`，除非有意设置更窄的子模块边界。
 
 pub(crate) mod engine;
 pub(crate) mod error;
@@ -357,6 +356,7 @@ impl AgentCoreThread {
                 }
             }
             thread_types::RunIntent::InterveneMessage => ServerToRuntimeEvent::InterveneMessage {
+                run_id: None,
                 message: command.message,
             },
         };
@@ -367,7 +367,27 @@ impl AgentCoreThread {
     }
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::CancelRun).await
+        self.send_to_runtime(ServerToRuntimeEvent::CancelRun { run_id: None })
+            .await
+    }
+
+    pub async fn cancel_agent_run(&self, run_id: String) -> Result<(), CoreError> {
+        self.send_to_runtime(ServerToRuntimeEvent::CancelRun {
+            run_id: Some(run_id),
+        })
+        .await
+    }
+
+    pub async fn intervene_agent_run(
+        &self,
+        run_id: String,
+        message: omini_domain::message::Message,
+    ) -> Result<(), CoreError> {
+        self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
+            run_id: Some(run_id),
+            message,
+        })
+        .await
     }
 
     pub async fn compact_context(&self, instructions: Option<String>) -> Result<(), CoreError> {
@@ -520,7 +540,7 @@ fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
     match event {
         ServerToRuntimeEvent::SendMessage { .. } => "send_message",
         ServerToRuntimeEvent::InterveneMessage { .. } => "intervene_message",
-        ServerToRuntimeEvent::CancelRun => "cancel_run",
+        ServerToRuntimeEvent::CancelRun { .. } => "cancel_run",
         ServerToRuntimeEvent::CompactContext { .. } => "compact_context",
         ServerToRuntimeEvent::ModelSelected { .. } => "model_selected",
         ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",

@@ -1,4 +1,8 @@
 use chrono::{DateTime, Utc};
+use omini_domain::agent_run::{
+    AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
+    ToolUseStatus,
+};
 use omini_domain::display::{AgentTaskNotification, DisplayPlan, DisplaySummary};
 use omini_domain::events::{AgentTaskInfo, AgentTaskResult, AgentTaskStatus};
 use omini_domain::message::Message;
@@ -32,6 +36,34 @@ pub struct ThreadRecord {
 /// role/kind 等字符串形状的 SQL 词汇由 server 从领域类型派生。
 #[derive(Debug)]
 pub enum RuntimePersistenceEvent {
+    CreateAgentRun {
+        run: Box<AgentRunSnapshot>,
+    },
+    UpdateAgentRun {
+        run_id: String,
+        status: AgentRunStatus,
+        started_at: Option<DateTime<Utc>>,
+        finished_at: Option<DateTime<Utc>>,
+        add_tokens: i64,
+    },
+    UpsertAgentStep {
+        step: AgentStepSnapshot,
+    },
+    UpdateAgentStep {
+        step_id: String,
+        status: AgentStepStatus,
+        finished_at: Option<DateTime<Utc>>,
+        add_input_tokens: i64,
+        add_output_tokens: i64,
+    },
+    UpsertToolUseExecution {
+        tool_use: ToolUseExecutionSnapshot,
+        status: ToolUseStatus,
+    },
+    SetAgentRunArchived {
+        run_id: String,
+        archived_at: Option<DateTime<Utc>>,
+    },
     /// 原子创建子线程、task 记录和初始用户消息。
     CreateAgentTask {
         task: Box<AgentTaskInfo>,

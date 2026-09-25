@@ -17,21 +17,28 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc, oneshot};
 
-pub mod agent_tools;
 pub mod ask_user_tool;
 pub mod bash_tool;
+pub mod cancel_task_tool;
 pub mod edit_tool;
+pub mod read_task_tool;
 pub mod read_tool;
+pub mod run_agent_tool;
 pub mod search_tool;
+pub mod send_message_tool;
 pub mod skill_tool;
+pub mod spawn_agent_tool;
+mod task_support;
 pub mod todo_tool;
 pub mod view_image_tool;
+pub mod wait_agents_tool;
 pub mod write_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -168,7 +175,7 @@ pub struct ToolExecutionContext {
     pub permission_engine: Arc<PermissionEngine>,
     pub active_profile: ActiveProfile,
     pub cancelled: Arc<AtomicBool>,
-    #[allow(dead_code)] // Retained in the per-tool context for cancellation-aware tool handlers.
+    #[allow(dead_code)] // 保留在每个工具的上下文中，供支持取消的工具处理器使用。
     pub cancel_notify: Arc<Notify>,
     pub runtime: Option<Arc<ToolRuntimeContext>>,
 }
@@ -360,16 +367,6 @@ fn preview_tool_use_id(pause_id: &str, tool_use_id: &str) -> Option<String> {
     (pause_id != tool_use_id).then(|| tool_use_id.to_string())
 }
 
-pub fn normalize_tool_paths(tool_name: &str, raw_input: &mut Value, cwd: &Path) {
-    match tool_name {
-        "bash" => normalize_path_field(raw_input, "workdir", cwd, true),
-        "search" => normalize_path_field(raw_input, "path", cwd, true),
-        "read" | "edit" | "write" => normalize_path_field(raw_input, "file_path", cwd, false),
-        "view_image" => normalize_path_field(raw_input, "path", cwd, false),
-        _ => {}
-    }
-}
-
 fn normalize_path_field(raw_input: &mut Value, field: &str, cwd: &Path, default_to_cwd: bool) {
     let Some(input) = raw_input.as_object_mut() else {
         return;
@@ -408,8 +405,7 @@ fn resolve_thread_path(cwd: &Path, raw: &str) -> PathBuf {
 #[async_trait]
 pub trait Tool: Send + Sync + 'static {
     /// 每个工具关联自己的输入参数结构体（需派生 JsonSchema + Deserialize）
-    type Input: DeserializeOwned + JsonSchema + Send;
-    type Prepared: Send + 'static;
+    type Input: DeserializeOwned + JsonSchema + Send + Sync;
 
     fn name(&self) -> &str;
     fn description(&self) -> &str;
@@ -430,21 +426,74 @@ pub trait Tool: Send + Sync + 'static {
         schema
     }
 
-    /// 预检查工具调用，生成内部强类型执行计划。
-    async fn prepare(&self, input: Self::Input) -> Result<Self::Prepared, ToolResult>;
+    /// 执行一次已由运行协调器完成参数解析和权限决策的工具调用。
+    async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult;
+}
 
-    /// 生成对外可序列化的权限预览。返回 None 表示无需权限审批。
-    fn permission_preview(&self, _prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        None
+/// 为存量单元测试保留“先解析、再执行”的便捷写法；生产工具接口不暴露该阶段。
+#[cfg(test)]
+#[async_trait]
+pub trait ToolTestCompat: Tool {
+    async fn prepare(&self, input: Self::Input) -> Result<Self::Input, ToolResult> {
+        Ok(input)
     }
 
-    /// 执行已经预检查过的工具计划。
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        ctx: ToolExecutionContext,
-    ) -> ToolResult;
+    async fn execute_prepared(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
+        self.call(input, ctx).await
+    }
 }
+
+#[cfg(test)]
+impl<T: Tool> ToolTestCompat for T {}
+
+/// 在 Tool 外部预检输入并构造策略/审批所需信息。
+#[async_trait]
+pub trait ToolPolicy<T: Tool>: Send + Sync + 'static {
+    /// 在类型反序列化前对原始路径字段做规范化；具体策略由注册的 Tool 类型决定。
+    fn normalize_raw_input(
+        &self,
+        #[allow(unused_variables)] raw_input: &mut Value,
+        #[allow(unused_variables)] cwd: &Path,
+    ) {
+    }
+
+    async fn preflight(
+        &self,
+        #[allow(unused_variables)] input: &T::Input,
+        #[allow(unused_variables)] ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        Ok(None)
+    }
+}
+
+pub struct PathFieldPolicy<T: Tool> {
+    field: &'static str,
+    default_to_cwd: bool,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: Tool> PathFieldPolicy<T> {
+    pub fn new(field: &'static str, default_to_cwd: bool) -> Self {
+        Self {
+            field,
+            default_to_cwd,
+            marker: PhantomData,
+        }
+    }
+}
+
+#[async_trait]
+impl<T: Tool> ToolPolicy<T> for PathFieldPolicy<T> {
+    fn normalize_raw_input(&self, raw_input: &mut Value, cwd: &Path) {
+        normalize_path_field(raw_input, self.field, cwd, self.default_to_cwd);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopToolPolicy;
+
+#[async_trait]
+impl<T: Tool> ToolPolicy<T> for NoopToolPolicy {}
 
 pub fn sanitize_tool_schema(value: &mut Value) {
     sanitize_tool_schema_value(value, false);
@@ -517,16 +566,26 @@ impl Clone for RegisteredTool {
 
 impl RegisteredTool {
     pub fn new<T: Tool>(tool: T) -> Self {
+        Self::with_policy(tool, NoopToolPolicy)
+    }
+
+    pub fn with_policy<T, P>(tool: T, policy: P) -> Self
+    where
+        T: Tool,
+        P: ToolPolicy<T>,
+    {
         let name = tool.name().to_string();
         let description = tool.description().to_string();
         let input_schema = tool.input_schema();
         let tool = Arc::new(tool);
+        let policy = Arc::new(policy);
         let executor: Arc<ToolExecutor> = Arc::new(
             move |input: HashMap<String, Value>, ctx: ToolExecutionContext| {
                 let tool = Arc::clone(&tool);
+                let policy = Arc::clone(&policy);
                 Box::pin(async move {
                     let mut raw_input = Value::Object(input.clone().into_iter().collect());
-                    normalize_tool_paths(tool.name(), &mut raw_input, &ctx.settings.cwd);
+                    policy.normalize_raw_input(&mut raw_input, &ctx.settings.cwd);
                     if let Some(check) = ctx
                         .permission_engine
                         .profile_policy(ctx.active_profile, tool.name())
@@ -544,12 +603,10 @@ impl RegisteredTool {
                             ));
                         }
                     };
-                    let prepared = match tool.prepare(input).await {
-                        Ok(prepared) => prepared,
+                    let preview = match policy.preflight(&input, &ctx).await {
+                        Ok(preview) => preview,
                         Err(result) => return result,
                     };
-
-                    let preview = tool.permission_preview(&prepared);
                     let permission_check = ctx.permission_engine.check_for_profile(
                         ctx.active_profile,
                         tool.name(),
@@ -587,7 +644,7 @@ impl RegisteredTool {
                         }
                     }
 
-                    tool.execute_prepared(prepared, ctx).await
+                    tool.call(input, ctx).await
                 })
             },
         );
@@ -646,6 +703,17 @@ impl ToolRegistry {
 
     pub fn register<T: Tool>(&mut self, tool: T) -> &mut Self {
         let reg = RegisteredTool::new(tool);
+        let name = reg.name.clone();
+        self.tools.insert(name, reg);
+        self
+    }
+
+    pub fn register_with_policy<T, P>(&mut self, tool: T, policy: P) -> &mut Self
+    where
+        T: Tool,
+        P: ToolPolicy<T>,
+    {
+        let reg = RegisteredTool::with_policy(tool, policy);
         let name = reg.name.clone();
         self.tools.insert(name, reg);
         self
@@ -757,7 +825,7 @@ pub fn create_agent_registry_from_parent(
         && allow.is_none_or(|tools| tools.iter().any(|tool| tool == "run_agent"))
         && !deny_names.contains("run_agent");
     if run_agent_allowed {
-        registry.register(agent_tools::RunAgentTool);
+        registry.register(run_agent_tool::RunAgentTool);
     }
     Ok((registry, warnings))
 }
@@ -774,31 +842,40 @@ fn create_registry_with_allowed(
         registry.register(skill_tool::SkillTool);
     }
     if tool_allowed(allowed, "bash") {
-        registry.register(bash_tool::BashTool);
+        registry.register_with_policy(bash_tool::BashTool, bash_tool::BashPermissionPolicy);
     }
     if tool_allowed(allowed, "search") {
-        registry.register(search_tool::SearchTool);
+        registry.register_with_policy(search_tool::SearchTool, search_tool::SearchPermissionPolicy);
     }
     if tool_allowed(allowed, "read") {
-        registry.register(read_tool::ReadTool);
+        registry.register_with_policy(
+            read_tool::ReadTool,
+            PathFieldPolicy::new("file_path", false),
+        );
     }
     if tool_allowed(allowed, "view_image") {
-        registry.register(view_image_tool::ViewImageTool);
+        registry.register_with_policy(
+            view_image_tool::ViewImageTool,
+            PathFieldPolicy::new("path", false),
+        );
     }
     if tool_allowed(allowed, "edit") {
-        registry.register(edit_tool::EditTool);
+        registry.register_with_policy(edit_tool::EditTool, edit_tool::EditPermissionPolicy);
     }
     if tool_allowed(allowed, "write") {
-        registry.register(write_tool::WriteTool);
+        registry.register_with_policy(write_tool::WriteTool, write_tool::WritePermissionPolicy);
     }
     if agent_tool_set == AgentToolSet::Main && tool_allowed(allowed, "todo_write") {
         registry.register(todo_tool::TodoWriteTool);
     }
     if agent_tool_set == AgentToolSet::Main {
-        registry.register(agent_tools::SpawnAgentTool);
-        registry.register(agent_tools::ReadTaskTool);
-        registry.register(agent_tools::WaitAgentsTool);
-        registry.register(agent_tools::CancelTaskTool);
+        registry.register(spawn_agent_tool::SpawnAgentTool);
+        registry.register(read_task_tool::ReadTaskTool);
+        registry.register(wait_agents_tool::WaitAgentsTool);
+        registry.register(cancel_task_tool::CancelTaskTool);
+    }
+    if tool_allowed(allowed, "send_message") {
+        registry.register(send_message_tool::SendMessageTool);
     }
     registry
 }
@@ -823,6 +900,7 @@ fn tool_definition_priority(name: &str) -> usize {
         "read_task" => 11,
         "wait_agents" => 12,
         "cancel_task" => 13,
+        "send_message" => 14,
         _ => 100,
     }
 }
@@ -877,7 +955,7 @@ mod tests {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({ "query": "needle" });
 
-        normalize_tool_paths("search", &mut input, cwd);
+        normalize_path_field(&mut input, "path", cwd, true);
 
         assert_eq!(input["path"], serde_json::json!("/repo"));
     }
@@ -890,7 +968,7 @@ mod tests {
             "workdir": "crates/omini-core"
         });
 
-        normalize_tool_paths("bash", &mut input, cwd);
+        normalize_path_field(&mut input, "workdir", cwd, true);
 
         assert_eq!(
             input["workdir"],
@@ -903,7 +981,7 @@ mod tests {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({ "file_path": "src/lib.rs" });
 
-        normalize_tool_paths("read", &mut input, cwd);
+        normalize_path_field(&mut input, "file_path", cwd, false);
 
         assert_eq!(input["file_path"], serde_json::json!("/repo/src/lib.rs"));
     }
@@ -913,7 +991,7 @@ mod tests {
         let cwd = Path::new("/repo");
         let mut input = serde_json::json!({ "path": "/tmp/image.png" });
 
-        normalize_tool_paths("view_image", &mut input, cwd);
+        normalize_path_field(&mut input, "path", cwd, false);
 
         assert_eq!(input["path"], serde_json::json!("/tmp/image.png"));
     }
@@ -977,6 +1055,7 @@ mod tests {
                 "read",
                 "read_task",
                 "search",
+                "send_message",
                 "skill",
                 "spawn_agent",
                 "todo_write",
@@ -1006,6 +1085,7 @@ mod tests {
                 "read_task",
                 "wait_agents",
                 "cancel_task",
+                "send_message",
             ]
         );
 
@@ -1020,8 +1100,8 @@ mod tests {
         assert!(todo_item.get("step").is_none());
 
         for schema in [
-            agent_tools::SpawnAgentTool.input_schema(),
-            agent_tools::RunAgentTool.input_schema(),
+            spawn_agent_tool::SpawnAgentTool.input_schema(),
+            run_agent_tool::RunAgentTool.input_schema(),
         ] {
             let required = schema["required"].as_array().expect("required fields");
             for field in ["name", "prompt", "title"] {
@@ -1033,11 +1113,11 @@ mod tests {
             }
         }
         assert!(
-            agent_tools::SpawnAgentTool
+            spawn_agent_tool::SpawnAgentTool
                 .description()
                 .contains("Completion is reported automatically")
         );
-        let wait_schema = agent_tools::WaitAgentsTool.input_schema();
+        let wait_schema = wait_agents_tool::WaitAgentsTool.input_schema();
         assert!(
             !wait_schema["required"]
                 .as_array()
@@ -1051,13 +1131,13 @@ mod tests {
                         && description.contains("omit this field")
                 })
         );
-        let read_schema = agent_tools::ReadTaskTool.input_schema();
+        let read_schema = read_task_tool::ReadTaskTool.input_schema();
         assert!(
             read_schema["properties"]["task_id"]["description"]
                 .as_str()
                 .is_some_and(|description| description.contains("returned by `spawn_agent`"))
         );
-        let spawn_schema = agent_tools::SpawnAgentTool.input_schema();
+        let spawn_schema = spawn_agent_tool::SpawnAgentTool.input_schema();
         assert!(spawn_schema["properties"]["title"]["description"].is_string());
     }
 
@@ -1117,29 +1197,25 @@ mod tests {
     #[tokio::test]
     async fn wait_agents_accepts_optional_ids_and_rejects_empty_lists() {
         assert_eq!(
-            agent_tools::WaitAgentsTool
-                .prepare(agent_tools::WaitAgentsInput { task_ids: None })
-                .await
-                .unwrap(),
+            wait_agents_tool::normalize_wait_input(wait_agents_tool::WaitAgentsInput {
+                task_ids: None
+            })
+            .unwrap(),
             None
         );
         assert_eq!(
-            agent_tools::WaitAgentsTool
-                .prepare(agent_tools::WaitAgentsInput {
-                    task_ids: Some(vec![" task-1 ".to_string(), "task-1".to_string()]),
-                })
-                .await
-                .unwrap(),
+            wait_agents_tool::normalize_wait_input(wait_agents_tool::WaitAgentsInput {
+                task_ids: Some(vec![" task-1 ".to_string(), "task-1".to_string()]),
+            })
+            .unwrap(),
             Some(vec!["task-1".to_string()])
         );
         assert!(
-            agent_tools::WaitAgentsTool
-                .prepare(agent_tools::WaitAgentsInput {
-                    task_ids: Some(Vec::new()),
-                })
-                .await
-                .unwrap_err()
-                .is_error
+            wait_agents_tool::normalize_wait_input(wait_agents_tool::WaitAgentsInput {
+                task_ids: Some(Vec::new()),
+            })
+            .unwrap_err()
+            .is_error
         );
     }
 

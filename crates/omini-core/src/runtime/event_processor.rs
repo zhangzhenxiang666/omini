@@ -2,17 +2,36 @@ use super::manual_compact::persist_compact_summary_event;
 use super::service::AgentRuntime;
 use super::usage::{record_total_usage_and_notify, record_usage_snapshot};
 use super::*;
-use omini_domain::display::HistoryItem;
 use tracing::Instrument;
 
 impl AgentRuntime {
     /// 启动事件处理器。
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub async fn spawn_event_processor(
+        &self,
+        engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
+        active_profile: ActiveProfile,
+        active_profile_handle: Arc<RwLock<ActiveProfile>>,
+        tool_pause_resolver: ToolPauseResolver,
+    ) -> tokio::task::JoinHandle<()> {
+        self.spawn_event_processor_for_run(
+            engine_rx,
+            active_profile,
+            active_profile_handle,
+            tool_pause_resolver,
+            None,
+        )
+        .await
+    }
+
+    pub async fn spawn_event_processor_for_run(
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
         active_profile: ActiveProfile,
         active_profile_handle: Arc<RwLock<ActiveProfile>>,
         tool_pause_resolver: ToolPauseResolver,
+        run_id: Option<String>,
     ) -> tokio::task::JoinHandle<()> {
         let thread_id = self.thread_id.clone();
         let event_tx = self.event_tx.clone();
@@ -23,10 +42,14 @@ impl AgentRuntime {
         let context_window = active_run::current_context_window(&self.settings);
         let task_supervisor = Arc::clone(&self.task_supervisor);
         let span_thread_id = thread_id.clone();
+        let run_id_for_events = run_id.clone();
 
         tokio::spawn(
             async move {
                 let mut proposed_plan_forwarder = plan::ProposedPlanForwarder::new(active_profile);
+                let mut next_step_no = 0_u32;
+                let mut active_step_id: Option<String> = None;
+                let mut tool_uses = std::collections::HashMap::new();
                 while let Some(event) = engine_rx.recv().await {
                     let active = *active_profile_handle
                         .read()
@@ -73,12 +96,6 @@ impl AgentRuntime {
                             };
                             if result.is_ok() {
                                 task_supervisor.mark_notifications_delivered(&task_ids);
-                                let _ = event_tx
-                                    .send(RuntimeToServerEvent::UserMessageInjected {
-                                        item: HistoryItem::AgentTaskNotification(notification),
-                                        client_echo_id: None,
-                                    })
-                                    .await;
                             }
                             let _ = ack.send(result);
                         }
@@ -125,10 +142,41 @@ impl AgentRuntime {
                         // ===== 透传事件 =====
                         EngineToRuntimeEvent::TurnStarted => {
                             tracing::debug!("forwarding turn started event");
+                            if let Some(run_id) = &run_id_for_events {
+                                next_step_no += 1;
+                                let step_id = uuid::Uuid::new_v4().to_string();
+                                let started_at = chrono::Utc::now();
+                                active_step_id = Some(step_id.clone());
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpsertAgentStep {
+                                        step: omini_domain::agent_run::AgentStepSnapshot {
+                                            id: step_id,
+                                            run_id: run_id.clone(),
+                                            step_no: next_step_no,
+                                            status: omini_domain::agent_run::AgentStepStatus::Running,
+                                            started_at,
+                                            finished_at: None,
+                                            input_tokens: 0,
+                                            output_tokens: 0,
+                                        },
+                                    })
+                                    .await;
+                            }
                             let _ = event_tx.send(RuntimeToServerEvent::TurnStarted).await;
                         }
                         EngineToRuntimeEvent::TurnEnded => {
                             tracing::debug!("forwarding turn ended event");
+                            if let Some(step_id) = active_step_id.take() {
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpdateAgentStep {
+                                        step_id,
+                                        status: omini_domain::agent_run::AgentStepStatus::Completed,
+                                        finished_at: Some(chrono::Utc::now()),
+                                        add_input_tokens: 0,
+                                        add_output_tokens: 0,
+                                    })
+                                    .await;
+                            }
                             proposed_plan_forwarder.flush(&event_tx).await;
                             let _ = event_tx.send(RuntimeToServerEvent::TurnEnded).await;
                         }
@@ -146,6 +194,35 @@ impl AgentRuntime {
                                 tool_name = %tu.name,
                                 "forwarding tool use event"
                             );
+                            if let (Some(step_id), Some(run_id)) =
+                                (active_step_id.as_ref(), run_id_for_events.as_ref())
+                            {
+                                let record = omini_domain::agent_run::ToolUseExecutionSnapshot {
+                                    id: tu.id.clone(),
+                                    step_id: step_id.clone(),
+                                    name: tu.name.clone(),
+                                    input: serde_json::to_value(&tu.input)
+                                        .unwrap_or(serde_json::Value::Null),
+                                    status: omini_domain::agent_run::ToolUseStatus::Running,
+                                    updated_at: chrono::Utc::now(),
+                                };
+                                tool_uses.insert(tu.id.clone(), record.clone());
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                        tool_use: record,
+                                        status: omini_domain::agent_run::ToolUseStatus::Running,
+                                    })
+                                    .await;
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpdateAgentRun {
+                                        run_id: run_id.clone(),
+                                        status: omini_domain::agent_run::AgentRunStatus::Running,
+                                        started_at: None,
+                                        finished_at: None,
+                                        add_tokens: 0,
+                                    })
+                                    .await;
+                            }
                             let _ = event_tx.send(RuntimeToServerEvent::ToolUse(tu)).await;
                         }
                         EngineToRuntimeEvent::ToolResult(tr) => {
@@ -154,6 +231,21 @@ impl AgentRuntime {
                                 is_error = tr.is_error,
                                 "forwarding tool result event"
                             );
+                            if let Some(mut record) = tool_uses.get(&tr.tool_use_id).cloned() {
+                                record.updated_at = chrono::Utc::now();
+                                let status = if tr.is_error {
+                                    omini_domain::agent_run::ToolUseStatus::Failed
+                                } else {
+                                    omini_domain::agent_run::ToolUseStatus::Completed
+                                };
+                                record.status = status;
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                        tool_use: record,
+                                        status,
+                                    })
+                                    .await;
+                            }
                             let _ = event_tx.send(RuntimeToServerEvent::ToolResult(tr)).await;
                         }
                         EngineToRuntimeEvent::ToolPauseRequested(req) => {
@@ -165,6 +257,28 @@ impl AgentRuntime {
                                 pause_kind = ?req.kind,
                                 "tool pause requested"
                             );
+                            if let Some(mut record) = tool_uses.get(&req.tool_use_id).cloned()
+                                && matches!(req.kind, omini_domain::events::ToolPauseKind::Permission(_))
+                                && let Some(run_id) = &run_id_for_events
+                            {
+                                record.updated_at = chrono::Utc::now();
+                                record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                        tool_use: record,
+                                        status: omini_domain::agent_run::ToolUseStatus::WaitingApproval,
+                                    })
+                                    .await;
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpdateAgentRun {
+                                        run_id: run_id.clone(),
+                                        status: omini_domain::agent_run::AgentRunStatus::WaitingApproval,
+                                        started_at: None,
+                                        finished_at: None,
+                                        add_tokens: 0,
+                                    })
+                                    .await;
+                            }
                             if Self::should_auto_approve_permission_pause(
                                 &active_profile_handle,
                                 &req,
@@ -209,6 +323,28 @@ impl AgentRuntime {
                                     usage,
                                 })
                                 .await;
+                            if let Some(run_id) = &run_id_for_events {
+                                let _ = persistence_tx
+                                    .send(RuntimePersistenceEvent::UpdateAgentRun {
+                                        run_id: run_id.clone(),
+                                        status: omini_domain::agent_run::AgentRunStatus::Running,
+                                        started_at: None,
+                                        finished_at: None,
+                                        add_tokens: usage.total_tokens() as i64,
+                                    })
+                                    .await;
+                                if let Some(step_id) = &active_step_id {
+                                    let _ = persistence_tx
+                                        .send(RuntimePersistenceEvent::UpdateAgentStep {
+                                            step_id: step_id.clone(),
+                                            status: omini_domain::agent_run::AgentStepStatus::Running,
+                                            finished_at: None,
+                                            add_input_tokens: usage.prompt_tokens as i64,
+                                            add_output_tokens: usage.completion_tokens as i64,
+                                        })
+                                        .await;
+                                }
+                            }
                             let snapshot =
                                 record_usage_snapshot(&usage_state, usage, context_window);
                             let _ = event_tx

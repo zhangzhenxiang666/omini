@@ -380,16 +380,18 @@ fn typed_runtime_event_from_runtime_contract_event(
     event: runtime_contract::RuntimeToServerEvent,
 ) -> client_proto::TypedRuntimeEvent {
     match event {
+        runtime_contract::RuntimeToServerEvent::AgentRunChanged(run) => {
+            client_proto::TypedRuntimeEvent::AgentRunChanged(run)
+        }
         runtime_contract::RuntimeToServerEvent::RunStarted => {
             client_proto::TypedRuntimeEvent::RunStarted
         }
-        runtime_contract::RuntimeToServerEvent::UserMessageInjected {
-            item,
-            client_echo_id,
-        } => client_proto::TypedRuntimeEvent::UserMessageInjected {
-            item,
-            client_echo_id,
-        },
+        runtime_contract::RuntimeToServerEvent::PlanApprovalAccepted { message } => {
+            client_proto::TypedRuntimeEvent::UserMessageInjected {
+                item: domain::display::HistoryItem::Message(message),
+                client_echo_id: None,
+            }
+        }
         runtime_contract::RuntimeToServerEvent::RunFinished => {
             client_proto::TypedRuntimeEvent::RunFinished
         }

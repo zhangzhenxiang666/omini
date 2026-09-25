@@ -56,7 +56,15 @@ omini-cli / omini-tui
 5. 核心运行 Agent 并发出运行时和持久化事件；服务端负责保存、投影和广播。核心只在安全输入边界（运行开始或运行中干预排空点）将用户消息加入模型上下文。
 6. 重连时按项目 ID 恢复；项目路径不作为身份。
 
-用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。核心事件不携带用户界面展示数据。
+## Agent Run 与工具调用
+
+- `AgentRun` 是一次运行的治理和查询单位，关联 Thread、可选父 Run、类型、状态、时间和累计 Token。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 等非 Agent Run 不创建虚假的 Step。
+- runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 3 暴露 Run 快照、详情、归档状态和状态事件；Run 记录通过归档标记隐藏，不物理删除。
+- `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
+- 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
+
+用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，任务通知在持久化成功后投影；核心只发领域事实和模型上下文消息，不构造 UI 历史项。
 
 ## 输入与附件
 

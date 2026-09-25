@@ -4,6 +4,10 @@
 //! `omini-core`、`omini-server` 和 `omini-tui`。
 
 use chrono::{DateTime, Utc};
+pub use omini_domain::agent_run::{
+    AgentRunKind, AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus,
+    ToolUseExecutionSnapshot, ToolUseStatus,
+};
 pub use omini_domain::config::{
     InputModality, ModelInfo, ProviderEndpointKind, ProviderInfo, ThinkingEffort,
 };
@@ -22,7 +26,7 @@ pub use omini_domain::subagents::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 2;
+pub const PROTOCOL_REVISION: u32 = 3;
 
 /// daemon 健康检查响应，用于客户端确认本地服务可用并识别服务名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +94,28 @@ pub struct ProjectSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectsResponse {
     pub projects: Vec<ProjectSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunsResponse {
+    pub runs: Vec<AgentRunSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunDetailResponse {
+    pub run: AgentRunSnapshot,
+    pub steps: Vec<AgentStepSnapshot>,
+    pub tool_uses: Vec<ToolUseExecutionSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveAgentRunRequest {
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunMessageRequest {
+    pub message: String,
 }
 
 /// 注册当前真实工作目录；同一 canonical path 的请求是幂等的。
@@ -218,6 +244,7 @@ impl RuntimeEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TypedRuntimeEvent {
+    AgentRunChanged(AgentRunSnapshot),
     RunStarted,
     UserMessageInjected {
         item: HistoryItem,
@@ -260,6 +287,7 @@ pub enum TypedRuntimeEvent {
 impl TypedRuntimeEvent {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::AgentRunChanged(_) => "agent_run_changed",
             Self::RunStarted => "run_started",
             Self::UserMessageInjected { .. } => "user_message_injected",
             Self::RunFinished => "run_finished",

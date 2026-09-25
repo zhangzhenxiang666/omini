@@ -10,10 +10,157 @@ use crate::routes::{
     require_daemon_thread, require_project,
 };
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use omini_protocol as protocol;
+use serde::Deserialize;
 use std::sync::Arc;
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListRunsQuery {
+    #[serde(default)]
+    include_archived: bool,
+}
+
+pub async fn list_agent_runs(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path((project_id, thread_id)): Path<(String, String)>,
+    Query(query): Query<ListRunsQuery>,
+) -> ApiResult<protocol::AgentRunsResponse> {
+    let project = require_project(&manager, &project_id).await?;
+    project
+        .list_agent_runs(&thread_id, query.include_archived)
+        .await
+        .map(Json)
+        .map_err(core_error)
+}
+
+pub async fn get_agent_run(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
+) -> ApiResult<protocol::AgentRunDetailResponse> {
+    let project = require_project(&manager, &project_id).await?;
+    project
+        .get_agent_run_detail(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .map(Json)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })
+}
+
+pub async fn archive_agent_run(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
+    Json(request): Json<protocol::ArchiveAgentRunRequest>,
+) -> ApiResult<protocol::AckResponse> {
+    let project = require_project(&manager, &project_id).await?;
+    let detail = project
+        .get_agent_run_detail(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })?;
+    if request.archived
+        && matches!(
+            detail.run.status,
+            protocol::AgentRunStatus::Queued
+                | protocol::AgentRunStatus::Running
+                | protocol::AgentRunStatus::WaitingApproval
+        )
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_active",
+            "An active AgentRun cannot be archived",
+        ));
+    }
+    if !project
+        .archive_agent_run(&thread_id, &run_id, request.archived)
+        .await
+        .map_err(core_error)?
+    {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "AgentRun does not exist",
+        ));
+    }
+    Ok(Json(protocol::AckResponse::ok()))
+}
+
+pub async fn intervene_agent_run(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<protocol::AgentRunMessageRequest>,
+) -> ApiResult<protocol::AckResponse> {
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    let project = require_project(&manager, &project_id).await?;
+    let detail = project
+        .get_agent_run_detail(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })?;
+    let Some(parent_run_id) = detail.run.parent_run_id else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_not_child_agent",
+            "User intervention is only available for child AgentRuns",
+        ));
+    };
+    let parent = project
+        .get_agent_run_detail(&thread_id, &parent_run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::CONFLICT,
+                "parent_run_unavailable",
+                "Parent AgentRun is unavailable",
+            )
+        })?;
+    if parent.run.parent_run_id.is_some() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_not_direct_child",
+            "User intervention is only available for direct child AgentRuns",
+        ));
+    }
+    let message = request.message.trim();
+    if message.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "empty_message",
+            "Message must not be empty",
+        ));
+    }
+    thread
+        .intervene_agent_run(
+            run_id,
+            omini_domain::message::Message::from_user_text(message.to_string()),
+        )
+        .await
+        .map_err(core_error)?;
+    Ok(Json(protocol::AckResponse::ok()))
+}
 
 /// 向当前线程提交一次新的运行请求。
 #[axum::debug_handler]
@@ -92,11 +239,42 @@ pub async fn submit_run(
 #[axum::debug_handler]
 pub async fn cancel_run(
     State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, _run_id)): Path<(String, String, String)>,
+    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<protocol::AckResponse> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     ensure_connected_controller(&thread, &headers).await?;
+    if run_id == "current" {
+        return thread
+            .cancel_run()
+            .await
+            .map(|_| Json(protocol::AckResponse::ok()))
+            .map_err(core_error);
+    }
+    let project = require_project(&manager, &project_id).await?;
+    let run = project
+        .get_agent_run_detail(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })?;
+    if run.run.parent_run_id.is_some() {
+        thread.cancel_agent_run(run_id).await.map_err(core_error)?;
+        return Ok(Json(protocol::AckResponse::ok()));
+    }
+    if !matches!(
+        run.run.status,
+        protocol::AgentRunStatus::Queued
+            | protocol::AgentRunStatus::Running
+            | protocol::AgentRunStatus::WaitingApproval
+    ) {
+        return Ok(Json(protocol::AckResponse::ok()));
+    }
     thread
         .cancel_run()
         .await

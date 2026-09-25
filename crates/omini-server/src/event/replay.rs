@@ -890,13 +890,11 @@ mod tests {
         let item = domain::display::HistoryItem::Message(domain::message::Message::from_user_text(
             "hello".to_string(),
         ));
-        let event = runtime_event_from_runtime_contract_event(
-            runtime_contract::RuntimeToServerEvent::UserMessageInjected {
+        let event =
+            client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::UserMessageInjected {
                 item: item.clone(),
                 client_echo_id: Some("echo-1".to_string()),
-            },
-        )
-        .expect("event should encode");
+            });
 
         buffer.record(SequencedRuntimeEvent { seq: 1, event });
         buffer.record_snapshot(&snapshot(vec![item]), &[]);

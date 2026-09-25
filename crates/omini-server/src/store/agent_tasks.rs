@@ -55,6 +55,7 @@ impl Database {
                     task_id,
                     owner_thread_id,
                     agent_thread_id,
+                    parent_run_id,
                     parent_task_id,
                     parent_thread_id,
                     spawn_tool_use_id,
@@ -69,11 +70,12 @@ impl Database {
                     completed_at,
                     notification_delivered
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0)",
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0)",
         )
         .bind(&task.task_id)
         .bind(&task.owner_thread_id)
         .bind(&task.thread_id)
+        .bind(&task.parent_run_id)
         .bind(&task.parent_task_id)
         .bind(&task.parent_thread_id)
         .bind(&task.spawn_tool_use_id)
@@ -84,6 +86,17 @@ impl Database {
         .bind(&task.title)
         .bind(task.created_at)
         .bind(task.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO agent_run(id, thread_id, parent_run_id, kind, status, created_at, started_at, finished_at, total_tokens, archived_at)
+             VALUES (?, ?, ?, 'agent', 'running', ?, ?, NULL, 0, NULL)",
+        )
+        .bind(&task.task_id)
+        .bind(&task.thread_id)
+        .bind(&task.parent_run_id)
+        .bind(task.created_at)
+        .bind(task.created_at)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -155,6 +168,19 @@ impl Database {
         .bind(task_id)
         .execute(&self.pool)
         .await?;
+        let run_status = match status {
+            AgentTaskStatus::Running | AgentTaskStatus::Cancelling => "running",
+            AgentTaskStatus::Completed => "completed",
+            AgentTaskStatus::Failed => "failed",
+            AgentTaskStatus::Cancelled => "cancelled",
+            AgentTaskStatus::Interrupted => "interrupted",
+        };
+        sqlx::query("UPDATE agent_run SET status = ?, finished_at = ? WHERE id = ?")
+            .bind(run_status)
+            .bind(completed_at)
+            .bind(task_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

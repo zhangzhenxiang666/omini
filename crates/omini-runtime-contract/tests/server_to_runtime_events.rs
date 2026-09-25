@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
     let cases = [
         (
-            ServerToRuntimeEvent::CancelRun,
+            ServerToRuntimeEvent::CancelRun { run_id: None },
             json!({"type": "cancel_run"}),
         ),
         (
@@ -42,6 +42,7 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
         ),
         (
             ServerToRuntimeEvent::InterveneMessage {
+                run_id: None,
                 message: user_message("补充说明"),
             },
             json!({
@@ -253,7 +254,7 @@ fn message_json(text: &str) -> Value {
 
 fn server_event_type(event: &ServerToRuntimeEvent) -> &'static str {
     match event {
-        ServerToRuntimeEvent::CancelRun => "cancel_run",
+        ServerToRuntimeEvent::CancelRun { .. } => "cancel_run",
         ServerToRuntimeEvent::SendMessage { .. } => "send_message",
         ServerToRuntimeEvent::CompactContext { .. } => "compact_context",
         ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",

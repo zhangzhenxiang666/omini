@@ -52,15 +52,13 @@ pub struct QueryEngine {
     permission_engine: Arc<PermissionEngine>,
     cancel_notify: Arc<Notify>,
     drain_pauses_on_start: bool,
-    pending_user_messages: Mutex<VecDeque<PendingUserMessage>>,
+    pending_user_messages: SharedPendingUserMessages,
     // Task completion 还需要原子持久化、失败重排队和 delivered 标记，
     // 生命周期不同于一次性的用户干预消息。
     pending_agent_task_completions: Mutex<VecDeque<AgentTaskCompletion>>,
 }
 
-struct PendingUserMessage {
-    message: Message,
-}
+pub type SharedPendingUserMessages = Arc<Mutex<VecDeque<Message>>>;
 
 impl QueryEngine {
     pub fn new(permission_engine: Arc<PermissionEngine>) -> Self {
@@ -71,7 +69,7 @@ impl QueryEngine {
             permission_engine,
             cancel_notify: Arc::new(Notify::new()),
             drain_pauses_on_start: true,
-            pending_user_messages: Mutex::new(VecDeque::new()),
+            pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
             pending_agent_task_completions: Mutex::new(VecDeque::new()),
         }
     }
@@ -86,9 +84,25 @@ impl QueryEngine {
             permission_engine,
             cancel_notify,
             drain_pauses_on_start: false,
-            pending_user_messages: Mutex::new(VecDeque::new()),
+            pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
             pending_agent_task_completions: Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub fn with_shared_user_messages(
+        pending_tool_pauses: PendingToolPauses,
+        permission_engine: Arc<PermissionEngine>,
+        cancel_notify: Arc<Notify>,
+        pending_user_messages: SharedPendingUserMessages,
+    ) -> Self {
+        let mut engine =
+            Self::with_shared_tool_controls(pending_tool_pauses, permission_engine, cancel_notify);
+        engine.pending_user_messages = pending_user_messages;
+        engine
+    }
+
+    pub fn shared_user_messages(&self) -> SharedPendingUserMessages {
+        Arc::clone(&self.pending_user_messages)
     }
 
     /// 将用户干预消息排队，在当前 Turn 收尾后注入历史。
@@ -96,7 +110,7 @@ impl QueryEngine {
         self.pending_user_messages
             .lock()
             .expect("pending user messages mutex poisoned")
-            .push_back(PendingUserMessage { message });
+            .push_back(message);
     }
 
     pub fn enqueue_agent_task_completion(&self, completion: AgentTaskCompletion) {
@@ -304,9 +318,9 @@ impl QueryEngine {
 
         let injected = !pending.is_empty();
         for pending in pending {
-            messages.push(pending.message.clone());
+            messages.push(pending.clone());
             let _ = event_tx
-                .send(EngineToRuntimeEvent::UserMessageProduced(pending.message))
+                .send(EngineToRuntimeEvent::UserMessageProduced(pending))
                 .await;
         }
         injected

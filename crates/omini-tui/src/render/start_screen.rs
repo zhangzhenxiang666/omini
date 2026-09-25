@@ -117,8 +117,8 @@ fn full_lines(state: &UiState, width: usize) -> Vec<Line<'static>> {
 }
 
 fn project_overview_rows(state: &UiState, right_width: usize) -> Vec<Vec<Span<'static>>> {
-    // right_cell (CellAlign::Left) adds 2 chars of left padding.
-    // Available width for row content:
+    // right_cell 使用 CellAlign::Left 时会增加 2 个字符的左侧内边距。
+    // 此处计算行内容可用宽度：
     let content_available = right_width.saturating_sub(2);
 
     // 计算时间列最大显示宽度

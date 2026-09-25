@@ -136,6 +136,8 @@ pub struct AgentTaskInfo {
     pub task_id: String,
     pub thread_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_task_id: Option<String>,
     pub owner_thread_id: String,
     pub parent_thread_id: String,

@@ -85,6 +85,7 @@ pub fn test_agent_task(task_id: &str, thread_id: &str, owner_thread_id: &str) ->
     AgentTaskInfo {
         task_id: task_id.to_string(),
         thread_id: thread_id.to_string(),
+        parent_run_id: None,
         parent_task_id: None,
         owner_thread_id: owner_thread_id.to_string(),
         parent_thread_id: owner_thread_id.to_string(),

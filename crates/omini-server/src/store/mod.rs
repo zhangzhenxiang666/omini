@@ -19,6 +19,7 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use uuid::Uuid;
 
+mod agent_runs;
 mod agent_tasks;
 mod attachments;
 mod content;

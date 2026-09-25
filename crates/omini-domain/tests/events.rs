@@ -544,6 +544,7 @@ fn task_info() -> AgentTaskInfo {
     AgentTaskInfo {
         task_id: "task-1".into(),
         thread_id: "child-1".into(),
+        parent_run_id: None,
         parent_task_id: None,
         owner_thread_id: "owner-1".into(),
         parent_thread_id: "parent-1".into(),

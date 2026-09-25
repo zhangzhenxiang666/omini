@@ -1,5 +1,6 @@
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
+use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::display::{DisplayMessage, HistoryItem, UserDraft};
 pub use omini_domain::events::*;
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
@@ -144,6 +145,7 @@ pub enum EngineToRuntimeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeToUiEvent {
+    AgentRunChanged(AgentRunSnapshot),
     /// 用户输入已提交，运行时开始处理
     RunStarted,
     /// Runtime 注入了一条用户消息，UI 需要显示到消息区

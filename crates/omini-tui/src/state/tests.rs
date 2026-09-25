@@ -66,6 +66,7 @@ fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
         task: AgentTaskInfo {
             task_id: "task_1".to_string(),
             thread_id: "sub_1".to_string(),
+            parent_run_id: None,
             parent_task_id: None,
             owner_thread_id: "parent".to_string(),
             parent_thread_id: "parent".to_string(),

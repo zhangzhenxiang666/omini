@@ -49,6 +49,44 @@ impl Database {
         project: &ProjectDir,
     ) -> Result<(), StoreError> {
         match event {
+            RuntimePersistenceEvent::CreateAgentRun { run } => self.create_agent_run(run).await,
+            RuntimePersistenceEvent::UpdateAgentRun {
+                run_id,
+                status,
+                started_at,
+                finished_at,
+                add_tokens,
+            } => {
+                self.update_agent_run(run_id, *status, *started_at, *finished_at, *add_tokens)
+                    .await
+            }
+            RuntimePersistenceEvent::UpsertAgentStep { step } => self.upsert_agent_step(step).await,
+            RuntimePersistenceEvent::UpdateAgentStep {
+                step_id,
+                status,
+                finished_at,
+                add_input_tokens,
+                add_output_tokens,
+            } => {
+                self.update_agent_step(
+                    step_id,
+                    *status,
+                    *finished_at,
+                    *add_input_tokens,
+                    *add_output_tokens,
+                )
+                .await
+            }
+            RuntimePersistenceEvent::UpsertToolUseExecution { tool_use, status } => {
+                self.upsert_tool_use_execution(tool_use, *status).await
+            }
+            RuntimePersistenceEvent::SetAgentRunArchived {
+                run_id,
+                archived_at,
+            } => self
+                .set_agent_run_archived(run_id, *archived_at)
+                .await
+                .map(|_| ()),
             RuntimePersistenceEvent::CreateAgentTask {
                 task,
                 thread,

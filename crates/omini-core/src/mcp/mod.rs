@@ -1,4 +1,6 @@
-use crate::tools::{Tool, ToolRegistry, ToolResult, tool_metadata};
+use crate::tools::{
+    Tool, ToolExecutionContext, ToolPolicy, ToolRegistry, ToolResult, tool_metadata,
+};
 use async_trait::async_trait;
 use omini_config::{
     McpServerConfig as CoreMcpServerConfig,
@@ -46,17 +48,31 @@ struct McpRuntimeTool {
     spec: RegisteredMcpToolSpec,
 }
 
+struct McpToolPermissionPolicy {
+    spec: RegisteredMcpToolSpec,
+}
+
+#[async_trait]
+impl ToolPolicy<McpRuntimeTool> for McpToolPermissionPolicy {
+    async fn preflight(
+        &self,
+        input: &McpToolInput,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        let spec = &self.spec;
+        Ok(Some(PermissionPreview::Mcp(McpPermissionPreview {
+            server_name: spec.server_name.clone(),
+            server_tool_name: spec.server_tool_name.clone(),
+            registered_tool_name: spec.registered_tool_name.clone(),
+            inputs: input.arguments.clone().into_iter().collect(),
+        })))
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 struct McpToolInput {
     #[serde(flatten)]
     arguments: HashMap<String, Value>,
-}
-
-#[derive(Debug, Clone)]
-struct PreparedMcpToolInput {
-    server_name: String,
-    server_tool_name: String,
-    arguments: Map<String, Value>,
 }
 
 impl McpManager {
@@ -144,7 +160,6 @@ impl McpManager {
 #[async_trait]
 impl Tool for McpRuntimeTool {
     type Input = McpToolInput;
-    type Prepared = PreparedMcpToolInput;
 
     fn name(&self) -> &str {
         &self.spec.registered_tool_name
@@ -158,26 +173,9 @@ impl Tool for McpRuntimeTool {
         self.spec.input_schema.clone()
     }
 
-    async fn prepare(&self, input: Self::Input) -> Result<Self::Prepared, ToolResult> {
-        Ok(PreparedMcpToolInput {
-            server_name: self.spec.server_name.clone(),
-            server_tool_name: self.spec.server_tool_name.clone(),
-            arguments: input.arguments.into_iter().collect(),
-        })
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Mcp(McpPermissionPreview {
-            server_name: prepared.server_name.clone(),
-            server_tool_name: prepared.server_tool_name.clone(),
-            registered_tool_name: self.spec.registered_tool_name.clone(),
-            inputs: prepared.arguments.clone(),
-        }))
-    }
-
-    async fn execute_prepared(
+    async fn call(
         &self,
-        prepared: Self::Prepared,
+        input: Self::Input,
         _ctx: crate::tools::ToolExecutionContext,
     ) -> ToolResult {
         let metadata = mcp_tool_metadata(
@@ -188,9 +186,9 @@ impl Tool for McpRuntimeTool {
         match self
             .manager
             .call_tool(
-                &prepared.server_name,
-                &prepared.server_tool_name,
-                prepared.arguments,
+                &self.spec.server_name,
+                &self.spec.server_tool_name,
+                input.arguments.into_iter().collect(),
             )
             .await
         {
@@ -243,10 +241,13 @@ fn register_server_tools(
     server_tools: Vec<McpServerToolSpec>,
 ) {
     for spec in assign_registered_tool_names(server_tools) {
-        registry.register(McpRuntimeTool {
-            manager: Arc::clone(manager),
-            spec,
-        });
+        registry.register_with_policy(
+            McpRuntimeTool {
+                manager: Arc::clone(manager),
+                spec: spec.clone(),
+            },
+            McpToolPermissionPolicy { spec },
+        );
     }
 }
 
@@ -608,14 +609,16 @@ mod tests {
             manager,
             spec: spec.clone(),
         };
-        let prepared = tool
-            .prepare(McpToolInput {
-                arguments: HashMap::from([("query".to_string(), serde_json::json!("rust"))]),
-            })
+        let input = McpToolInput {
+            arguments: HashMap::from([("query".to_string(), serde_json::json!("rust"))]),
+        };
+        let preview = McpToolPermissionPolicy { spec: spec.clone() }
+            .preflight(
+                &input,
+                &ToolExecutionContext::test(&spec.registered_tool_name),
+            )
             .await
-            .unwrap();
-        let preview = tool
-            .permission_preview(&prepared)
+            .unwrap()
             .expect("MCP tool should provide a permission preview");
         let PermissionPreview::Mcp(preview) = preview else {
             panic!("expected MCP permission preview");
@@ -626,8 +629,8 @@ mod tests {
         assert_eq!(preview.inputs["query"], serde_json::json!("rust"));
 
         let result = tool
-            .execute_prepared(
-                prepared,
+            .call(
+                input,
                 ToolExecutionContext::test(&spec.registered_tool_name),
             )
             .await;

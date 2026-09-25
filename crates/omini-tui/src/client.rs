@@ -824,6 +824,7 @@ enum HandleOutcome {
 
 fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEvent {
     match event.event {
+        protocol::TypedRuntimeEvent::AgentRunChanged(run) => RuntimeToUiEvent::AgentRunChanged(run),
         protocol::TypedRuntimeEvent::RunStarted => RuntimeToUiEvent::RunStarted,
         protocol::TypedRuntimeEvent::UserMessageInjected {
             item,

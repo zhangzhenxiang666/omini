@@ -282,6 +282,9 @@ impl UiState {
 
     pub fn apply_event(&mut self, event: RuntimeToUiEvent) {
         match event {
+            RuntimeToUiEvent::AgentRunChanged(run) => {
+                self.agent_runs.insert(run.id.clone(), run);
+            }
             RuntimeToUiEvent::RunStarted => {
                 self.main_query_active = true;
                 self.show_start_screen = false;

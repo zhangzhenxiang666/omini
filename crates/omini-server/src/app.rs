@@ -189,7 +189,19 @@ fn capability_routes() -> Router<AppState> {
 fn run_routes() -> Router<AppState> {
     // 运行、权限暂停和计划审批会改变 core 状态，必须走 controller 保护。
     Router::new()
-        .route("/runs", post(routes::runs::submit_run))
+        .route(
+            "/runs",
+            get(routes::runs::list_agent_runs).post(routes::runs::submit_run),
+        )
+        .route("/runs/{run_id}", get(routes::runs::get_agent_run))
+        .route(
+            "/runs/{run_id}/archive",
+            post(routes::runs::archive_agent_run),
+        )
+        .route(
+            "/runs/{run_id}/messages",
+            post(routes::runs::intervene_agent_run),
+        )
         .route("/runs/{run_id}/cancel", post(routes::runs::cancel_run))
         .route(
             "/tool-pauses/{tool_use_id}/resolve",

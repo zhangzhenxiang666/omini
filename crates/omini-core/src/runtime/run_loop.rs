@@ -44,16 +44,32 @@ impl AgentRuntime {
                                 ))
                                 .await;
                             }
-                            ServerToRuntimeEvent::InterveneMessage { .. } => {
+                            ServerToRuntimeEvent::InterveneMessage { run_id: None, .. } => {
                                 tracing::debug!(request_kind = "intervene_message", "runtime request rejected because no run is active");
                                 self.send_event(RuntimeToServerEvent::error(
                                     "Cannot intervene because no run is active".to_string(),
                                 ))
                                 .await;
                             }
-                            ServerToRuntimeEvent::CancelRun => {
+                            ServerToRuntimeEvent::InterveneMessage {
+                                run_id: Some(run_id),
+                                message,
+                            } => {
+                                if let Err(error) = self
+                                    .task_supervisor
+                                    .intervene_agent_run(&run_id, message)
+                                {
+                                    let _ = self.send_event(RuntimeToServerEvent::error(error)).await;
+                                }
+                            }
+                            ServerToRuntimeEvent::CancelRun { run_id: None } => {
                                 tracing::debug!(request_kind = "cancel_run", "runtime request received");
                                 self.task_supervisor.cancel_all().await;
+                            }
+                            ServerToRuntimeEvent::CancelRun {
+                                run_id: Some(run_id),
+                            } => {
+                                self.task_supervisor.cancel_task(&run_id).await;
                             }
                             ServerToRuntimeEvent::ModelSelected { provider, model, thinking_effort } => {
                                 tracing::debug!(
@@ -158,6 +174,29 @@ impl AgentRuntime {
         loop {
             self.collect_task_completions().await;
             let run_id = Uuid::new_v4().to_string();
+            let created_at = chrono::Utc::now();
+            let mut run_snapshot = omini_domain::agent_run::AgentRunSnapshot {
+                id: run_id.clone(),
+                thread_id: self.thread_id.clone(),
+                parent_run_id: None,
+                kind: omini_domain::agent_run::AgentRunKind::Agent,
+                status: omini_domain::agent_run::AgentRunStatus::Running,
+                created_at,
+                started_at: Some(created_at),
+                finished_at: None,
+                total_tokens: 0,
+                archived_at: None,
+            };
+            let _ = self
+                .persistence_tx
+                .send(RuntimePersistenceEvent::CreateAgentRun {
+                    run: Box::new(run_snapshot.clone()),
+                })
+                .await;
+            let _ = self
+                .event_tx
+                .send(RuntimeToServerEvent::AgentRunChanged(run_snapshot.clone()))
+                .await;
             let _ = self
                 .persistence_tx
                 .send(RuntimePersistenceEvent::UpdateThreadUpdatedAt {
@@ -177,9 +216,32 @@ impl AgentRuntime {
                 thinking_effort = ?model.thinking_effort,
                 max_turns = ?self.settings.max_turns,
             );
-            let follow_up = self
-                .process_run_inner(start, run_id, thread_id)
+            let (follow_up, failed) = self
+                .process_run_inner(start, run_id.clone(), thread_id)
                 .instrument(run_span)
+                .await;
+            let status = if self.cancelled.load(Ordering::Relaxed) {
+                omini_domain::agent_run::AgentRunStatus::Cancelled
+            } else if failed {
+                omini_domain::agent_run::AgentRunStatus::Failed
+            } else {
+                omini_domain::agent_run::AgentRunStatus::Completed
+            };
+            run_snapshot.status = status;
+            run_snapshot.finished_at = Some(chrono::Utc::now());
+            let _ = self
+                .persistence_tx
+                .send(RuntimePersistenceEvent::UpdateAgentRun {
+                    run_id,
+                    status,
+                    started_at: None,
+                    finished_at: run_snapshot.finished_at,
+                    add_tokens: 0,
+                })
+                .await;
+            let _ = self
+                .event_tx
+                .send(RuntimeToServerEvent::AgentRunChanged(run_snapshot))
                 .await;
             let collected_after_run = self.collect_task_completions().await;
             start = if follow_up {
@@ -197,7 +259,7 @@ impl AgentRuntime {
         start: RunStart,
         run_id: String,
         thread_id: String,
-    ) -> bool {
+    ) -> (bool, bool) {
         tracing::info!("agent run started");
         let requires_internal_input = matches!(start, RunStart::PendingAgentTaskNotification);
         let model = self.settings.active_model();
@@ -222,15 +284,16 @@ impl AgentRuntime {
 
         // 启动事件处理器独立 task，负责增量持久化和转发到 server。
         let processor = self
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 active_profile,
                 Arc::clone(&active_profile_handle),
                 tool_pause_resolver,
+                Some(run_id.clone()),
             )
             .await;
 
-        let follow_up = {
+        let (follow_up, failed) = {
             let subagent_registry = self.capabilities.subagent_registry();
             let skill_registry = self.capabilities.skill_registry();
             let run_settings = self.settings.clone();
@@ -275,14 +338,23 @@ impl AgentRuntime {
                     }
                     Some(req) = self.request_rx.recv() => {
                         match req {
-                            ServerToRuntimeEvent::CancelRun => {
+                            ServerToRuntimeEvent::CancelRun { run_id: None } => {
                                 tracing::debug!("active run cancellation requested");
                                 self.cancelled.store(true, Ordering::Relaxed);
                                 self.query_engine.notify_cancel_waiters();
                                 self.task_supervisor.cancel_all().await;
                             }
+                            ServerToRuntimeEvent::CancelRun {
+                                run_id: Some(run_id),
+                            } => {
+                                self.task_supervisor.cancel_task(&run_id).await;
+                            }
                             ServerToRuntimeEvent::ResolveToolPause { tool_use_id, response } => {
                                 tracing::debug!(tool_use_id = %tool_use_id, response = ?response, "resolving tool pause");
+                                let permission_response = matches!(
+                                    response,
+                                    omini_domain::events::ToolPauseResponse::Permission { .. }
+                                );
                                 if let Err(e) = self
                                     .query_engine
                                     .resolve_tool_pause(&tool_use_id, response)
@@ -290,11 +362,35 @@ impl AgentRuntime {
                                     tracing::warn!(tool_use_id = %tool_use_id, error = %e, "failed to resolve tool pause");
                                     let _ =
                                         event_tx.send(RuntimeToServerEvent::error(e.to_string())).await;
+                                } else if permission_response {
+                                    let _ = self.persistence_tx
+                                        .send(RuntimePersistenceEvent::UpdateAgentRun {
+                                            run_id: run_id.clone(),
+                                            status: omini_domain::agent_run::AgentRunStatus::Running,
+                                            started_at: None,
+                                            finished_at: None,
+                                            add_tokens: 0,
+                                        })
+                                        .await;
                                 }
                             }
-                            ServerToRuntimeEvent::InterveneMessage { message } => {
+                            ServerToRuntimeEvent::InterveneMessage {
+                                run_id: None,
+                                message,
+                            } => {
                                 tracing::debug!(request_kind = "intervene_message", "active run intervention received");
                                 self.query_engine.enqueue_user_message(message);
+                            }
+                            ServerToRuntimeEvent::InterveneMessage {
+                                run_id: Some(run_id),
+                                message,
+                            } => {
+                                if let Err(error) = self
+                                    .task_supervisor
+                                    .intervene_agent_run(&run_id, message)
+                                {
+                                    let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
+                                }
                             }
                             ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action } => {
                                 tracing::debug!(plan_id = %plan_id, action = ?action, "plan approval resolution rejected during active run");
@@ -405,7 +501,15 @@ impl AgentRuntime {
                     "query finished"
                 );
             }
-            query_result.is_some_and(|result| result.follow_up)
+            query_result.map_or((false, false), |result| {
+                (
+                    result.follow_up,
+                    matches!(
+                        result.finish_reason,
+                        omini_provider_api::FinishReason::Error(_)
+                    ),
+                )
+            })
         };
 
         // 等待事件处理器在 engine_tx drop 后自然退出。
@@ -433,7 +537,7 @@ impl AgentRuntime {
                 self.send_event(RuntimeToServerEvent::error(error)).await;
             }
         }
-        follow_up
+        (follow_up, failed)
     }
 
     async fn collect_task_completions(&mut self) -> bool {

@@ -31,7 +31,6 @@ pub struct TodoWriteTool;
 #[async_trait]
 impl Tool for TodoWriteTool {
     type Input = TodoWriteInput;
-    type Prepared = TodoWriteInput;
 
     fn name(&self) -> &str {
         "todo_write"
@@ -49,23 +48,15 @@ impl Tool for TodoWriteTool {
         )
     }
 
-    async fn prepare(&self, input: TodoWriteInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: TodoWriteInput, _ctx: ToolExecutionContext) -> ToolResult {
         if input.todos.is_empty() {
-            return Err(ToolResult::error("todos must contain at least one item"));
+            return ToolResult::error("todos must contain at least one item");
         }
         for todo in &input.todos {
             if todo.content.trim().is_empty() {
-                return Err(ToolResult::error("todo content must not be empty"));
+                return ToolResult::error("todo content must not be empty");
             }
         }
-        Ok(input)
-    }
-
-    async fn execute_prepared(
-        &self,
-        input: Self::Prepared,
-        _ctx: ToolExecutionContext,
-    ) -> ToolResult {
         ToolResult::ok(
             serde_json::to_string_pretty(&input)
                 .unwrap_or_else(|_| format!("Updated {} todo item(s)", input.todos.len())),

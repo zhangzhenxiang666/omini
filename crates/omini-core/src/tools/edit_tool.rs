@@ -1,4 +1,6 @@
-use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
+use super::{
+    Tool, ToolExecutionContext, ToolPolicy, ToolResult, normalize_path_field, tool_metadata,
+};
 use crate::util::file_lock::FileLockService;
 use async_trait::async_trait;
 use omini_domain::events::{EditPermissionPreview, PermissionPreview};
@@ -23,6 +25,53 @@ pub struct EditInput {
 
 pub struct EditTool;
 
+/// 在权限决策前校验编辑输入，并生成供审批界面展示的 diff。
+pub struct EditPermissionPolicy;
+
+#[async_trait]
+impl ToolPolicy<EditTool> for EditPermissionPolicy {
+    fn normalize_raw_input(&self, raw_input: &mut serde_json::Value, cwd: &Path) {
+        normalize_path_field(raw_input, "file_path", cwd, false);
+    }
+
+    async fn preflight(
+        &self,
+        input: &EditInput,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        let plan = plan_edit(input)
+            .await
+            .map_err(|error| ToolResult::error(error.to_string()))?;
+        Ok(Some(PermissionPreview::Edit(build_preview(
+            input,
+            &plan.matches,
+            &plan.diff,
+        ))))
+    }
+}
+
+#[cfg(test)]
+impl EditTool {
+    async fn prepare(&self, input: EditInput) -> Result<PreparedEdit, ToolResult> {
+        let plan = plan_edit(&input)
+            .await
+            .map_err(|error| ToolResult::error(error.to_string()))?;
+        Ok(PreparedEdit {
+            preview: build_preview(&input, &plan.matches, &plan.diff),
+            matches: plan.matches,
+            input,
+        })
+    }
+
+    async fn execute_prepared(
+        &self,
+        prepared: PreparedEdit,
+        ctx: ToolExecutionContext,
+    ) -> ToolResult {
+        self.call(prepared.input, ctx).await
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EditMatch {
     pub start_byte: usize,
@@ -41,7 +90,6 @@ pub struct PreparedEdit {
 #[async_trait]
 impl Tool for EditTool {
     type Input = EditInput;
-    type Prepared = PreparedEdit;
 
     fn name(&self) -> &str {
         "edit"
@@ -69,29 +117,18 @@ impl Tool for EditTool {
         )
     }
 
-    async fn prepare(&self, input: EditInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: EditInput, _ctx: ToolExecutionContext) -> ToolResult {
         let plan = match plan_edit(&input).await {
             Ok(plan) => plan,
-            Err(e) => return Err(ToolResult::error(e)),
+            Err(e) => return ToolResult::error(e),
         };
 
         let preview = build_preview(&input, &plan.matches, &plan.diff);
-        Ok(PreparedEdit {
+        let prepared = PreparedEdit {
             input,
             preview,
             matches: plan.matches,
-        })
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Edit(prepared.preview.clone()))
-    }
-
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        _ctx: ToolExecutionContext,
-    ) -> ToolResult {
+        };
         match execute_edit(&prepared).await {
             Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
                 ("input", serde_json::json!(prepared.input.clone())),

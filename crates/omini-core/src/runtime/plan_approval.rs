@@ -1,6 +1,5 @@
 use super::service::{AgentRuntime, RunStart};
 use super::*;
-use omini_domain::display::HistoryItem;
 
 impl AgentRuntime {
     pub async fn resolve_plan_approval(&mut self, plan_id: &str, action: PlanApprovalAction) {
@@ -22,9 +21,8 @@ impl AgentRuntime {
                 ))
                 .await;
                 self.messages.push(plan_message.clone());
-                self.send_event(RuntimeToServerEvent::UserMessageInjected {
-                    item: HistoryItem::Message(plan_message),
-                    client_echo_id: None,
+                self.send_event(RuntimeToServerEvent::PlanApprovalAccepted {
+                    message: plan_message,
                 })
                 .await;
                 self.process_run(RunStart::UserMessage).await;

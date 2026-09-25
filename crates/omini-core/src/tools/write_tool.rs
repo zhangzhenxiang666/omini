@@ -1,4 +1,6 @@
-use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
+use super::{
+    Tool, ToolExecutionContext, ToolPolicy, ToolResult, normalize_path_field, tool_metadata,
+};
 use crate::util::file_lock::FileLockService;
 use async_trait::async_trait;
 use omini_domain::events::{EditPermissionPreview, PermissionPreview};
@@ -18,6 +20,27 @@ pub struct WriteInput {
 
 pub struct WriteTool;
 
+/// 在权限决策前校验写入目标，并生成供审批界面展示的 diff。
+pub struct WritePermissionPolicy;
+
+#[async_trait]
+impl ToolPolicy<WriteTool> for WritePermissionPolicy {
+    fn normalize_raw_input(&self, raw_input: &mut serde_json::Value, cwd: &Path) {
+        normalize_path_field(raw_input, "file_path", cwd, false);
+    }
+
+    async fn preflight(
+        &self,
+        input: &WriteInput,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        let existed = validate_target(input).map_err(ToolResult::error)?;
+        Ok(Some(PermissionPreview::Write(build_preview(
+            input, existed,
+        ))))
+    }
+}
+
 #[derive(Debug)]
 pub struct PreparedWrite {
     input: WriteInput,
@@ -28,7 +51,6 @@ pub struct PreparedWrite {
 #[async_trait]
 impl Tool for WriteTool {
     type Input = WriteInput;
-    type Prepared = PreparedWrite;
 
     fn name(&self) -> &str {
         "write"
@@ -52,29 +74,18 @@ impl Tool for WriteTool {
         )
     }
 
-    async fn prepare(&self, input: WriteInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: WriteInput, _ctx: ToolExecutionContext) -> ToolResult {
         let existed = match validate_target(&input) {
             Ok(existed) => existed,
-            Err(e) => return Err(ToolResult::error(e)),
+            Err(e) => return ToolResult::error(e),
         };
 
         let preview = build_preview(&input, existed);
-        Ok(PreparedWrite {
+        let prepared = PreparedWrite {
             input,
             preview,
             existed,
-        })
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Write(prepared.preview.clone()))
-    }
-
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        _ctx: ToolExecutionContext,
-    ) -> ToolResult {
+        };
         match execute_write(&prepared).await {
             Ok(report) => ToolResult::ok(report.output).with_metadata(tool_metadata([
                 ("input", serde_json::json!(prepared.input.clone())),

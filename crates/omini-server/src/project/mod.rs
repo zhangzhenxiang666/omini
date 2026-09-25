@@ -14,6 +14,7 @@ use std::{
 mod agents;
 mod model_selection;
 mod open;
+mod runs;
 mod settings;
 mod threads;
 

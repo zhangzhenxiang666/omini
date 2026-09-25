@@ -1,4 +1,4 @@
-use super::{Tool, ToolExecutionContext, ToolResult, tool_metadata};
+use super::{Tool, ToolExecutionContext, ToolPolicy, ToolResult, tool_metadata};
 use async_trait::async_trait;
 use omini_domain::events::{PermissionPreview, SearchPermissionPreview};
 use schemars::JsonSchema;
@@ -40,6 +40,49 @@ pub struct SearchInput {
 }
 
 pub struct SearchTool;
+
+#[cfg(test)]
+impl SearchTool {
+    async fn prepare(&self, input: SearchInput) -> Result<PreparedSearch, String> {
+        prepare_search(input)
+    }
+}
+pub struct SearchPermissionPolicy;
+
+#[async_trait]
+impl ToolPolicy<SearchTool> for SearchPermissionPolicy {
+    fn normalize_raw_input(&self, raw_input: &mut serde_json::Value, cwd: &Path) {
+        super::normalize_path_field(raw_input, "path", cwd, true);
+    }
+
+    async fn preflight(
+        &self,
+        input: &SearchInput,
+        ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        let path = input
+            .path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| ctx.settings.cwd.clone());
+        let path = if path.is_absolute() {
+            path
+        } else {
+            ctx.settings.cwd.join(path)
+        };
+        let path = std::fs::canonicalize(&path).unwrap_or(path);
+        Ok(Some(PermissionPreview::Search(SearchPermissionPreview {
+            query: input.query.clone(),
+            mode: match input.mode {
+                SearchMode::Content => "content",
+                SearchMode::Files => "files",
+            }
+            .to_string(),
+            path: path.display().to_string(),
+        })))
+    }
+}
 
 #[derive(Debug)]
 pub struct PreparedSearch {
@@ -86,7 +129,6 @@ struct ParsedSearch {
 #[async_trait]
 impl Tool for SearchTool {
     type Input = SearchInput;
-    type Prepared = PreparedSearch;
 
     fn name(&self) -> &str {
         "search"
@@ -124,33 +166,11 @@ impl Tool for SearchTool {
         )
     }
 
-    async fn prepare(&self, input: SearchInput) -> Result<Self::Prepared, ToolResult> {
-        prepare_search(input).map_err(ToolResult::error)
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        // permission_preview 阶段没有 ctx，先用 raw_path 显示（可能是相对路径或 None）
-        let path_display = prepared
-            .raw_path
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| ".".to_string());
-        Some(PermissionPreview::Search(SearchPermissionPreview {
-            query: prepared.query.clone(),
-            mode: match prepared.mode {
-                SearchMode::Content => "content",
-                SearchMode::Files => "files",
-            }
-            .to_string(),
-            path: path_display,
-        }))
-    }
-
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        ctx: ToolExecutionContext,
-    ) -> ToolResult {
+    async fn call(&self, input: SearchInput, ctx: ToolExecutionContext) -> ToolResult {
+        let prepared = match prepare_search(input) {
+            Ok(prepared) => prepared,
+            Err(error) => return ToolResult::error(error),
+        };
         let thread_cwd = ctx.settings.cwd.clone();
         execute_search(prepared, thread_cwd).await
     }
@@ -656,18 +676,16 @@ mod tests {
 
     #[tokio::test]
     async fn prepares_paths_outside_workspace_for_permission_check() {
-        let prepared = SearchTool
-            .prepare(SearchInput {
-                path: Some("/".to_string()),
-                ..input("anything", Path::new("."))
-            })
+        let search_input = SearchInput {
+            path: Some("/".to_string()),
+            ..input("anything", Path::new("."))
+        };
+        let ctx = ToolExecutionContext::test("search");
+        let preview = SearchPermissionPolicy
+            .preflight(&search_input, &ctx)
             .await
-            .unwrap();
-
-        let preview = SearchTool
-            .permission_preview(&prepared)
+            .unwrap()
             .expect("search should provide permission preview");
-        assert_eq!(prepared.raw_path, Some(PathBuf::from("/")));
         assert!(matches!(
             preview,
             PermissionPreview::Search(SearchPermissionPreview { path, .. }) if path == "/"

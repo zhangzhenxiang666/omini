@@ -358,8 +358,7 @@ fn agent_editor_cursor_prefix_lines(manager: &AgentManagerState, field_index: us
 }
 
 fn agent_manual_create_field_cursor_prefix_lines(manager: &AgentManagerState) -> usize {
-    // Inside build_agent_create_lines before the editable content row:
-    // tabs + blank + summary(source/tools/model/blank) + label + top border.
+    // 可编辑内容行之前，build_agent_create_lines 会输出：标签页、空行、摘要（来源/工具/模型/空行）、字段标签和顶部边框。
     2 + 1
         + agent_tool_summary_line_count(&manager.draft.tools, &manager.draft.disallow_tools)
         + 1

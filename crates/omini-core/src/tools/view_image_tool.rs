@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use omini_domain::config::InputModality;
-use omini_domain::events::{PermissionPreview, ReadPermissionPreview};
 use omini_domain::message::ContentBlock;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -27,7 +26,6 @@ pub struct PreparedViewImage {
 #[async_trait]
 impl Tool for ViewImageTool {
     type Input = ViewImageInput;
-    type Prepared = PreparedViewImage;
 
     fn name(&self) -> &str {
         "view_image"
@@ -46,24 +44,13 @@ impl Tool for ViewImageTool {
         )
     }
 
-    async fn prepare(&self, input: ViewImageInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: ViewImageInput, ctx: ToolExecutionContext) -> ToolResult {
         let path = PathBuf::from(input.path);
-        validate_path(&path)
-            .map(|media_type| PreparedViewImage { path, media_type })
-            .map_err(ToolResult::error)
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Read(ReadPermissionPreview {
-            file_path: prepared.path.display().to_string(),
-        }))
-    }
-
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        ctx: ToolExecutionContext,
-    ) -> ToolResult {
+        let media_type = match validate_path(&path) {
+            Ok(media_type) => media_type,
+            Err(error) => return ToolResult::error(error),
+        };
+        let prepared = PreparedViewImage { path, media_type };
         if !ctx.settings.supports_input_modality(InputModality::Image) {
             return ToolResult::error(format!(
                 "view_image requires image input, but current model '{}' does not declare support for image input",

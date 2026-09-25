@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
-use omini_domain::display::{DisplayPlan, HistoryItem};
+use omini_domain::display::DisplayPlan;
 use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, CompactTrigger, Notification,
@@ -82,56 +82,6 @@ fn delta_and_profile_events_all_values_use_flat_named_payloads() {
             expected
         );
     }
-}
-
-#[test]
-fn injected_message_missing_or_null_echo_id_defaults_to_none_and_is_omitted() {
-    let canonical = json!({
-        "type": "user_message_injected",
-        "item": {"type": "message", "role": "user", "content": []}
-    });
-
-    for input in [
-        canonical.clone(),
-        json!({
-            "type": "user_message_injected",
-            "item": {"type": "message", "role": "user", "content": []},
-            "client_echo_id": null
-        }),
-    ] {
-        let event: RuntimeToServerEvent =
-            serde_json::from_value(input).expect("absent echo id should deserialize");
-        assert!(matches!(
-            &event,
-            RuntimeToServerEvent::UserMessageInjected {
-                client_echo_id: None,
-                ..
-            }
-        ));
-        assert_eq!(
-            serde_json::to_value(event).expect("injected message should serialize"),
-            canonical
-        );
-    }
-
-    let with_echo = json!({
-        "type": "user_message_injected",
-        "item": {"type": "message", "role": "user", "content": []},
-        "client_echo_id": "echo-终"
-    });
-    let event: RuntimeToServerEvent =
-        serde_json::from_value(with_echo.clone()).expect("echo id should deserialize");
-    assert!(matches!(
-        &event,
-        RuntimeToServerEvent::UserMessageInjected {
-            client_echo_id: Some(id),
-            ..
-        } if id == "echo-终"
-    ));
-    assert_eq!(
-        serde_json::to_value(event).expect("injected message should serialize"),
-        with_echo
-    );
 }
 
 #[test]
@@ -362,13 +312,12 @@ fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
             json!({"type": "run_started"}),
         ),
         (
-            RuntimeToServerEvent::UserMessageInjected {
-                item: HistoryItem::Message(Message::new(Role::User, Vec::new())),
-                client_echo_id: None,
+            RuntimeToServerEvent::PlanApprovalAccepted {
+                message: Message::new(Role::User, Vec::new()),
             },
             json!({
-                "type": "user_message_injected",
-                "item": {"type": "message", "role": "user", "content": []}
+                "type": "plan_approval_accepted",
+                "message": {"role": "user", "content": []}
             }),
         ),
         (
@@ -501,7 +450,7 @@ fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
 fn runtime_event_type(event: &RuntimeToServerEvent) -> &'static str {
     match event {
         RuntimeToServerEvent::RunStarted => "run_started",
-        RuntimeToServerEvent::UserMessageInjected { .. } => "user_message_injected",
+        RuntimeToServerEvent::PlanApprovalAccepted { .. } => "plan_approval_accepted",
         RuntimeToServerEvent::RunFinished => "run_finished",
         RuntimeToServerEvent::Notification(_) => "notification",
         RuntimeToServerEvent::ModelChanged { .. } => "model_changed",
@@ -524,6 +473,7 @@ fn runtime_event_type(event: &RuntimeToServerEvent) -> &'static str {
         RuntimeToServerEvent::PlanSubmitted(_) => "plan_submitted",
         RuntimeToServerEvent::PlanApprovalResolved { .. } => "plan_approval_resolved",
         RuntimeToServerEvent::ThreadSwitched { .. } => "thread_switched",
+        RuntimeToServerEvent::AgentRunChanged(_) => "agent_run_changed",
         RuntimeToServerEvent::AgentTaskEvent(_) => "agent_task_event",
     }
 }

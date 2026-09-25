@@ -1,5 +1,5 @@
+use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::HistoryItem;
 use omini_domain::events::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerToRuntimeEvent {
-    CancelRun,
+    /// 取消当前主 Run 及其子任务，或取消指定子 Run 及其后代。
+    CancelRun {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
     /// 用户消息的 LLM 上下文行。展示行与 echo 由 server 在接收路径直接处理,
     /// 不进入 runtime;语义见 `submit_run` 的所有权划分。
     SendMessage {
@@ -27,8 +31,11 @@ pub enum ServerToRuntimeEvent {
     ),
     ToggleActiveProfile,
     SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
-    /// 运行中插话的 LLM 上下文行,在安全输入边界提交;展示行与 echo 同样由 server 处理。
+    /// 运行中插话的 LLM 上下文行。`None` 指当前主 Run，`Some` 指定子 Run；消息在安全输入边界提交。
+    /// 展示行与 echo 同样由 server 处理。
     InterveneMessage {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
         message: Message,
     },
     ModelSelected {
@@ -52,12 +59,8 @@ pub enum ServerToRuntimeEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeToServerEvent {
+    AgentRunChanged(AgentRunSnapshot),
     RunStarted,
-    UserMessageInjected {
-        item: HistoryItem,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_echo_id: Option<String>,
-    },
     RunFinished,
     Notification(Notification),
     ModelChanged {
@@ -91,6 +94,10 @@ pub enum RuntimeToServerEvent {
     PlanApprovalResolved {
         plan_id: String,
         action: PlanApprovalAction,
+    },
+    /// 计划批准后提交给 LLM 上下文的消息，由 server 决定如何投影到用户历史。
+    PlanApprovalAccepted {
+        message: Message,
     },
     /// server 端 fork 出新 ThreadRuntime 后，作为原 thread 推送给客户端的
     /// 外部线程切换通知。承载在普通 runtime 通道上，以便 ws 文本帧能直接编码为

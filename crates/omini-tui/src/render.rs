@@ -270,7 +270,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(!rendered.contains("██████"));
-        // help drawer hides start screen visually, but the flag stays true
+        // 帮助抽屉会遮住起始页，但对应标志仍保持为 true。
         assert!(state.show_start_screen);
     }
 

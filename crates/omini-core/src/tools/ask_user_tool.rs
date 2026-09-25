@@ -37,7 +37,6 @@ pub struct AskUserTool;
 #[async_trait]
 impl Tool for AskUserTool {
     type Input = AskUserInput;
-    type Prepared = AskUserInput;
 
     fn name(&self) -> &str {
         "ask_user"
@@ -66,39 +65,31 @@ impl Tool for AskUserTool {
         )
     }
 
-    async fn prepare(&self, input: AskUserInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: AskUserInput, ctx: ToolExecutionContext) -> ToolResult {
         if !(1..=5).contains(&input.questions.len()) {
-            return Err(ToolResult::error("questions must contain 1-5 items"));
+            return ToolResult::error("questions must contain 1-5 items");
         }
         for question in &input.questions {
             if question.id.trim().is_empty() {
-                return Err(ToolResult::error("question id must not be empty"));
+                return ToolResult::error("question id must not be empty");
             }
             if !is_snake_case_identifier(&question.id) {
-                return Err(ToolResult::error("question id must be snake_case"));
+                return ToolResult::error("question id must be snake_case");
             }
             if question.header.trim().is_empty() {
-                return Err(ToolResult::error("question header must not be empty"));
+                return ToolResult::error("question header must not be empty");
             }
             if question.question.trim().is_empty() {
-                return Err(ToolResult::error("question text must not be empty"));
+                return ToolResult::error("question text must not be empty");
             }
             if !(2..=4).contains(&question.options.len()) {
-                return Err(ToolResult::error("each question must contain 2-4 choices"));
+                return ToolResult::error("each question must contain 2-4 choices");
             }
             if question.options.iter().any(|o| o.label.trim().is_empty()) {
-                return Err(ToolResult::error("option labels must not be empty"));
+                return ToolResult::error("option labels must not be empty");
             }
         }
-        Ok(input)
-    }
-
-    async fn execute_prepared(
-        &self,
-        prepared: Self::Prepared,
-        ctx: ToolExecutionContext,
-    ) -> ToolResult {
-        let questions = prepared
+        let questions = input
             .questions
             .into_iter()
             .map(|prepared_question| UserInputQuestion {

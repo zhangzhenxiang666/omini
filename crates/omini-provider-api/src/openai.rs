@@ -151,7 +151,7 @@ pub async fn invoke_openai(
                             }
                         };
 
-                        // usage
+                        // 用量信息。
                         if let Some(value) = data.get("usage") {
                             update_usage_from_value(&mut usage, value);
                         }
@@ -165,7 +165,7 @@ pub async fn invoke_openai(
                             None => continue,
                         };
 
-                        // finish_reason
+                        // 响应结束原因。
                         let current_finish_reason = choice
                             .get("finish_reason")
                             .and_then(|v| v.as_str())
@@ -181,7 +181,7 @@ pub async fn invoke_openai(
                         }
 
                         if let Some(delta) = choice.get("delta") {
-                            // content delta
+                            // 正文增量。
                             if let Some(text) = delta
                                 .get("content")
                                 .and_then(|v| v.as_str())
@@ -196,7 +196,7 @@ pub async fn invoke_openai(
                                 }
                             }
 
-                            // reasoning_content delta
+                            // 推理内容增量。
                             if let Some(thinking) = delta
                                 .get("reasoning_content")
                                 .or_else(|| delta.get("reasoning"))
@@ -216,7 +216,7 @@ pub async fn invoke_openai(
                                 }
                             }
 
-                            // tool_calls delta
+                            // 工具调用增量。
                             if let Some(tc_array) =
                                 delta.get("tool_calls").and_then(|v| v.as_array())
                             {
@@ -440,10 +440,10 @@ async fn emit_all_pending_tool_calls(
     .await
 }
 
-/// Emit completed tool calls in index order.
+/// 按索引顺序发送已完成的工具调用。
 ///
-/// OpenAI does not send an explicit per-tool stop event. When a higher index starts,
-/// lower indexes are complete enough to dispatch, while still preserving order.
+/// OpenAI 不会为每个工具调用单独发送结束事件。较大的索引开始出现时，较小索引的调用已足以派发，
+/// 同时仍能保持原始顺序。
 async fn emit_tool_calls_before_index(
     tool_calls: &mut HashMap<usize, ToolCallAcc>,
     next_expected_index: &mut usize,

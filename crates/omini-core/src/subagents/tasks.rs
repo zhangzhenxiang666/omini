@@ -1,4 +1,4 @@
-use crate::engine::{QueryContext, QueryEngine};
+use crate::engine::{QueryContext, QueryEngine, SharedPendingUserMessages};
 use crate::skills::SkillSummary;
 use crate::subagents::{AgentSpec, AgentTaskRequest};
 use crate::tools::{
@@ -96,6 +96,7 @@ struct TaskEntry {
     info: AgentTaskInfo,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
+    inbox: SharedPendingUserMessages,
 }
 
 struct PreparedTask {
@@ -111,6 +112,7 @@ struct PreparedTask {
     warnings: Vec<String>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
+    inbox: SharedPendingUserMessages,
     slot: TaskSlotReservation,
 }
 
@@ -124,6 +126,7 @@ pub struct AgentTaskSupervisor {
     active_profile: Arc<RwLock<ActiveProfile>>,
     owner_usage: Arc<Mutex<ThreadUsageSnapshot>>,
     tasks: Mutex<HashMap<String, TaskEntry>>,
+    parent_inbox: Mutex<Option<SharedPendingUserMessages>>,
     active_task_slots: Mutex<ActiveTaskSlots>,
     idle_notify: Notify,
 }
@@ -169,6 +172,7 @@ impl AgentTaskSupervisor {
                         info,
                         cancelled: Arc::new(AtomicBool::new(false)),
                         cancel_notify: Arc::new(Notify::new()),
+                        inbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                     },
                 )
             })
@@ -182,6 +186,7 @@ impl AgentTaskSupervisor {
             active_profile,
             owner_usage,
             tasks: Mutex::new(tasks),
+            parent_inbox: Mutex::new(None),
             active_task_slots: Mutex::new(ActiveTaskSlots::default()),
             idle_notify: Notify::new(),
         });
@@ -199,6 +204,85 @@ impl AgentTaskSupervisor {
             });
         }
         supervisor
+    }
+
+    pub fn set_parent_inbox(&self, inbox: SharedPendingUserMessages) {
+        *self
+            .parent_inbox
+            .lock()
+            .expect("agent parent inbox mutex poisoned") = Some(inbox);
+    }
+
+    pub fn send_message(
+        &self,
+        sender_task_id: Option<&str>,
+        sender_depth: u8,
+        target: &str,
+        message: Message,
+    ) -> Result<(), String> {
+        if target == "parent" {
+            if sender_depth != 1 || sender_task_id.is_none() {
+                return Err("only a first-level child agent can message its parent".to_string());
+            }
+            let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+            let sender = tasks
+                .get(sender_task_id.expect("checked above"))
+                .ok_or_else(|| "sending child agent was not found".to_string())?;
+            if sender.info.depth != 1 || sender.info.parent_task_id.is_some() {
+                return Err("messages are only available to direct child agents".to_string());
+            }
+            if sender.info.status.is_terminal() {
+                return Err("completed child agents cannot send messages".to_string());
+            }
+            let inbox = self
+                .parent_inbox
+                .lock()
+                .expect("agent parent inbox mutex poisoned")
+                .clone()
+                .ok_or_else(|| "parent agent inbox is unavailable".to_string())?;
+            inbox
+                .lock()
+                .expect("agent parent inbox queue poisoned")
+                .push_back(message);
+            return Ok(());
+        }
+
+        if sender_depth != 0 || sender_task_id.is_some() {
+            return Err("only the main agent can message a child agent".to_string());
+        }
+        let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+        let task = tasks
+            .get(target)
+            .ok_or_else(|| "child agent task was not found".to_string())?;
+        if task.info.depth != 1 || task.info.parent_task_id.is_some() {
+            return Err("messages are only available to direct child agents".to_string());
+        }
+        if task.info.status.is_terminal() {
+            return Err("messages cannot be sent to a completed child agent".to_string());
+        }
+        task.inbox
+            .lock()
+            .expect("agent child inbox queue poisoned")
+            .push_back(message);
+        Ok(())
+    }
+
+    pub fn intervene_agent_run(&self, run_id: &str, message: Message) -> Result<(), String> {
+        let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+        let task = tasks
+            .get(run_id)
+            .ok_or_else(|| "agent run was not found".to_string())?;
+        if task.info.depth != 1 || task.info.parent_task_id.is_some() {
+            return Err("user intervention is only available for direct child agents".to_string());
+        }
+        if task.info.status.is_terminal() {
+            return Err("user intervention is unavailable for a completed child agent".to_string());
+        }
+        task.inbox
+            .lock()
+            .expect("agent child inbox queue poisoned")
+            .push_back(message);
+        Ok(())
     }
 
     pub async fn spawn_background(
@@ -499,6 +583,7 @@ impl AgentTaskSupervisor {
         let info = AgentTaskInfo {
             task_id: task_id.clone(),
             thread_id: thread_id.clone(),
+            parent_run_id: runtime.run_id.clone().or_else(|| runtime.task_id.clone()),
             parent_task_id: runtime.task_id.clone(),
             owner_thread_id: runtime.owner_thread_id.clone(),
             parent_thread_id: runtime.thread_id.clone(),
@@ -564,6 +649,7 @@ impl AgentTaskSupervisor {
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel_notify = Arc::new(Notify::new());
+        let inbox = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         self.tasks
             .lock()
             .expect("agent task mutex poisoned")
@@ -573,6 +659,7 @@ impl AgentTaskSupervisor {
                     info: info.clone(),
                     cancelled: Arc::clone(&cancelled),
                     cancel_notify: Arc::clone(&cancel_notify),
+                    inbox: Arc::clone(&inbox),
                 },
             );
         self.emit(
@@ -609,6 +696,7 @@ impl AgentTaskSupervisor {
             warnings,
             cancelled,
             cancel_notify,
+            inbox,
             slot,
         })
     }
@@ -627,6 +715,7 @@ impl AgentTaskSupervisor {
             mut warnings,
             cancelled,
             cancel_notify,
+            inbox,
             slot: _slot,
         } = prepared;
         let task_span = tracing::debug_span!(
@@ -651,7 +740,7 @@ impl AgentTaskSupervisor {
         );
         let runtime = Arc::new(ToolRuntimeContext {
             thread_id: info.thread_id.clone(),
-            run_id: None,
+            run_id: Some(info.task_id.clone()),
             thread_type: "agent".to_string(),
             agent_label: Some(info.agent.clone()),
             thread_dir,
@@ -676,10 +765,11 @@ impl AgentTaskSupervisor {
                     .await
             })
         };
-        let engine = QueryEngine::with_shared_tool_controls(
+        let engine = QueryEngine::with_shared_user_messages(
             Arc::clone(&self.pending_tool_pauses),
             Arc::clone(&self.permission_engine),
             Arc::clone(&cancel_notify),
+            inbox,
         );
         let result = engine
             .run_query(
@@ -726,12 +816,47 @@ impl AgentTaskSupervisor {
         model_ref: &str,
     ) -> Vec<String> {
         let mut warnings = Vec::new();
+        let mut next_step_no = 0_u32;
+        let mut active_step_id: Option<String> = None;
+        let mut tool_uses = HashMap::new();
         while let Some(event) = rx.recv().await {
             match event {
                 EngineToRuntimeEvent::TurnStarted => {
+                    next_step_no += 1;
+                    let step_id = Uuid::new_v4().to_string();
+                    active_step_id = Some(step_id.clone());
+                    let _ = self
+                        .persistence_tx
+                        .send(RuntimePersistenceEvent::UpsertAgentStep {
+                            step: omini_domain::agent_run::AgentStepSnapshot {
+                                id: step_id,
+                                run_id: info.task_id.clone(),
+                                step_no: next_step_no,
+                                status: omini_domain::agent_run::AgentStepStatus::Running,
+                                started_at: Utc::now(),
+                                finished_at: None,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            },
+                        })
+                        .await;
                     self.emit(info, AgentTaskEvent::TurnStarted).await
                 }
-                EngineToRuntimeEvent::TurnEnded => self.emit(info, AgentTaskEvent::TurnEnded).await,
+                EngineToRuntimeEvent::TurnEnded => {
+                    if let Some(step_id) = active_step_id.take() {
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpdateAgentStep {
+                                step_id,
+                                status: omini_domain::agent_run::AgentStepStatus::Completed,
+                                finished_at: Some(Utc::now()),
+                                add_input_tokens: 0,
+                                add_output_tokens: 0,
+                            })
+                            .await;
+                    }
+                    self.emit(info, AgentTaskEvent::TurnEnded).await
+                }
                 EngineToRuntimeEvent::ThinkingDelta(delta) => {
                     self.emit(info, AgentTaskEvent::ThinkingDelta { delta })
                         .await
@@ -740,9 +865,44 @@ impl AgentTaskSupervisor {
                     self.emit(info, AgentTaskEvent::TextDelta { delta }).await
                 }
                 EngineToRuntimeEvent::ToolUse(tool_use) => {
+                    if let Some(step_id) = active_step_id.as_ref() {
+                        let record = omini_domain::agent_run::ToolUseExecutionSnapshot {
+                            id: tool_use.id.clone(),
+                            step_id: step_id.clone(),
+                            name: tool_use.name.clone(),
+                            input: serde_json::to_value(&tool_use.input)
+                                .unwrap_or(serde_json::Value::Null),
+                            status: omini_domain::agent_run::ToolUseStatus::Running,
+                            updated_at: Utc::now(),
+                        };
+                        tool_uses.insert(tool_use.id.clone(), record.clone());
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                tool_use: record,
+                                status: omini_domain::agent_run::ToolUseStatus::Running,
+                            })
+                            .await;
+                    }
                     self.emit(info, AgentTaskEvent::ToolUse { tool_use }).await
                 }
                 EngineToRuntimeEvent::ToolResult(tool_result) => {
+                    if let Some(mut record) = tool_uses.get(&tool_result.tool_use_id).cloned() {
+                        record.updated_at = Utc::now();
+                        let status = if tool_result.is_error {
+                            omini_domain::agent_run::ToolUseStatus::Failed
+                        } else {
+                            omini_domain::agent_run::ToolUseStatus::Completed
+                        };
+                        record.status = status;
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                tool_use: record,
+                                status,
+                            })
+                            .await;
+                    }
                     self.emit(info, AgentTaskEvent::ToolResult { tool_result })
                         .await
                 }
@@ -802,6 +962,29 @@ impl AgentTaskSupervisor {
                         .await;
                 }
                 EngineToRuntimeEvent::ToolPauseRequested(request) => {
+                    if matches!(request.kind, ToolPauseKind::Permission(_))
+                        && let Some(mut record) = tool_uses.get(&request.tool_use_id).cloned()
+                    {
+                        record.updated_at = Utc::now();
+                        record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
+                                tool_use: record,
+                                status: omini_domain::agent_run::ToolUseStatus::WaitingApproval,
+                            })
+                            .await;
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpdateAgentRun {
+                                run_id: info.task_id.clone(),
+                                status: omini_domain::agent_run::AgentRunStatus::WaitingApproval,
+                                started_at: None,
+                                finished_at: None,
+                                add_tokens: 0,
+                            })
+                            .await;
+                    }
                     let active_profile = *self
                         .active_profile
                         .read()
@@ -836,6 +1019,28 @@ impl AgentTaskSupervisor {
                             usage,
                         })
                         .await;
+                    let _ = self
+                        .persistence_tx
+                        .send(RuntimePersistenceEvent::UpdateAgentRun {
+                            run_id: info.task_id.clone(),
+                            status: omini_domain::agent_run::AgentRunStatus::Running,
+                            started_at: None,
+                            finished_at: None,
+                            add_tokens: usage.total_tokens() as i64,
+                        })
+                        .await;
+                    if let Some(step_id) = &active_step_id {
+                        let _ = self
+                            .persistence_tx
+                            .send(RuntimePersistenceEvent::UpdateAgentStep {
+                                step_id: step_id.clone(),
+                                status: omini_domain::agent_run::AgentStepStatus::Running,
+                                finished_at: None,
+                                add_input_tokens: usage.prompt_tokens as i64,
+                                add_output_tokens: usage.completion_tokens as i64,
+                            })
+                            .await;
+                    }
                     self.record_owner_agent_usage(info, usage).await;
                 }
                 EngineToRuntimeEvent::Warning(warning) => warnings.push(warning),
@@ -1267,6 +1472,7 @@ mod tests {
         AgentTaskInfo {
             task_id: format!("task_{depth}"),
             thread_id: format!("thread_{depth}"),
+            parent_run_id: (depth == 1).then(|| "root_run".to_string()),
             parent_task_id: (depth > 1).then(|| "task_1".to_string()),
             owner_thread_id: "owner".to_string(),
             parent_thread_id: "parent".to_string(),

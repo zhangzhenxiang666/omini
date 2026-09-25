@@ -3,6 +3,7 @@ use crate::types::events::{
     ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandSummary,
     InteractionRequest, Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
+use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::display::{
     AgentTaskNotification, DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft,
 };
@@ -393,6 +394,8 @@ pub struct UiState {
     pub running_tools: HashSet<String>,
     /// 等待用户确认/输入的工具暂停队列，按到达顺序处理。
     pub pending_tool_pauses: VecDeque<ToolPauseRequest>,
+    /// 当前线程已收到的 AgentRun 生命周期快照。
+    pub agent_runs: HashMap<String, AgentRunSnapshot>,
     /// 子 agent 视图模型，按 thread id 存储完整消息。
     pub subagents: HashMap<String, SubagentNode>,
     /// 父 tool_use_id 到子 agent thread id 的映射。
@@ -506,6 +509,7 @@ impl UiState {
             runtime_handle: None,
             running_tools: HashSet::new(),
             pending_tool_pauses: VecDeque::new(),
+            agent_runs: HashMap::new(),
             subagents: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
             live_message_start: usize::MAX,

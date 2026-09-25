@@ -83,10 +83,23 @@ impl AgentRuntime {
                 }
                 Some(req) = self.request_rx.recv() => {
                     match req {
-                        ServerToRuntimeEvent::CancelRun => {
+                        ServerToRuntimeEvent::CancelRun { run_id: None } => {
                             tracing::debug!("manual compact cancellation requested");
                             self.cancelled.store(true, Ordering::Relaxed);
                             self.query_engine.notify_cancel_waiters();
+                        }
+                        ServerToRuntimeEvent::CancelRun {
+                            run_id: Some(run_id),
+                        } => {
+                            self.task_supervisor.cancel_task(&run_id).await;
+                        }
+                        ServerToRuntimeEvent::InterveneMessage {
+                            run_id: Some(run_id),
+                            message,
+                        } => {
+                            if let Err(error) = self.task_supervisor.intervene_agent_run(&run_id, message) {
+                                let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
+                            }
                         }
                         _ => {
                             tracing::debug!("request ignored during manual compact");

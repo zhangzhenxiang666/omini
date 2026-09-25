@@ -1,4 +1,4 @@
-use super::{Tool, ToolExecutionContext, ToolResult};
+use super::{Tool, ToolExecutionContext, ToolPolicy, ToolResult};
 use async_trait::async_trait;
 use omini_domain::events::{BashPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
@@ -22,19 +22,31 @@ pub struct BashInput {
 }
 
 pub struct BashTool;
+pub struct BashPermissionPolicy;
 
-#[derive(Debug)]
-pub struct PreparedBash {
-    pub command: String,
-    pub description: Option<String>,
-    pub timeout: u64,
-    pub workdir: Option<String>,
+#[async_trait]
+impl ToolPolicy<BashTool> for BashPermissionPolicy {
+    fn normalize_raw_input(&self, raw_input: &mut serde_json::Value, cwd: &std::path::Path) {
+        super::normalize_path_field(raw_input, "workdir", cwd, true);
+    }
+
+    async fn preflight(
+        &self,
+        input: &BashInput,
+        _ctx: &ToolExecutionContext,
+    ) -> Result<Option<PermissionPreview>, ToolResult> {
+        Ok(Some(PermissionPreview::Bash(BashPermissionPreview {
+            command: input.command.clone(),
+            description: input.description.clone(),
+            workdir: input.workdir.clone(),
+            timeout: input.timeout.unwrap_or(120_000).min(600_000),
+        })))
+    }
 }
 
 #[async_trait]
 impl Tool for BashTool {
     type Input = BashInput;
-    type Prepared = PreparedBash;
 
     fn name(&self) -> &str {
         "bash"
@@ -63,29 +75,8 @@ impl Tool for BashTool {
         )
     }
 
-    async fn prepare(&self, input: BashInput) -> Result<Self::Prepared, ToolResult> {
-        Ok(PreparedBash {
-            command: input.command,
-            description: input.description,
-            timeout: input.timeout.unwrap_or(120_000).min(600_000),
-            workdir: input.workdir,
-        })
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Bash(BashPermissionPreview {
-            command: prepared.command.clone(),
-            description: prepared.description.clone(),
-            workdir: prepared.workdir.clone(),
-            timeout: prepared.timeout,
-        }))
-    }
-
-    async fn execute_prepared(
-        &self,
-        input: Self::Prepared,
-        _ctx: ToolExecutionContext,
-    ) -> ToolResult {
+    async fn call(&self, input: BashInput, _ctx: ToolExecutionContext) -> ToolResult {
+        let timeout = input.timeout.unwrap_or(120_000).min(600_000);
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(&input.command).envs(std::env::vars());
         cmd.kill_on_drop(true);
@@ -96,7 +87,7 @@ impl Tool for BashTool {
         }
 
         // 超时控制（默认 120s，最大 600s）
-        let timeout_dur = Duration::from_millis(input.timeout);
+        let timeout_dur = Duration::from_millis(timeout);
 
         let output = match tokio::time::timeout(timeout_dur, cmd.output()).await {
             Ok(Ok(o)) => o,

@@ -169,6 +169,7 @@ pub async fn load_agent_tasks_for_thread(
             task: AgentTaskInfo {
                 task_id: task.task_id,
                 thread_id: task.agent_thread_id,
+                parent_run_id: task.parent_run_id,
                 parent_task_id: task.parent_task_id,
                 owner_thread_id: task.owner_thread_id,
                 parent_thread_id: task.parent_thread_id,

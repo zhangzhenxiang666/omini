@@ -53,8 +53,7 @@ pub(super) fn activity_group_end(
 fn is_activity_message(messages: &[UiMessage], index: usize, message: &Message) -> bool {
     match message.role {
         Role::Assistant => is_assistant_activity_message(message),
-        // Persisted tool results use the user role. They continue the activity
-        // only when their call belongs to a regular tool, never an ask_user reply.
+        // 已持久化的工具结果使用 user 角色。只有调用属于普通工具时才延续当前活动，ask_user 回复除外。
         Role::User => message.content.iter().all(|block| {
             let ContentBlock::ToolResult(result) = block else {
                 return false;
@@ -81,16 +80,14 @@ fn is_assistant_activity_message(message: &Message) -> bool {
     );
     let has_visible_text = message.content.iter().any(|block| {
         matches!(block, ContentBlock::Text(text)
-            // This is only a visibility probe; Markdown rules allocate a line
-            // at the requested width, so an unbounded width can overflow.
+            // 这里只检查文本是否可见；Markdown 排版会按给定宽度分配行，使用无界宽度可能导致溢出。
             if build_assistant_text_lines(&text.text, 80)
                 .iter()
                 .any(|line| !line_to_plain_text(line).trim().is_empty()))
     });
 
-    // Tool narration and a pending ask_user prompt may share an assistant
-    // message with Thought; keep their text/tool UI while folding the Thought
-    // into the surrounding activity summary.
+    // 工具说明和待处理的 ask_user 提示可能与 Thought 共处于一条 assistant 消息中；保留其文本和工具界面，
+    // 同时将 Thought 合并到周围的活动摘要中。
     (!has_visible_text || has_regular_tool_use || is_ask_user_message(message))
         && message.content.iter().all(|block| match block {
             ContentBlock::Thinking(_) | ContentBlock::ToolResult(_) | ContentBlock::Image(_) => {

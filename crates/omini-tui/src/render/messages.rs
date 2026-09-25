@@ -499,8 +499,7 @@ fn render_message_range(
         }
     }
 
-    // Merge adjacent assistant messages that contain only hidden reasoning and
-    // ordinary tool activity. A visible answer or an interaction tool closes the group.
+    // 合并仅包含隐藏推理和普通工具活动的相邻 assistant 消息；出现可见答案或交互工具时结束分组。
     let mut rendered_msg_idx = rendered_msg_offset;
     let mut ui_idx = start_idx;
     while ui_idx < end_idx {

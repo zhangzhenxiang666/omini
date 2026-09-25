@@ -191,6 +191,7 @@ impl AgentRuntime {
             Arc::clone(&thread_usage),
             agent_tasks,
         );
+        task_supervisor.set_parent_inbox(query_engine.shared_user_messages());
 
         for diagnostic in &subagent_registry.diagnostics {
             let _ = event_tx.try_send(RuntimeToServerEvent::warning(format!(
@@ -260,7 +261,7 @@ mod tests {
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{RawConfig, ResolvedConfig, Settings};
-    use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem, HistoryItem};
+    use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
     use omini_domain::events::{
         AgentTaskStatus, CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview,
         PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
@@ -490,8 +491,8 @@ thinking = true
         assert!(
             !events
                 .iter()
-                .any(|event| matches!(event, RuntimeToServerEvent::UserMessageInjected { .. })),
-            "user message echo is server-owned and must not be emitted by runtime"
+                .any(|event| matches!(event, RuntimeToServerEvent::PlanApprovalAccepted { .. })),
+            "ordinary user input projection is server-owned"
         );
         assert!(
             events
@@ -1066,10 +1067,7 @@ thinking = true
 
         let mut saw_short_approval_event = false;
         while let Ok(event) = event_rx.try_recv() {
-            if let RuntimeToServerEvent::UserMessageInjected {
-                item: HistoryItem::Message(message),
-                client_echo_id: None,
-            } = event
+            if let RuntimeToServerEvent::PlanApprovalAccepted { message } = event
                 && text_content(&message) == "Approved. Implement the proposed plan now."
             {
                 saw_short_approval_event = true;
@@ -1186,7 +1184,7 @@ thinking = true
                     ));
                     saw_resolved = true;
                 }
-                RuntimeToServerEvent::UserMessageInjected { .. } => {
+                RuntimeToServerEvent::PlanApprovalAccepted { .. } => {
                     saw_user_message = true;
                 }
                 _ => {}
@@ -1416,7 +1414,7 @@ thinking = true
     }
 
     #[tokio::test]
-    async fn task_notification_is_visible_only_after_successful_persistence_ack() {
+    async fn runtime_does_not_project_task_notifications_into_ui_events() {
         for persistence_result in [Ok(()), Err("database unavailable".to_string())] {
             let root = unique_temp_root("task-notification-ack");
             let cwd = root.join("workspace");
@@ -1468,13 +1466,7 @@ thinking = true
             ack.send(persistence_result).unwrap();
             assert_eq!(result.await.unwrap().is_ok(), should_succeed);
             if should_succeed {
-                assert!(matches!(
-                    event_rx.recv().await,
-                    Some(RuntimeToServerEvent::UserMessageInjected {
-                        item: HistoryItem::AgentTaskNotification(saved),
-                        client_echo_id: None,
-                    }) if saved == notification
-                ));
+                assert!(event_rx.try_recv().is_err());
             } else {
                 tokio::task::yield_now().await;
                 assert!(event_rx.try_recv().is_err());

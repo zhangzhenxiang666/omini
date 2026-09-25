@@ -1,6 +1,5 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
-use omini_domain::events::{PermissionPreview, ReadPermissionPreview};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::fs;
@@ -20,7 +19,6 @@ pub struct ReadTool;
 #[async_trait]
 impl Tool for ReadTool {
     type Input = ReadInput;
-    type Prepared = ReadInput;
 
     fn name(&self) -> &str {
         "read"
@@ -44,51 +42,24 @@ impl Tool for ReadTool {
         )
     }
 
-    async fn prepare(&self, input: ReadInput) -> Result<Self::Prepared, ToolResult> {
-        let path = std::path::Path::new(&input.file_path);
-        if !path.is_absolute() {
-            return Err(ToolResult::error(format!(
-                "file_path must be absolute: {}",
-                input.file_path
-            )));
-        }
-        if !path.exists() {
-            return Err(ToolResult::error(format!(
-                "Path does not exist: {}",
-                input.file_path
-            )));
-        }
-        Ok(input)
-    }
-
-    fn permission_preview(&self, prepared: &Self::Prepared) -> Option<PermissionPreview> {
-        Some(PermissionPreview::Read(ReadPermissionPreview {
-            file_path: prepared.file_path.clone(),
-        }))
-    }
-
-    async fn execute_prepared(
-        &self,
-        input: Self::Prepared,
-        _ctx: ToolExecutionContext,
-    ) -> ToolResult {
+    async fn call(&self, input: ReadInput, _ctx: ToolExecutionContext) -> ToolResult {
         let path = std::path::Path::new(&input.file_path);
 
         if !path.is_absolute() {
             return ToolResult::error(format!("file_path must be absolute: {}", input.file_path));
         }
 
-        // Check if path exists
+        // 确认目标路径存在。
         if !path.exists() {
             return ToolResult::error(format!("Path does not exist: {}", input.file_path));
         }
 
-        // Directory listing
+        // 读取目录条目。
         if path.is_dir() {
             return read_directory(path).await;
         }
 
-        // File reading
+        // 读取文件内容。
         read_file(path, input.offset, input.limit).await
     }
 }
@@ -137,11 +108,11 @@ async fn read_file(
     offset: Option<usize>,
     limit: Option<usize>,
 ) -> ToolResult {
-    // Read file content
+    // 读取文件文本内容。
     let content = match fs::read_to_string(path).await {
         Ok(c) => c,
         Err(e) => {
-            // Check if it's a binary file
+            // 无法按 UTF-8 解码时，将其作为二进制文件处理。
             if e.kind() == std::io::ErrorKind::InvalidData {
                 let metadata = match fs::metadata(path).await {
                     Ok(m) => m,
@@ -149,7 +120,7 @@ async fn read_file(
                 };
                 return ToolResult::ok(format!("(binary file, {} bytes)", metadata.len()));
             }
-            // Permission denied or other error
+            // 区分权限错误和其他读取错误。
             if e.kind() == std::io::ErrorKind::PermissionDenied {
                 return ToolResult::error(format!("Permission denied: {}", path.display()));
             }
@@ -161,7 +132,7 @@ async fn read_file(
     let total_lines = lines.len();
 
     let start = offset.unwrap_or(1).max(1);
-    let start_idx = start - 1; // convert to 0-indexed
+    let start_idx = start - 1; // 将行号转换为从零开始的索引。
 
     if start_idx >= total_lines {
         return ToolResult::ok(format!(
@@ -177,7 +148,7 @@ async fn read_file(
         output.push_str(&format!("{}: {}\n", start + i, line));
     }
 
-    // Append a status line if file was truncated
+    // 文件被截断时，追加状态说明和继续读取的提示。
     if end_idx < total_lines {
         output.push_str(&format!(
             "(... {}/{} lines shown, use higher offset to continue)\n",

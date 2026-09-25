@@ -1,9 +1,7 @@
-use crate::event::bridge::runtime_event_from_runtime_contract_event;
 use crate::{store, thread::ThreadRuntime};
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
-use omini_domain::display::HistoryItem;
 use omini_domain::input::{
     AttachmentMetadata, DisplayUserInput, ResolvedAttachment, UserInputIntent,
 };
@@ -214,18 +212,30 @@ impl ThreadRuntime {
             .map_err(|error| {
                 CoreError::persistence("failed to persist user input", error.to_string())
             })?;
-        let echo = runtime_event_from_runtime_contract_event(
-            runtime_contract::events::RuntimeToServerEvent::UserMessageInjected {
-                item: HistoryItem::UserInput(display),
+        let echo = omini_protocol::RuntimeEvent::new(
+            omini_protocol::TypedRuntimeEvent::UserMessageInjected {
+                item: omini_domain::display::HistoryItem::UserInput(display),
                 client_echo_id: command.client_echo_id.clone(),
             },
-        )?;
+        );
         self.broadcast_server_local_event(echo);
         Ok(())
     }
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {
         self.core.cancel_run().await
+    }
+
+    pub async fn cancel_agent_run(&self, run_id: String) -> Result<(), CoreError> {
+        self.core.cancel_agent_run(run_id).await
+    }
+
+    pub async fn intervene_agent_run(
+        &self,
+        run_id: String,
+        message: omini_domain::message::Message,
+    ) -> Result<(), CoreError> {
+        self.core.intervene_agent_run(run_id, message).await
     }
 
     pub async fn resolve_tool_pause(

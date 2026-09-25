@@ -9,17 +9,11 @@ pub struct SkillInput {
     pub name: String,
 }
 
-#[derive(Debug)]
-pub struct SkillRequest {
-    name: String,
-}
-
 pub struct SkillTool;
 
 #[async_trait]
 impl Tool for SkillTool {
     type Input = SkillInput;
-    type Prepared = SkillRequest;
 
     fn name(&self) -> &str {
         "skill"
@@ -38,29 +32,19 @@ impl Tool for SkillTool {
         )
     }
 
-    async fn prepare(&self, input: SkillInput) -> Result<Self::Prepared, ToolResult> {
+    async fn call(&self, input: SkillInput, ctx: ToolExecutionContext) -> ToolResult {
         let name = input.name.trim();
         if name.is_empty() {
-            return Err(ToolResult::error("name must not be empty"));
+            return ToolResult::error("name must not be empty");
         }
-        Ok(SkillRequest {
-            name: name.to_string(),
-        })
-    }
-
-    async fn execute_prepared(
-        &self,
-        request: Self::Prepared,
-        ctx: ToolExecutionContext,
-    ) -> ToolResult {
         let Some(runtime) = ctx.runtime.clone() else {
             return ToolResult::error("skill requires runtime context");
         };
-        let Some(spec) = runtime.skill_registry.get(&request.name).cloned() else {
+        let Some(spec) = runtime.skill_registry.get(name).cloned() else {
             let available = runtime.skill_registry.sorted_names();
             let mut msg = format!(
                 "unknown skill '{}'. Available skills: {}",
-                request.name,
+                name,
                 available.join(", ")
             );
             if !runtime.skill_registry.diagnostics.is_empty() {

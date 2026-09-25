@@ -119,7 +119,7 @@ fn unknown_variants_and_legacy_shape_are_rejected() {
 
 #[test]
 fn protocol_revision_is_two() {
-    assert_eq!(omini_protocol::PROTOCOL_REVISION, 2);
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 3);
 }
 
 fn assert_data_error<T>(value: Value)

@@ -88,6 +88,7 @@ impl ThreadRuntime {
         let replay_thread_id = thread_id.clone();
         let persistence_project = project.clone();
         let persistence_project_id = project_id;
+        let persistence_server_event_tx = server_event_inbox_tx.clone();
         // core 发出的持久化事件先落 SQLite，成功后再裁剪 replay，避免重连时漏掉未落盘内容。
         let persistence_handle = tokio::spawn(
             async move {
@@ -104,6 +105,20 @@ impl ThreadRuntime {
                             .lock()
                             .expect("replay buffer lock poisoned")
                             .record_persistence(&replay_thread_id, &event);
+                        if let runtime_contract::RuntimePersistenceEvent::InsertAgentTaskNotification {
+                            notification,
+                            ..
+                        } = &event
+                        {
+                            let _ = persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
+                                client_proto::TypedRuntimeEvent::UserMessageInjected {
+                                    item: domain::display::HistoryItem::AgentTaskNotification(
+                                        notification.clone(),
+                                    ),
+                                    client_echo_id: None,
+                                },
+                            ));
+                        }
                     } else if let Err(error) = &result {
                         tracing::error!(error = %error, "runtime persistence event failed");
                     }

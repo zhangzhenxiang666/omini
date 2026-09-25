@@ -1,3 +1,4 @@
+pub mod agent_run;
 pub mod config;
 pub mod display;
 pub mod events;
