@@ -1,146 +1,76 @@
-# Architecture
+# 架构概览
 
-`omini` is a terminal client backed by a local daemon. The client handles interaction,
-the server owns project and thread orchestration, and core runs the agent.
+`omini` 由终端客户端、本地服务和 Agent 核心组成：客户端负责交互，服务端负责项目与线程管理，核心负责 Agent 执行。
 
 ```text
 omini-cli / omini-tui
-          |
-          | HTTP + WebSocket (omini-protocol)
-          v
-     omini-server
-          |
-          | commands, events, snapshots (omini-runtime-contract)
-          v
-      omini-core
+        │ HTTP + WebSocket（omini-protocol）
+        ▼
+   omini-server
+        │ 命令、事件、快照（omini-runtime-contract）
+        ▼
+    omini-core
 ```
 
-## Crate Boundaries
+## Crate 职责
 
-| Crate | Responsibility |
+| Crate | 职责 |
 | --- | --- |
-| `omini-cli` | Binary entrypoint, daemon startup/discovery, project registration, and TUI launch. |
-| `omini-tui` | Terminal input, rendering, client-side interaction state, and protocol requests. |
-| `omini-protocol` | Public HTTP and WebSocket DTOs shared by clients and the server. |
-| `omini-server` | Local daemon, project/thread lifecycle, controllers, event projection, replay, and SQLite persistence. |
-| `omini-runtime-contract` | Internal commands, events, snapshots, and persistence requests exchanged by server and core. |
-| `omini-core` | Agent loop, tools, prompts, skills, agent task supervision, compaction, plans, and provider/MCP orchestration. |
-| `omini-config` | User/project config resolution and Omini-managed filesystem paths. |
-| `omini-domain` | Stable shared value types with no transport, runtime, or persistence behavior. |
-| `omini-permissions` | Permission policy parsing and allow/ask/deny decisions. |
-| `omini-provider-api` | Provider HTTP/SSE clients and provider-facing request/response handling. |
-| `omini-mcp-client` | MCP connections, lifecycle, catalog loading, and remote calls. |
+| `omini-cli` | 程序入口、服务发现与启动、项目注册、启动 TUI。 |
+| `omini-tui` | 终端交互、界面状态与渲染、协议请求。 |
+| `omini-protocol` | 客户端与服务端共用的公开 HTTP/WebSocket 类型。 |
+| `omini-server` | 本地服务、项目和线程生命周期、事件投影与重放、SQLite 持久化。 |
+| `omini-runtime-contract` | 服务端与核心之间的命令、事件、快照和持久化请求。 |
+| `omini-core` | Agent 执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
+| `omini-config` | 用户和项目配置，以及 Omini 管理的文件路径。 |
+| `omini-domain` | 不含传输、运行时或持久化逻辑的共享领域类型。 |
+| `omini-permissions` | 权限策略解析及允许、询问、拒绝决策。 |
+| `omini-provider-api` | Provider 的 HTTP/SSE 客户端及请求响应处理。 |
+| `omini-mcp-client` | MCP 连接、生命周期、工具目录和远程调用。 |
 
-The main dependency rules are:
+依赖边界：
 
-- `omini-protocol` is the public client/server boundary; `omini-runtime-contract` is the
-  private server/core boundary. Neither contains runtime implementation details.
-- `omini-domain` contains shared vocabulary only. Config loading, API keys, orchestration,
-  persistence, transport envelopes, and UI state stay with their owning crates.
-- Provider, MCP, and permission implementations remain independent services consumed by
-  core rather than leaking through protocol or runtime-contract types.
-- Server persistence consumes `RuntimePersistenceEvent`; persistence events carry
-  domain-fact vocabulary (row timestamps are stamped server-side), while SQLite schema,
-  transactions, and replay remain server concerns.
-- Server code uses core's public project/thread capabilities instead of deep-linking
-  into skills, agent tasks, tools, or engine internals.
+- `omini-protocol` 是公开客户端/服务端边界；`omini-runtime-contract` 是内部服务端/核心边界，两者不放运行时实现。
+- `omini-domain` 只承载共享词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
+- Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
+- SQLite、事务、事件重放和持久化投影归服务端；核心事件只表达领域事实。
+- 服务端通过核心公开的项目/线程能力工作，不依赖核心内部的 Skill、任务、工具或引擎模块。
 
-## Project Identity and Storage
+## 项目身份与存储
 
-Projects persist four distinct values:
-
-| Value | Meaning |
+| 字段 | 含义 |
 | --- | --- |
-| `id` | Stable public identity, daemon cache key, and thread foreign key. |
-| `path` | Canonical working directory; may change through relinking. |
-| `storage_key` | Stable directory name under `~/.omini/projects/`. |
-| `name` | User-facing display name. |
+| `id` | 稳定公开 ID，也是服务缓存键和线程外键。 |
+| `path` | 规范化后的工作目录，可通过重新关联更新。 |
+| `storage_key` | `~/.omini/projects/` 下稳定的目录名。 |
+| `name` | 面向用户的显示名称。 |
 
-`id` and `storage_key` never change. Relinking updates only `path` and is rejected while
-a cached thread is running or connected. Every thread, including forks and agent tasks,
-belongs to a project.
+`id` 和 `storage_key` 不变；重新关联只更新 `path`，且项目有运行中或已连接的缓存线程时拒绝操作。所有线程（包括分支和子 Agent 任务）都属于某个项目。
 
-## Runtime Flow
+## 运行流程
 
-1. `omini-cli` starts or connects to the daemon, registers the canonical current
-   directory, and opens the returned project UUID.
-2. `omini-server` resolves the project from SQLite and lazily creates its
-   `ProjectManager` using the current path and stable project storage directory.
-3. `omini-tui` creates or selects a thread, claims controller status, and subscribes to
-   its event stream.
-4. The server validates requests and controller ownership, then invokes the relevant
-   core capability through the runtime boundary. For run submissions it additionally
-   commits the user-facing display row (timestamped at speaking time) and broadcasts
-   the user-message echo before dispatching, so replay history follows speaking-time
-   order.
-5. Core runs the agent and emits runtime and persistence events. The server persists,
-   projects, and broadcasts them to the controller and observers. Core appends the
-   user message to LLM context only at safe input boundaries (run start, or the
-   mid-run intervention drain point), never carrying user-facing display data.
-6. Reconnecting clients reopen the project by UUID; the current path is not used as
-   project identity.
+1. CLI 启动或连接本地服务，注册当前规范化目录，并打开服务返回的项目 ID。
+2. 服务端从 SQLite 解析项目，按需创建 `ProjectManager`，使用当前路径和稳定存储目录。
+3. TUI 创建或选择线程、取得控制权并订阅事件。
+4. 服务端校验请求和控制权，再经运行时边界调用核心能力。提交用户输入时，服务端先保存并广播用户可见消息，再派发执行。
+5. 核心运行 Agent 并发出运行时和持久化事件；服务端负责保存、投影和广播。核心只在安全输入边界（运行开始或运行中干预排空点）将用户消息加入模型上下文。
+6. 重连时按项目 ID 恢复；项目路径不作为身份。
 
-## Typed Input and Attachments
+用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。核心事件不携带用户界面展示数据。
 
-The TUI converts composer spans into ordered semantic input parts. Text, skills,
-project files/directories, and subagents retain their relative order; local image
-markers are removed and uploaded before the run request. The public protocol carries
-only opaque attachment UUIDs, never client filesystem paths.
+## 输入与附件
 
-The server owns project-path canonicalization, attachment ownership and integrity,
-and controller checks. Core owns SkillRegistry validation, skill and `/init` prompt
-expansion, subagent validation, model modality checks, and construction of the single
-Provider user message. These checks complete before a run is dispatched.
+- TUI 将输入框内容转为有序语义片段；文本、Skill、项目文件/目录和子 Agent 保持相对顺序。图片标记先上传，协议只传不透明附件 ID，不传客户端路径。
+- 服务端负责路径规范化、附件归属与完整性校验、控制权校验；核心负责 Skill 和 `/init` 展开、子 Agent 校验、模型模态检查，并构造单条 Provider 用户消息。
+- UI 历史保存原始输入意图和附件元数据；展开后的 Skill 内容、内部 `/init` 提示词及图片数据只进入模型上下文。
+- 附件内容存于线程目录下的内容寻址文件，SQLite 将附件 ID 映射到文件。
 
-User input lifecycle is split by ownership. After validation succeeds, the server
-persists the display row and broadcasts the echo immediately (both idle submit and
-mid-run intervention); it then dispatches only the constructed LLM message into core.
-Core appends that message to LLM history at the safe input boundary and emits a
-`UserMessageProduced` event without display payload. Consequently replay shows user
-messages in speaking-time order, which for mid-run interventions may differ from the
-LLM context order — the same view a live client already sees.
+## 子 Agent 任务
 
-UI history persists typed user intent and attachment metadata separately from LLM
-history. Expanded skill bodies, the internal `/init` prompt, and base64 image blocks
-remain only in LLM history. Thread-local attachment bytes use content-addressed files
-under `assets/`, while SQLite maps independent attachment UUIDs to those files.
+派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 
-## Agent Tasks
+只有主 Agent 可调用 `spawn_agent`、`read_task`、`wait_agents` 和 `cancel_task`。`read_task` 查询单个任务；`wait_agents` 等待指定任务，未指定时等待当前运行的根后台任务。完成通知自动送达，无需轮询。
 
-Agent derivation is bounded. `MAX_AGENT_DEPTH` is `2`:
+任务是归属于同一项目和主线程的子线程。核心负责实时监督、事件流和层级取消；服务端负责 SQLite 状态、重放、重连快照、通知、重启恢复和运行时回收；TUI 展示任务状态与完成通知，不把子任务的增量输出混入主 Agent 回复。
 
-```text
-main (depth 0)
-└─ spawn_agent: background depth-1 task
-   └─ run_agent: synchronous depth-2 agent
-```
-
-Only the main agent receives `spawn_agent`, `get_task`, and `cancel_task`. A depth-1
-agent can receive `run_agent` when its own tool policy permits it; depth-2 agents
-cannot derive more agents. All tasks owned by a main thread share that thread's active
-profile, with the task's own allow/deny policy applied first.
-
-Each main-thread supervisor admits at most eight concurrent background tasks and ten
-concurrent synchronous tasks. A request above either limit is rejected as a tool error
-without creating a task or child thread.
-
-Agent tasks are child threads owned by the same project and main thread. `spawn_agent`
-creates durable task and child-thread records; model-facing APIs expose only task
-identity, status, and results, while protocol, persistence, and UI code keep ownership,
-timing, execution mode, and notification state out of model context.
-
-Core owns live task supervision: task handles, child pauses, streaming task events,
-completion delivery into the runtime, and hierarchical cancellation. The server owns
-durable task state: SQLite records, replay and status projection, reconnect snapshots,
-notification delivery, restart recovery, and runtime reclamation. The TUI renders task
-status, tools, committed messages, and completion notifications without merging child
-streaming deltas into the main assistant output.
-
-A committed message is the durable boundary. Task completion notifications are persisted
-before entering in-memory LLM history or being shown in the UI, preserving the order
-`current turn -> task notification -> next assistant`. On daemon restart, live tasks are
-not resumed and uncommitted deltas may be discarded.
-
-Cancellation is hierarchical. `cancel_task` affects the selected task and descendants,
-not siblings. Foreground run cancellation and runtime shutdown also cancel task trees
-owned by the main thread.
+已提交消息是持久化边界。完成通知先持久化，再进入模型历史或界面，以保持“当前轮次 → 任务通知 → 下一轮回复”的顺序。服务重启后不恢复运行中的任务，未提交的增量可丢弃。取消任务会影响其后代，不影响兄弟任务；取消前台运行或关闭运行时也会取消主线程拥有的任务树。

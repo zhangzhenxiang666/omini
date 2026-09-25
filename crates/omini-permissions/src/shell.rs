@@ -28,6 +28,9 @@ pub(crate) fn split_shell_commands(command: &str) -> Vec<String> {
         extract_eval_exec_args(trimmed, &mut nested);
     }
 
+    // 循环控制字不是可执行命令，只分析循环体，并继续逐条执行原有权限与安全检查。
+    let mut expanded = strip_for_loop_syntax(&expanded);
+
     // 递归拆分所有收集到的嵌套上下文。
     for ctx in nested {
         let ctx_trimmed = ctx.trim().to_string();
@@ -37,6 +40,89 @@ pub(crate) fn split_shell_commands(command: &str) -> Vec<String> {
     }
 
     expanded
+}
+
+/// 从可拆分的命令段中移除完整 `for …; do …; done` 循环的控制字，保留循环体。
+/// 不完整或不符合常见 shell 形式的循环原样保留，使未知语法继续触发询问。
+fn strip_for_loop_syntax(commands: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut index = 0;
+
+    while index < commands.len() {
+        if !is_for_header(&commands[index]) {
+            result.push(commands[index].clone());
+            index += 1;
+            continue;
+        }
+
+        let mut depth = 1usize;
+        let mut do_index = None;
+        let mut done_index = None;
+        for (offset, command) in commands.iter().enumerate().skip(index + 1) {
+            if starts_control_word(command, "do") {
+                if do_index.is_none() {
+                    do_index = Some(offset);
+                }
+                if is_for_header(strip_control_word(command, "do")) {
+                    depth += 1;
+                }
+            } else if is_for_header(command) {
+                depth += 1;
+            } else if starts_control_word(command, "done") {
+                depth -= 1;
+                if depth == 0 {
+                    done_index = Some(offset);
+                    break;
+                }
+            }
+        }
+
+        let (Some(do_index), Some(done_index)) = (do_index, done_index) else {
+            result.push(commands[index].clone());
+            index += 1;
+            continue;
+        };
+
+        let mut body = Vec::new();
+        for (offset, command) in commands.iter().enumerate().take(done_index).skip(do_index) {
+            let command = if offset == do_index {
+                strip_control_word(command, "do")
+            } else {
+                command.as_str()
+            };
+            if !command.trim().is_empty() {
+                body.push(command.trim().to_string());
+            }
+        }
+        let body = strip_for_loop_syntax(&body);
+        result.extend(body);
+
+        let tail = strip_control_word(&commands[done_index], "done");
+        if !tail.trim().is_empty() {
+            result.push(tail.trim().to_string());
+        }
+        index = done_index + 1;
+    }
+
+    result
+}
+
+fn is_for_header(command: &str) -> bool {
+    let words = shell_words(command);
+    words.len() >= 4 && words[0] == "for" && words[2] == "in"
+}
+
+fn starts_control_word(command: &str, word: &str) -> bool {
+    command
+        .strip_prefix(word)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
+fn strip_control_word<'a>(command: &'a str, word: &str) -> &'a str {
+    command
+        .strip_prefix(word)
+        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+        .unwrap_or(command)
 }
 
 /// 顶层拆分：按 `;` `|` `||` `&&` `\n` 分割，同时递归提取 `$()`、反引号、
@@ -285,6 +371,26 @@ mod tests {
             vec!["ls", "pwd", "whoami", "date", "wc -l", "true"]
         );
         assert_eq!(split_shell_commands(" ; | || && \n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn for_loop_control_words_are_removed_but_body_commands_remain() {
+        assert_eq!(
+            split_shell_commands(r#"for d in /workspace/crates/*/; do echo "$d"; ls "$d"; done"#),
+            vec![r#"echo "$d""#, r#"ls "$d""#]
+        );
+        assert_eq!(
+            split_shell_commands("for outer in a; do for inner in b; do ls; done; done"),
+            vec!["ls"]
+        );
+        assert_eq!(
+            split_shell_commands("for d in a; do sudo true; done"),
+            vec!["sudo true"]
+        );
+        assert_eq!(
+            split_shell_commands("for d in a; do ls"),
+            vec!["for d in a", "do ls"]
+        );
     }
 
     #[test]

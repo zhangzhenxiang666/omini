@@ -1,36 +1,28 @@
-# AGENTS.md
+# 仓库协作约定
 
-Project instructions for coding agents working in this repository.
+## 工作方式
 
-## Working Style
+- 跨 crate 或核心流程改动前，先阅读 `ARCHITECTURE.md`。
+- 先确认需求和成功条件；会影响行为的假设要说明，不确定且会改变实现时先询问。
+- 采用能解决问题的最小改动，遵循附近代码风格，不顺手重构或清理无关内容。
+- 只清理本次改动造成的未使用代码。注释解释意图、约束和不明显的行为，不复述代码。
 
-- Before cross-crate or core-flow changes, read `ARCHITECTURE.md` to understand crate responsibilities and event flow.
-- Think before coding. State assumptions when they affect behavior, and ask when ambiguity would change the implementation.
-- Prefer the smallest implementation that solves the request. Do not add speculative features, abstractions, configurability, or error handling.
-- Make surgical changes. Touch only files and lines that directly support the requested work.
-- Match nearby style, even when it differs from personal preference.
-- Use comments in proportion to complexity: add a short orienting note when behavior is non-obvious or easy to misread, expand only for genuinely complex logic, and omit comments when the code is self-explanatory.
-- Do not refactor unrelated code, rewrite comments, or clean up pre-existing dead code unless explicitly asked.
-- If your changes make imports, variables, functions, or tests unused, clean up only the unused code introduced by your changes.
-- For non-trivial work, define success criteria and verify them with the narrowest useful check.
+## Rust 约定
 
-## Rust Style
+- 注释与 Rustdoc 文档注释一律使用中文；测试中的 Given/When/Then 说明也写在中文注释中（给定、当、则）。
+- 函数或方法名按 `snake_case` 分段达到 4 段时，精简为 2–3 段，采用“强动词 + 名词短语”；补充中文 `///` 文档注释，说明用途和重要约束。
+- 同 crate 跨父模块访问必须使用 `crate::`。仅访问直接父模块时可用 `super::`；本模块私有项直接使用名称。禁止 `super::super`，包括测试代码和 Rustdoc 链接。
+- 新代码中，多个嵌套的 `if let` / `let Some(...)` 可清晰表达时，优先使用 Rust 2024 链式写法。
+- 不要为了符合风格要求而改写无关的旧代码。
 
-- Prefer absolute `use` paths for imports, such as `crate::...`, `omini_core::...`, `omini_protocol::...`, `omini_server::...`, `omini_tui::...`, `std::...`, or dependency crate paths.
-- Avoid adding new `super::...` imports when an absolute path is clear. Keep existing `super::...` imports if changing them is unrelated churn or if nearby code strongly favors that style.
-- When multiple nested `if let` or `let Some(...)` checks can be expressed clearly as a Rust 2024 `if let` chain, prefer the chain form.
-- Do not rewrite existing imports or nested conditionals solely to satisfy these Rust style rules. Apply them to new code and code already being edited for the task.
+## 文档与验证
 
-## Documentation Maintenance
+- 用户可见行为、配置、CLI/TUI、安装、权限、MCP、Provider 或模型行为变化时，更新相关文档。
+- 文档改动无需构建或测试，除非包含生成内容或需要验证的示例。
+- 代码改动优先运行受影响 crate 的检查；非简单 Rust 改动最终运行 `cargo fmt --all --check` 和 `cargo clippy --workspace`。
+- 验证范围应与改动相称；不要为测试而堆叠重复用例。
 
-- When a change involves user-visible features, configuration schema, CLI/TUI behavior, installation layout, permissions, MCP, provider, or model behavior, update the relevant documentation in `docs/` or `README.md` accordingly.
-- If a change does not require documentation updates, note the reason in the PR or commit message (e.g., "internal refactor, no doc update needed").
-- Before merging a PR that affects documentation, verify that the docs reflect the new behavior and that examples still work.
+## 环境约定
 
-## Verification
-
-- Prefer focused checks over broad ones when the change is narrow.
-- This is a Cargo workspace. For ordinary checks and tests, target the specific crate that changed instead of running the whole workspace.
-- For Rust code changes, use crate-scoped checks such as `cargo check -p <crate>` or `cargo test -p <crate>` as appropriate.
-- For final acceptance of non-trivial Rust changes, run workspace-level validation with `cargo clippy --workspace` and `cargo fmt --all --check`.
-- For documentation-only changes, no build or test command is required unless the documentation includes generated examples or checked snippets.
+- Python 命令使用 `uv run`，不要直接运行 `python` 或 `python3`。
+- 版本控制使用 Jujutsu（`jj`）；只有明确要求时才使用 Git。

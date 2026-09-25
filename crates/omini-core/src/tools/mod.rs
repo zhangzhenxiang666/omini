@@ -447,12 +447,19 @@ pub trait Tool: Send + Sync + 'static {
 }
 
 pub fn sanitize_tool_schema(value: &mut Value) {
+    sanitize_tool_schema_value(value, false);
+}
+
+fn sanitize_tool_schema_value(value: &mut Value, is_schema_map: bool) {
     match value {
         Value::Object(map) => {
-            map.remove("$schema");
-            map.remove("default");
-            map.remove("format");
-            map.remove("title");
+            // 这些映射的键是用户字段名或 schema 名称，不能当作 schema 关键字删除。
+            if !is_schema_map {
+                map.remove("$schema");
+                map.remove("default");
+                map.remove("format");
+                map.remove("title");
+            }
 
             if let Some(Value::Array(types)) = map.get("type") {
                 let mut types = types.clone();
@@ -467,13 +474,22 @@ pub fn sanitize_tool_schema(value: &mut Value) {
                     .or_insert(Value::Bool(false));
             }
 
-            for value in map.values_mut() {
-                sanitize_tool_schema(value);
+            for (key, value) in map.iter_mut() {
+                let child_is_schema_map = !is_schema_map
+                    && matches!(
+                        key.as_str(),
+                        "properties"
+                            | "$defs"
+                            | "definitions"
+                            | "patternProperties"
+                            | "dependentSchemas"
+                    );
+                sanitize_tool_schema_value(value, child_is_schema_map);
             }
         }
         Value::Array(values) => {
             for value in values {
-                sanitize_tool_schema(value);
+                sanitize_tool_schema_value(value, false);
             }
         }
         _ => {}
@@ -780,7 +796,8 @@ fn create_registry_with_allowed(
     }
     if agent_tool_set == AgentToolSet::Main {
         registry.register(agent_tools::SpawnAgentTool);
-        registry.register(agent_tools::GetTaskTool);
+        registry.register(agent_tools::ReadTaskTool);
+        registry.register(agent_tools::WaitAgentsTool);
         registry.register(agent_tools::CancelTaskTool);
     }
     registry
@@ -803,8 +820,9 @@ fn tool_definition_priority(name: &str) -> usize {
         "todo_write" => 8,
         "spawn_agent" => 9,
         "run_agent" => 10,
-        "get_task" => 11,
-        "cancel_task" => 12,
+        "read_task" => 11,
+        "wait_agents" => 12,
+        "cancel_task" => 13,
         _ => 100,
     }
 }
@@ -817,7 +835,7 @@ enum AgentToolSet {
 fn is_agent_control_tool(name: &str) -> bool {
     matches!(
         name,
-        "spawn_agent" | "run_agent" | "get_task" | "cancel_task"
+        "spawn_agent" | "run_agent" | "read_task" | "wait_agents" | "cancel_task"
     )
 }
 
@@ -956,16 +974,18 @@ mod tests {
                 "bash",
                 "cancel_task",
                 "edit",
-                "get_task",
                 "read",
+                "read_task",
                 "search",
                 "skill",
                 "spawn_agent",
                 "todo_write",
                 "view_image",
+                "wait_agents",
                 "write",
             ]
         );
+        assert!(!registry.contains("get_task"));
         assert_eq!(
             registry
                 .definitions()
@@ -983,7 +1003,8 @@ mod tests {
                 "skill",
                 "todo_write",
                 "spawn_agent",
-                "get_task",
+                "read_task",
+                "wait_agents",
                 "cancel_task",
             ]
         );
@@ -1005,13 +1026,64 @@ mod tests {
             let required = schema["required"].as_array().expect("required fields");
             for field in ["name", "prompt", "title"] {
                 assert!(required.iter().any(|value| value.as_str() == Some(field)));
+                assert!(
+                    schema["properties"][field]["description"].is_string(),
+                    "missing schema description for {field}: {schema}"
+                );
             }
         }
         assert!(
             agent_tools::SpawnAgentTool
                 .description()
-                .contains("automatic notification")
+                .contains("Completion is reported automatically")
         );
+        let wait_schema = agent_tools::WaitAgentsTool.input_schema();
+        assert!(
+            !wait_schema["required"]
+                .as_array()
+                .is_some_and(|fields| fields.iter().any(|field| field == "task_ids"))
+        );
+        assert!(
+            wait_schema["properties"]["task_ids"]["description"]
+                .as_str()
+                .is_some_and(|description| {
+                    description.contains("Waits for all listed tasks")
+                        && description.contains("omit this field")
+                })
+        );
+        let read_schema = agent_tools::ReadTaskTool.input_schema();
+        assert!(
+            read_schema["properties"]["task_id"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("returned by `spawn_agent`"))
+        );
+        let spawn_schema = agent_tools::SpawnAgentTool.input_schema();
+        assert!(spawn_schema["properties"]["title"]["description"].is_string());
+    }
+
+    #[test]
+    fn schema_sanitizer_keeps_properties_named_after_schema_metadata() {
+        let mut schema = serde_json::json!({
+            "title": "Input",
+            "properties": {
+                "title": {"title": "Field", "description": "Task label", "type": "string"},
+                "default": {"type": "string"},
+                "format": {"type": "string"}
+            },
+            "$defs": {
+                "format": {"title": "Definition", "type": "string"}
+            }
+        });
+
+        sanitize_tool_schema(&mut schema);
+
+        assert!(schema.get("title").is_none());
+        assert_eq!(schema["properties"]["title"]["description"], "Task label");
+        assert!(schema["properties"].get("default").is_some());
+        assert!(schema["properties"].get("format").is_some());
+        assert!(schema["properties"]["title"].get("title").is_none());
+        assert!(schema["$defs"].get("format").is_some());
+        assert!(schema["$defs"]["format"].get("title").is_none());
     }
 
     #[test]
@@ -1029,6 +1101,8 @@ mod tests {
             .expect("remaining allowed tools should create a registry");
 
         assert_eq!(child.tool_names(), vec!["read", "run_agent", "search"]);
+        assert!(!child.contains("read_task"));
+        assert!(!child.contains("wait_agents"));
         assert_eq!(
             warnings,
             vec!["tool 'missing' is not available to the parent agent"]
@@ -1038,6 +1112,35 @@ mod tests {
             .expect("default policy should retain ordinary tools");
         assert!(!deep_child.contains("run_agent"));
         assert!(deep_warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn wait_agents_accepts_optional_ids_and_rejects_empty_lists() {
+        assert_eq!(
+            agent_tools::WaitAgentsTool
+                .prepare(agent_tools::WaitAgentsInput { task_ids: None })
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            agent_tools::WaitAgentsTool
+                .prepare(agent_tools::WaitAgentsInput {
+                    task_ids: Some(vec![" task-1 ".to_string(), "task-1".to_string()]),
+                })
+                .await
+                .unwrap(),
+            Some(vec!["task-1".to_string()])
+        );
+        assert!(
+            agent_tools::WaitAgentsTool
+                .prepare(agent_tools::WaitAgentsInput {
+                    task_ids: Some(Vec::new()),
+                })
+                .await
+                .unwrap_err()
+                .is_error
+        );
     }
 
     #[test]

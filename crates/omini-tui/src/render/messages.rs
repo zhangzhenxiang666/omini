@@ -10,8 +10,9 @@ use super::{
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    build_bordered_lines, format_thinking_duration, is_special_tool, render_get_task, render_tool,
-    render_tool_compact, thinking_duration_line, tool_error_display_text, truncate_display_width,
+    build_bordered_lines, format_thinking_duration, is_special_tool, render_read_task, render_tool,
+    render_tool_compact, render_wait_agents, thinking_duration_line, tool_error_display_text,
+    truncate_display_width,
 };
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::{ContentBlock, ToolUseBlock};
@@ -736,12 +737,19 @@ fn render_single_ui_message(
                                     consumed.insert(*pos);
                                 }
                             }
-                        } else if tu.name == "get_task" {
-                            block_lines.extend(render_get_task(
+                        } else if tu.name == "read_task" {
+                            block_lines.extend(render_read_task(
                                 tu,
-                                get_task_label(state, tu),
+                                read_task_label(state, tu),
                                 false,
                             ));
+                            if let Some(positions) = tool_result_map.get(&tu.id) {
+                                for pos in positions {
+                                    consumed.insert(*pos);
+                                }
+                            }
+                        } else if tu.name == "wait_agents" {
+                            block_lines.extend(render_wait_agents(tu, false));
                             if let Some(positions) = tool_result_map.get(&tu.id) {
                                 for pos in positions {
                                     consumed.insert(*pos);
@@ -897,8 +905,13 @@ fn render_pending_assistant_lines(
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }
-                } else if tu.name == "get_task" {
-                    block_lines.extend(render_get_task(tu, get_task_label(state, tu), false));
+                } else if tu.name == "read_task" {
+                    block_lines.extend(render_read_task(tu, read_task_label(state, tu), false));
+                    if let Some(&bi) = tr_indices.get(&tu.id) {
+                        consumed_tr.insert(bi);
+                    }
+                } else if tu.name == "wait_agents" {
+                    block_lines.extend(render_wait_agents(tu, false));
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }
@@ -991,7 +1004,7 @@ fn render_pending_assistant_lines(
     (all_lines, selectable_lines)
 }
 
-fn get_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'a str, &'a str)> {
+fn read_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'a str, &'a str)> {
     let task_id = tool_use.input.get("task_id")?.as_str()?;
     state
         .subagents

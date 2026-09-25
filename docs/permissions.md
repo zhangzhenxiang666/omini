@@ -101,6 +101,8 @@ deny = ["read(.env)"]
 
 Bash 命令的权限控制需要使用专门的 `.rules` 文件，不能使用 `[permissions]` 段中的规则（在 `[permissions]` 中写 `bash` 规则会被忽略并产生警告）。
 
+复合命令会逐条按实际执行的命令检查权限。对于常见的 `for …; do …; done` 循环，循环控制语法本身不会触发确认，循环体内的每条命令仍按现有规则单独判定。
+
 ### 文件路径
 
 - 用户级：`~/.omini/rules/*.rules`
@@ -309,7 +311,7 @@ prefix_rule(
 | `search` | 允许 | 搜索操作直接允许 |
 | `edit`、`write` | 需确认 | 写入操作需要用户确认 |
 | `todo_write` | 允许 | 创建待办清单直接允许 |
-| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`get_task`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
+| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`wait_agents`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
 | `bash` | 按规则判断 | 根据 Bash 规则和内置策略决定 |
 
 ## 相关文档

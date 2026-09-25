@@ -251,7 +251,7 @@ pub fn thinking_duration_line(label: &str) -> Line<'static> {
 
 /// 常规工具（bash/read/edit/write/search/mcp/skill 等）的紧凑渲染：
 /// 主行 `⏺ ToolName(args)` + 结果首行 `  └ ...`。
-/// 特殊交互工具（ask_user/todo_write/view_image/subagent/get_task）不走此路径。
+/// 特殊交互工具（ask_user/todo_write/view_image/subagent/task controls）不走此路径。
 pub fn render_tool_compact(
     tool_use: &ToolUseBlock,
     tool_result: Option<&ToolResultBlock>,
@@ -399,7 +399,13 @@ pub enum ToolCategory {
 pub fn is_special_tool(tool_use: &ToolUseBlock) -> bool {
     matches!(
         tool_use.name.as_str(),
-        "ask_user" | "todo_write" | "view_image" | "spawn_agent" | "run_agent" | "get_task"
+        "ask_user"
+            | "todo_write"
+            | "view_image"
+            | "spawn_agent"
+            | "run_agent"
+            | "read_task"
+            | "wait_agents"
     )
 }
 
@@ -559,7 +565,7 @@ pub fn render_tool(
     lines
 }
 
-pub fn render_get_task(
+pub fn render_read_task(
     tool_use: &ToolUseBlock,
     task: Option<(&str, &str)>,
     pending: bool,
@@ -578,9 +584,26 @@ pub fn render_get_task(
     let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
     vec![Line::from(vec![
         Span::raw("⏺ "),
-        Span::styled("GetTask", title_style),
+        Span::styled("ReadTask", title_style),
         Span::raw("("),
         Span::raw(task_label),
+        Span::raw(")"),
+    ])]
+}
+
+pub fn render_wait_agents(tool_use: &ToolUseBlock, pending: bool) -> Vec<Line<'static>> {
+    let target = tool_use
+        .input
+        .get("task_ids")
+        .and_then(|value| value.as_array())
+        .map(|task_ids| format!("{} task(s)", task_ids.len()))
+        .unwrap_or_else(|| "all active agents".to_string());
+    let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
+    vec![Line::from(vec![
+        Span::raw("⏺ "),
+        Span::styled("WaitAgents", title_style),
+        Span::raw("("),
+        Span::raw(target),
         Span::raw(")"),
     ])]
 }
@@ -1146,29 +1169,42 @@ mod tests {
     }
 
     #[test]
-    fn get_task_renders_agent_and_title() {
+    fn read_task_renders_agent_and_title() {
         let tool_use = ToolUseBlock {
             id: "toolu_1".to_string(),
-            name: "get_task".to_string(),
+            name: "read_task".to_string(),
             input: std::collections::HashMap::from([(
                 "task_id".to_string(),
                 serde_json::json!("task_1"),
             )]),
         };
 
-        let lines = render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
+        let lines = render_read_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
 
-        assert_eq!(plain(&lines[0]), "⏺ GetTask(explorer · Find entrypoints)");
+        assert_eq!(plain(&lines[0]), "⏺ ReadTask(explorer · Find entrypoints)");
         assert!(lines[0].spans[1].style.fg.is_some());
         assert_eq!(lines[0].spans[2].style, Style::default());
         assert_eq!(lines[0].spans[3].style, Style::default());
         assert_eq!(lines[0].spans[4].style, Style::default());
 
         let pending_lines =
-            render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), true);
+            render_read_task(&tool_use, Some(("explorer", "Find entrypoints")), true);
         assert!(pending_lines[0].spans[1].style.fg.is_some());
         assert_eq!(pending_lines[0].spans[2].style, Style::default());
         assert_eq!(pending_lines[0].spans[3].style, Style::default());
         assert_eq!(pending_lines[0].spans[4].style, Style::default());
+    }
+
+    #[test]
+    fn wait_agents_renders_selected_task_count() {
+        let tool_use = ToolUseBlock {
+            id: "toolu_wait".to_string(),
+            name: "wait_agents".to_string(),
+            input: serde_json::from_value(serde_json::json!({"task_ids": ["task-a", "task-b"]}))
+                .unwrap(),
+        };
+
+        let lines = render_wait_agents(&tool_use, false);
+        assert_eq!(plain(&lines[0]), "⏺ WaitAgents(2 task(s))");
     }
 }

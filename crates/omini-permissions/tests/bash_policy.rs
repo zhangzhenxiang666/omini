@@ -165,6 +165,41 @@ prefix_rule(pattern = ["custom-deny"], decision = "forbidden", justification = "
 }
 
 #[test]
+fn safe_for_loop_bodies_do_not_prompt_but_unsafe_commands_keep_their_policy() {
+    let engine = PermissionEngine::empty("/workspace");
+
+    assert_eq!(
+        check(
+            &engine,
+            r#"for d in /Users/takehan/Codespace/rust/omini/crates/*/; do echo "=== $d ==="; ls "$d"; echo "--- src ---"; ls "$d/src" 2>/dev/null; done"#
+        ),
+        PermissionCheck {
+            decision: PermissionDecision::Allow,
+            source: None,
+        }
+    );
+    assert_eq!(
+        check(
+            &engine,
+            "for d in /workspace/crates/*/; do rm -rf \"$d\"; done"
+        ),
+        PermissionCheck {
+            decision: PermissionDecision::Ask,
+            source: None,
+        }
+    );
+    assert_eq!(
+        check(&engine, "for d in /workspace/crates/*/; do sudo true; done"),
+        PermissionCheck {
+            decision: PermissionDecision::Deny {
+                reason: "Blocked high-risk shell command".to_string(),
+            },
+            source: None,
+        }
+    );
+}
+
+#[test]
 fn nested_execution_contexts_cannot_hide_deny_or_prompt_commands() {
     let engine = PermissionEngine::empty("/workspace");
     let deny_cases = [

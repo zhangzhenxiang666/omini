@@ -280,12 +280,67 @@ impl AgentTaskSupervisor {
         response
     }
 
-    pub fn get_task(&self, task_id: &str) -> ToolResult {
+    pub fn read_task(&self, task_id: &str) -> ToolResult {
         let tasks = self.tasks.lock().expect("agent task mutex poisoned");
         let Some(task) = tasks.get(task_id) else {
             return ToolResult::error(format!("unknown agent task '{task_id}'"));
         };
         ToolResult::ok(task_result_payload(&task.info))
+    }
+
+    pub async fn wait_for_tasks(&self, task_ids: Option<&[String]>) -> ToolResult {
+        let task_ids = {
+            let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+            match task_ids {
+                Some(task_ids) => {
+                    for task_id in task_ids {
+                        if !tasks.contains_key(task_id) {
+                            return ToolResult::error(format!("unknown agent task '{task_id}'"));
+                        }
+                    }
+                    task_ids.to_vec()
+                }
+                None => {
+                    let mut task_ids = tasks
+                        .values()
+                        .filter(|entry| {
+                            entry.info.parent_task_id.is_none()
+                                && entry.info.execution_mode == AgentTaskExecutionMode::Background
+                                && !entry.info.status.is_terminal()
+                        })
+                        .map(|entry| entry.info.task_id.clone())
+                        .collect::<Vec<_>>();
+                    task_ids.sort();
+                    task_ids
+                }
+            }
+        };
+
+        loop {
+            // 先注册通知，再检查状态，避免任务恰好在检查与 await 之间完成后等待者错过唤醒。
+            let notified = self.idle_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+
+            let completed = {
+                let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+                let mut completed = Vec::with_capacity(task_ids.len());
+                let mut all_terminal = true;
+                for task_id in &task_ids {
+                    let Some(task) = tasks.get(task_id) else {
+                        return ToolResult::error(format!("unknown agent task '{task_id}'"));
+                    };
+                    all_terminal &= task.info.status.is_terminal();
+                    completed.push(task.info.clone());
+                }
+                all_terminal.then_some(completed)
+            };
+
+            if let Some(completed) = completed {
+                return ToolResult::ok(task_results_payload(&completed));
+            }
+            notified.await;
+        }
     }
 
     pub async fn cancel_task(&self, task_id: &str) -> ToolResult {
@@ -368,8 +423,14 @@ impl AgentTaskSupervisor {
     }
 
     pub async fn wait_until_idle(&self) {
-        while self.has_active_tasks() {
-            self.idle_notify.notified().await;
+        loop {
+            let notified = self.idle_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.has_active_tasks() {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -936,7 +997,7 @@ impl AgentTaskSupervisor {
                 status: info.status,
             });
         }
-        self.idle_notify.notify_one();
+        self.idle_notify.notify_waiters();
         info
     }
 
@@ -1065,6 +1126,18 @@ fn task_result_payload(info: &AgentTaskInfo) -> String {
         result: info.result.as_ref(),
     })
     .unwrap_or_else(|_| serialization_failure_payload(&info.task_id))
+}
+
+fn task_results_payload(infos: &[AgentTaskInfo]) -> String {
+    let responses = infos
+        .iter()
+        .map(|info| AgentTaskResultResponse {
+            task_id: &info.task_id,
+            status: info.status,
+            result: info.result.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&responses).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn serialization_failure_payload(task_id: &str) -> String {
@@ -1249,6 +1322,22 @@ mod tests {
         )
     }
 
+    fn complete_test_task(
+        supervisor: &AgentTaskSupervisor,
+        task_id: &str,
+        status: AgentTaskStatus,
+        result: AgentTaskResult,
+    ) {
+        let mut tasks = supervisor.tasks.lock().expect("agent task mutex poisoned");
+        let task = tasks.get_mut(task_id).expect("test task should exist");
+        task.info.status = status;
+        task.info.result = Some(result);
+        task.info.completed_at = Some(Utc::now());
+        task.info.updated_at = task.info.completed_at.expect("completion timestamp");
+        drop(tasks);
+        supervisor.idle_notify.notify_waiters();
+    }
+
     #[test]
     fn task_slots_enforce_per_mode_limits_and_release_after_drop() {
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
@@ -1335,6 +1424,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_for_tasks_returns_all_terminal_results_after_concurrent_completion() {
+        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            test_supervisor(vec![task_info(1), task_info(2)]);
+        let task_ids = vec!["task_1".to_string(), "task_2".to_string()];
+        let waiter = {
+            let supervisor = Arc::clone(&supervisor);
+            let task_ids = task_ids.clone();
+            tokio::spawn(async move { supervisor.wait_for_tasks(Some(&task_ids)).await })
+        };
+
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        for task_id in &task_ids {
+            complete_test_task(
+                &supervisor,
+                task_id,
+                AgentTaskStatus::Completed,
+                AgentTaskResult {
+                    output: Some(format!("result for {task_id}")),
+                    error: None,
+                    warnings: Vec::new(),
+                },
+            );
+        }
+
+        let result = waiter.await.expect("wait task should finish");
+        assert!(!result.is_error);
+        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 2);
+        assert_eq!(payload[0]["task_id"], "task_1");
+        assert_eq!(payload[1]["result"]["output"], "result for task_2");
+    }
+
+    #[tokio::test]
+    async fn wait_for_tasks_defaults_to_active_root_background_tasks() {
+        let mut completed = task_info(4);
+        completed.task_id = "done".to_string();
+        completed.execution_mode = AgentTaskExecutionMode::Background;
+        completed.status = AgentTaskStatus::Completed;
+        completed.result = Some(AgentTaskResult {
+            output: Some("already done".to_string()),
+            error: None,
+            warnings: Vec::new(),
+        });
+        completed.notification_delivered = true;
+        let active = task_info(1);
+        let mut child = task_info(2);
+        child.parent_task_id = Some(active.task_id.clone());
+        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            test_supervisor(vec![completed, active.clone(), child]);
+
+        let waiter = {
+            let supervisor = Arc::clone(&supervisor);
+            tokio::spawn(async move { supervisor.wait_for_tasks(None).await })
+        };
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+        complete_test_task(
+            &supervisor,
+            &active.task_id,
+            AgentTaskStatus::Completed,
+            AgentTaskResult {
+                output: Some("active result".to_string()),
+                error: None,
+                warnings: Vec::new(),
+            },
+        );
+
+        let result = waiter.await.expect("default wait should finish");
+        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 1);
+        assert_eq!(payload[0]["task_id"], active.task_id);
+    }
+
+    #[tokio::test]
+    async fn wait_for_tasks_returns_completed_tasks_and_rejects_unknown_ids() {
+        let mut completed = task_info(1);
+        completed.status = AgentTaskStatus::Failed;
+        completed.result = Some(AgentTaskResult {
+            output: None,
+            error: Some("failed".to_string()),
+            warnings: vec!["retry exhausted".to_string()],
+        });
+        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            test_supervisor(vec![completed]);
+
+        let result = supervisor
+            .wait_for_tasks(Some(&["task_1".to_string()]))
+            .await;
+        assert!(!result.is_error);
+        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        assert_eq!(payload[0]["status"], "failed");
+        assert_eq!(payload[0]["result"]["warnings"][0], "retry exhausted");
+
+        let result = supervisor
+            .wait_for_tasks(Some(&["missing".to_string()]))
+            .await;
+        assert!(result.is_error);
+        assert!(result.output.contains("unknown agent task 'missing'"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_tasks_without_active_roots_returns_an_empty_list() {
+        let mut completed = task_info(1);
+        completed.status = AgentTaskStatus::Completed;
+        completed.result = Some(AgentTaskResult {
+            output: Some("done".to_string()),
+            error: None,
+            warnings: Vec::new(),
+        });
+        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            test_supervisor(vec![completed]);
+
+        let result = supervisor.wait_for_tasks(None).await;
+        assert!(!result.is_error);
+        assert_eq!(result.output, "[]");
+    }
+
+    #[tokio::test]
     async fn terminal_cancel_is_idempotent_and_returns_only_status() {
         let mut info = task_info(1);
         info.status = AgentTaskStatus::Failed;
@@ -1360,8 +1568,8 @@ mod tests {
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(vec![background, synchronous]);
 
-        assert!(!supervisor.get_task("task_1").is_error);
-        assert!(supervisor.get_task("task_2").is_error);
+        assert!(!supervisor.read_task("task_1").is_error);
+        assert!(supervisor.read_task("task_2").is_error);
     }
 
     #[test]
@@ -1384,10 +1592,10 @@ mod tests {
             test_supervisor(tasks);
 
         for index in 0..5 {
-            assert!(supervisor.get_task(&format!("done_{index:02}")).is_error);
+            assert!(supervisor.read_task(&format!("done_{index:02}")).is_error);
         }
         for index in 5..35 {
-            assert!(!supervisor.get_task(&format!("done_{index:02}")).is_error);
+            assert!(!supervisor.read_task(&format!("done_{index:02}")).is_error);
         }
     }
 
@@ -1425,9 +1633,9 @@ mod tests {
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(tasks);
 
-        assert!(!supervisor.get_task("running_old").is_error);
-        assert!(!supervisor.get_task("undelivered_old").is_error);
-        assert!(supervisor.get_task("done_00").is_error);
+        assert!(!supervisor.read_task("running_old").is_error);
+        assert!(!supervisor.read_task("undelivered_old").is_error);
+        assert!(supervisor.read_task("done_00").is_error);
     }
 
     #[test]
@@ -1453,10 +1661,10 @@ mod tests {
 
         supervisor.mark_notifications_delivered(&delivered_ids);
 
-        assert!(supervisor.get_task("task_00").is_error);
-        assert!(supervisor.get_task("task_01").is_error);
-        assert!(!supervisor.get_task("task_02").is_error);
-        assert!(!supervisor.get_task("task_31").is_error);
+        assert!(supervisor.read_task("task_00").is_error);
+        assert!(supervisor.read_task("task_01").is_error);
+        assert!(!supervisor.read_task("task_02").is_error);
+        assert!(!supervisor.read_task("task_31").is_error);
     }
 
     #[test]
@@ -1497,9 +1705,9 @@ mod tests {
 
         supervisor.mark_notifications_delivered(&delivered_ids);
 
-        assert!(!supervisor.get_task("running_old").is_error);
-        assert!(!supervisor.get_task("undelivered_old").is_error);
-        assert!(supervisor.get_task("done_00").is_error);
+        assert!(!supervisor.read_task("running_old").is_error);
+        assert!(!supervisor.read_task("undelivered_old").is_error);
+        assert!(supervisor.read_task("done_00").is_error);
     }
 
     #[tokio::test]
@@ -1525,7 +1733,7 @@ mod tests {
             let payload: serde_json::Value = serde_json::from_str(&response.output).unwrap();
             assert_eq!(payload["task_id"], task_id);
             assert_eq!(payload["status"], status.as_str());
-            assert!(supervisor.get_task(&task_id).is_error);
+            assert!(supervisor.read_task(&task_id).is_error);
         }
 
         let initial = task_info(2);
@@ -1558,7 +1766,7 @@ mod tests {
                 .unwrap()
                 .contains("synthetic task panic")
         );
-        assert!(supervisor.get_task(&task_id).is_error);
+        assert!(supervisor.read_task(&task_id).is_error);
     }
 
     #[tokio::test]
