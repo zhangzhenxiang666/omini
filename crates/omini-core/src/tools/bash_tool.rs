@@ -109,8 +109,10 @@ impl Tool for BashTool {
             }
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // stdout/stderr 各按字节上限截断：命令输出（如 cat 大文件）可能巨量，
+        // 未截断会拖垮持久化（sidecar 写盘）与事件广播链路
+        let stdout = truncate_command_output(&output.stdout);
+        let stderr = truncate_command_output(&output.stderr);
 
         let result = if output.status.success() {
             if stdout.is_empty() {
@@ -124,5 +126,46 @@ impl Tool for BashTool {
         };
 
         ToolResult::ok(result.trim())
+    }
+}
+
+/// 命令单个输出流的字节上限。
+const OUTPUT_BYTE_LIMIT: usize = 256 * 1024;
+
+/// 按字节上限截断命令输出（UTF-8 安全边界），并附截断提示。
+fn truncate_command_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() <= OUTPUT_BYTE_LIMIT {
+        return text;
+    }
+    let mut end = OUTPUT_BYTE_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n(... output truncated: kept first {end} of {} bytes ...)",
+        &text[..end],
+        text.len()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_command_output_caps_oversized_stream() {
+        let oversized = vec![b'b'; OUTPUT_BYTE_LIMIT * 4];
+        let truncated = truncate_command_output(&oversized);
+
+        assert!(truncated.len() < OUTPUT_BYTE_LIMIT + 200);
+        assert!(truncated.starts_with('b'));
+        assert!(truncated.contains("output truncated"));
+    }
+
+    #[test]
+    fn truncate_command_output_keeps_small_stream_unchanged() {
+        assert_eq!(truncate_command_output(b"ok"), "ok");
+        assert_eq!(truncate_command_output(&[]), "");
     }
 }

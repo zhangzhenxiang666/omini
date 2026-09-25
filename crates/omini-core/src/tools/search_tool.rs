@@ -231,8 +231,10 @@ async fn execute_search_with_rg_path(
             }
         }
         let exit_code = output.status.code().map_or("?".into(), |c| c.to_string());
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // rg 异常退出（如中断/IO 错误）前可能已刷出海量 JSON 匹配流；
+        // 错误详情按字节限制截断，避免巨型结果拖垮持久化与广播链路
+        let stdout = truncate_stream_output(&output.stdout);
+        let stderr = truncate_stream_output(&output.stderr);
         let details = [stdout.trim(), stderr.trim()]
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -276,6 +278,23 @@ async fn execute_search_with_rg_path(
             ToolResult::ok(text).with_metadata(metadata)
         }
     }
+}
+
+/// 按字节上限截断 rg 的原始输出流（UTF-8 安全边界），并附截断提示。
+fn truncate_stream_output(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    if text.len() <= OUTPUT_BYTE_LIMIT {
+        return text;
+    }
+    let mut end = OUTPUT_BYTE_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n(... output truncated: kept first {end} of {} bytes ...)",
+        &text[..end],
+        text.len()
+    )
 }
 
 async fn run_rg_with_path(
@@ -574,6 +593,28 @@ mod tests {
         };
 
         assert_eq!(bundled_rg_display_path(), expected);
+    }
+
+    #[test]
+    fn truncate_stream_output_caps_oversized_stream() {
+        // rg 异常退出前的巨量输出流按上限截断，保留头部与截断提示
+        let oversized = vec![b'a'; OUTPUT_BYTE_LIMIT * 4];
+        let truncated = truncate_stream_output(&oversized);
+
+        assert!(truncated.len() < OUTPUT_BYTE_LIMIT + 200);
+        assert!(truncated.starts_with('a'));
+        assert!(truncated.contains("output truncated"));
+    }
+
+    #[test]
+    fn truncate_stream_output_keeps_small_stream_and_utf8_boundary() {
+        assert_eq!(truncate_stream_output(b"small"), "small");
+
+        // 多字节字符落在边界时回退到字符边界，不拆半个字符
+        let oversized = "汉".repeat(OUTPUT_BYTE_LIMIT / 3 + 10).into_bytes();
+        let truncated = truncate_stream_output(&oversized);
+        assert!(truncated.starts_with("汉汉"));
+        assert!(truncated.contains("output truncated"));
     }
 
     #[tokio::test]

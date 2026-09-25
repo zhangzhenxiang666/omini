@@ -119,11 +119,33 @@ impl ToolResult {
         let block = ToolResultBlock {
             tool_use_id: tool_use_id.to_string(),
             is_error: self.is_error,
-            content: self.output,
+            content: truncate_result_content(self.output),
             metadata: self.metadata,
         };
         (block, self.extra_blocks)
     }
+}
+
+/// 工具结果内容的硬上限。任何工具的超大输出都在 `into_parts` 处截断，
+/// 防止巨型结果拖垮序列化、持久化（sidecar 写盘 + SHA-256）与事件广播链路。
+/// 源头工具可以（且应该）用更小的语义化限制；此值只作最后防线。
+const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
+
+/// 超过 [`MAX_TOOL_RESULT_BYTES`] 的输出保留头部并附截断提示（保头去尾）：
+/// 错误与匹配信息通常集中在开头，模型可据此收窄重试范围。
+fn truncate_result_content(output: String) -> String {
+    if output.len() <= MAX_TOOL_RESULT_BYTES {
+        return output;
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n(... output truncated: kept first {end} of {} bytes ...)",
+        &output[..end],
+        output.len()
+    )
 }
 
 pub type PendingToolPauses = Arc<Mutex<HashMap<String, PendingToolPause>>>;
@@ -802,6 +824,35 @@ fn is_agent_control_tool(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn into_parts_truncates_oversized_output() {
+        // 2MB 输出超过硬上限，应保留头部并附截断提示
+        let oversized = "x".repeat(2 * MAX_TOOL_RESULT_BYTES);
+        let (block, _) = ToolResult::ok(oversized).into_parts("toolu_1");
+
+        assert!(block.content.len() < 2 * MAX_TOOL_RESULT_BYTES);
+        assert!(block.content.starts_with('x'));
+        assert!(block.content.contains("output truncated"));
+        assert!(block.content.contains("bytes ..."));
+    }
+
+    #[test]
+    fn into_parts_truncates_oversized_utf8_on_char_boundary() {
+        // 多字节字符落在截断边界时截断点向前回退到字符边界，不拆半个字符
+        let oversized = "汉".repeat(MAX_TOOL_RESULT_BYTES / 3 + 100);
+        let (block, _) = ToolResult::ok(oversized).into_parts("toolu_1");
+
+        assert!(block.content.starts_with("汉汉"));
+        assert!(block.content.contains("output truncated"));
+    }
+
+    #[test]
+    fn into_parts_keeps_normal_output() {
+        let (block, _) = ToolResult::ok("all good").into_parts("toolu_1");
+
+        assert_eq!(block.content, "all good");
+    }
 
     #[test]
     fn normalize_search_default_path_uses_thread_cwd() {
