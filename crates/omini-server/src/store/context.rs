@@ -147,23 +147,74 @@ impl Database {
         thread_id: &str,
         thread_dir: &ThreadDir,
     ) -> Result<Vec<Message>, StoreError> {
-        let rows = sqlx::query_as::<_, StoredLlmMessageRow>(
-            "SELECT lm.role, lm.content
-                FROM llm_messages lm
-                JOIN thread t ON t.id = lm.thread_id
-                WHERE lm.thread_id = ? AND lm.context_version = t.llm_context_version
-                ORDER BY lm.ordinal",
-        )
-        .bind(thread_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter()
-            .map(|row| {
+        self.load_current_llm_context(thread_id, thread_dir)
+            .await
+            .map(|(messages, _)| messages)
+    }
+
+    pub(crate) async fn load_current_llm_context(
+        &self,
+        thread_id: &str,
+        thread_dir: &ThreadDir,
+    ) -> Result<(Vec<Message>, i64), StoreError> {
+        loop {
+            let context_version: i64 =
+                sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
+                    .bind(thread_id)
+                    .fetch_one(&self.pool)
+                    .await?;
+            let rows = sqlx::query_as::<_, StoredLlmMessageRow>(
+                "SELECT role, content FROM llm_messages
+                    WHERE thread_id = ? AND context_version = ?
+                    ORDER BY ordinal",
+            )
+            .bind(thread_id)
+            .bind(context_version)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut messages = Vec::with_capacity(rows.len());
+            let mut oversized = None;
+            for row in rows {
                 let role = parse_role(&row.role)?;
                 let stored = serde_json::from_str::<Vec<serde_json::Value>>(&row.content)?;
-                Ok(Message::new(role, load_blocks(&stored, thread_dir)?))
-            })
-            .collect()
+                match load_blocks(&stored, thread_dir) {
+                    Ok(blocks) => messages.push(Message::new(role, blocks)),
+                    Err(StoreError::OversizedSidecar {
+                        actual_bytes,
+                        limit_bytes,
+                    }) => {
+                        oversized = Some((actual_bytes, limit_bytes));
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+
+            let Some((actual_bytes, limit_bytes)) = oversized else {
+                return Ok((messages, context_version));
+            };
+
+            // 保留旧版本供检查，同时切换活动上下文版本，避免后续请求反复遇到同一大文件。
+            let updated = sqlx::query(
+                "UPDATE thread SET llm_context_version = ?
+                    WHERE id = ? AND llm_context_version = ?",
+            )
+            .bind(context_version + 1)
+            .bind(thread_id)
+            .bind(context_version)
+            .execute(&self.pool)
+            .await?;
+            if updated.rows_affected() == 1 {
+                tracing::warn!(
+                    thread_id,
+                    actual_bytes,
+                    limit_bytes,
+                    "cleared active LLM context containing an oversized sidecar"
+                );
+                return Ok((Vec::new(), context_version + 1));
+            }
+        }
     }
 }
 

@@ -38,7 +38,7 @@ pub(super) fn render_subagent_tool(
         })
         .unwrap_or(AgentTaskStatus::Running);
 
-    let mut header = vec![Span::raw("· ")];
+    let mut header = vec![Span::raw("⏺ ")];
     if matches!(
         status,
         AgentTaskStatus::Running | AgentTaskStatus::Cancelling

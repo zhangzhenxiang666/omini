@@ -12,7 +12,7 @@ use omini_domain::display::{
 };
 use omini_domain::events::{AgentTaskInfo, AgentTaskSnapshot};
 use omini_domain::input::DisplayUserInput;
-use omini_domain::message::{Message, Role};
+use omini_domain::message::{ContentBlock, Message, Role};
 
 /// 加载一个线程的消息历史，跳过无法解析的损坏记录以保证线程仍可打开。
 pub async fn load_messages(
@@ -106,6 +106,24 @@ pub async fn load_messages(
         };
         let blocks = match store::load_blocks(&content_json, thread_dir) {
             Ok(blocks) => blocks,
+            Err(store::StoreError::OversizedSidecar {
+                actual_bytes,
+                limit_bytes,
+            }) => {
+                tracing::warn!(
+                    thread_id,
+                    actual_bytes,
+                    limit_bytes,
+                    "omitted oversized persisted message content"
+                );
+                messages.push(HistoryItem::Message(Message::new(
+                    role,
+                    vec![ContentBlock::from_text(
+                        "（消息太长，暂不显示）".to_string(),
+                    )],
+                )));
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(thread_id, error = %error, "failed to load message blocks");
                 continue;

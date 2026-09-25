@@ -21,7 +21,7 @@ pub(super) fn render(
     let mut lines = Vec::new();
 
     let mut title = Vec::new();
-    title.push(Span::raw("· "));
+    title.push(Span::raw("⏺ "));
     let title_style = tool_title_style(accent, is_pending);
     if result.is_some_and(|tr| !tr.is_error) && answered_count > 0 {
         title.push(Span::styled("Questions", title_style));

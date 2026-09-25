@@ -32,7 +32,7 @@ pub(super) fn render(
     let mut lines = Vec::new();
     let is_pending = result.is_none();
     let title = vec![
-        Span::raw("· "),
+        Span::raw("⏺ "),
         Span::styled("Todo List", tool_title_style(accent, is_pending)),
     ];
     lines.push(Line::from(title));

@@ -88,7 +88,7 @@ fn render_path_tool(
         s
     };
 
-    main_spans.push(Span::raw("· "));
+    main_spans.push(Span::raw("⏺ "));
     if is_permission_preview {
         let display = format!("{display_file_path}{params_desc}");
         main_spans.push(Span::styled(display, title_style));

@@ -250,7 +250,7 @@ pub fn thinking_duration_line(label: &str) -> Line<'static> {
 }
 
 /// 常规工具（bash/read/edit/write/search/mcp/skill 等）的紧凑渲染：
-/// 主行 `· ToolName(args)` + 结果首行 `  └ ...`。
+/// 主行 `⏺ ToolName(args)` + 结果首行 `  └ ...`。
 /// 特殊交互工具（ask_user/todo_write/view_image/subagent/get_task）不走此路径。
 pub fn render_tool_compact(
     tool_use: &ToolUseBlock,
@@ -294,14 +294,14 @@ pub fn render_tool_compact(
     lines
 }
 
-/// 生成紧凑工具主行 `· ToolName(args)`；未覆盖的工具退化为 `· {name}`。
+/// 生成紧凑工具主行 `⏺ ToolName(args)`；未覆盖的工具退化为 `⏺ {name}`。
 fn compact_tool_title_line(
     tool_use: &ToolUseBlock,
     title_style: Style,
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Line<'static> {
-    let mut spans = vec![Span::raw("· ")];
+    let mut spans = vec![Span::raw("⏺ ")];
     match tool_use.name.as_str() {
         "read" | "edit" | "write" => {
             let title = match tool_use.name.as_str() {
@@ -426,6 +426,10 @@ pub fn activity_summary_line(
     tool_counts: &[(ToolCategory, usize)],
     content_width: usize,
 ) -> Option<Line<'static>> {
+    if thinking_ms.is_some_and(|ms| ms < 1_000) && tool_counts.is_empty() {
+        return None;
+    }
+
     let mut phrases: Vec<String> = Vec::new();
     if let Some(ms) = thinking_ms {
         phrases.push(format!("Thought for {}", format_thinking_duration(ms)));
@@ -452,7 +456,14 @@ pub fn activity_summary_line(
         .add_modifier(Modifier::ITALIC);
     let text = phrases.join(", ");
     Some(Line::from(Span::styled(
-        truncate_display_width(&format!("· {text}"), content_width),
+        truncate_display_width(
+            &format!(
+                "{}{}",
+                if thinking_ms.is_some() { "  " } else { "⏺ " },
+                text
+            ),
+            content_width,
+        ),
         style,
     )))
 }
@@ -464,7 +475,7 @@ fn category_phrase(category: &ToolCategory, count: usize) -> String {
         ToolCategory::FileRead => format!("read {count} file{plural}"),
         ToolCategory::FileEdit => format!("edited {count} file{plural}"),
         ToolCategory::FileWrite => format!("wrote {count} file{plural}"),
-        ToolCategory::Search => format!("ran {count} search{plural}"),
+        ToolCategory::Search => format!("ran {count} search{}", if count == 1 { "" } else { "es" }),
         ToolCategory::Skill => format!("used {count} skill{plural}"),
         ToolCategory::McpTool => format!("called {count} MCP tool{plural}"),
         ToolCategory::Other(name) => format!("used {name} ×{count}"),
@@ -531,7 +542,7 @@ pub fn render_tool(
 
     if lines.is_empty() && tool_preview.is_some() {
         lines.push(Line::from(vec![
-            Span::raw("· "),
+            Span::raw("⏺ "),
             Span::styled(
                 tool_use.name.clone(),
                 tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), tool_result.is_none()),
@@ -566,7 +577,7 @@ pub fn render_get_task(
 
     let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
     vec![Line::from(vec![
-        Span::raw("· "),
+        Span::raw("⏺ "),
         Span::styled("GetTask", title_style),
         Span::raw("("),
         Span::raw(task_label),
@@ -590,7 +601,7 @@ fn compact_waiting_tool_lines(
             !tool_pause_active,
         )];
     }
-    let mut spans = vec![Span::raw("· ")];
+    let mut spans = vec![Span::raw("⏺ ")];
 
     match tool_use.name.as_str() {
         "read" | "view_image" | "edit" | "write" => {
@@ -685,7 +696,7 @@ fn decorate_paused_tool(
         if first
             .spans
             .first()
-            .is_some_and(|span| span.content.as_ref() == "· ")
+            .is_some_and(|span| span.content.as_ref() == "⏺ ")
         {
             first.spans[0] = Span::styled("• ", active_style);
         } else {
@@ -788,7 +799,7 @@ mod tests {
 
         assert_eq!(
             plain(&line),
-            "· Thought for 12s, ran 2 shell commands, read 1 file"
+            "  Thought for 12s, ran 2 shell commands, read 1 file"
         );
     }
 
@@ -797,7 +808,7 @@ mod tests {
         let counts = vec![(ToolCategory::Shell, 1)];
         let line = activity_summary_line(None, &counts, 80).expect("summary line");
 
-        assert_eq!(plain(&line), "· Ran 1 shell command");
+        assert_eq!(plain(&line), "⏺ Ran 1 shell command");
     }
 
     #[test]
@@ -805,6 +816,11 @@ mod tests {
         assert!(activity_summary_line(None, &[], 80).is_none());
         // 旧记录：thinking 无时长且无工具 → 不渲染
         assert!(activity_summary_line(None, &[], 80).is_none());
+        // 极短的纯思考不占一行；有工具活动时仍保留 Thought 时长摘要。
+        assert!(activity_summary_line(Some(999), &[], 80).is_none());
+        let counts = vec![(ToolCategory::Shell, 1)];
+        let line = activity_summary_line(Some(999), &counts, 80).expect("tool summary");
+        assert_eq!(plain(&line), "  Thought for <1s, ran 1 shell command");
     }
 
     #[test]
@@ -825,7 +841,7 @@ mod tests {
 
         let lines = render_tool_compact(&tool_use, Some(&tool_result), 80, None);
 
-        assert_eq!(plain(&lines[0]), "· Bash(git status)");
+        assert_eq!(plain(&lines[0]), "⏺ Bash(git status)");
         assert_eq!(plain(&lines[1]), "  └ On branch main");
     }
 
@@ -842,7 +858,7 @@ mod tests {
         let lines = render_tool_compact(&tool_use, None, 80, None);
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(plain(&lines[0]), "· Read src/main.rs");
+        assert_eq!(plain(&lines[0]), "⏺ Read src/main.rs");
     }
 
     #[test]
@@ -876,7 +892,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert_eq!(plain(&lines[0]), "· Skill commit-message");
+        assert_eq!(plain(&lines[0]), "⏺ Skill commit-message");
     }
 
     #[test]
@@ -898,7 +914,7 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+        assert_eq!(plain(&lines[0]), "⏺ View Image /tmp/image.png");
     }
 
     #[test]
@@ -919,7 +935,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+        assert_eq!(plain(&lines[0]), "⏺ View Image /tmp/image.png");
         assert_eq!(plain(&lines[1]), "  Failed to read image /tmp/image.png");
         assert_eq!(lines[1].spans[1].style.fg, Some(Color::Rgb(255, 100, 100)));
     }
@@ -949,7 +965,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, None, Some(&preview), Some(false), 80, None);
 
-        assert_eq!(plain(&lines[0]), "· View Image /tmp/image.png");
+        assert_eq!(plain(&lines[0]), "⏺ View Image /tmp/image.png");
         assert_eq!(plain(&lines[1]), "  └ Waiting for permission");
     }
 
@@ -975,7 +991,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert!(plain(&lines[0]).starts_with("· Bash("));
+        assert!(plain(&lines[0]).starts_with("⏺ Bash("));
         assert_eq!(plain(&lines[1]), "  └ # 创建提交");
         assert_eq!(plain(&lines[2]), "  Permission denied for tool: bash");
         assert_eq!(
@@ -1007,7 +1023,7 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
-        assert_eq!(rendered[0], "· MCP docs/search {\"query\":\"rust\"}");
+        assert_eq!(rendered[0], "⏺ MCP docs/search {\"query\":\"rust\"}");
         assert_eq!(rendered[1], "  └ found docs");
     }
 
@@ -1023,7 +1039,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, None, None, None, 80, None);
 
-        assert_eq!(plain(&lines[0]), "· MCP docs/search {\"query\":\"rust\"}");
+        assert_eq!(plain(&lines[0]), "⏺ MCP docs/search {\"query\":\"rust\"}");
         assert_eq!(lines[0].spans[1].content.as_ref(), "MCP");
         assert_eq!(lines[0].spans[2].style.fg, Some(Color::Rgb(140, 142, 150)));
     }
@@ -1104,7 +1120,7 @@ mod tests {
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
         let rendered: Vec<_> = lines.iter().map(plain).collect();
 
-        assert_eq!(rendered[0], "· Todo List");
+        assert_eq!(rendered[0], "⏺ Todo List");
         assert_eq!(rendered[1], "  └ ✔ Read existing flow");
         assert_eq!(rendered[2], "    □ Add UpdateTodo widget");
         assert_eq!(rendered[3], "    □ Run focused tests");
@@ -1142,7 +1158,7 @@ mod tests {
 
         let lines = render_get_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
 
-        assert_eq!(plain(&lines[0]), "· GetTask(explorer · Find entrypoints)");
+        assert_eq!(plain(&lines[0]), "⏺ GetTask(explorer · Find entrypoints)");
         assert!(lines[0].spans[1].style.fg.is_some());
         assert_eq!(lines[0].spans[2].style, Style::default());
         assert_eq!(lines[0].spans[3].style, Style::default());

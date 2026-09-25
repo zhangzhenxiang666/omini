@@ -14,6 +14,8 @@ const TOOL_PAUSE_FOOTER_HEIGHT: u16 = 1;
 const BOTTOM_DRAWER_TOP_SPACER_HEIGHT: u16 = 1;
 const BOTTOM_DRAWER_MIN_MESSAGES_HEIGHT: u16 = 1;
 const BOTTOM_DRAWER_MESSAGE_GAP_HEIGHT: u16 = 1;
+const MESSAGE_STATUS_GAP_HEIGHT: u16 = 1;
+const MESSAGE_INPUT_GAP_HEIGHT: u16 = 1;
 
 pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let area = frame.area();
@@ -108,11 +110,18 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let show_start_screen = should_render_start_screen(state);
     state.set_input_wrap_width(area.width as usize);
     let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
-    let activity_height = if state.is_run_active() { 3 } else { 1 };
+    let activity_height = if state.is_run_active() { 1 } else { 0 };
+    let activity_gap_height = if activity_height > 0 {
+        MESSAGE_STATUS_GAP_HEIGHT
+    } else {
+        0
+    };
     let chunks = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
+        Constraint::Length(activity_gap_height),
         Constraint::Length(activity_height),
+        Constraint::Length(MESSAGE_INPUT_GAP_HEIGHT),
         Constraint::Length(input_height),
         Constraint::Length(1),
     ])
@@ -124,16 +133,16 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     } else {
         super::render_messages(state, frame, chunks[1]);
     }
-    render_activity(state, frame, chunks[2]);
-    super::autocomplete::render_autocomplete(state, frame, chunks[3]);
-    super::status::render_footer(state, frame, chunks[4]);
+    render_activity(state, frame, chunks[3]);
+    super::autocomplete::render_autocomplete(state, frame, chunks[5]);
+    super::status::render_footer(state, frame, chunks[6]);
 
     if state.interaction_step.is_none()
         && state.active_tool_pause().is_none()
         && state.help_drawer.is_none()
         && state.plan_approval.is_none()
     {
-        super::input::render_input(state, frame, chunks[3]);
+        super::input::render_input(state, frame, chunks[5]);
     }
 
     if state.interaction_request.is_some() {

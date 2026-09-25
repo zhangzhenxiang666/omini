@@ -12,6 +12,10 @@ pub enum StoreError {
     Base64(#[from] base64::DecodeError),
     #[error("invalid persisted data: {0}")]
     InvalidData(String),
+    #[error(
+        "persisted sidecar is too large to load ({actual_bytes} bytes; limit {limit_bytes} bytes)"
+    )]
+    OversizedSidecar { actual_bytes: u64, limit_bytes: u64 },
     #[error("LLM context version conflict: expected {expected}, found {actual}")]
     ContextVersionConflict { expected: i64, actual: i64 },
     #[error("attachment not found: {0}")]

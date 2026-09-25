@@ -12,6 +12,7 @@ use ratatui::widgets::{Clear, Paragraph};
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+mod activity;
 mod agents;
 mod assistant;
 mod autocomplete;
@@ -294,6 +295,9 @@ mod tests {
         let input_col = prompt_idx % 100;
         assert_eq!(input_row, 21);
         assert_eq!(input_col, 0);
+        let input_area_top = (input_row - 1) as u16;
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+        assert_eq!(input_area_top - messages_bottom, 1);
 
         let bottom_row = buffer
             .content()
@@ -304,6 +308,35 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(bottom_row.contains("footer-model"));
+    }
+
+    #[test]
+    fn active_status_uses_one_row_and_idle_status_uses_none() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+        let idle_messages_height = state.messages_area.height;
+
+        state.agent_status = crate::state::AgentStatus::Thinking;
+        state.start_run_timer();
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        assert_eq!(state.messages_area.height, idle_messages_height - 2);
+        let status_row = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(80)
+            .position(|row| {
+                row.iter()
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+                    .contains("esc to interrupt")
+            })
+            .expect("active status should render") as u16;
+        let messages_bottom = state.messages_area.y + state.messages_area.height;
+        assert_eq!(status_row - messages_bottom, 1);
     }
 
     #[test]

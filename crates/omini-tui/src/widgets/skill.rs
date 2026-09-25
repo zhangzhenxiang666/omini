@@ -20,7 +20,7 @@ pub(super) fn render(
     let mut main_spans = Vec::new();
     let is_pending = result.is_none();
 
-    main_spans.push(Span::raw("· "));
+    main_spans.push(Span::raw("⏺ "));
     main_spans.push(Span::styled(
         "Skill",
         tool_title_style(skill_color, is_pending),

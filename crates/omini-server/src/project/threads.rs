@@ -453,14 +453,14 @@ async fn load_thread_snapshot(
             context_window: None,
         },
     };
-    let thread_messages = db
-        .load_current_llm_messages(thread_id, &thread_dir)
+    let (thread_messages, llm_context_version) = db
+        .load_current_llm_context(thread_id, &thread_dir)
         .await
         .map_err(|error| CoreError::persistence("failed to load LLM context", error.to_string()))?;
     Ok(ThreadRuntimeInputs::new(
         snapshot,
         thread_messages,
-        thread.llm_context_version,
+        llm_context_version,
     ))
 }
 

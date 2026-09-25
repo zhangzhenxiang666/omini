@@ -1,3 +1,7 @@
+use super::activity::{
+    activity_group_end, render_activity_summary, render_pending_activity_group, tool_result_index,
+    trailing_activity_group_start,
+};
 use super::{
     INPUT_BG, build_assistant_text_lines, build_llm_summary_lines, build_proposed_plan_lines,
     line_to_plain_text, line_width, render_subagent_tool, styled_wrapped_display,
@@ -6,9 +10,8 @@ use super::{
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    ToolCategory, activity_summary_line, build_bordered_lines, format_thinking_duration,
-    is_special_tool, render_get_task, render_tool, render_tool_compact, thinking_duration_line,
-    tool_category, tool_error_display_text, truncate_display_width,
+    build_bordered_lines, format_thinking_duration, is_special_tool, render_get_task, render_tool,
+    render_tool_compact, thinking_duration_line, tool_error_display_text, truncate_display_width,
 };
 use omini_domain::display::DisplayMessage;
 use omini_domain::message::{ContentBlock, ToolUseBlock};
@@ -26,8 +29,7 @@ fn build_display_message_lines(
 ) -> Vec<Line<'static>> {
     let user_bg = INPUT_BG;
     let bg_style = Style::default().bg(user_bg);
-    let mut lines =
-        vec![Line::from(Span::styled(" ".repeat(content_width), bg_style)).style(bg_style)];
+    let mut lines = Vec::new();
 
     let wrapped = styled_wrapped_display(display, content_width.saturating_sub(2), bg_style);
     if wrapped.is_empty() {
@@ -44,8 +46,6 @@ fn build_display_message_lines(
             lines.push(Line::from(spans).style(bg_style));
         }
     }
-
-    lines.push(Line::from(Span::styled(" ".repeat(content_width), bg_style)).style(bg_style));
     lines
 }
 
@@ -62,7 +62,7 @@ fn build_notification_lines(
     let detail_style = Style::default().fg(Color::Rgb(140, 142, 150));
     let mut lines = Vec::new();
 
-    let prefix = "· ";
+    let prefix = "⏺ ";
     let prefix_width = UnicodeWidthStr::width(prefix);
     if content_width <= prefix_width {
         lines.push(Line::from(Span::styled(
@@ -151,12 +151,19 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     // 1. completed 段：缓存仅覆盖 live_message_start 之前的消息。
     //    含未完成工具（pending tool use）的消息不进入缓存，而是作为 live 段每帧重渲染。
 
-    let live_start = state.live_message_start.min(state.messages.len());
+    let active_group_start = trailing_activity_group_start(&state.messages);
+    let live_start = state
+        .live_message_start
+        .min(active_group_start.unwrap_or(usize::MAX))
+        .min(state.messages.len());
     let dims_match = state.render_cache.completed_content_width == content_width;
 
-    if state.render_cache.completed_message_count == 0 || !dims_match {
-        // 缓存完全失效或维度变化 → 全量重建到 live 边界
-        let (lines, sel) = render_message_range(state, content_width, 0, Some(live_start));
+    if state.render_cache.completed_message_count == 0
+        || !dims_match
+        || state.render_cache.completed_message_count > live_start
+    {
+        // 缓存完全失效、维度变化或 live 边界回退时，全量重建到 live 边界。
+        let (lines, sel) = render_message_range(state, content_width, 0, Some(live_start), None);
         state.render_cache.completed_lines = lines;
         state.render_cache.completed_selectable = sel;
         state.render_cache.completed_message_count = live_start;
@@ -165,7 +172,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         // 增量追加到 live 边界
         let start_idx = state.render_cache.completed_message_count;
         let (new_lines, new_sel) =
-            render_message_range(state, content_width, start_idx, Some(live_start));
+            render_message_range(state, content_width, start_idx, Some(live_start), None);
         if !new_lines.is_empty() && !state.render_cache.completed_lines.is_empty() {
             state.render_cache.completed_lines.push(Line::from(""));
             state.render_cache.completed_selectable.push(String::new());
@@ -177,8 +184,14 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     // else: 缓存命中到 live 边界，无需操作
 
     // live 段：含运行中 subagent 的消息，每帧重渲染（呼吸灯动画 + 子工具实时更新）
+    let pending_activity_prefix_len = state
+        .pending_assistant
+        .as_ref()
+        .map(|pending| activity_prefix_len(state, pending));
+    let suppress_open_group = active_group_start
+        .filter(|_| pending_activity_prefix_len.is_some_and(|prefix_len| prefix_len > 0));
     let live_lines = if live_start < state.messages.len() {
-        render_message_range(state, content_width, live_start, None)
+        render_message_range(state, content_width, live_start, None, suppress_open_group)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -188,7 +201,22 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     let pending_lines = state
         .pending_assistant
         .as_ref()
-        .map(|_| render_pending_assistant_lines(state, content_width))
+        .map(|_| {
+            let prefix_len = pending_activity_prefix_len.unwrap_or_default();
+            if prefix_len > 0 {
+                let mut group = render_pending_activity_group(
+                    state,
+                    suppress_open_group.unwrap_or(state.messages.len()),
+                    prefix_len,
+                    content_width,
+                );
+                let pending_body = render_pending_assistant_lines(state, content_width, prefix_len);
+                append_message_lines(&mut group.0, &mut group.1, pending_body.0, pending_body.1);
+                group
+            } else {
+                render_pending_assistant_lines(state, content_width, 0)
+            }
+        })
         .unwrap_or_default();
 
     let plan_lines = state
@@ -335,6 +363,23 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     render_cached_section(&compact_lines.0, compact_offset, &render_ctx, buf);
 }
 
+fn activity_prefix_len(state: &UiState, message: &omini_domain::message::Message) -> usize {
+    message
+        .content
+        .iter()
+        .take_while(|block| match block {
+            ContentBlock::Thinking(_) | ContentBlock::ToolResult(_) | ContentBlock::Image(_) => {
+                true
+            }
+            ContentBlock::ToolUse(tool_use) => {
+                !is_special_tool(tool_use) && state.tool_pause_for_tool_use(&tool_use.id).is_none()
+            }
+            ContentBlock::Text(text) if text.text.trim().is_empty() => true,
+            ContentBlock::Text(_) => false,
+        })
+        .count()
+}
+
 /// 渲染缓存段所需的上下文参数。
 struct SectionRenderContext {
     scroll_y: usize,
@@ -401,6 +446,7 @@ fn render_message_range(
     content_width: usize,
     start_idx: usize,
     end_idx: Option<usize>,
+    suppress_activity_from: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<String>) {
     let end_idx = end_idx.unwrap_or(state.messages.len());
     let mut all_lines: Vec<Line> = Vec::new();
@@ -413,17 +459,13 @@ fn render_message_range(
         .filter_map(UiMessage::as_message)
         .collect();
 
-    let mut tool_result_map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    for (mi, msg) in rendered_messages.iter().enumerate() {
-        for (bi, block) in msg.content.iter().enumerate() {
-            if let ContentBlock::ToolResult(tr) = block {
-                tool_result_map
-                    .entry(tr.tool_use_id.clone())
-                    .or_default()
-                    .push((mi, bi));
-            }
-        }
-    }
+    let tool_result_map = tool_result_index(&rendered_messages);
+    let render_context = MessageRenderContext {
+        rendered_messages: &rendered_messages,
+        tool_result_map: &tool_result_map,
+        state,
+        content_width,
+    };
 
     let mut consumed: HashSet<(usize, usize)> = HashSet::new();
 
@@ -456,29 +498,83 @@ fn render_message_range(
         }
     }
 
-    // 渲染 messages[start_idx..end_idx]
+    // Merge adjacent assistant messages that contain only hidden reasoning and
+    // ordinary tool activity. A visible answer or an interaction tool closes the group.
     let mut rendered_msg_idx = rendered_msg_offset;
-    for ui_message in &state.messages[start_idx..end_idx] {
-        let (msg_lines, msg_sel) = render_single_ui_message(
-            ui_message,
-            &mut rendered_msg_idx,
-            &rendered_messages,
-            &tool_result_map,
-            &mut consumed,
-            state,
-            content_width,
-        );
-        if !msg_lines.is_empty() {
-            if !all_lines.is_empty() {
-                all_lines.push(Line::from(""));
-                selectable_lines.push(String::new());
+    let mut ui_idx = start_idx;
+    while ui_idx < end_idx {
+        if let Some(group_end) = activity_group_end(&state.messages, ui_idx, end_idx) {
+            let group = state.messages[ui_idx..group_end]
+                .iter()
+                .filter_map(UiMessage::as_message)
+                .collect::<Vec<_>>();
+            let summary = render_activity_summary(
+                &group,
+                &tool_result_map,
+                &mut consumed,
+                content_width,
+                None,
+            );
+            if !suppress_activity_from.is_some_and(|from| ui_idx >= from) {
+                let summary_selectable = summary.iter().map(line_to_plain_text).collect();
+                append_message_lines(
+                    &mut all_lines,
+                    &mut selectable_lines,
+                    summary,
+                    summary_selectable,
+                );
             }
-            all_lines.extend(msg_lines);
-            selectable_lines.extend(msg_sel);
+
+            for ui_message in &state.messages[ui_idx..group_end] {
+                let (msg_lines, msg_sel) = render_single_ui_message(
+                    ui_message,
+                    &mut rendered_msg_idx,
+                    &render_context,
+                    &mut consumed,
+                    false,
+                );
+                append_message_lines(&mut all_lines, &mut selectable_lines, msg_lines, msg_sel);
+            }
+            ui_idx = group_end;
+            continue;
         }
+
+        let (msg_lines, msg_sel) = render_single_ui_message(
+            &state.messages[ui_idx],
+            &mut rendered_msg_idx,
+            &render_context,
+            &mut consumed,
+            true,
+        );
+        append_message_lines(&mut all_lines, &mut selectable_lines, msg_lines, msg_sel);
+        ui_idx += 1;
     }
 
     (all_lines, selectable_lines)
+}
+
+struct MessageRenderContext<'a> {
+    rendered_messages: &'a [&'a omini_domain::message::Message],
+    tool_result_map: &'a HashMap<String, Vec<(usize, usize)>>,
+    state: &'a UiState,
+    content_width: usize,
+}
+
+fn append_message_lines(
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+    mut lines: Vec<Line<'static>>,
+    mut selectable: Vec<String>,
+) {
+    if lines.is_empty() {
+        return;
+    }
+    if !all_lines.is_empty() {
+        all_lines.push(Line::from(""));
+        selectable_lines.push(String::new());
+    }
+    all_lines.append(&mut lines);
+    selectable_lines.append(&mut selectable);
 }
 
 /// 渲染单条 `UiMessage`，返回 `(lines, selectable)`。
@@ -488,12 +584,17 @@ fn render_message_range(
 fn render_single_ui_message(
     ui_message: &UiMessage,
     rendered_msg_idx: &mut usize,
-    rendered_messages: &[&omini_domain::message::Message],
-    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    context: &MessageRenderContext<'_>,
     consumed: &mut HashSet<(usize, usize)>,
-    state: &UiState,
-    content_width: usize,
+    include_activity_summary: bool,
 ) -> (Vec<Line<'static>>, Vec<String>) {
+    let MessageRenderContext {
+        rendered_messages,
+        tool_result_map,
+        state,
+        content_width: _,
+    } = context;
+    let content_width = context.content_width;
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
 
@@ -542,15 +643,15 @@ fn render_single_ui_message(
             *rendered_msg_idx += 1;
 
             // Claude Code 式活动收缩：assistant 消息的 thinking 时长与常规工具
-            // 聚合为一行摘要（`· Thought for 12s, ran 1 shell command`），
-            // 各工具结果首行依次挂在 └ 下；特殊交互工具与正文保持独立渲染。
-            if message.role == omini_domain::message::Role::Assistant {
+            // 聚合为一行摘要（`⏺ Thought for 12s, ran 1 shell command`），
+            // 常规工具按类别计数；特殊交互工具与正文保持独立渲染。
+            if include_activity_summary && message.role == omini_domain::message::Role::Assistant {
                 let summary_lines = render_activity_summary(
-                    message,
-                    rendered_messages,
+                    &[message],
                     tool_result_map,
                     consumed,
                     content_width,
+                    None,
                 );
                 if !summary_lines.is_empty() {
                     selectable_lines.extend(summary_lines.iter().map(line_to_plain_text));
@@ -570,11 +671,6 @@ fn render_single_ui_message(
                     ContentBlock::Text(tb) if message.role == omini_domain::message::Role::User => {
                         let user_bg = INPUT_BG;
                         let bg_style = Style::default().bg(user_bg);
-                        block_lines.push(
-                            Line::from(Span::styled(" ".repeat(content_width), bg_style))
-                                .style(bg_style),
-                        );
-
                         let wrapped = styled_wrapped_text(
                             tb,
                             content_width.saturating_sub(2),
@@ -595,11 +691,6 @@ fn render_single_ui_message(
                                 block_lines.push(Line::from(spans).style(bg_style));
                             }
                         }
-
-                        block_lines.push(
-                            Line::from(Span::styled(" ".repeat(content_width), bg_style))
-                                .style(bg_style),
-                        );
                     }
                     ContentBlock::Text(tb) => {
                         let mut lines = build_assistant_text_lines(&tb.text, content_width);
@@ -609,7 +700,7 @@ fn render_single_ui_message(
                     // thinking 块已并入活动聚合摘要；思考内容文本不再展示
                     ContentBlock::Thinking(_) => continue,
                     ContentBlock::ToolUse(tu) => {
-                        // 常规工具已由活动聚合摘要渲染（主行统计 + └ 结果首行）
+                        // 常规工具已由活动聚合摘要按类别计数。
                         if !is_special_tool(tu) {
                             continue;
                         }
@@ -731,6 +822,7 @@ fn render_single_ui_message(
 fn render_pending_assistant_lines(
     state: &UiState,
     content_width: usize,
+    skip_prefix: usize,
 ) -> (Vec<Line<'static>>, Vec<String>) {
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
@@ -749,6 +841,9 @@ fn render_pending_assistant_lines(
     let mut consumed_tr: std::collections::HashSet<usize> = std::collections::HashSet::new();
 
     for (block_idx, block) in pending.content.iter().enumerate() {
+        if block_idx < skip_prefix {
+            continue;
+        }
         if let ContentBlock::ToolResult(_) = block
             && consumed_tr.contains(&block_idx)
         {
@@ -765,16 +860,16 @@ fn render_pending_assistant_lines(
             ContentBlock::Thinking(tb) => {
                 // 思考内容不再展示；进行中的段显示动态计时，已结算的段显示静态时长
                 let label = if let Some(ms) = tb.duration_ms {
-                    format!("· Thought for {}", format_thinking_duration(ms))
+                    format!("  Thought for {}", format_thinking_duration(ms))
                 } else if let Some(started_at) = state.thinking_started_at {
                     let secs = started_at.elapsed().as_secs();
                     if secs >= 1 {
-                        format!("· Thinking for {secs}s...")
+                        format!("  Thinking for {secs}s...")
                     } else {
-                        "· Thinking...".to_string()
+                        "  Thinking...".to_string()
                     }
                 } else {
-                    "· Thinking...".to_string()
+                    "  Thinking...".to_string()
                 };
                 block_lines.push(thinking_duration_line(&label));
             }
@@ -853,7 +948,7 @@ fn render_pending_assistant_lines(
                             Some(state.status_bar.cwd.as_path()),
                         ));
                     } else {
-                        // 常规工具紧凑形态：主行 + 结果首行，与完成态聚合摘要的子行一致
+                        // 常规工具紧凑形态：主行 + 结果首行。
                         block_lines.extend(render_tool_compact(
                             tu,
                             tr.as_ref(),
@@ -905,98 +1000,12 @@ fn get_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'
         .map(|node| (node.agent_label.as_str(), node.title.as_str()))
 }
 
-/// 渲染 assistant 消息的活动聚合摘要块：`· Thought for 12s, ran 1 shell command`
-/// 主行 + 各常规工具结果首行的 `└` 挂接行。
+/// 渲染 assistant 消息的活动聚合摘要块：`⏺ Thought for 12s, ran 1 shell command`
+/// 常规工具计数合并在摘要主行中；配对结果不额外显示错误预览。
 ///
 /// thinking 时长取消息内所有已测量 Thinking 块之和（旧记录无数据则不计）；
 /// 常规工具按类别统计，其配对的 ToolResult 位置标记进 `consumed` 防止重复渲染。
 /// 无思考数据且无常规工具时返回空（如纯文本回复或仅特殊工具）。
-fn render_activity_summary(
-    message: &omini_domain::message::Message,
-    rendered_messages: &[&omini_domain::message::Message],
-    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
-    consumed: &mut HashSet<(usize, usize)>,
-    content_width: usize,
-) -> Vec<Line<'static>> {
-    let mut thinking_ms: Option<u64> = None;
-    for block in &message.content {
-        if let ContentBlock::Thinking(tb) = block
-            && let Some(ms) = tb.duration_ms
-        {
-            thinking_ms = Some(thinking_ms.unwrap_or(0) + ms);
-        }
-    }
-
-    // 常规工具按类别聚合计数，同时保持出现顺序用于结果首行挂接
-    let mut tool_counts: Vec<(ToolCategory, usize)> = Vec::new();
-    let mut compact_tools: Vec<(
-        &ToolUseBlock,
-        Option<&omini_domain::message::ToolResultBlock>,
-    )> = Vec::new();
-    for block in &message.content {
-        let ContentBlock::ToolUse(tu) = block else {
-            continue;
-        };
-        if is_special_tool(tu) {
-            continue;
-        }
-        let category = tool_category(tu);
-        if let Some((_, count)) = tool_counts.iter_mut().find(|(c, _)| *c == category) {
-            *count += 1;
-        } else {
-            tool_counts.push((category, 1));
-        }
-
-        let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
-            positions.first().and_then(|&(mi, bi)| {
-                if let ContentBlock::ToolResult(tr) = &rendered_messages[mi].content[bi] {
-                    Some(tr)
-                } else {
-                    None
-                }
-            })
-        });
-        compact_tools.push((tu, tool_result));
-        if let Some(positions) = tool_result_map.get(&tu.id) {
-            for pos in positions {
-                consumed.insert(*pos);
-            }
-        }
-    }
-
-    let Some(summary) = activity_summary_line(thinking_ms, &tool_counts, content_width) else {
-        return Vec::new();
-    };
-
-    let mut lines = vec![summary];
-    let detail_style = Style::default().fg(Color::Rgb(140, 145, 155));
-    let error_style = Style::default().fg(Color::Rgb(255, 100, 100));
-    for (_tool_use, tool_result) in compact_tools {
-        let Some(tr) = tool_result else {
-            continue;
-        };
-        let content = if tr.is_error {
-            tool_error_display_text(&tr.content)
-        } else {
-            tr.content.trim().to_string()
-        };
-        let Some(first) = content.lines().map(str::trim).find(|l| !l.is_empty()) else {
-            continue;
-        };
-        let width = content_width.saturating_sub(UnicodeWidthStr::width("  └ "));
-        let style = if tr.is_error {
-            error_style
-        } else {
-            detail_style
-        };
-        lines.push(Line::from(vec![
-            Span::raw("  └ "),
-            Span::styled(truncate_display_width(first, width), style),
-        ]));
-    }
-    lines
-}
-
 /// 渲染 pending_proposed_plan。
 fn render_pending_plan_lines(
     plan_text: &str,
@@ -1035,6 +1044,21 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    fn thought_and_shell_call(duration_ms: u64, id: &str, output: &str) -> Message {
+        let input = HashMap::from([("command".to_string(), serde_json::json!("pwd"))]);
+        Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "hidden thought".to_string(),
+                    duration_ms: Some(duration_ms),
+                }),
+                ContentBlock::from_tool_use(id.to_string(), "bash".to_string(), input),
+                ContentBlock::from_tool_result(id.to_string(), false, output.to_string()),
+            ],
+        )
+    }
+
     #[test]
     fn run_divider_renders_elapsed_duration() {
         let lines = build_run_divider_line(Duration::from_secs(67), 24);
@@ -1068,7 +1092,7 @@ mod tests {
 
         assert_eq!(
             plain,
-            vec!["· 主消息", "  └ ok", "    中文abcdef", "    done"]
+            vec!["⏺ 主消息", "  └ ok", "    中文abcdef", "    done"]
         );
         assert!(
             plain
@@ -1167,9 +1191,423 @@ mod tests {
             rendered.contains("Thought for 12s, ran 1 shell command"),
             "rendered: {rendered}"
         );
-        assert!(rendered.contains("└ On branch main"));
+        assert!(!rendered.contains("On branch main"));
         assert!(rendered.contains("fixed"));
         // 常规工具不再展开独立主行
-        assert!(!rendered.contains("· Bash"));
+        assert!(!rendered.contains("⏺ Bash"));
+    }
+
+    #[test]
+    fn adjacent_tool_turns_share_one_thought_activity_summary() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.messages.extend([
+            UiMessage::Message(thought_and_shell_call(5_300, "t1", "first output")),
+            UiMessage::Message(thought_and_shell_call(6_700, "t2", "second output")),
+        ]);
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 12s, ran 2 shell commands"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("first output"), "{rendered}");
+        assert!(!rendered.contains("middle output"), "{rendered}");
+        assert!(!rendered.contains("second output"), "{rendered}");
+        assert!(!rendered.contains("hidden thought"));
+    }
+
+    #[test]
+    fn incrementally_appended_activity_stays_one_uncached_group() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state
+            .messages
+            .push(UiMessage::Message(thought_and_shell_call(
+                5_000,
+                "t1",
+                "first output",
+            )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        assert_eq!(state.render_cache.completed_message_count, 0);
+
+        state.messages.push(UiMessage::Message(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_tool_use("t2".into(), "bash".into(), HashMap::new()),
+                ContentBlock::from_tool_result("t2".into(), false, "middle output".into()),
+            ],
+        )));
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        assert_eq!(state.render_cache.completed_message_count, 0);
+
+        state
+            .messages
+            .push(UiMessage::Message(thought_and_shell_call(
+                7_000,
+                "t3",
+                "second output",
+            )));
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 12s, ran 3 shell commands"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("first output"), "{rendered}");
+        assert!(!rendered.contains("second output"), "{rendered}");
+        assert_eq!(state.render_cache.completed_message_count, 0);
+    }
+
+    #[test]
+    fn restored_thread_snapshot_collapses_consecutive_thought_and_tool_messages() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let read_turn = |id: &str, duration_ms: Option<u64>, narration: Option<&str>| {
+            let mut content = Vec::new();
+            if let Some(duration_ms) = duration_ms {
+                content.push(ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "hidden thought".into(),
+                    duration_ms: Some(duration_ms),
+                }));
+            }
+            if let Some(narration) = narration {
+                content.push(ContentBlock::from_text(narration.into()));
+            }
+            content.push(ContentBlock::from_tool_use(
+                id.into(),
+                "read".into(),
+                HashMap::new(),
+            ));
+            Message::new(Role::Assistant, content)
+        };
+        let tool_result = |id: &str, content: &str| {
+            Message::new(
+                Role::User,
+                vec![ContentBlock::from_tool_result(
+                    id.into(),
+                    false,
+                    content.into(),
+                )],
+            )
+        };
+        state.apply_thread_snapshot(
+            Some("restored-thread".into()),
+            vec![
+                omini_domain::display::HistoryItem::Message(read_turn("r1", Some(5_000), None)),
+                omini_domain::display::HistoryItem::Message(tool_result("r1", "101: text,")),
+                omini_domain::display::HistoryItem::Message(read_turn("r2", None, None)),
+                omini_domain::display::HistoryItem::Message(tool_result("r2", "880: text,")),
+                omini_domain::display::HistoryItem::Message(read_turn(
+                    "r3",
+                    Some(7_000),
+                    Some("检查剩余的状态逻辑。"),
+                )),
+                omini_domain::display::HistoryItem::Message(tool_result(
+                    "r3",
+                    "225: if hours > 0 {",
+                )),
+            ],
+            Vec::new(),
+            crate::types::events::ThreadUsageSnapshot::default(),
+        );
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 12s, read 3 files"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("text,"), "{rendered}");
+        assert!(!rendered.contains("if hours > 0"), "{rendered}");
+        assert!(rendered.contains("检查剩余的状态逻辑。"), "{rendered}");
+    }
+
+    #[test]
+    fn thought_before_ask_user_joins_prior_activity_but_keeps_prompt_visible() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let shell_input = HashMap::from([("command".into(), serde_json::json!("ls"))]);
+        let ask_input = HashMap::new();
+        state.apply_thread_snapshot(
+            Some("thread-with-ask-user".into()),
+            vec![
+                omini_domain::display::HistoryItem::Message(Message::new(
+                    Role::Assistant,
+                    vec![
+                        ContentBlock::Thinking(ThinkingBlock {
+                            thinking: "checking the project".into(),
+                            duration_ms: Some(1_040),
+                        }),
+                        ContentBlock::from_tool_use("shell-1".into(), "bash".into(), shell_input),
+                    ],
+                )),
+                omini_domain::display::HistoryItem::Message(Message::new(
+                    Role::User,
+                    vec![ContentBlock::from_tool_result(
+                        "shell-1".into(),
+                        false,
+                        "Cargo.toml".into(),
+                    )],
+                )),
+                omini_domain::display::HistoryItem::Message(Message::new(
+                    Role::Assistant,
+                    vec![
+                        ContentBlock::Thinking(ThinkingBlock {
+                            thinking: "deciding what to clarify".into(),
+                            duration_ms: Some(161),
+                        }),
+                        ContentBlock::from_text("请确认 review 范围。".into()),
+                        ContentBlock::from_tool_use("ask-1".into(), "ask_user".into(), ask_input),
+                    ],
+                )),
+            ],
+            Vec::new(),
+            crate::types::events::ThreadUsageSnapshot::default(),
+        );
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 1s, ran 1 shell command"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("请确认 review 范围。"), "{rendered}");
+    }
+
+    #[test]
+    fn adjacent_thoughts_merge_across_tool_only_turns_without_output_previews() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let blank_message =
+            Message::new(Role::Assistant, vec![ContentBlock::from_text(" \n".into())]);
+        let search_call = |id: &str, output: &str| {
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking(ThinkingBlock {
+                        thinking: "hidden thought".into(),
+                        duration_ms: Some(1_000),
+                    }),
+                    ContentBlock::from_tool_use(id.into(), "search".into(), HashMap::new()),
+                    ContentBlock::from_tool_result(id.into(), false, output.into()),
+                ],
+            )
+        };
+        let search_only = |id: &str, output: &str| {
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::from_tool_use(id.into(), "search".into(), HashMap::new()),
+                    ContentBlock::from_tool_result(id.into(), false, output.into()),
+                ],
+            )
+        };
+        state.messages.extend([
+            UiMessage::Message(search_call("s1", "Found 4 matches")),
+            UiMessage::Message(blank_message),
+            UiMessage::Message(search_only("s2", "Found 9 matches")),
+            UiMessage::Message(search_call("s3", "Found 3 matches")),
+        ]);
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 2s, ran 3 searches"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Found "), "{rendered}");
+        assert_eq!(rendered.matches("└ ").count(), 0, "{rendered}");
+    }
+
+    #[test]
+    fn visible_assistant_text_closes_thought_activity_group() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.messages.extend([
+            UiMessage::Message(thought_and_shell_call(5_000, "t1", "first output")),
+            UiMessage::Message(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_text("intermediate answer".to_string())],
+            )),
+            UiMessage::Message(thought_and_shell_call(7_000, "t2", "second output")),
+        ]);
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 2, "{rendered}");
+        assert!(rendered.contains("intermediate answer"));
+        assert!(rendered.contains("Thought for 5s"));
+        assert!(rendered.contains("Thought for 7s"));
+    }
+
+    #[test]
+    fn user_message_closes_thought_activity_group() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.messages.extend([
+            UiMessage::Message(thought_and_shell_call(5_000, "t1", "first output")),
+            UiMessage::Message(Message::new(
+                Role::User,
+                vec![ContentBlock::from_text("follow-up".to_string())],
+            )),
+            UiMessage::Message(thought_and_shell_call(7_000, "t2", "second output")),
+        ]);
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 2, "{rendered}");
+        assert!(rendered.contains("follow-up"));
+    }
+
+    #[test]
+    fn errored_tool_result_is_omitted_from_merged_activity_preview() {
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let input = HashMap::from([("command".to_string(), serde_json::json!("false"))]);
+        state.messages.push(UiMessage::Message(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "hidden".to_string(),
+                    duration_ms: Some(2_000),
+                }),
+                ContentBlock::from_tool_use("t1".to_string(), "bash".to_string(), input),
+                ContentBlock::from_tool_result(
+                    "t1".to_string(),
+                    true,
+                    "command failed".to_string(),
+                ),
+            ],
+        )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert!(
+            rendered.contains("Thought for 2s, ran 1 shell command"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("└ error:"), "{rendered}");
+        assert!(!rendered.contains("command failed"), "{rendered}");
+        assert!(!rendered.contains("hidden"));
+    }
+
+    #[test]
+    fn active_thought_merges_with_recent_tool_activity_and_keeps_live_time() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.main_query_active = true;
+        state
+            .messages
+            .push(UiMessage::Message(thought_and_shell_call(
+                5_000,
+                "t1",
+                "first output",
+            )));
+        state.pending_assistant = Some(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_thinking("still hidden".to_string()),
+                ContentBlock::from_tool_use(
+                    "t2".to_string(),
+                    "bash".to_string(),
+                    HashMap::from([("command".to_string(), serde_json::json!("pwd"))]),
+                ),
+            ],
+        ));
+        state.thinking_started_at = Some(std::time::Instant::now() - Duration::from_secs(2));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 7s, ran 2 shell commands"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("first output"), "{rendered}");
+        assert!(!rendered.contains("still hidden"));
+    }
+
+    #[test]
+    fn active_thought_merges_before_the_visible_answer_closes_the_group() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.main_query_active = true;
+        state
+            .messages
+            .push(UiMessage::Message(thought_and_shell_call(
+                5_000,
+                "t1",
+                "first output",
+            )));
+        state.pending_assistant = Some(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_thinking("hidden continuation".to_string()),
+                ContentBlock::from_text("final answer".to_string()),
+            ],
+        ));
+        state.thinking_started_at = Some(std::time::Instant::now() - Duration::from_secs(2));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 7s, ran 1 shell command"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("final answer"));
+        assert!(!rendered.contains("hidden continuation"));
     }
 }

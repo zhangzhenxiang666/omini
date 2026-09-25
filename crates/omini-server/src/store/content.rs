@@ -1,6 +1,8 @@
 use super::*;
 
 pub const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
+/// 历史 sidecar 的读取上限；超过后恢复流程必须降级，不能把完整文件读入内存。
+pub const MAX_SIDECAR_LOAD_BYTES: u64 = 2 * 1024 * 1024;
 
 pub struct PreparedBlocks {
     pub values: Vec<serde_json::Value>,
@@ -50,7 +52,7 @@ pub(crate) fn load_ui_content(stored: &str, thread_dir: &ThreadDir) -> Result<St
         return Ok(stored.to_string());
     }
     let relative = required_string(&reference, "path")?;
-    let bytes = fs::read(safe_relative_path(thread_dir.path(), relative)?)?;
+    let bytes = read_bounded_sidecar(&reference, safe_relative_path(thread_dir.path(), relative)?)?;
     verify_stored_bytes(&reference, &bytes)?;
     String::from_utf8(bytes)
         .map_err(|error| StoreError::InvalidData(format!("sidecar is not UTF-8: {error}")))
@@ -136,7 +138,7 @@ pub(crate) fn load_blocks(
                 Some("sidecar") => {
                     let relative = required_string(value, "path")?;
                     let path = safe_relative_path(thread_dir.path(), relative)?;
-                    let bytes = fs::read(path)?;
+                    let bytes = read_bounded_sidecar(value, path)?;
                     verify_stored_bytes(value, &bytes)?;
                     Ok(serde_json::from_slice(&bytes)?)
                 }
@@ -144,6 +146,41 @@ pub(crate) fn load_blocks(
             },
         )
         .collect()
+}
+
+fn read_bounded_sidecar(
+    reference: &serde_json::Value,
+    path: PathBuf,
+) -> Result<Vec<u8>, StoreError> {
+    if let Some(expected_bytes) = reference.get("bytes").and_then(serde_json::Value::as_u64)
+        && expected_bytes > MAX_SIDECAR_LOAD_BYTES
+    {
+        return Err(StoreError::OversizedSidecar {
+            actual_bytes: expected_bytes,
+            limit_bytes: MAX_SIDECAR_LOAD_BYTES,
+        });
+    }
+
+    let file = File::open(path)?;
+    let actual_bytes = file.metadata()?.len();
+    if actual_bytes > MAX_SIDECAR_LOAD_BYTES {
+        return Err(StoreError::OversizedSidecar {
+            actual_bytes,
+            limit_bytes: MAX_SIDECAR_LOAD_BYTES,
+        });
+    }
+
+    // 即使 sidecar 在元数据检查后发生变化，也将实际读取量限制在上限以内。
+    let mut bytes = Vec::with_capacity(actual_bytes as usize);
+    file.take(MAX_SIDECAR_LOAD_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_SIDECAR_LOAD_BYTES {
+        return Err(StoreError::OversizedSidecar {
+            actual_bytes: bytes.len() as u64,
+            limit_bytes: MAX_SIDECAR_LOAD_BYTES,
+        });
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn persist_staged_asset(

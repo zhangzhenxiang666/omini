@@ -36,7 +36,7 @@ pub(super) fn render(
         .unwrap_or("")
         .trim();
 
-    title.push(Span::raw("· "));
+    title.push(Span::raw("⏺ "));
     title.push(Span::styled("Bash", title_style));
     if !cmd.is_empty() {
         let used_width: usize = title.iter().map(|s| s.width()).sum();

@@ -33,7 +33,7 @@ pub(super) fn render(
         .map(|path| display_path(path, project_dir))
         .unwrap_or_else(|| ".".to_string());
 
-    title.push(Span::raw("· "));
+    title.push(Span::raw("⏺ "));
     title.push(Span::styled("Search", title_style));
     let dim = Style::default().fg(Color::Rgb(0x6a, 0x6f, 0x78));
     let prefix = if query.is_empty() { "files" } else { query };

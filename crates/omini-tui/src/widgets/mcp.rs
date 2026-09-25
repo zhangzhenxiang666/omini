@@ -30,7 +30,7 @@ pub(super) fn title_line(
 ) -> Line<'static> {
     let detail_style = Style::default().fg(Color::Rgb(140, 142, 150));
     let info = display_info(tool_use);
-    let mut spans = vec![Span::raw("· "), Span::styled("MCP", title_style)];
+    let mut spans = vec![Span::raw("⏺ "), Span::styled("MCP", title_style)];
     let mut label = format!(" {}/{}", info.server_name, info.server_tool_name);
     let input = compact_json_object(&tool_use.input);
     if input != "{}" {

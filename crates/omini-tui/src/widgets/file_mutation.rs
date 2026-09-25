@@ -72,7 +72,7 @@ pub(crate) fn render_edit(
         && tr.is_error
     {
         lines.push(Line::from(vec![
-            Span::raw("· "),
+            Span::raw("⏺ "),
             Span::styled("Edit", Style::default().fg(accent)),
             Span::raw(format!(" {}", display_file_path)),
         ]));
@@ -115,7 +115,7 @@ pub(crate) fn render_edit(
 
     if is_running_without_preview {
         lines.push(Line::from(vec![
-            Span::raw("· "),
+            Span::raw("⏺ "),
             Span::styled("Edit", tool_title_style(accent, true)),
         ]));
         return lines;
@@ -125,7 +125,7 @@ pub(crate) fn render_edit(
     let hdr_accent = Style::default().fg(accent).bg(header_bg);
     let hdr_green = Style::default().fg(green_fg).bg(header_bg);
     let hdr_red = Style::default().fg(red_fg).bg(header_bg);
-    let mut header_spans: Vec<Span<'static>> = vec![Span::styled("· ", hdr_plain)];
+    let mut header_spans: Vec<Span<'static>> = vec![Span::styled("⏺ ", hdr_plain)];
     if is_permission_preview {
         header_spans.push(Span::styled(
             format!("Matches: {}", replacement_count),
@@ -563,7 +563,7 @@ pub(crate) fn render_write(
         && tr.is_error
     {
         lines.push(Line::from(vec![
-            Span::raw("· "),
+            Span::raw("⏺ "),
             Span::styled("Write", Style::default().fg(accent)),
         ]));
         let error_style = Style::default().fg(red_fg);
@@ -581,7 +581,7 @@ pub(crate) fn render_write(
     let is_running_without_preview = result.is_none() && preview.is_none();
     if is_running_without_preview {
         lines.push(Line::from(vec![
-            Span::raw("· "),
+            Span::raw("⏺ "),
             Span::styled("Write", tool_title_style(accent, true)),
         ]));
         return lines;
@@ -610,7 +610,7 @@ pub(crate) fn render_write(
     });
     let is_permission_preview = result.is_none() && write_preview.is_some();
     let mut header_spans: Vec<Span<'static>> =
-        vec![Span::styled("· ", Style::default().bg(header_bg))];
+        vec![Span::styled("⏺ ", Style::default().bg(header_bg))];
     if is_permission_preview {
         let action = write_preview
             .and_then(|preview| preview.summary.split_once(' ').map(|(action, _)| action))
