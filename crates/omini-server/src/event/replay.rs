@@ -244,7 +244,7 @@ impl RuntimeReplayBuffer {
         thread_messages: &[omini_model::message::Message],
     ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
-        self.drop_user_injections_in_snapshot(snapshot);
+        self.drop_snapshot_injections(snapshot);
         self.drop_thread_title_in_snapshot(snapshot);
         // LLM 级去重使用当前 context version 的 `llm_messages`，不使用 UI 集合。
         if self.current_assistant_tail_is_in_snapshot(thread_messages) {
@@ -409,14 +409,14 @@ impl RuntimeReplayBuffer {
         self.clear_compact_tail();
     }
 
-    fn drop_user_injections_in_snapshot(
+    fn drop_snapshot_injections(
         &mut self,
         snapshot: &runtime_contract::thread_domain::LoadedThread,
     ) {
         self.pending_prefix
-            .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
+            .retain(|event| !injection_is_in_snapshot(event, snapshot));
         self.current_tail
-            .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
+            .retain(|event| !injection_is_in_snapshot(event, snapshot));
     }
 
     fn drop_thread_title_in_snapshot(
@@ -494,17 +494,26 @@ fn truncate_task_output(replay: &mut TaskStreamReplay, stream: domain::task::Tas
         .insert(stream, MAX_TASK_OUTPUT_SNAPSHOT_BYTES);
 }
 
-/// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
-fn user_injection_is_in_snapshot(
+/// 判断待 replay 的用户输入是否已经出现在主线程或子任务快照中。
+fn injection_is_in_snapshot(
     event: &SequencedRuntimeEvent,
     snapshot: &runtime_contract::thread_domain::LoadedThread,
 ) -> bool {
-    let client_proto::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event
-    else {
-        return false;
-    };
-    let item = crate::conversation::domain_entry(item.clone());
-    snapshot.messages.iter().any(|message| message == &item)
+    match &event.event.event {
+        client_proto::TypedRuntimeEvent::UserMessageInjected { item, .. } => {
+            let item = crate::conversation::domain_entry(item.clone());
+            snapshot.messages.iter().any(|message| message == &item)
+        }
+        client_proto::TypedRuntimeEvent::AgentTaskUserMessageInjected { task_id, item, .. } => {
+            let item = crate::conversation::domain_entry(item.clone());
+            snapshot
+                .agent_tasks
+                .iter()
+                .find(|task| task.task.task_id.as_str() == task_id)
+                .is_some_and(|task| task.history.iter().any(|entry| entry == &item))
+        }
+        _ => false,
+    }
 }
 
 fn thread_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&String>> {
@@ -880,6 +889,40 @@ mod tests {
         }
     }
 
+    fn agent_history_snapshot(
+        task_id: &str,
+        history: Vec<domain::conversation::ConversationEntry>,
+    ) -> runtime_contract::thread_domain::LoadedThread {
+        let now = fixed_time();
+        let mut snapshot = snapshot(Vec::new());
+        snapshot
+            .agent_tasks
+            .push(runtime_contract::thread_domain::AgentTaskSnapshot {
+                task: runtime_contract::thread_domain::AgentTaskInfo {
+                    task_id: task_id.to_string(),
+                    thread_id: format!("thread_{task_id}"),
+                    parent_run_id: Some("parent_run".to_string()),
+                    parent_task_id: None,
+                    owner_thread_id: "s1".to_string(),
+                    parent_thread_id: "s1".to_string(),
+                    spawn_tool_use_id: format!("tool_{task_id}"),
+                    agent: "general".to_string(),
+                    title: "Test agent".to_string(),
+                    depth: 1,
+                    execution_mode:
+                        runtime_contract::thread_domain::AgentTaskExecutionMode::Background,
+                    status: domain::task::TaskStatus::Running,
+                    result: None,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                    notification_delivered: false,
+                },
+                history,
+            });
+        snapshot
+    }
+
     fn persisted_message(
         thread_id: &str,
         role: omini_model::message::Role,
@@ -1089,6 +1132,38 @@ mod tests {
         buffer.record_snapshot(&snapshot(vec![item]), &[]);
 
         assert!(buffer.replay().is_empty());
+    }
+
+    #[test]
+    fn task_input_dedup() {
+        let mut buffer = RuntimeReplayBuffer::default();
+        let input = domain::conversation::UserInput {
+            intent: domain::input::UserInputIntent::Message,
+            parts: vec![domain::input::InputPart::Text {
+                text: "follow up".to_string(),
+            }],
+            attachments: Vec::new(),
+        };
+        let event = client_proto::RuntimeEvent::new(
+            client_proto::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+                task_id: "task_1".to_string(),
+                thread_id: "thread_task_1".to_string(),
+                item: client_proto::HistoryItem::UserInput(input.clone()),
+                client_echo_id: Some("echo-1".to_string()),
+            },
+        );
+
+        buffer.record(sequenced(1, "run_started"));
+        buffer.record(SequencedRuntimeEvent { seq: 2, event });
+        buffer.record_snapshot(
+            &agent_history_snapshot(
+                "task_1",
+                vec![domain::conversation::ConversationEntry::UserInput(input)],
+            ),
+            &[],
+        );
+
+        assert_eq!(replay_kinds(&buffer), vec!["run_started"]);
     }
 
     #[test]

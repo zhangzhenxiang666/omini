@@ -5,6 +5,7 @@ use crate::types::events::{
     PermissionPreview, RuntimeToUiEvent, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
 };
 use chrono::Utc;
+use omini_domain::conversation::{AssistantMessage, AssistantMessageBlock, ConversationEntry};
 use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use omini_domain::task::{TaskChangedEvent, TaskInfo, TaskKind};
 use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
@@ -55,6 +56,13 @@ fn start_subagent_with_execution_mode(state: &mut UiState, execution_mode: Agent
             spawn_tool_use_id: "tool_1".to_string(),
             agent: "explorer".to_string(),
             title: "Explore".to_string(),
+            initial_prompt: omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "Explore the repository".to_string(),
+                }],
+                attachments: Vec::new(),
+            },
             depth: 1,
             execution_mode,
         },
@@ -62,7 +70,7 @@ fn start_subagent_with_execution_mode(state: &mut UiState, execution_mode: Agent
 }
 
 #[test]
-fn background_subagent_status_comes_from_task_changed() {
+fn task_completion_prunes() {
     let mut state = UiState::new();
     start_subagent(&mut state);
     let now = Utc::now();
@@ -81,10 +89,43 @@ fn background_subagent_status_comes_from_task_changed() {
         },
     }));
 
-    assert_eq!(state.subagents["sub_1"].status, TaskStatus::Completed);
+    assert!(state.subagents.is_empty());
+    assert!(state.subagent_order.is_empty());
+    assert!(state.subagent_views.is_empty());
 }
 
-fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
+#[test]
+fn active_terminal_lifecycle() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+    state.active_session_task_id = Some("task_1".to_string());
+    let now = Utc::now();
+
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: "task_1".to_string(),
+            owner_thread_id: "parent".to_string(),
+            kind: TaskKind::SubAgent,
+            title: "Explore".to_string(),
+            status: TaskStatus::Completed,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            result_summary: None,
+        },
+    }));
+
+    assert_eq!(state.subagent_order, ["task_1"]);
+    assert!(state.session_is_terminal());
+
+    state.active_session_task_id = None;
+    state.prune_terminal_tasks();
+
+    assert!(state.subagent_order.is_empty());
+    assert!(state.subagents.is_empty());
+}
+
+fn subagent_snapshot(history: Vec<ConversationEntry>) -> AgentTaskSnapshot {
     let now = Utc::now();
     AgentTaskSnapshot {
         task: AgentTaskInfo {
@@ -106,7 +147,7 @@ fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
             completed_at: Some(now),
             notification_delivered: true,
         },
-        messages,
+        history,
     }
 }
 
@@ -785,29 +826,68 @@ fn synchronous_agent_tool_result_finishes_subagent_state() {
 }
 
 #[test]
-fn thread_snapshot_discards_subagent_transcript_in_tui_state() {
+fn task_history_snapshot() {
     let mut state = UiState::new();
-    let child_tool = ContentBlock::from_tool_use(
-        "child_tool".to_string(),
-        "read".to_string(),
-        std::collections::HashMap::new(),
-    );
-
+    state.current_thread_id = Some("parent".to_string());
+    state.active_session_task_id = Some("task_1".to_string());
     state.apply_thread_snapshot(
         Some("parent".to_string()),
         Vec::new(),
-        vec![subagent_snapshot(vec![Message::new(
-            Role::Assistant,
-            vec![child_tool],
-        )])],
+        vec![subagent_snapshot(vec![
+            ConversationEntry::UserInput(omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "initial prompt".to_string(),
+                }],
+                attachments: Vec::new(),
+            }),
+            ConversationEntry::AssistantMessage(AssistantMessage {
+                blocks: vec![AssistantMessageBlock::Text {
+                    text: "child answer".to_string(),
+                }],
+            }),
+            ConversationEntry::UserInput(omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "follow up".to_string(),
+                }],
+                attachments: Vec::new(),
+            }),
+            ConversationEntry::SystemEvent(omini_domain::conversation::SystemEvent::ToolResults {
+                results: vec![omini_domain::conversation::ToolResultRecord {
+                    tool_use_id: "read-1".to_string(),
+                    is_error: false,
+                    content: "file contents".to_string(),
+                    metadata: None,
+                }],
+            }),
+        ])],
         ThreadUsageSnapshot::default(),
     );
 
     assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
+    assert_eq!(state.subagent_views["task_1"].messages.len(), 4);
 }
 
 #[test]
-fn agent_message_and_tool_events_do_not_update_subagent_transcript() {
+fn snapshot_omits_old_terminal() {
+    let mut state = UiState::new();
+    state.current_thread_id = Some("old-thread".to_string());
+    state.active_session_task_id = Some("task_1".to_string());
+
+    state.apply_thread_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![subagent_snapshot(Vec::new())],
+        ThreadUsageSnapshot::default(),
+    );
+
+    assert!(state.subagent_order.is_empty());
+    assert!(state.active_session_task_id.is_none());
+}
+
+#[test]
+fn task_message_isolation() {
     let mut state = UiState::new();
     start_subagent(&mut state);
 
@@ -831,6 +911,25 @@ fn agent_message_and_tool_events_do_not_update_subagent_transcript() {
                 metadata: None,
             },
         },
+        AgentTaskEvent::MessageCommitted {
+            message: Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_text("child answer".to_string())],
+            ),
+            persist_llm_history: true,
+        },
+        AgentTaskEvent::MessageCommitted {
+            message: Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "child_tool".to_string(),
+                    is_error: false,
+                    content: "done".to_string(),
+                    metadata: None,
+                })],
+            ),
+            persist_llm_history: true,
+        },
     ] {
         state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
             task_id: "task_1".to_string(),
@@ -842,11 +941,14 @@ fn agent_message_and_tool_events_do_not_update_subagent_transcript() {
         }));
     }
 
-    assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
+    assert_eq!(state.subagents.get("sub_1").unwrap().messages.len(), 2);
+    let view = &state.subagent_views["task_1"];
+    assert_eq!(view.messages.len(), 3);
+    assert!(state.messages.is_empty());
 }
 
 #[test]
-fn agent_turn_and_delta_events_do_not_pollute_main_pending_assistant() {
+fn task_delta_isolation() {
     let mut state = UiState::new();
     start_subagent(&mut state);
 
@@ -872,6 +974,35 @@ fn agent_turn_and_delta_events_do_not_pollute_main_pending_assistant() {
 
     assert!(state.pending_assistant.is_none());
     assert!(state.subagents.get("sub_1").unwrap().messages.is_empty());
+    assert!(matches!(
+        state.subagent_views["task_1"].pending_assistant.as_ref().unwrap().content.last(),
+        Some(ContentBlock::Text(text)) if text.text == "partial child answer"
+    ));
+}
+
+#[test]
+fn task_input_history() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+    state.apply_event(RuntimeToUiEvent::AgentTaskUserMessageInjected {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        item: protocol::HistoryItem::UserInput(omini_domain::conversation::UserInput {
+            intent: omini_domain::input::UserInputIntent::Message,
+            parts: vec![omini_domain::input::InputPart::Text {
+                text: "follow up".to_string(),
+            }],
+            attachments: Vec::new(),
+        }),
+        client_echo_id: Some("echo-1".to_string()),
+    });
+
+    assert_eq!(state.subagent_views["task_1"].messages.len(), 2);
+    assert!(matches!(
+        &state.subagent_views["task_1"].messages[1],
+        UiMessage::Display(message) if message.text == "follow up"
+    ));
+    assert!(state.messages.is_empty());
 }
 
 #[test]

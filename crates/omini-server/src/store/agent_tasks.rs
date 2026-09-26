@@ -1,4 +1,6 @@
 use super::*;
+use omini_domain::conversation::{ConversationEntry, UserInput};
+use omini_domain::input::{InputPart, UserInputIntent};
 
 impl Database {
     pub async fn create_agent_task(
@@ -10,6 +12,21 @@ impl Database {
     ) -> Result<(), StoreError> {
         let thread = thread_from_runtime(project_id, thread);
         let initial_content = serde_json::to_string(&initial_message.content)?;
+        let initial_prompt = initial_message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                omini_model::message::ContentBlock::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let initial_entry = serde_json::to_string(&ConversationEntry::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: initial_prompt,
+            }],
+            attachments: Vec::new(),
+        }))?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO thread(
@@ -110,6 +127,15 @@ impl Database {
         .bind(&task.thread_id)
         .bind(&task.parent_run_id)
         .bind(task.created_at)
+        .bind(task.created_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO messages(thread_id, role, model_ref, content, kind, created_at)
+             VALUES (?, 'user', NULL, ?, 'conversation_entry', ?)",
+        )
+        .bind(&task.thread_id)
+        .bind(initial_entry)
         .bind(task.created_at)
         .execute(&mut *tx)
         .await?;

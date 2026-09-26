@@ -34,6 +34,14 @@ pub(crate) enum ClientRequest {
         input: crate::protocol::ClientUserInput,
         client_echo_id: Option<String>,
     },
+    AgentTaskSubmitInput {
+        task_id: String,
+        input: crate::protocol::ClientUserInput,
+        client_echo_id: Option<String>,
+    },
+    AgentTaskCancel {
+        task_id: String,
+    },
     RunExecuteCommand {
         command: protocol::RunCommand,
         input: crate::protocol::ClientUserInput,
@@ -596,6 +604,8 @@ fn request_name(request: &ClientRequest) -> &'static str {
     match request {
         ClientRequest::RunSubmitUserInput { .. } => "submit",
         ClientRequest::RunInterveneInput { .. } => "intervene",
+        ClientRequest::AgentTaskSubmitInput { .. } => "agent_task_input",
+        ClientRequest::AgentTaskCancel { .. } => "agent_task_cancel",
         ClientRequest::RunExecuteCommand { .. } => "command",
         ClientRequest::RunCancel => "cancel",
         ClientRequest::ProfileToggle => "profile toggle",
@@ -830,6 +840,17 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
             item,
             client_echo_id,
         } => RuntimeToUiEvent::UserMessageInjected {
+            item,
+            client_echo_id,
+        },
+        protocol::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+            task_id,
+            thread_id,
+            item,
+            client_echo_id,
+        } => RuntimeToUiEvent::AgentTaskUserMessageInjected {
+            task_id,
+            thread_id,
             item,
             client_echo_id,
         },
@@ -1123,6 +1144,32 @@ async fn handle_local_request(
                     input: input.input,
                     client_echo_id,
                 },
+            )
+            .await?;
+        }
+        ClientRequest::AgentTaskSubmitInput {
+            task_id,
+            mut input,
+            client_echo_id,
+        } => {
+            upload_images(http, base, client_id, &mut input).await?;
+            post_json::<_, protocol::AckResponse>(
+                http,
+                &format!("{base}/runs/{task_id}/input"),
+                client_id,
+                &protocol::AgentRunInputRequest {
+                    input: input.input,
+                    client_echo_id,
+                },
+            )
+            .await?;
+        }
+        ClientRequest::AgentTaskCancel { task_id } => {
+            send_empty(
+                http,
+                Method::POST,
+                &format!("{base}/runs/{task_id}/cancel"),
+                client_id,
             )
             .await?;
         }

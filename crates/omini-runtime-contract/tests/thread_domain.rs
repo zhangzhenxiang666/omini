@@ -1,6 +1,6 @@
 use chrono::{DateTime, TimeZone, Utc};
+use omini_domain::conversation::ConversationEntry;
 use omini_domain::task::TaskStatus;
-use omini_model::message::Message;
 use omini_runtime_contract::thread_domain::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
     AgentTaskResult, AgentTaskSnapshot, BashPermissionPreview, CompactTrigger,
@@ -270,18 +270,22 @@ fn agent_task_optional_fields_default_and_omit_as_declared() {
 }
 
 #[test]
-fn agent_task_snapshot_flattens_task_fields_and_keeps_messages() {
+fn task_history_snapshot() {
     let snapshot = AgentTaskSnapshot {
         task: task_info(),
-        messages: vec![Message::from_user_text("hello".into())],
+        history: vec![ConversationEntry::SystemEvent(
+            omini_domain::conversation::SystemEvent::ToolResults {
+                results: Vec::new(),
+            },
+        )],
     };
 
     let value = serde_json::to_value(snapshot).expect("snapshot should serialize");
     assert_eq!(value.get("task"), None);
     assert_eq!(value["task_id"], json!("task-1"));
     assert_eq!(
-        value["messages"],
-        json!([{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
+        value["history"],
+        json!([{"kind": "system_event", "content": {"type": "tool_results", "results": []}}])
     );
 }
 

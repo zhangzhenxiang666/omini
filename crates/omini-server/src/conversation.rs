@@ -78,28 +78,3 @@ pub(crate) fn domain_entry(item: HistoryItem) -> ConversationEntry {
         HistoryItem::SystemEvent(output) => ConversationEntry::SystemEvent(output),
     }
 }
-
-pub(crate) fn model_message_from_assistant_message(
-    output: AssistantMessage,
-    role: omini_model::message::Role,
-) -> Message {
-    use omini_model::message::{ContentBlock, ThinkingBlock};
-    let blocks = output
-        .blocks
-        .into_iter()
-        .map(|block| match block {
-            AssistantMessageBlock::Thinking {
-                thinking,
-                duration_ms,
-            } => ContentBlock::Thinking(ThinkingBlock {
-                thinking,
-                duration_ms,
-            }),
-            AssistantMessageBlock::Text { text } => ContentBlock::from_text(text),
-            AssistantMessageBlock::ToolUse { id, name, input } => {
-                ContentBlock::from_tool_use(id, name, input)
-            }
-        })
-        .collect();
-    Message::new(role, blocks)
-}

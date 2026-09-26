@@ -22,6 +22,7 @@ pub struct ListRunsQuery {
     include_archived: bool,
 }
 
+#[axum::debug_handler]
 pub async fn list_agent_runs(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id)): Path<(String, String)>,
@@ -35,6 +36,7 @@ pub async fn list_agent_runs(
         .map_err(core_error)
 }
 
+#[axum::debug_handler]
 pub async fn get_agent_run(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
@@ -54,6 +56,7 @@ pub async fn get_agent_run(
         })
 }
 
+#[axum::debug_handler]
 pub async fn archive_agent_run(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
@@ -99,6 +102,7 @@ pub async fn archive_agent_run(
     Ok(Json(protocol::AckResponse::ok()))
 }
 
+#[axum::debug_handler]
 pub async fn intervene_agent_run(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
@@ -144,6 +148,13 @@ pub async fn intervene_agent_run(
             "User intervention is only available for direct child AgentRuns",
         ));
     }
+    if is_terminal_run(detail.run.status) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_terminal",
+            "Completed child AgentRuns cannot receive messages",
+        ));
+    }
     let message = request.message.trim();
     if message.is_empty() {
         return Err(api_error(
@@ -160,6 +171,87 @@ pub async fn intervene_agent_run(
         .await
         .map_err(core_error)?;
     Ok(Json(protocol::AckResponse::ok()))
+}
+
+/// 向运行中的直接子 AgentRun 提交结构化用户输入。
+#[axum::debug_handler]
+pub async fn submit_agent_input(
+    State(manager): State<Arc<GlobalDaemonManager>>,
+    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<protocol::AgentRunInputRequest>,
+) -> ApiResult<protocol::AckResponse> {
+    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
+    ensure_connected_controller(&thread, &headers).await?;
+    let project = require_project(&manager, &project_id).await?;
+    let detail = project
+        .get_agent_run_detail(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })?;
+    let Some(parent_run_id) = detail.run.parent_run_id.as_deref() else {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_not_child_agent",
+            "User input is only available for child AgentRuns",
+        ));
+    };
+    let parent = project
+        .get_agent_run_detail(&thread_id, parent_run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::CONFLICT,
+                "parent_run_unavailable",
+                "Parent AgentRun is unavailable",
+            )
+        })?;
+    if parent.run.parent_run_id.is_some() {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_not_direct_child",
+            "User input is only available for direct child AgentRuns",
+        ));
+    }
+    if is_terminal_run(detail.run.status) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_terminal",
+            "Completed child AgentRuns cannot receive messages",
+        ));
+    }
+    let command = submit_run_command_from_protocol_request_for_thread(
+        protocol::SubmitRunRequest::InterveneMessage {
+            input: request.input,
+            client_echo_id: request.client_echo_id,
+        },
+        &thread,
+    )
+    .await
+    .map_err(core_error)?;
+    thread
+        .send_task_input(run_id, detail.run.thread_id, command)
+        .await
+        .map_err(core_error)?;
+    Ok(Json(protocol::AckResponse::ok()))
+}
+
+/// 判断 AgentRun 是否已进入不再接受用户输入的终态。
+fn is_terminal_run(status: protocol::AgentRunStatus) -> bool {
+    matches!(
+        status,
+        protocol::AgentRunStatus::Completed
+            | protocol::AgentRunStatus::Failed
+            | protocol::AgentRunStatus::Cancelled
+            | protocol::AgentRunStatus::Interrupted
+    )
 }
 
 /// 向当前线程提交一次新的运行请求。

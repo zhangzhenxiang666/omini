@@ -62,7 +62,7 @@ omini-cli / omini-tui
 
 - `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 6 暴露 Agent Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 7 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 
@@ -76,6 +76,8 @@ omini-cli / omini-tui
 - 附件内容存于线程目录下的内容寻址文件，SQLite 将附件 ID 映射到文件。
 
 ## 子 Agent 任务
+
+TUI 的状态栏紧跟输入框；存在可切换任务时，会话列表在状态栏下方空一行显示 `main` 和按创建顺序排列的直接异步子 Agent。输入光标在最后一行按 Down 后进入列表，Enter 切换消息视图并把焦点还给输入框；任务视图按 task ID 保存时间线、流式缓冲和滚动状态。主线程继续在后台接收自己的事件。运行中的任务可切换查看；任务结束后会从列表移除，除非用户当时正在查看它。活动终态视图保留历史并只读，切换到其他视图后移除。Esc 只取消当前选中的子任务及其后代。编排工具调用仍进入模型上下文与持久化记录，但不进入主消息区或普通活动汇总，后台任务通知继续单独显示。
 
 派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 

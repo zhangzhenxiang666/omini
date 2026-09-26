@@ -1,4 +1,7 @@
-use omini_protocol::{InputPart, RunCommand, SubmitRunRequest, UserInput};
+use omini_protocol::{
+    AgentRunInputRequest, HistoryItem, InputPart, RunCommand, RuntimeEvent, SubmitRunRequest,
+    TypedRuntimeEvent, UserInput,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -118,8 +121,50 @@ fn unknown_variants_and_legacy_shape_are_rejected() {
 }
 
 #[test]
-fn protocol_revision_is_six() {
-    assert_eq!(omini_protocol::PROTOCOL_REVISION, 6);
+fn protocol_rev_seven() {
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 7);
+}
+
+#[test]
+fn task_input_event_scope() {
+    let request = AgentRunInputRequest {
+        input: UserInput {
+            parts: vec![
+                InputPart::Skill {
+                    name: "review".to_string(),
+                },
+                InputPart::File {
+                    path: "src/main.rs".to_string(),
+                    label: Some("main".to_string()),
+                },
+            ],
+            attachment_ids: vec!["image-1".to_string()],
+        },
+        client_echo_id: Some("echo-1".to_string()),
+    };
+    let value = serde_json::to_value(request).unwrap();
+    assert_eq!(value["input"]["parts"][0]["type"], "skill");
+    assert_eq!(value["input"]["parts"][1]["path"], "src/main.rs");
+    assert_eq!(value["input"]["attachment_ids"], json!(["image-1"]));
+    assert_eq!(value["client_echo_id"], "echo-1");
+
+    let event = RuntimeEvent::new(TypedRuntimeEvent::AgentTaskUserMessageInjected {
+        task_id: "task-1".to_string(),
+        thread_id: "child-1".to_string(),
+        item: HistoryItem::UserInput(omini_domain::conversation::UserInput {
+            intent: omini_domain::input::UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: "follow up".to_string(),
+            }],
+            attachments: Vec::new(),
+        }),
+        client_echo_id: Some("echo-1".to_string()),
+    });
+    assert_eq!(event.kind(), "agent_task_user_message_injected");
+    let value = serde_json::to_value(event).unwrap();
+    assert_eq!(value["event"]["task_id"], "task-1");
+    assert_eq!(value["event"]["thread_id"], "child-1");
+    assert_eq!(value["event"]["item"]["type"], "user_input");
 }
 
 fn assert_data_error<T>(value: Value)

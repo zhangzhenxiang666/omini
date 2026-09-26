@@ -44,7 +44,19 @@ use theme::INPUT_BG;
 use thread_list::render_thread_list;
 
 pub fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
+    let Some(task_id) = state.active_session_task_id.clone() else {
+        layout::render(state, frame);
+        return;
+    };
+    let Some(mut view) = state.subagent_views.remove(&task_id) else {
+        state.active_session_task_id = None;
+        layout::render(state, frame);
+        return;
+    };
+    state.swap_session_view(&mut view);
     layout::render(state, frame);
+    state.swap_session_view(&mut view);
+    state.subagent_views.insert(task_id, view);
 }
 
 #[cfg(test)]
@@ -308,6 +320,59 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(bottom_row.contains("footer-model"));
+    }
+
+    #[test]
+    fn footer_session_layout() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.show_start_screen = false;
+        state.status_bar.model = "footer-model".to_string();
+        state.subagent_order.push("task-1".to_string());
+        state.subagents.insert(
+            "thread-1".to_string(),
+            crate::state::SubagentNode {
+                task_id: "task-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                parent_thread_id: "main-thread".to_string(),
+                spawn_tool_use_id: "tool-1".to_string(),
+                agent_label: "Explore".to_string(),
+                title: "Inspect project".to_string(),
+                execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
+                status: omini_domain::task::TaskStatus::Running,
+                messages: Vec::new(),
+            },
+        );
+        state.subagent_views.insert(
+            "task-1".to_string(),
+            crate::state::SessionViewState::default(),
+        );
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let rows = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect::<Vec<_>>();
+        let prompt_row = rows
+            .iter()
+            .position(|row| row.contains("❯"))
+            .expect("input prompt should render");
+        let footer_row = rows
+            .iter()
+            .position(|row| row.contains("footer-model"))
+            .expect("footer should render");
+        let main_row = rows
+            .iter()
+            .position(|row| row.contains("main"))
+            .expect("main session should render");
+
+        assert_eq!(footer_row, prompt_row + 2);
+        assert_eq!(main_row, footer_row + 2);
     }
 
     #[test]

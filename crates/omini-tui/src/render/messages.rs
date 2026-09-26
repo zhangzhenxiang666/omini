@@ -11,9 +11,9 @@ use crate::display::DisplayMessage;
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    build_bordered_lines, format_thinking_duration, is_special_tool, render_read_task, render_tool,
-    render_tool_compact, render_wait_tasks, thinking_duration_line, tool_error_display_text,
-    truncate_display_width,
+    build_bordered_lines, format_thinking_duration, hide_orchestration_tool, is_special_tool,
+    render_read_task, render_tool, render_tool_compact, render_wait_tasks, thinking_duration_line,
+    tool_error_display_text, truncate_display_width,
 };
 use omini_model::message::{ContentBlock, ToolUseBlock};
 use ratatui::layout::Rect;
@@ -701,6 +701,12 @@ fn render_single_ui_message(
                     // thinking 块已并入活动聚合摘要；思考内容文本不再展示
                     ContentBlock::Thinking(_) => continue,
                     ContentBlock::ToolUse(tu) => {
+                        if state.active_session_task_id.is_none() && hide_orchestration_tool(tu) {
+                            if let Some(positions) = tool_result_map.get(&tu.id) {
+                                consumed.extend(positions.iter().copied());
+                            }
+                            continue;
+                        }
                         // 常规工具已由活动聚合摘要按类别计数。
                         if !is_special_tool(tu) {
                             continue;
@@ -882,6 +888,12 @@ fn render_pending_assistant_lines(
                 block_lines.push(thinking_duration_line(&label));
             }
             ContentBlock::ToolUse(tu) => {
+                if state.active_session_task_id.is_none() && hide_orchestration_tool(tu) {
+                    if let Some(&bi) = tr_indices.get(&tu.id) {
+                        consumed_tr.insert(bi);
+                    }
+                    continue;
+                }
                 if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
                     let node = state
                         .subagents_by_tool_use
@@ -1254,6 +1266,78 @@ mod tests {
         assert!(rendered.contains("fixed"));
         // 常规工具不再展开独立主行
         assert!(!rendered.contains("⏺ Bash"));
+    }
+
+    #[test]
+    fn main_timeline_hides_agent_orchestration_calls_and_results_but_keeps_task_notifications() {
+        let backend = TestBackend::new(100, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        let names = [
+            "spawn_agent",
+            "run_agent",
+            "read_task",
+            "wait_tasks",
+            "cancel_task",
+        ];
+        let tool_uses = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                ContentBlock::from_tool_use(
+                    format!("orchestration-{index}"),
+                    (*name).to_string(),
+                    HashMap::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let results = names
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                ContentBlock::from_tool_result(
+                    format!("orchestration-{index}"),
+                    false,
+                    "hidden orchestration result".to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        state.messages.extend([
+            UiMessage::Message(Message::new(
+                Role::Assistant,
+                std::iter::once(ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "hidden reasoning".to_string(),
+                    duration_ms: Some(2_000),
+                }))
+                .chain(tool_uses)
+                .collect(),
+            )),
+            UiMessage::Message(Message::new(Role::User, results)),
+            UiMessage::TaskNotification(omini_domain::conversation::TaskNotification {
+                tasks: vec![omini_domain::task::TaskCompletion {
+                    task_id: "task-1".to_string(),
+                    kind: omini_domain::task::TaskKind::SubAgent,
+                    label: "Explore".to_string(),
+                    title: "Search architecture".to_string(),
+                    status: omini_domain::task::TaskStatus::Completed,
+                    summary: None,
+                }],
+                created_at: chrono::Utc::now(),
+            }),
+        ]);
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+
+        let rendered = state.selectable_message_lines.join("\n");
+        for name in names {
+            assert!(!rendered.contains(name), "unexpected {name} in {rendered}");
+        }
+        assert!(!rendered.contains("hidden orchestration result"));
+        assert!(!rendered.contains("ran 1"));
+        assert!(rendered.contains("background task"));
+        assert!(rendered.contains("Search architecture"));
     }
 
     #[test]

@@ -103,6 +103,7 @@ pub async fn list_models(
 }
 
 /// 设置项目默认模型；后续新建 thread 会继承该配置。
+#[axum::debug_handler]
 pub async fn set_model(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path(project_id): Path<String>,

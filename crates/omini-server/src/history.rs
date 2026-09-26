@@ -8,8 +8,9 @@
 use crate::store::{self, Database};
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::conversation::ConversationEntry;
-use omini_model::message::Role;
-use omini_runtime_contract::thread_domain::{AgentTaskInfo, AgentTaskSnapshot};
+use omini_runtime_contract::thread_domain::{
+    AgentTaskExecutionMode, AgentTaskInfo, AgentTaskSnapshot,
+};
 
 /// 加载一个线程的消息历史，跳过无法解析的损坏记录以保证线程仍可打开。
 pub async fn load_messages(
@@ -57,8 +58,8 @@ pub async fn load_messages(
     messages
 }
 
-/// 加载父线程下的子 agent 历史，并恢复成已完成的 snapshot。
-pub async fn load_agent_tasks_for_thread(
+/// 加载父线程的直接异步子任务，并恢复每个任务的完整会话历史。
+pub async fn load_agent_tasks(
     db: &Database,
     thread_id: &str,
     project: &ProjectDir,
@@ -72,21 +73,13 @@ pub async fn load_agent_tasks_for_thread(
     };
 
     let mut snapshots = Vec::with_capacity(tasks.len());
-    for task in tasks {
+    for task in tasks.into_iter().filter(|task| {
+        task.depth == 1
+            && task.parent_task_id.is_none()
+            && task.execution_mode == AgentTaskExecutionMode::Background
+    }) {
         let thread_dir = project.thread(&task.agent_thread_id);
-        let messages = load_messages(db, &task.agent_thread_id, &thread_dir)
-            .await
-            .into_iter()
-            .filter_map(|item| match item {
-                ConversationEntry::AssistantMessage(output) => {
-                    Some(crate::conversation::model_message_from_assistant_message(
-                        output,
-                        Role::Assistant,
-                    ))
-                }
-                ConversationEntry::UserInput(_) | ConversationEntry::SystemEvent(_) => None,
-            })
-            .collect();
+        let history = load_messages(db, &task.agent_thread_id, &thread_dir).await;
         snapshots.push(AgentTaskSnapshot {
             task: AgentTaskInfo {
                 task_id: task.task_id,
@@ -107,7 +100,7 @@ pub async fn load_agent_tasks_for_thread(
                 completed_at: task.completed_at,
                 notification_delivered: task.notification_delivered,
             },
-            messages,
+            history,
         });
     }
     snapshots

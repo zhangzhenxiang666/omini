@@ -406,6 +406,15 @@ pub fn is_special_tool(tool_use: &ToolUseBlock) -> bool {
             | "run_agent"
             | "read_task"
             | "wait_tasks"
+            | "cancel_task"
+    )
+}
+
+/// 判断主会话中需要从消息区隐藏的编排工具。
+pub fn hide_orchestration_tool(tool_use: &ToolUseBlock) -> bool {
+    matches!(
+        tool_use.name.as_str(),
+        "spawn_agent" | "run_agent" | "read_task" | "wait_tasks" | "cancel_task"
     )
 }
 

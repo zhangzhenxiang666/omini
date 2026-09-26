@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use omini_domain::config::ThinkingEffort;
-use omini_domain::conversation::{ConversationEntry, ProposedPlan};
+use omini_domain::conversation::{ConversationEntry, ProposedPlan, UserInput};
 use omini_domain::task::TaskStatus;
 use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -131,7 +131,7 @@ pub struct AgentTaskInfo {
 pub struct AgentTaskSnapshot {
     #[serde(flatten)]
     pub task: AgentTaskInfo,
-    pub messages: Vec<Message>,
+    pub history: Vec<ConversationEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +154,7 @@ pub enum AgentTaskEvent {
         spawn_tool_use_id: String,
         agent: String,
         title: String,
+        initial_prompt: UserInput,
         depth: u8,
         execution_mode: AgentTaskExecutionMode,
     },

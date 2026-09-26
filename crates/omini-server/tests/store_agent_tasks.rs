@@ -1,6 +1,11 @@
 mod support;
 
 use crate::support::store::*;
+use omini_domain::conversation::{
+    AssistantMessage, AssistantMessageBlock, ConversationEntry, SystemEvent, ToolResultRecord,
+    UserInput,
+};
+use omini_domain::input::{InputPart, UserInputIntent};
 use omini_domain::task::TaskStatus;
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::thread_domain::AgentTaskResult;
@@ -23,7 +28,90 @@ async fn agent_task_creation_and_recovery() {
     )
     .await
     .unwrap();
-    assert_eq!(db.get_messages("agent_running").await.unwrap().len(), 1);
+    assert_eq!(db.get_messages("agent_running").await.unwrap().len(), 2);
+    assert_eq!(
+        history::load_messages(&db, "agent_running", &project.thread("agent_running")).await,
+        vec![ConversationEntry::UserInput(
+            omini_domain::conversation::UserInput {
+                intent: UserInputIntent::Message,
+                parts: vec![InputPart::Text {
+                    text: "do work".to_string(),
+                }],
+                attachments: Vec::new(),
+            }
+        )]
+    );
+    let follow_up = ConversationEntry::UserInput(UserInput {
+        intent: UserInputIntent::Message,
+        parts: vec![
+            InputPart::Skill {
+                name: "review".to_string(),
+            },
+            InputPart::File {
+                path: "src/lib.rs".to_string(),
+                label: Some("lib.rs".to_string()),
+            },
+        ],
+        attachments: Vec::new(),
+    });
+    db.insert_conversation_entry(
+        "agent_running",
+        &follow_up,
+        "user",
+        None,
+        fixed_time(),
+        &project.thread("agent_running"),
+    )
+    .await
+    .unwrap();
+    let assistant = ConversationEntry::AssistantMessage(AssistantMessage {
+        blocks: vec![AssistantMessageBlock::Text {
+            text: "review complete".to_string(),
+        }],
+    });
+    db.insert_conversation_entry(
+        "agent_running",
+        &assistant,
+        "assistant",
+        Some("openai/gpt-test"),
+        fixed_time(),
+        &project.thread("agent_running"),
+    )
+    .await
+    .unwrap();
+    let tool_results = ConversationEntry::SystemEvent(SystemEvent::ToolResults {
+        results: vec![ToolResultRecord {
+            tool_use_id: "read-1".to_string(),
+            is_error: false,
+            content: "file contents".to_string(),
+            metadata: None,
+        }],
+    });
+    db.insert_conversation_entry(
+        "agent_running",
+        &tool_results,
+        "user",
+        None,
+        fixed_time(),
+        &project.thread("agent_running"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        history::load_messages(&db, "agent_running", &project.thread("agent_running")).await,
+        vec![
+            ConversationEntry::UserInput(UserInput {
+                intent: UserInputIntent::Message,
+                parts: vec![InputPart::Text {
+                    text: "do work".to_string(),
+                }],
+                attachments: Vec::new(),
+            }),
+            follow_up,
+            assistant,
+            tool_results,
+        ]
+    );
     assert_eq!(
         db.load_current_llm_messages("agent_running", &project.thread("agent_running"))
             .await

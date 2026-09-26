@@ -980,6 +980,13 @@ mod tests {
                         spawn_tool_use_id: "tool_agent".to_string(),
                         agent: "explorer".to_string(),
                         title: "Explore".to_string(),
+                        initial_prompt: omini_domain::conversation::UserInput {
+                            intent: omini_domain::input::UserInputIntent::Message,
+                            parts: vec![omini_domain::input::InputPart::Text {
+                                text: "Explore".to_string(),
+                            }],
+                            attachments: Vec::new(),
+                        },
                         depth: 1,
                         execution_mode: client_proto::AgentTaskExecutionMode::Background,
                     },

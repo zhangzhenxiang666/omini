@@ -436,7 +436,7 @@ async fn load_thread_snapshot(
     let thread_dir = project.thread(thread_id);
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
     let messages = crate::history::load_messages(db, thread_id, &thread_dir).await;
-    let agent_tasks = crate::history::load_agent_tasks_for_thread(db, thread_id, project).await;
+    let agent_tasks = crate::history::load_agent_tasks(db, thread_id, project).await;
     let snapshot = runtime_contract::thread_domain::LoadedThread {
         thread_id: thread.id.clone(),
         provider: thread.provider.clone(),

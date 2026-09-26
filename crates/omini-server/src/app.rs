@@ -202,6 +202,10 @@ fn run_routes() -> Router<AppState> {
             "/runs/{run_id}/messages",
             post(routes::runs::intervene_agent_run),
         )
+        .route(
+            "/runs/{run_id}/input",
+            post(routes::runs::submit_agent_input),
+        )
         .route("/runs/{run_id}/cancel", post(routes::runs::cancel_run))
         .route(
             "/tool-pauses/{tool_use_id}/resolve",

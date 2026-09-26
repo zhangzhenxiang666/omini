@@ -2,7 +2,7 @@ use crate::{store, thread::ThreadRuntime};
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
-use omini_domain::conversation::UserInput;
+use omini_domain::conversation::UserInput as ConversationUserInput;
 use omini_domain::input::{AttachmentMetadata, UserInputIntent};
 use omini_runtime_contract::{self as runtime_contract, thread::ResolvedAttachment};
 
@@ -211,7 +211,7 @@ impl ThreadRuntime {
             .map(|attachment| attachment.metadata.clone())
             .collect::<Vec<_>>();
         attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
-        let input = UserInput {
+        let input = ConversationUserInput {
             intent,
             parts: command.input.parts.clone(),
             attachments,
@@ -246,6 +246,51 @@ impl ThreadRuntime {
         message: omini_model::message::Message,
     ) -> Result<(), CoreError> {
         self.core.intervene_agent_run(run_id, message).await
+    }
+
+    /// 将结构化用户输入写入子任务历史并投递到对应消息队列。
+    pub async fn send_task_input(
+        &self,
+        run_id: String,
+        child_thread_id: String,
+        command: runtime_contract::thread::SubmitRunCommand,
+    ) -> Result<(), CoreError> {
+        let prepared = self.core.prepare_run(command)?;
+        let mut attachment_metadata = prepared
+            .input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.metadata.clone())
+            .collect::<Vec<_>>();
+        attachment_metadata.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+        let conversation_input = ConversationUserInput {
+            intent: UserInputIntent::Message,
+            parts: prepared.input.parts.clone(),
+            attachments: attachment_metadata,
+        };
+        let child_thread_dir = self.project.thread(&child_thread_id);
+        self.db
+            .insert_user_input(
+                &child_thread_id,
+                &conversation_input,
+                Utc::now(),
+                &child_thread_dir,
+            )
+            .await
+            .map_err(|error| {
+                CoreError::persistence("failed to persist child user input", error.to_string())
+            })?;
+        self.broadcast_server_local_event(omini_protocol::RuntimeEvent::new(
+            omini_protocol::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+                task_id: run_id.clone(),
+                thread_id: child_thread_id,
+                item: omini_protocol::HistoryItem::UserInput(conversation_input),
+                client_echo_id: prepared.client_echo_id.clone(),
+            },
+        ));
+        self.core
+            .intervene_agent_run(run_id, prepared.message)
+            .await
     }
 
     pub async fn resolve_tool_pause(

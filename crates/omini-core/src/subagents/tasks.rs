@@ -12,6 +12,8 @@ use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
+use omini_domain::conversation::UserInput;
+use omini_domain::input::{InputPart, UserInputIntent};
 use omini_domain::task::{TaskCompletion, TaskInfo, TaskKind, TaskStatus};
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_permissions::PermissionEngine;
@@ -652,6 +654,13 @@ impl AgentTaskSupervisor {
             created_at: now,
             updated_at: now,
         };
+        let initial_prompt = UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: request.prompt.clone(),
+            }],
+            attachments: Vec::new(),
+        };
         let initial_message = Message::from_user_text(request.prompt);
         let (ack_tx, ack_rx) = oneshot::channel();
         let creation_result = self
@@ -717,6 +726,7 @@ impl AgentTaskSupervisor {
                 spawn_tool_use_id: info.spawn_tool_use_id.clone(),
                 agent: info.agent.clone(),
                 title: info.title.clone(),
+                initial_prompt,
                 depth,
                 execution_mode,
             },

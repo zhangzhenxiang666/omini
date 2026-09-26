@@ -30,7 +30,7 @@ pub use omini_runtime_contract::thread_domain::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 6;
+pub const PROTOCOL_REVISION: u32 = 7;
 
 /// 用户时间线快照中的一个条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +145,13 @@ pub struct ArchiveAgentRunRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentRunMessageRequest {
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentRunInputRequest {
+    pub input: UserInput,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_echo_id: Option<String>,
 }
 
 /// 注册当前真实工作目录；同一 canonical path 的请求是幂等的。
@@ -280,6 +287,13 @@ pub enum TypedRuntimeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
     },
+    AgentTaskUserMessageInjected {
+        task_id: String,
+        thread_id: String,
+        item: HistoryItem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_echo_id: Option<String>,
+    },
     RunFinished,
     Notification(NotificationEvent),
     ModelChanged(ModelChangedEvent),
@@ -321,6 +335,7 @@ impl TypedRuntimeEvent {
             Self::AgentRunChanged(_) => "agent_run_changed",
             Self::RunStarted => "run_started",
             Self::UserMessageInjected { .. } => "user_message_injected",
+            Self::AgentTaskUserMessageInjected { .. } => "agent_task_user_message_injected",
             Self::RunFinished => "run_finished",
             Self::Notification(_) => "notification",
             Self::ModelChanged(_) => "model_changed",

@@ -1,12 +1,14 @@
 # Client / Server Protocol
 
-Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `5`。Revision 5 调整线程快照中的历史记录格式；客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。旧本地消息历史不会按旧 JSON 形状读取；项目和配置数据保留。
+Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `7`。Revision 7 为直接异步子 Agent 增加完整会话历史快照、任务级结构化输入和输入回显事件；客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。
 
 ## 会话历史
 
 线程快照中的每条历史记录使用 `HistoryItem` 的 `type` 区分 `user_input`、`assistant_message` 和 `system_event`。系统事件使用各自的事件类型保存计划、压缩摘要、子 Agent 通知和工具结果。用户提交的原始输入与助手可见消息不会复用 Provider 上下文的 `Message` 结构。
 
 工具结果由系统执行工具后生成：它在 Provider 上下文中仍是 `role: "user"` 的 ToolResult 消息，并紧跟对应的 ToolUse；用户可见历史另保存 `system_event` 类型的 `tool_results` 记录。两者用途不同，模型上下文顺序和会话历史顺序分别保持。
+
+线程快照中的 `agent_tasks` 只包含主线程的直接异步子 Agent，每个任务的 `history` 使用同一套 `ConversationEntry` 语义恢复初始提示、用户输入、助手消息和工具结果。同步 `run_agent` 与嵌套任务不作为独立 TUI 会话提供。
 
 ## 用户输入
 
@@ -42,6 +44,8 @@ Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` �
   "input": { "parts": [{ "type": "text", "text": "先停一下" }] }
 }
 ```
+
+主线程的直接异步子 Agent 使用 `POST /v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/input` 接收同样的结构化输入。响应成功后，`agent_task_user_message_injected` 事件携带任务 ID、子线程 ID、原始 `HistoryItem` 和可选 `client_echo_id`。只能向仍运行的直接子任务发送输入；终态任务及非直接子任务返回冲突错误。现有 `/runs/{run_id}/messages` 纯文本接口继续保留。
 
 ## 命令分层
 

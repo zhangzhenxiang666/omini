@@ -28,26 +28,64 @@ impl UiState {
     }
 
     pub fn scroll_up(&mut self, lines: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_add(lines);
-        self.auto_scroll = false;
+        if let Some(view) = self
+            .active_session_task_id
+            .as_ref()
+            .and_then(|task_id| self.subagent_views.get_mut(task_id))
+        {
+            view.scroll_offset = view.scroll_offset.saturating_add(lines);
+            view.auto_scroll = false;
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_add(lines);
+            self.auto_scroll = false;
+        }
     }
 
     pub fn scroll_down(&mut self, lines: usize) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(lines);
-        if self.scroll_offset == 0 {
-            self.auto_scroll = true;
+        if let Some(view) = self
+            .active_session_task_id
+            .as_ref()
+            .and_then(|task_id| self.subagent_views.get_mut(task_id))
+        {
+            view.scroll_offset = view.scroll_offset.saturating_sub(lines);
+            if view.scroll_offset == 0 {
+                view.auto_scroll = true;
+            }
+        } else {
+            self.scroll_offset = self.scroll_offset.saturating_sub(lines);
+            if self.scroll_offset == 0 {
+                self.auto_scroll = true;
+            }
         }
     }
 
     /// 滚动到消息区顶部
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset = usize::MAX;
-        self.auto_scroll = false;
+        if let Some(view) = self
+            .active_session_task_id
+            .as_ref()
+            .and_then(|task_id| self.subagent_views.get_mut(task_id))
+        {
+            view.scroll_offset = usize::MAX;
+            view.auto_scroll = false;
+        } else {
+            self.scroll_offset = usize::MAX;
+            self.auto_scroll = false;
+        }
     }
 
     /// 滚动到消息区底部并恢复自动滚动
     pub fn scroll_to_bottom(&mut self) {
-        self.scroll_offset = 0;
-        self.auto_scroll = true;
+        if let Some(view) = self
+            .active_session_task_id
+            .as_ref()
+            .and_then(|task_id| self.subagent_views.get_mut(task_id))
+        {
+            view.scroll_offset = 0;
+            view.auto_scroll = true;
+        } else {
+            self.scroll_offset = 0;
+            self.auto_scroll = true;
+        }
     }
 }

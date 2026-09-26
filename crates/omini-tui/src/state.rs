@@ -1,8 +1,8 @@
 use crate::display::{DisplayImageAttachment, DisplayMessage, UserDraft};
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, CommandSummary, InteractionRequest,
-    Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
+    ActiveProfile, AgentTaskExecutionMode, AgentTaskInfo, AgentTaskSnapshot, CommandSummary,
+    InteractionRequest, Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::conversation::{SystemEvent, TaskNotification};
@@ -180,18 +180,44 @@ pub struct SubagentNode {
 
 impl From<AgentTaskSnapshot> for SubagentNode {
     fn from(snapshot: AgentTaskSnapshot) -> Self {
+        Self::from(snapshot.task)
+    }
+}
+
+impl From<AgentTaskInfo> for SubagentNode {
+    fn from(task: AgentTaskInfo) -> Self {
         Self {
-            task_id: snapshot.task.task_id,
-            thread_id: snapshot.task.thread_id,
-            parent_thread_id: snapshot.task.parent_thread_id,
-            spawn_tool_use_id: snapshot.task.spawn_tool_use_id,
-            agent_label: snapshot.task.agent,
-            title: snapshot.task.title,
-            execution_mode: snapshot.task.execution_mode,
-            status: snapshot.task.status,
+            task_id: task.task_id,
+            thread_id: task.thread_id,
+            parent_thread_id: task.parent_thread_id,
+            spawn_tool_use_id: task.spawn_tool_use_id,
+            agent_label: task.agent,
+            title: task.title,
+            execution_mode: task.execution_mode,
+            status: task.status,
             messages: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct SessionViewState {
+    pub messages: Vec<UiMessage>,
+    pub pending_assistant: Option<Message>,
+    pub pending_proposed_plan: Option<String>,
+    pub pending_compact_summary: Option<String>,
+    pub thinking_started_at: Option<std::time::Instant>,
+    pub total_lines: usize,
+    pub selectable_message_lines: Vec<String>,
+    pub message_scroll_y: usize,
+    pub scroll_offset: usize,
+    pub auto_scroll: bool,
+    pub live_message_start: usize,
+    pub pending_tool_message_map: HashMap<String, usize>,
+    pub running_tools: HashSet<String>,
+    pub agent_status: AgentStatus,
+    pub run_timer: Option<RunTimer>,
+    pub render_cache: RenderCache,
 }
 
 impl UiMessage {
@@ -320,7 +346,7 @@ impl HelpDrawerState {
 }
 
 /// 渲染管线缓存，避免每帧全量重建。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RenderCache {
     // 已完成消息缓存
     pub completed_lines: Vec<Line<'static>>,
@@ -409,6 +435,12 @@ pub struct UiState {
     pub subagents: HashMap<String, SubagentNode>,
     /// 父 tool_use_id 到子 agent thread id 的映射。
     pub subagents_by_tool_use: HashMap<String, String>,
+    /// 当前主线程直接异步子任务的显示顺序；索引 0 始终保留给 main。
+    pub subagent_order: Vec<String>,
+    pub subagent_views: HashMap<String, SessionViewState>,
+    pub active_session_task_id: Option<String>,
+    pub session_selector_focused: bool,
+    pub session_selection_index: usize,
     /// `messages` 中包含未完成工具（pending tool use）的第一条消息索引；
     /// 该索引及之后的消息不进缓存，每帧重新渲染（与 pending_assistant 同级），
     /// 保证呼吸灯动画实时更新。未完成工具包括：运行中的 subagent、
@@ -521,6 +553,11 @@ impl UiState {
             agent_runs: HashMap::new(),
             subagents: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
+            subagent_order: Vec::new(),
+            subagent_views: HashMap::new(),
+            active_session_task_id: None,
+            session_selector_focused: false,
+            session_selection_index: 0,
             live_message_start: usize::MAX,
             pending_tool_message_map: std::collections::HashMap::new(),
             permission_selected: 0,
@@ -1027,6 +1064,100 @@ impl UiState {
         self.subagents
             .values()
             .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling))
+    }
+
+    pub fn session_count(&self) -> usize {
+        1 + self.subagent_order.len()
+    }
+
+    /// 返回会话列表当前选择的子任务，用于执行任务级操作。
+    pub fn selected_task_id(&self) -> Option<String> {
+        if self.session_selector_focused {
+            return self
+                .session_selection_index
+                .checked_sub(1)
+                .and_then(|index| self.subagent_order.get(index))
+                .cloned();
+        }
+        self.active_session_task_id.clone()
+    }
+
+    /// 判断当前子任务会话是否已结束并应保持只读。
+    pub fn session_is_terminal(&self) -> bool {
+        self.active_session_task_id.as_ref().is_some_and(|task_id| {
+            self.subagents
+                .values()
+                .any(|node| node.task_id == *task_id && node.status.is_terminal())
+        })
+    }
+
+    /// 移除已结束且当前未查看的直接异步子任务。
+    pub(crate) fn prune_terminal_tasks(&mut self) {
+        let removed = self
+            .subagent_order
+            .iter()
+            .filter_map(|task_id| {
+                let active = self.active_session_task_id.as_ref() == Some(task_id);
+                let terminal = self
+                    .subagents
+                    .values()
+                    .any(|node| node.task_id == *task_id && node.status.is_terminal());
+                (!active && terminal).then(|| task_id.clone())
+            })
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            return;
+        }
+
+        let removed_threads = self
+            .subagents
+            .values()
+            .filter(|node| removed.contains(&node.task_id))
+            .map(|node| node.thread_id.clone())
+            .collect::<HashSet<_>>();
+        self.subagent_order
+            .retain(|task_id| !removed.contains(task_id));
+        self.subagent_views
+            .retain(|task_id, _| !removed.contains(task_id));
+        self.subagents
+            .retain(|_, node| !removed.contains(&node.task_id));
+        self.subagents_by_tool_use
+            .retain(|_, thread_id| !removed_threads.contains(thread_id));
+        self.session_selection_index = self
+            .session_selection_index
+            .min(self.session_count().saturating_sub(1));
+        self.update_live_boundary();
+    }
+
+    pub fn swap_session_view(&mut self, view: &mut SessionViewState) {
+        std::mem::swap(&mut self.messages, &mut view.messages);
+        std::mem::swap(&mut self.pending_assistant, &mut view.pending_assistant);
+        std::mem::swap(
+            &mut self.pending_proposed_plan,
+            &mut view.pending_proposed_plan,
+        );
+        std::mem::swap(
+            &mut self.pending_compact_summary,
+            &mut view.pending_compact_summary,
+        );
+        std::mem::swap(&mut self.thinking_started_at, &mut view.thinking_started_at);
+        std::mem::swap(&mut self.total_lines, &mut view.total_lines);
+        std::mem::swap(
+            &mut self.selectable_message_lines,
+            &mut view.selectable_message_lines,
+        );
+        std::mem::swap(&mut self.message_scroll_y, &mut view.message_scroll_y);
+        std::mem::swap(&mut self.scroll_offset, &mut view.scroll_offset);
+        std::mem::swap(&mut self.auto_scroll, &mut view.auto_scroll);
+        std::mem::swap(&mut self.live_message_start, &mut view.live_message_start);
+        std::mem::swap(
+            &mut self.pending_tool_message_map,
+            &mut view.pending_tool_message_map,
+        );
+        std::mem::swap(&mut self.running_tools, &mut view.running_tools);
+        std::mem::swap(&mut self.agent_status, &mut view.agent_status);
+        std::mem::swap(&mut self.run_timer, &mut view.run_timer);
+        std::mem::swap(&mut self.render_cache, &mut view.render_cache);
     }
 }
 

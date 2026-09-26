@@ -1,6 +1,6 @@
 use crate::state::{AgentStatus, InteractionStep, UiState, format_run_duration};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -110,6 +110,12 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     let show_start_screen = should_render_start_screen(state);
     state.set_input_wrap_width(area.width as usize);
     let input_height = 2 + state.input_visible_line_count() as u16 + queued_height;
+    let session_list_height = if state.subagent_order.is_empty() {
+        0
+    } else {
+        state.session_count().min(u16::MAX as usize) as u16
+    };
+    let session_list_gap_height = u16::from(session_list_height > 0);
     let activity_height = if state.is_run_active() { 1 } else { 0 };
     let activity_gap_height = if activity_height > 0 {
         MESSAGE_STATUS_GAP_HEIGHT
@@ -124,6 +130,8 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         Constraint::Length(MESSAGE_INPUT_GAP_HEIGHT),
         Constraint::Length(input_height),
         Constraint::Length(1),
+        Constraint::Length(session_list_gap_height),
+        Constraint::Length(session_list_height),
     ])
     .split(area);
     state.messages_area = chunks[1];
@@ -136,6 +144,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     render_activity(state, frame, chunks[3]);
     super::autocomplete::render_autocomplete(state, frame, chunks[5]);
     super::status::render_footer(state, frame, chunks[6]);
+    render_session_selector(state, frame, chunks[8]);
 
     if state.interaction_step.is_none()
         && state.active_tool_pause().is_none()
@@ -152,6 +161,81 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
     super::help_drawer::render_help_drawer(state, frame, area);
     super::permission_drawer::render_permission_drawer(state, frame, area);
     crate::selection::apply_selection_overlay(state, frame.buffer_mut());
+}
+
+fn render_session_selector(state: &UiState, frame: &mut ratatui::Frame, area: Rect) {
+    if area.height == 0 || state.subagent_order.is_empty() {
+        return;
+    }
+    let dim = Style::default().fg(Color::Rgb(135, 140, 150));
+    let active_style = Style::default()
+        .fg(Color::Rgb(230, 232, 238))
+        .add_modifier(Modifier::BOLD);
+    let selected_style = Style::default()
+        .fg(Color::Rgb(66, 217, 232))
+        .add_modifier(Modifier::BOLD);
+    let mut rows = Vec::with_capacity(state.session_count());
+    rows.push(("main".to_string(), None, 0usize));
+    for (index, task_id) in state.subagent_order.iter().enumerate() {
+        let Some(node) = state
+            .subagents
+            .values()
+            .find(|node| &node.task_id == task_id)
+        else {
+            continue;
+        };
+        rows.push((
+            format!("{}  {}", node.agent_label, node.title),
+            Some(node.status),
+            index + 1,
+        ));
+    }
+    let lines = rows
+        .into_iter()
+        .take(area.height as usize)
+        .map(|(label, status, index)| {
+            let selected = if state.session_selector_focused {
+                state.session_selection_index == index
+            } else {
+                state
+                    .active_session_task_id
+                    .as_ref()
+                    .is_some_and(|task_id| {
+                        state.subagent_order.get(index.wrapping_sub(1)) == Some(task_id)
+                    })
+                    || (index == 0 && state.active_session_task_id.is_none())
+            };
+            let marker = if selected { "● " } else { "○ " };
+            let mut spans = vec![Span::styled(
+                marker,
+                if selected { selected_style } else { dim },
+            )];
+            spans.push(Span::styled(
+                label,
+                if selected { active_style } else { dim },
+            ));
+            if let Some(status) = status {
+                spans.push(Span::styled(
+                    format!("  {}", task_status_label(status)),
+                    dim,
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn task_status_label(status: omini_domain::task::TaskStatus) -> &'static str {
+    use omini_domain::task::TaskStatus;
+    match status {
+        TaskStatus::Running => "running",
+        TaskStatus::Cancelling => "cancelling",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+        TaskStatus::Interrupted => "interrupted",
+    }
 }
 
 fn should_render_start_screen(state: &UiState) -> bool {

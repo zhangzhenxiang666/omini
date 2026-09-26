@@ -1,6 +1,8 @@
 mod support;
 
 use crate::support::store::*;
+use omini_domain::conversation::{ConversationEntry, UserInput};
+use omini_domain::input::{InputPart, UserInputIntent};
 use omini_model::message::Message;
 use omini_server::{history, store::*};
 use std::fs;
@@ -87,12 +89,16 @@ async fn agent_compaction_preserves_ui_history() {
     .await
     .unwrap();
     assert_eq!(old_count, 1);
-    assert!(matches!(
-        history::load_messages(&db, "agent_compact", &project.thread("agent_compact"))
-            .await
-            .as_slice(),
-        []
-    ));
+    assert_eq!(
+        history::load_messages(&db, "agent_compact", &project.thread("agent_compact")).await,
+        vec![ConversationEntry::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: "do work".to_string(),
+            }],
+            attachments: Vec::new(),
+        })]
+    );
 }
 
 #[tokio::test]

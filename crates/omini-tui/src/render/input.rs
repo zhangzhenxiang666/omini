@@ -53,10 +53,16 @@ pub(super) fn render_input(state: &mut UiState, frame: &mut ratatui::Frame, area
         .bg(Color::Rgb(65, 69, 76))
         .add_modifier(Modifier::DIM);
 
+    let read_only_task = state.session_is_terminal();
+    let placeholder = if read_only_task {
+        "此任务已结束，只能查看历史".to_string()
+    } else {
+        state.input_placeholder.clone()
+    };
     let lines = if state.input.is_empty() {
         vec![Line::from(vec![
             Span::styled("\u{276f} ", prefix_style),
-            Span::styled(state.input_placeholder.clone(), placeholder_style),
+            Span::styled(placeholder, placeholder_style),
         ])]
     } else {
         input_lines(state, prefix_style, cmd_color)

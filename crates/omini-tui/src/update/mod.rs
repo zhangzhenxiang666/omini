@@ -8,6 +8,7 @@ use crate::types::events::{
     ToolPauseKind,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use omini_domain::task::TaskStatus;
 use tokio::sync::mpsc;
 
 mod mouse;
@@ -151,14 +152,27 @@ async fn handle_key_event(
         return true;
     }
 
-    if code == KeyCode::Esc
-        && (matches!(
-            state.agent_status,
-            AgentStatus::Working | AgentStatus::Thinking
-        ) || state.has_active_agent_tasks())
-    {
-        let _ = request_tx.send(ClientRequest::RunCancel).await;
-        return true;
+    if code == KeyCode::Esc {
+        if let Some(task_id) = state.selected_task_id()
+            && state.subagents.values().any(|node| {
+                node.task_id == task_id
+                    && matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling)
+            })
+        {
+            let _ = request_tx
+                .send(ClientRequest::AgentTaskCancel { task_id })
+                .await;
+            return true;
+        }
+        if state.active_session_task_id.is_none()
+            && (matches!(
+                state.agent_status,
+                AgentStatus::Working | AgentStatus::Thinking
+            ) || state.has_active_agent_tasks())
+        {
+            let _ = request_tx.send(ClientRequest::RunCancel).await;
+            return true;
+        }
     }
 
     if state.active_tool_pause().is_some() {
@@ -617,6 +631,46 @@ async fn handle_composer_key(
     request_tx: &mpsc::Sender<ClientRequest>,
 ) -> bool {
     let page_amt = 1.max(state.messages_area.height as usize / 2);
+    if state.session_selector_focused {
+        match code {
+            KeyCode::Up => {
+                if state.session_selection_index == 0 {
+                    state.session_selector_focused = false;
+                } else {
+                    state.session_selection_index -= 1;
+                }
+            }
+            KeyCode::Down => {
+                state.session_selection_index = (state.session_selection_index + 1)
+                    .min(state.session_count().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                state.active_session_task_id = if state.session_selection_index == 0 {
+                    None
+                } else {
+                    state
+                        .subagent_order
+                        .get(state.session_selection_index - 1)
+                        .cloned()
+                };
+                state.session_selector_focused = false;
+                state.prune_terminal_tasks();
+            }
+            _ => {}
+        }
+        return true;
+    }
+    if state.session_is_terminal()
+        && !state.input.starts_with('/')
+        && !(state.input.is_empty()
+            && matches!((code, modifiers), (KeyCode::Char('/'), KeyModifiers::NONE)))
+        && !matches!(
+            code,
+            KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown
+        )
+    {
+        return true;
+    }
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('\x03'), _) => {
             return state.clear_input();
@@ -625,7 +679,15 @@ async fn handle_composer_key(
             state.cursor_up_in_input();
         }
         (KeyCode::Down, _) => {
-            state.cursor_down_in_input();
+            if !state.cursor_down_in_input() && state.session_count() > 1 {
+                state.session_selector_focused = true;
+                state.session_selection_index = state
+                    .active_session_task_id
+                    .as_ref()
+                    .and_then(|task_id| state.subagent_order.iter().position(|id| id == task_id))
+                    .map(|index| index + 1)
+                    .unwrap_or(0);
+            }
         }
         (KeyCode::PageUp, _) => {
             state.update_scroll_step(tokio::time::Instant::now());
@@ -653,8 +715,47 @@ async fn handle_composer_key(
                         state.begin_manual_compact();
                     }
                     if let Some(request) = request_from_command_draft(state, draft) {
-                        let _ = request_tx.send(request).await;
+                        match (state.active_session_task_id.clone(), request) {
+                            (Some(task_id), ClientRequest::RunSubmitUserInput { input, .. }) => {
+                                let is_active = state.subagents.values().any(|node| {
+                                    node.task_id == task_id
+                                        && matches!(
+                                            node.status,
+                                            TaskStatus::Running | TaskStatus::Cancelling
+                                        )
+                                });
+                                if is_active {
+                                    let client_echo_id = uuid::Uuid::new_v4().to_string();
+                                    let _ = request_tx
+                                        .send(ClientRequest::AgentTaskSubmitInput {
+                                            task_id,
+                                            input,
+                                            client_echo_id: Some(client_echo_id),
+                                        })
+                                        .await;
+                                }
+                            }
+                            (_, request) => {
+                                let _ = request_tx.send(request).await;
+                            }
+                        }
                     }
+                } else if let Some(task_id) = state.active_session_task_id.clone() {
+                    let is_active = state.subagents.values().any(|node| {
+                        node.task_id == task_id
+                            && matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling)
+                    });
+                    if !is_active {
+                        return true;
+                    }
+                    let client_echo_id = uuid::Uuid::new_v4().to_string();
+                    let _ = request_tx
+                        .send(ClientRequest::AgentTaskSubmitInput {
+                            task_id,
+                            input: protocol::user_input_from_draft(draft),
+                            client_echo_id: Some(client_echo_id),
+                        })
+                        .await;
                 } else if state.is_main_query_active() && !state.manual_compact_running {
                     state.queued_user_inputs.push_back(draft);
                 } else {
@@ -723,6 +824,31 @@ mod tests {
     use chrono::Utc;
     use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
     use std::path::PathBuf;
+
+    fn add_background_task(state: &mut UiState, task_id: &str, thread_id: &str) {
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: task_id.to_string(),
+            thread_id: thread_id.to_string(),
+            parent_task_id: None,
+            owner_thread_id: "owner".to_string(),
+            truncated: false,
+            payload: AgentTaskEvent::Started {
+                parent_thread_id: "owner".to_string(),
+                spawn_tool_use_id: format!("tool-{task_id}"),
+                agent: "Explore".to_string(),
+                title: format!("Task {task_id}"),
+                initial_prompt: omini_domain::conversation::UserInput {
+                    intent: omini_domain::input::UserInputIntent::Message,
+                    parts: vec![omini_domain::input::InputPart::Text {
+                        text: "inspect".to_string(),
+                    }],
+                    attachments: Vec::new(),
+                },
+                depth: 1,
+                execution_mode: AgentTaskExecutionMode::Background,
+            },
+        }));
+    }
 
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
         ToolPauseRequest {
@@ -829,6 +955,13 @@ mod tests {
                 spawn_tool_use_id: "tool_1".to_string(),
                 agent: "general".to_string(),
                 title: "Background work".to_string(),
+                initial_prompt: omini_domain::conversation::UserInput {
+                    intent: omini_domain::input::UserInputIntent::Message,
+                    parts: vec![omini_domain::input::InputPart::Text {
+                        text: "Background work".to_string(),
+                    }],
+                    attachments: Vec::new(),
+                },
                 depth: 1,
                 execution_mode: AgentTaskExecutionMode::Background,
             },
@@ -851,6 +984,143 @@ mod tests {
 
         handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &tx).await;
         assert!(matches!(rx.recv().await, Some(ClientRequest::RunCancel)));
+    }
+
+    #[tokio::test]
+    async fn session_list_navigation() {
+        let mut state = UiState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        state.input = "first\nsecond".to_string();
+        state.cursor_char = 6;
+        let (tx, mut rx) = mpsc::channel(2);
+
+        handle_composer_key(&mut state, KeyCode::Up, KeyModifiers::NONE, &tx).await;
+        assert_eq!(state.cursor_char, 0);
+        assert!(!state.session_selector_focused);
+        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &tx).await;
+        assert_eq!(state.cursor_char, 6);
+        assert!(!state.session_selector_focused);
+        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &tx).await;
+        assert!(state.session_selector_focused);
+        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &tx).await;
+        assert_eq!(state.session_selection_index, 1);
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert_eq!(state.active_session_task_id.as_deref(), Some("task_1"));
+        assert!(!state.session_selector_focused);
+        assert_eq!(state.input, "first\nsecond");
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn switch_prunes_terminal() {
+        let mut state = UiState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        add_background_task(&mut state, "task_2", "thread_2");
+        state.active_session_task_id = Some("task_1".to_string());
+        state.subagents.get_mut("thread_1").unwrap().status = TaskStatus::Completed;
+        state.session_selector_focused = true;
+        state.session_selection_index = 0;
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        assert!(state.active_session_task_id.is_none());
+        assert_eq!(state.subagent_order, vec!["task_2"]);
+        assert!(!state.subagent_views.contains_key("task_1"));
+    }
+
+    #[tokio::test]
+    async fn empty_session_list_down() {
+        let mut state = UiState::new();
+        state.input = "hello".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, _rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &tx).await;
+
+        assert_eq!(state.session_count(), 1);
+        assert!(!state.session_selector_focused);
+        assert_eq!(state.cursor_char, 5);
+    }
+
+    #[tokio::test]
+    async fn task_input_escape_scope() {
+        let mut state = UiState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        add_background_task(&mut state, "task_2", "thread_2");
+        state.active_session_task_id = Some("task_1".to_string());
+        state.main_query_active = true;
+        state.agent_status = AgentStatus::Working;
+        state.input = "review this".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(3);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+        let Some(ClientRequest::AgentTaskSubmitInput { task_id, input, .. }) = rx.recv().await
+        else {
+            panic!("expected selected task input request");
+        };
+        assert_eq!(task_id, "task_1");
+        assert!(
+            matches!(input.input.parts.as_slice(), [omini_protocol::InputPart::Text { text }] if text == "review this")
+        );
+        assert!(state.queued_user_inputs.is_empty());
+        assert_eq!(state.agent_status, AgentStatus::Working);
+
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &tx).await;
+        assert!(matches!(
+            rx.recv().await,
+            Some(ClientRequest::AgentTaskCancel { task_id }) if task_id == "task_1"
+        ));
+        assert_eq!(state.subagents["thread_2"].status, TaskStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn skill_input_routing() {
+        let mut state = UiState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        state.active_session_task_id = Some("task_1".to_string());
+        state.autocomplete.all_commands = vec![CommandSummary {
+            name: "review".to_string(),
+            aliases: Vec::new(),
+            description: String::new(),
+            sort_weight: 0,
+            has_args: true,
+            args_description: None,
+            kind: CommandKind::Skill,
+        }];
+        state.input = "/review inspect src/main.rs".to_string();
+        state.cursor_char = state.input.chars().count();
+        let (tx, mut rx) = mpsc::channel(1);
+
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+
+        let Some(ClientRequest::AgentTaskSubmitInput { task_id, input, .. }) = rx.recv().await
+        else {
+            panic!("expected selected task input request");
+        };
+        assert_eq!(task_id, "task_1");
+        assert!(matches!(input.input.parts.as_slice(), [
+            omini_protocol::InputPart::Skill { name },
+            omini_protocol::InputPart::Text { text },
+        ] if name == "review" && text == " inspect src/main.rs"));
+    }
+
+    #[tokio::test]
+    async fn terminal_task_read_only() {
+        let mut state = UiState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        state.active_session_task_id = Some("task_1".to_string());
+        state.subagents.get_mut("thread_1").unwrap().status = TaskStatus::Completed;
+        let (tx, mut rx) = mpsc::channel(2);
+
+        handle_composer_key(&mut state, KeyCode::Char('x'), KeyModifiers::NONE, &tx).await;
+        assert!(state.input.is_empty());
+        state.input = "cannot send".to_string();
+        state.cursor_char = state.input.chars().count();
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &tx).await;
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

@@ -12,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
+#[axum::debug_handler]
 pub async fn upload_attachment(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id)): Path<(String, String)>,
@@ -96,6 +97,7 @@ pub async fn upload_attachment(
     ))
 }
 
+#[axum::debug_handler]
 pub async fn get_attachment(
     State(manager): State<Arc<GlobalDaemonManager>>,
     Path((project_id, thread_id, attachment_id)): Path<(String, String, String)>,

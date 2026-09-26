@@ -10,6 +10,7 @@ use crate::types::events::{
     CompactTrigger, InteractionRequest, Notification, NotificationKind, RuntimeToUiEvent,
 };
 use omini_domain::conversation::SystemEvent;
+use omini_domain::conversation::{AssistantMessage, AssistantMessageBlock, ToolResultRecord};
 use omini_domain::subagents::AgentSummary;
 use omini_domain::task::TaskStatus;
 use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock};
@@ -18,7 +19,8 @@ use std::collections::VecDeque;
 
 const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
 
-fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
+/// 将持久化历史条目转换为 TUI 消息。
+fn map_history_item(item: HistoryItem) -> UiMessage {
     match item {
         HistoryItem::UserInput(input) => {
             UiMessage::Display(crate::display::user_input_message(&input))
@@ -40,6 +42,60 @@ fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
                 UiMessage::Message(crate::display::tool_results_message(&results))
             }
         },
+    }
+}
+
+/// 将子任务的模型消息转换为可见时间线条目。
+fn map_agent_message(message: &Message) -> Option<UiMessage> {
+    if message.role == Role::Assistant {
+        let blocks = message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking(block) => Some(AssistantMessageBlock::Thinking {
+                    thinking: block.thinking.clone(),
+                    duration_ms: block.duration_ms,
+                }),
+                ContentBlock::Text(block) => Some(AssistantMessageBlock::Text {
+                    text: block.text.clone(),
+                }),
+                ContentBlock::ToolUse(block) => Some(AssistantMessageBlock::ToolUse {
+                    id: block.id.clone(),
+                    name: block.name.clone(),
+                    input: block.input.clone(),
+                }),
+                ContentBlock::Image(_) | ContentBlock::ToolResult(_) => None,
+            })
+            .collect::<Vec<_>>();
+        return (!blocks.is_empty())
+            .then(|| map_history_item(HistoryItem::AssistantMessage(AssistantMessage { blocks })));
+    }
+
+    let results = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult(result) => Some(ToolResultRecord {
+                tool_use_id: result.tool_use_id.clone(),
+                is_error: result.is_error,
+                content: result.content.clone(),
+                metadata: result.metadata.clone(),
+            }),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!results.is_empty()).then(|| {
+        map_history_item(HistoryItem::SystemEvent(SystemEvent::ToolResults {
+            results,
+        }))
+    })
+}
+
+fn push_session_message(view: &mut super::SessionViewState, message: UiMessage) {
+    view.messages.push(message);
+    view.render_cache = Default::default();
+    if view.auto_scroll {
+        view.scroll_offset = 0;
     }
 }
 
@@ -315,7 +371,7 @@ impl UiState {
                 client_echo_id,
             } => {
                 self.show_start_screen = false;
-                let ui_message = ui_message_from_history_item(item);
+                let ui_message = map_history_item(item);
                 if self
                     .take_client_echo_positions(client_echo_id.as_deref())
                     .is_none()
@@ -325,6 +381,14 @@ impl UiState {
                 }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
+                }
+            }
+            RuntimeToUiEvent::AgentTaskUserMessageInjected { task_id, item, .. } => {
+                if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                    let message = map_history_item(item);
+                    if view.messages.last() != Some(&message) {
+                        push_session_message(view, message);
+                    }
                 }
             }
             RuntimeToUiEvent::TurnStarted => {
@@ -414,7 +478,17 @@ impl UiState {
                         .find(|node| node.task_id == event.task.task_id)
                 {
                     node.status = event.task.status;
+                    if let Some(view) = self.subagent_views.get_mut(&node.task_id)
+                        && !matches!(
+                            event.task.status,
+                            TaskStatus::Running | TaskStatus::Cancelling
+                        )
+                    {
+                        view.agent_status = AgentStatus::Idle;
+                        view.run_timer = None;
+                    }
                     self.update_live_boundary();
+                    self.prune_terminal_tasks();
                 }
             }
             RuntimeToUiEvent::TaskOutputDelta(_) => {}
@@ -485,22 +559,28 @@ impl UiState {
                 self.clear_resolved_plan_approval(&plan_id);
             }
             RuntimeToUiEvent::AgentTaskEvent(event) => {
+                let task_id = event.task_id.clone();
+                let thread_id = event.thread_id.clone();
+                let direct_child = event.parent_task_id.is_none();
                 match event.payload {
                     AgentTaskEvent::Started {
                         parent_thread_id,
                         spawn_tool_use_id,
                         agent,
                         title,
+                        initial_prompt,
+                        depth,
                         execution_mode,
                         ..
-                    } => {
+                    } if depth == 1 && direct_child => {
+                        let new_task = !self.subagents.contains_key(&thread_id);
                         self.subagents_by_tool_use
-                            .insert(spawn_tool_use_id.clone(), event.thread_id.clone());
+                            .insert(spawn_tool_use_id.clone(), thread_id.clone());
                         self.subagents.insert(
-                            event.thread_id.clone(),
+                            thread_id.clone(),
                             SubagentNode {
-                                task_id: event.task_id,
-                                thread_id: event.thread_id,
+                                task_id: task_id.clone(),
+                                thread_id,
                                 parent_thread_id,
                                 spawn_tool_use_id,
                                 agent_label: agent,
@@ -510,33 +590,129 @@ impl UiState {
                                 messages: Vec::new(),
                             },
                         );
+                        if new_task && execution_mode == AgentTaskExecutionMode::Background {
+                            self.subagent_order.push(task_id.clone());
+                            let prompt = map_history_item(HistoryItem::UserInput(initial_prompt));
+                            let mut view = super::SessionViewState {
+                                agent_status: AgentStatus::Thinking,
+                                run_timer: Some(super::RunTimer::started_at(
+                                    tokio::time::Instant::now(),
+                                )),
+                                auto_scroll: true,
+                                ..super::SessionViewState::default()
+                            };
+                            view.messages.push(prompt);
+                            self.subagent_views.insert(task_id.clone(), view);
+                        }
                         self.update_live_boundary();
                     }
-                    AgentTaskEvent::MessageCommitted { .. } | AgentTaskEvent::ToolUse { .. } => {}
+                    AgentTaskEvent::Started { .. } => {}
+                    AgentTaskEvent::MessageCommitted { message, .. } => {
+                        if let Some(ui_message) = map_agent_message(&message) {
+                            if let Some(node) = self.subagents.get_mut(&thread_id) {
+                                node.messages.push(message);
+                            }
+                            if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                                view.pending_assistant = None;
+                                view.thinking_started_at = None;
+                                push_session_message(view, ui_message);
+                            }
+                        }
+                    }
+                    AgentTaskEvent::ToolUse { tool_use } => {
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            view.running_tools.insert(tool_use.id.clone());
+                            let pending = view
+                                .pending_assistant
+                                .get_or_insert_with(|| Message::new(Role::Assistant, Vec::new()));
+                            if !pending.content.iter().any(|block| {
+                                matches!(block, ContentBlock::ToolUse(current) if current.id == tool_use.id)
+                            }) {
+                                pending.content.push(ContentBlock::ToolUse(tool_use));
+                            }
+                            view.agent_status = AgentStatus::Working;
+                        }
+                    }
                     AgentTaskEvent::ToolResult { tool_result } => {
                         let scoped_tool_use_id =
-                            format!("{}:{}", event.thread_id, tool_result.tool_use_id);
-                        self.running_tools.remove(&scoped_tool_use_id);
+                            format!("{}:{}", thread_id, tool_result.tool_use_id);
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            view.running_tools.remove(&tool_result.tool_use_id);
+                        }
                         let removed_active = self.remove_tool_pause(&scoped_tool_use_id);
                         self.finish_tool_pause_removal(removed_active);
                     }
                     AgentTaskEvent::Finished { status, .. } => {
                         if let Some(status) = status
-                            && let Some(node) = self.subagents.get_mut(&event.thread_id)
+                            && let Some(node) = self.subagents.get_mut(&thread_id)
                         {
                             node.status = status;
                         }
-                        let removed_active =
-                            self.remove_tool_pauses_for_source_thread(&event.thread_id);
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            if let Some(pending) = view.pending_assistant.take()
+                                && !pending.content.is_empty()
+                            {
+                                push_session_message(view, UiMessage::Message(pending));
+                            }
+                            view.agent_status = AgentStatus::Idle;
+                            view.run_timer = None;
+                        }
+                        let removed_active = self.remove_tool_pauses_for_source_thread(&thread_id);
                         self.finish_tool_pause_removal(removed_active);
                         self.update_live_boundary();
+                        self.prune_terminal_tasks();
                     }
-                    AgentTaskEvent::TurnStarted
-                    | AgentTaskEvent::ThinkingDelta { .. }
-                    | AgentTaskEvent::TextDelta { .. }
-                    | AgentTaskEvent::TurnEnded => {
-                        // 当前不渲染子线程流式内容，也不允许它写入主线程的
-                        // pending_assistant 缓冲区。
+                    AgentTaskEvent::TurnStarted => {
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            if let Some(pending) = view.pending_assistant.take()
+                                && !pending.content.is_empty()
+                            {
+                                push_session_message(view, UiMessage::Message(pending));
+                            }
+                            view.agent_status = AgentStatus::Thinking;
+                            view.run_timer.get_or_insert_with(|| {
+                                super::RunTimer::started_at(tokio::time::Instant::now())
+                            });
+                        }
+                    }
+                    AgentTaskEvent::ThinkingDelta { delta } => {
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            let now = std::time::Instant::now();
+                            view.thinking_started_at.get_or_insert(now);
+                            let pending = view
+                                .pending_assistant
+                                .get_or_insert_with(|| Message::new(Role::Assistant, Vec::new()));
+                            match pending.content.last_mut() {
+                                Some(ContentBlock::Thinking(thinking)) => {
+                                    thinking.thinking.push_str(&delta);
+                                }
+                                _ => pending.content.push(ContentBlock::Thinking(
+                                    omini_model::message::ThinkingBlock {
+                                        thinking: delta,
+                                        duration_ms: None,
+                                    },
+                                )),
+                            }
+                            view.agent_status = AgentStatus::Thinking;
+                        }
+                    }
+                    AgentTaskEvent::TextDelta { delta } => {
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            let pending = view
+                                .pending_assistant
+                                .get_or_insert_with(|| Message::new(Role::Assistant, Vec::new()));
+                            match pending.content.last_mut() {
+                                Some(ContentBlock::Text(text)) => text.text.push_str(&delta),
+                                _ => pending.content.push(ContentBlock::from_text(delta)),
+                            }
+                            view.thinking_started_at = None;
+                            view.agent_status = AgentStatus::Thinking;
+                        }
+                    }
+                    AgentTaskEvent::TurnEnded => {
+                        if let Some(view) = self.subagent_views.get_mut(&task_id) {
+                            view.agent_status = AgentStatus::Working;
+                        }
                     }
                 }
             }
@@ -785,6 +961,11 @@ impl UiState {
         subagents: Vec<AgentTaskSnapshot>,
         usage: crate::types::events::ThreadUsageSnapshot,
     ) {
+        let active_task_id = if self.current_thread_id == thread_id {
+            self.active_session_task_id.clone()
+        } else {
+            None
+        };
         self.show_start_screen = false;
         self.current_thread_id = thread_id;
         if self.current_thread_id.is_none() {
@@ -800,11 +981,41 @@ impl UiState {
         self.status_bar.context_window = usage.context_window;
         self.subagents.clear();
         self.subagents_by_tool_use.clear();
+        self.subagent_order.clear();
+        self.subagent_views.clear();
+        self.active_session_task_id = None;
+        self.session_selector_focused = false;
+        self.session_selection_index = 0;
         for subagent in subagents {
-            let node = SubagentNode::from(subagent);
+            let task_id = subagent.task.task_id.clone();
+            if subagent.task.depth != 1
+                || subagent.task.parent_task_id.is_some()
+                || subagent.task.execution_mode != AgentTaskExecutionMode::Background
+            {
+                continue;
+            }
+            if subagent.task.status.is_terminal() && active_task_id.as_ref() != Some(&task_id) {
+                continue;
+            }
+            let history = UiMessage::from_history_items(
+                subagent.history.into_iter().map(Into::into).collect(),
+            );
+            let node = SubagentNode::from(subagent.task);
             self.subagents_by_tool_use
                 .insert(node.spawn_tool_use_id.clone(), node.thread_id.clone());
+            self.subagent_order.push(task_id.clone());
+            self.subagent_views.insert(
+                task_id.clone(),
+                super::SessionViewState {
+                    messages: history,
+                    auto_scroll: true,
+                    ..super::SessionViewState::default()
+                },
+            );
             self.subagents.insert(node.thread_id.clone(), node);
+            if active_task_id.as_ref() == Some(&task_id) {
+                self.active_session_task_id = Some(task_id);
+            }
         }
         self.pending_assistant = None;
         self.pending_proposed_plan = None;

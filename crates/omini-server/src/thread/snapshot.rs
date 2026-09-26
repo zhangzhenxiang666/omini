@@ -41,8 +41,7 @@ impl ThreadRuntime {
         // DB → UI 视角:给 TUI 的 ThreadSnapshotEvent 渲染 + user_injection 去重。
         let messages = crate::history::load_messages(&self.db, &self.thread_id, &thread_dir).await;
         let agent_tasks =
-            crate::history::load_agent_tasks_for_thread(&self.db, &self.thread_id, &self.project)
-                .await;
+            crate::history::load_agent_tasks(&self.db, &self.thread_id, &self.project).await;
         let active_profile = self
             .status_projection
             .lock()
