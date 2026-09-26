@@ -33,7 +33,7 @@ impl ThreadRuntime {
         project: ProjectDir,
         thread_id: String,
         db: Arc<Database>,
-        active_profile: domain::events::ActiveProfile,
+        active_profile: runtime_contract::thread_domain::ActiveProfile,
         inputs: ThreadRuntimeInputs,
     ) -> Result<Self, CoreError> {
         let ThreadRuntimeInputs {
@@ -114,8 +114,10 @@ impl ThreadRuntime {
                         {
                             let _ = persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
                                 client_proto::TypedRuntimeEvent::UserMessageInjected {
-                                    item: domain::display::HistoryItem::AgentTaskNotification(
-                                        notification.clone(),
+                                    item: omini_protocol::HistoryItem::SystemEvent(
+                                        domain::conversation::SystemEvent::AgentTaskNotification(
+                                            notification.clone(),
+                                        ),
                                     ),
                                     client_echo_id: None,
                                 },

@@ -12,6 +12,7 @@ use tokio::net::TcpListener;
 
 mod app;
 mod bundled_tools;
+mod conversation;
 mod daemon;
 mod event;
 mod git;

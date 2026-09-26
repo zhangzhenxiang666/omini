@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use omini_config::{PermissionSources, RawBashRulesFile, RawPermissionConfig};
-use omini_domain::events::{
+use omini_permissions::{PermissionCheck, PermissionDecision, PermissionEngine};
+use omini_runtime_contract::thread_domain::{
     EditPermissionPreview, PermissionPreview, PermissionSource, ReadPermissionPreview,
     SearchPermissionPreview,
 };
-use omini_permissions::{PermissionCheck, PermissionDecision, PermissionEngine};
 use serde_json::json;
 
 const USER_SOURCE: &str = "/home/test/.omini/config.toml";
@@ -356,10 +356,12 @@ fn edit_preview(path: &str, write: bool) -> PermissionPreview {
 }
 
 fn bash_preview(command: &str) -> PermissionPreview {
-    PermissionPreview::Bash(omini_domain::events::BashPermissionPreview {
-        command: command.to_string(),
-        description: None,
-        workdir: None,
-        timeout: 120_000,
-    })
+    PermissionPreview::Bash(
+        omini_runtime_contract::thread_domain::BashPermissionPreview {
+            command: command.to_string(),
+            description: None,
+            workdir: None,
+            timeout: 120_000,
+        },
+    )
 }

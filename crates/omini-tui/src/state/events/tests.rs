@@ -1,11 +1,13 @@
 use super::*;
+use crate::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
 use crate::types::events::{
     CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent, CompactSummaryFinishedEvent,
     CompactTrigger, ThreadSummary,
 };
 use chrono::{Duration, Utc};
-use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
+use omini_domain::conversation::UserInput;
+use omini_domain::input::{InputPart, UserInputIntent};
 use std::collections::HashMap;
 
 fn model_selection_request() -> InteractionRequest {
@@ -57,6 +59,22 @@ fn subagent_display_message(description: &str) -> DisplayMessage {
             description: description.to_string(),
         }],
     }
+}
+
+fn history_item_for_subagent(label: &str) -> HistoryItem {
+    HistoryItem::UserInput(UserInput {
+        intent: UserInputIntent::Message,
+        parts: vec![
+            InputPart::Subagent {
+                name: "code-reviewer".to_string(),
+                label: Some(label.to_string()),
+            },
+            InputPart::Text {
+                text: " review this".to_string(),
+            },
+        ],
+        attachments: Vec::new(),
+    })
 }
 
 #[test]
@@ -148,11 +166,20 @@ fn usage_totals_changed_preserves_current_context_usage() {
 #[test]
 fn user_message_injected_does_not_duplicate_optimistic_echo() {
     let mut state = UiState::new();
-    let message = Message::from_user_text("hello".to_string());
-    state.messages.push(UiMessage::Message(message.clone()));
+    state.messages.push(UiMessage::Display(DisplayMessage {
+        role: Role::User,
+        text: "hello".to_string(),
+        mentions: Vec::new(),
+    }));
 
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
-        item: HistoryItem::Message(message),
+        item: HistoryItem::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: "hello".to_string(),
+            }],
+            attachments: Vec::new(),
+        }),
         client_echo_id: None,
     });
 
@@ -163,11 +190,10 @@ fn user_message_injected_does_not_duplicate_optimistic_echo() {
 fn user_message_injected_uses_client_echo_id_for_display_metadata_differences() {
     let mut state = UiState::new();
     let local = subagent_display_message("Review code changes");
-    let runtime = subagent_display_message("subagent");
 
     state.push_optimistic_echo(UiMessage::Display(local.clone()), "echo-1".to_string());
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
-        item: HistoryItem::Display(runtime),
+        item: history_item_for_subagent("subagent"),
         client_echo_id: Some("echo-1".to_string()),
     });
 
@@ -179,11 +205,10 @@ fn user_message_injected_uses_client_echo_id_for_display_metadata_differences() 
 fn user_message_injected_without_client_echo_id_appends_different_message() {
     let mut state = UiState::new();
     let local = subagent_display_message("Review code changes");
-    let runtime = subagent_display_message("subagent");
 
     state.messages.push(UiMessage::Display(local));
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
-        item: HistoryItem::Display(runtime),
+        item: history_item_for_subagent("subagent"),
         client_echo_id: None,
     });
 
@@ -193,14 +218,30 @@ fn user_message_injected_without_client_echo_id_appends_different_message() {
 #[test]
 fn user_message_injected_with_unmatched_client_echo_id_appends_for_observers() {
     let mut state = UiState::new();
-    let runtime = subagent_display_message("subagent");
 
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
-        item: HistoryItem::Display(runtime.clone()),
+        item: history_item_for_subagent("subagent"),
         client_echo_id: Some("echo-1".to_string()),
     });
 
-    assert_eq!(state.messages, vec![UiMessage::Display(runtime)]);
+    assert_eq!(
+        state.messages,
+        vec![UiMessage::Display(crate::display::user_input_message(
+            &UserInput {
+                intent: UserInputIntent::Message,
+                parts: vec![
+                    InputPart::Subagent {
+                        name: "code-reviewer".to_string(),
+                        label: Some("subagent".to_string()),
+                    },
+                    InputPart::Text {
+                        text: " review this".to_string(),
+                    },
+                ],
+                attachments: Vec::new(),
+            }
+        ))]
+    );
 }
 
 #[test]

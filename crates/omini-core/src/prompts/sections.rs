@@ -1,7 +1,7 @@
 use crate::skills::SkillSummary;
 use omini_config::Settings;
-use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
+use omini_runtime_contract::thread_domain::ActiveProfile;
 
 const MAIN_MODE_BODY: &str = include_str!("main_mode.txt");
 const PLAN_MODE_BODY: &str = include_str!("plan_mode.txt");

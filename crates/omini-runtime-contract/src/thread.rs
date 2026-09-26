@@ -1,9 +1,22 @@
+use crate::thread_domain::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
 use omini_domain::config::{ProviderInfo, ThinkingEffort};
-use omini_domain::events::{ActiveProfile, PlanApprovalAction, ToolPauseResponse};
-use omini_domain::input::{RunCommand, RuntimeUserInput};
-use omini_domain::message::Message;
+use omini_domain::input::{AttachmentMetadata, InputPart, RunCommand};
 use omini_domain::subagents::AgentRecord;
+use omini_model::message::Message;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAttachment {
+    pub metadata: AttachmentMetadata,
+    pub sha256: String,
+    pub source_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeUserInput {
+    pub parts: Vec<InputPart>,
+    pub attachments: Vec<ResolvedAttachment>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunIntent {

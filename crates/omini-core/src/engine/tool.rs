@@ -3,9 +3,9 @@ use crate::tools::{
 };
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
-use omini_domain::events::ActiveProfile;
-use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
+use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_permissions::PermissionEngine;
+use omini_runtime_contract::thread_domain::ActiveProfile;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -337,7 +337,7 @@ fn summarize(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_domain::message::ContentBlock;
+    use omini_model::message::ContentBlock;
     use tokio::sync::mpsc;
 
     #[test]

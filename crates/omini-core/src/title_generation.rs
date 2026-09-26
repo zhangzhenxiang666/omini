@@ -1,11 +1,18 @@
 use omini_config::{RoutingTier, Settings};
-use omini_domain::message::{ContentBlock, Message, Role};
+use omini_model::message::{ContentBlock, Message, Role};
 use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use tokio_stream::StreamExt;
 
 const TITLE_MAX_CHARS: usize = 300;
 const TITLE_MAX_TOKENS: u64 = 128;
+
+/// 标题生成模型返回的 JSON 结构。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct GeneratedThreadTitle {
+    pub title: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TitleGenError {
@@ -134,16 +141,14 @@ fn parse_generated_title(raw: &str) -> Result<String, TitleGenError> {
     if let Some(stripped) = json_text.strip_suffix("```") {
         json_text = stripped.trim();
     }
-    let value: serde_json::Value = serde_json::from_str(json_text)
+    let generated: GeneratedThreadTitle = serde_json::from_str(json_text)
         .map_err(|e| TitleGenError::Parse(format!("parse generated title json failed: {e}")))?;
-    let title = value
-        .get("title")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            TitleGenError::Parse("generated title missing or empty `title` field".to_string())
-        })?;
+    let title = generated.title.trim();
+    if title.is_empty() {
+        return Err(TitleGenError::Parse(
+            "generated title missing or empty `title` field".to_string(),
+        ));
+    }
     Ok(title.to_owned())
 }
 

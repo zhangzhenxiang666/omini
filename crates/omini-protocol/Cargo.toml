@@ -6,5 +6,7 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 omini-domain.workspace = true
+omini-model.workspace = true
+omini-runtime-contract.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -6,7 +6,9 @@ edition.workspace = true
 [dependencies]
 chrono.workspace = true
 omini-domain.workspace = true
+omini-model.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]

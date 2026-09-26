@@ -2,13 +2,13 @@ use crate::error::{CompactError, RuntimeError};
 use crate::tools::ToolRuntimeContext;
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::{CompactConfig, Settings};
-use omini_domain::events::{
+use omini_model::message::{ContentBlock, Message, Role, TextBlock, ToolResultBlock};
+use omini_provider_api::ToolDefinition;
+use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
+use omini_runtime_contract::thread_domain::{
     CompactEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent,
     CompactSummaryFinishedEvent, CompactTrigger,
 };
-use omini_domain::message::{ContentBlock, Message, Role, TextBlock, ToolResultBlock};
-use omini_domain::tool::ToolDefinition;
-use omini_provider_api::{ApiEvent, ApiRequest, LlmClient};
 use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1475,7 +1475,7 @@ async fn emit_compact_summary_failed(
 mod tests {
     use super::*;
     use omini_config::RawConfig;
-    use omini_domain::message::{ContentBlock, ToolUseBlock};
+    use omini_model::message::{ContentBlock, ToolUseBlock};
     use std::collections::HashMap;
     use std::path::PathBuf;
 

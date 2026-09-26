@@ -1,10 +1,10 @@
 use super::register_selectable_lines;
 use super::text::truncate_str;
 use super::thread_list::relative_time;
+use crate::display::MentionKind;
 use crate::state::UiState;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::CommandKind;
-use omini_domain::display::MentionKind;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

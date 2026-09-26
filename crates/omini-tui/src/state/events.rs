@@ -3,33 +3,43 @@ use super::{
     AgentManagerState, AgentManagerView, AgentStatus, InteractionStep, ModelSelectionEntry,
     SubagentNode, UiMessage, UiState, agent_summaries_to_mention_candidates,
 };
+use crate::display::UserDraft;
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
     AgentTaskEvent, AgentTaskExecutionMode, AgentTaskSnapshot, CommandKind, CommandSummary,
     CompactTrigger, InteractionRequest, Notification, NotificationKind, RuntimeToUiEvent,
 };
-use omini_domain::display::{HistoryItem, UserDraft};
-use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_domain::conversation::SystemEvent;
 use omini_domain::subagents::AgentSummary;
 use omini_domain::task::TaskStatus;
+use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock};
+use omini_protocol::HistoryItem;
 use std::collections::VecDeque;
 
 const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
 
 fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
     match item {
-        HistoryItem::Message(message) => UiMessage::Message(message),
-        HistoryItem::Display(display) => UiMessage::Display(display),
-        HistoryItem::UserInput(input) => UiMessage::Display(input.display_message()),
-        HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
-            text: plan.markdown,
-        },
-        HistoryItem::Summary(summary) => UiMessage::CompactSummary {
-            text: summary.markdown,
-        },
-        HistoryItem::AgentTaskNotification(notification) => {
-            UiMessage::AgentTaskNotification(notification)
+        HistoryItem::UserInput(input) => {
+            UiMessage::Display(crate::display::user_input_message(&input))
         }
+        HistoryItem::AssistantMessage(output) => {
+            UiMessage::Message(crate::display::assistant_message(&output))
+        }
+        HistoryItem::SystemEvent(output) => match output {
+            SystemEvent::Plan(plan) => UiMessage::ProposedPlan {
+                text: plan.markdown,
+            },
+            SystemEvent::Summary(summary) => UiMessage::CompactSummary {
+                text: summary.markdown,
+            },
+            SystemEvent::AgentTaskNotification(notification) => {
+                UiMessage::AgentTaskNotification(notification)
+            }
+            SystemEvent::ToolResults { results } => {
+                UiMessage::Message(crate::display::tool_results_message(&results))
+            }
+        },
     }
 }
 
@@ -73,7 +83,7 @@ impl UiState {
         let messages = self
             .pending_intervention_inputs
             .drain(..)
-            .map(|draft| ui_message_from_history_item(draft.history_item()))
+            .map(|draft| UiMessage::Display(draft.display_message()))
             .collect();
         (messages, self.pending_intervention_client_echo_id.take())
     }

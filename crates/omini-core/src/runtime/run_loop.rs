@@ -161,7 +161,7 @@ impl AgentRuntime {
 
     /// 接收一条用户消息，追加进历史并启动运行。
     /// 展示行入库与 echo 已由 server 在接收时完成，这里只管 LLM 上下文。
-    pub async fn submit_user_message(&mut self, message: omini_domain::message::Message) {
+    pub async fn submit_user_message(&mut self, message: omini_model::message::Message) {
         self.messages.push(message);
         self.process_run(RunStart::UserInput).await;
     }
@@ -354,7 +354,7 @@ impl AgentRuntime {
                                 tracing::debug!(tool_use_id = %tool_use_id, response = ?response, "resolving tool pause");
                                 let permission_response = matches!(
                                     response,
-                                    omini_domain::events::ToolPauseResponse::Permission { .. }
+                                    omini_runtime_contract::thread_domain::ToolPauseResponse::Permission { .. }
                                 );
                                 if let Err(e) = self
                                     .query_engine

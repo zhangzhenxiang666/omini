@@ -1,12 +1,13 @@
+use crate::display::{DisplayMessage, UserDraft};
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
 use omini_domain::agent_run::AgentRunSnapshot;
-use omini_domain::display::{DisplayMessage, HistoryItem, UserDraft};
-pub use omini_domain::events::*;
-use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
 pub use omini_domain::task::{TaskChangedEvent, TaskOutputDelta};
 use omini_domain::usage::Usage;
+use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_protocol::HistoryItem;
+pub use omini_runtime_contract::thread_domain::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -365,7 +366,7 @@ mod serde_runtime_event_payload {
 #[cfg(test)]
 mod tests {
     use crate::types::events::{ActiveProfile, CommandKind, CommandSummary, RuntimeToUiEvent};
-    use omini_domain::display::HistoryItem;
+    use omini_protocol::HistoryItem;
     use serde_json::json;
 
     #[test]
@@ -382,52 +383,55 @@ mod tests {
         let value = json!({
             "type": "user_message_injected",
             "item": {
-                "type": "display",
-                "role": "user",
-                "text": "@worker hello"
+                "type": "user_input",
+                "entry": {
+                    "intent": {"type": "message"},
+                    "parts": [{"type": "text", "text": "@worker hello"}]
+                }
             }
         });
         let decoded: RuntimeToUiEvent =
-            serde_json::from_value(value.clone()).expect("deserialize display user message");
+            serde_json::from_value(value.clone()).expect("deserialize typed user input");
         assert!(matches!(
             &decoded,
             RuntimeToUiEvent::UserMessageInjected {
-                item: HistoryItem::Display(display),
+                item: HistoryItem::UserInput(input),
                 client_echo_id: None,
-            } if display.text == "@worker hello"
+            } if matches!(input.parts.as_slice(), [omini_domain::input::InputPart::Text { text }] if text == "@worker hello")
         ));
         assert_eq!(
-            serde_json::to_value(decoded).expect("serialize display user message"),
+            serde_json::to_value(decoded).expect("serialize typed user input"),
             value
         );
         let value = json!({
             "type": "user_message_injected",
             "client_echo_id": "echo-1",
             "item": {
-                "type": "message",
-                "role": "user",
-                "content": [{
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": "abc"
-                    }
-                }]
+                "type": "user_input",
+                "entry": {
+                    "intent": {"type": "message"},
+                    "parts": [],
+                    "attachments": [{
+                        "attachment_id": "attachment-1",
+                        "mime_type": "image/png",
+                        "size": 3,
+                        "name": "image.png"
+                    }]
+                }
             }
         });
         let decoded: RuntimeToUiEvent =
-            serde_json::from_value(value.clone()).expect("deserialize image user message");
+            serde_json::from_value(value.clone()).expect("deserialize attachment user input");
         assert!(matches!(
             &decoded,
             RuntimeToUiEvent::UserMessageInjected {
-                item: HistoryItem::Message(message),
+                item: HistoryItem::UserInput(input),
                 client_echo_id,
-            } if message.content.first().is_some_and(|block| block.is_image())
+            } if input.attachments.len() == 1
                 && client_echo_id.as_deref() == Some("echo-1")
         ));
         assert_eq!(
-            serde_json::to_value(decoded).expect("serialize image user message"),
+            serde_json::to_value(decoded).expect("serialize attachment user input"),
             value
         );
 

@@ -118,8 +118,8 @@ fn unknown_variants_and_legacy_shape_are_rejected() {
 }
 
 #[test]
-fn protocol_revision_is_four() {
-    assert_eq!(omini_protocol::PROTOCOL_REVISION, 4);
+fn protocol_revision_is_five() {
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 5);
 }
 
 fn assert_data_error<T>(value: Value)

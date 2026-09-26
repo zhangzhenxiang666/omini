@@ -1,8 +1,8 @@
 use crate::tools::{PendingToolPauses, ToolExecutionContext, ToolRegistry};
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::{RawConfig, Settings};
-use omini_domain::events::ActiveProfile;
 use omini_permissions::PermissionEngine;
+use omini_runtime_contract::thread_domain::ActiveProfile;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

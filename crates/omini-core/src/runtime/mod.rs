@@ -20,14 +20,14 @@ use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::display::DisplaySummary;
-use omini_domain::events::{
+use omini_domain::conversation::CompactionSummary;
+use omini_domain::usage::Usage;
+use omini_model::message::Message;
+use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, Notification, PlanApprovalAction, SubmittedPlan, ThreadUsageSnapshot,
     ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
 };
-use omini_domain::message::Message;
-use omini_domain::usage::Usage;
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};

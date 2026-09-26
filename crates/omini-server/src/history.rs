@@ -7,19 +7,16 @@
 
 use crate::store::{self, Database};
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::display::{
-    AgentTaskNotification, DisplayMessage, DisplayPlan, DisplaySummary, HistoryItem,
-};
-use omini_domain::events::{AgentTaskInfo, AgentTaskSnapshot};
-use omini_domain::input::DisplayUserInput;
-use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::conversation::ConversationEntry;
+use omini_model::message::Role;
+use omini_runtime_contract::thread_domain::{AgentTaskInfo, AgentTaskSnapshot};
 
 /// 加载一个线程的消息历史，跳过无法解析的损坏记录以保证线程仍可打开。
 pub async fn load_messages(
     db: &Database,
     thread_id: &str,
     thread_dir: &ThreadDir,
-) -> Vec<HistoryItem> {
+) -> Vec<ConversationEntry> {
     let stored = match db.get_messages(thread_id).await {
         Ok(rows) => rows,
         Err(error) => {
@@ -37,100 +34,24 @@ pub async fn load_messages(
                 continue;
             }
         };
-        // kind 决定这条记录恢复成哪类 HistoryItem；normal message 才继续解析 ContentBlock。
-        if sm.kind == "display" {
-            match serde_json::from_str::<DisplayMessage>(&content) {
-                Ok(display) => messages.push(HistoryItem::Display(display)),
-                Err(error) => {
-                    tracing::warn!(thread_id, error = %error, "failed to parse display message");
-                }
-            }
+        if sm.kind != "conversation_entry" {
             continue;
         }
-
-        if sm.kind == "user_input" {
-            match serde_json::from_str::<DisplayUserInput>(&content) {
-                Ok(display) => messages.push(HistoryItem::UserInput(display)),
-                Err(error) => {
-                    tracing::warn!(thread_id, error = %error, "failed to parse typed user input");
+        match serde_json::from_str::<ConversationEntry>(&content) {
+            Ok(entry) => match entry {
+                ConversationEntry::UserInput(input) => {
+                    messages.push(ConversationEntry::UserInput(input));
                 }
-            }
-            continue;
-        }
-
-        if sm.kind == "plan" {
-            match serde_json::from_str::<DisplayPlan>(&content) {
-                Ok(plan) => messages.push(HistoryItem::Plan(plan)),
-                Err(error) => {
-                    tracing::warn!(thread_id, error = %error, "failed to parse plan message");
+                ConversationEntry::AssistantMessage(output) => {
+                    messages.push(ConversationEntry::AssistantMessage(output));
                 }
-            }
-            continue;
-        }
-
-        if sm.kind == "compact_summary" {
-            match serde_json::from_str::<DisplaySummary>(&content) {
-                Ok(summary) => messages.push(HistoryItem::Summary(summary)),
-                Err(error) => {
-                    tracing::warn!(
-                        thread_id,
-                        error = %error,
-                        "failed to parse compact summary message"
-                    );
+                ConversationEntry::SystemEvent(output) => {
+                    messages.push(ConversationEntry::SystemEvent(output));
                 }
-            }
-            continue;
-        }
-
-        if sm.kind == "agent_task_notification" {
-            match serde_json::from_str::<AgentTaskNotification>(&content) {
-                Ok(notification) => messages.push(HistoryItem::AgentTaskNotification(notification)),
-                Err(error) => {
-                    tracing::warn!(thread_id, error = %error, "failed to parse agent task notification");
-                }
-            }
-            continue;
-        }
-
-        let role = match sm.role.as_str() {
-            "user" => Role::User,
-            "assistant" => Role::Assistant,
-            _ => continue,
-        };
-        let content_json: Vec<serde_json::Value> = match serde_json::from_str(&content) {
-            Ok(value) => value,
+            },
             Err(error) => {
-                tracing::warn!(thread_id, error = %error, "failed to parse message content");
-                continue;
+                tracing::warn!(thread_id, error = %error, "failed to parse conversation entry");
             }
-        };
-        let blocks = match store::load_blocks(&content_json, thread_dir) {
-            Ok(blocks) => blocks,
-            Err(store::StoreError::OversizedSidecar {
-                actual_bytes,
-                limit_bytes,
-            }) => {
-                tracing::warn!(
-                    thread_id,
-                    actual_bytes,
-                    limit_bytes,
-                    "omitted oversized persisted message content"
-                );
-                messages.push(HistoryItem::Message(Message::new(
-                    role,
-                    vec![ContentBlock::from_text(
-                        "（消息太长，暂不显示）".to_string(),
-                    )],
-                )));
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(thread_id, error = %error, "failed to load message blocks");
-                continue;
-            }
-        };
-        if !blocks.is_empty() {
-            messages.push(HistoryItem::Message(Message::new(role, blocks)));
         }
     }
     messages
@@ -157,12 +78,13 @@ pub async fn load_agent_tasks_for_thread(
             .await
             .into_iter()
             .filter_map(|item| match item {
-                HistoryItem::Message(message) => Some(message),
-                HistoryItem::Display(_)
-                | HistoryItem::UserInput(_)
-                | HistoryItem::Plan(_)
-                | HistoryItem::Summary(_)
-                | HistoryItem::AgentTaskNotification(_) => None,
+                ConversationEntry::AssistantMessage(output) => {
+                    Some(crate::conversation::model_message_from_assistant_message(
+                        output,
+                        Role::Assistant,
+                    ))
+                }
+                ConversationEntry::UserInput(_) | ConversationEntry::SystemEvent(_) => None,
             })
             .collect();
         snapshots.push(AgentTaskSnapshot {

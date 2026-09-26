@@ -5,12 +5,12 @@ use crate::subagents::AgentTaskSupervisor;
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
-use omini_domain::message::Message;
 use omini_domain::task::TaskCompletion;
+use omini_model::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::thread_domain::{ActiveProfile, ThreadUsageSnapshot};
 use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::sync::atomic::{AtomicBool, AtomicI64};
 use std::sync::{Arc, Mutex, RwLock};
@@ -45,7 +45,7 @@ pub struct AgentRuntimeDeps {
     pub llm_context_version: i64,
     pub usage: ThreadUsageSnapshot,
     pub active_profile: ActiveProfile,
-    pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
+    pub agent_tasks: Vec<omini_runtime_contract::thread_domain::AgentTaskInfo>,
     pub background_tasks: Vec<omini_domain::task::TaskInfo>,
 }
 
@@ -265,14 +265,14 @@ mod tests {
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{RawConfig, ResolvedConfig, Settings};
-    use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
-    use omini_domain::events::{
+    use omini_domain::conversation::{AgentTaskNotification, AgentTaskNotificationItem};
+    use omini_domain::task::TaskStatus;
+    use omini_domain::usage::Usage;
+    use omini_model::message::{ContentBlock, Role};
+    use omini_runtime_contract::thread_domain::{
         CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview, PlanApprovalAction,
         PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
     };
-    use omini_domain::message::{ContentBlock, Role};
-    use omini_domain::task::TaskStatus;
-    use omini_domain::usage::Usage;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::Mutex;

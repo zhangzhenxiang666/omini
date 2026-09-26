@@ -1,11 +1,9 @@
+use crate::proposed_plan::{ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text};
 use chrono::Utc;
 use omini_config::project::ProjectDir;
-use omini_domain::events::{ActiveProfile, SubmittedPlan};
-use omini_domain::message::{ContentBlock, Message, Role};
-use omini_domain::proposed_plan::{
-    ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text,
-};
+use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::RuntimeToServerEvent;
+use omini_runtime_contract::thread_domain::{ActiveProfile, SubmittedPlan};
 use tokio::sync::mpsc;
 
 const CURRENT_PLAN_ID: &str = "plan";

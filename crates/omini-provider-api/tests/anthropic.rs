@@ -1,8 +1,8 @@
 mod support;
 
 use omini_domain::config::{ProviderEndpointKind, ThinkingEffort};
-use omini_domain::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
-use omini_domain::tool::ToolDefinition;
+use omini_model::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
+use omini_provider_api::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, StreamError};
 use serde_json::{Map, json};
 use std::collections::HashMap;

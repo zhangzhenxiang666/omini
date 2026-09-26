@@ -33,7 +33,27 @@ impl Database {
     pub async fn insert_user_input(
         &self,
         thread_id: &str,
-        display: &omini_domain::input::DisplayUserInput,
+        input: &omini_domain::conversation::UserInput,
+        created_at: DateTime<Utc>,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        self.insert_conversation_entry(
+            thread_id,
+            &omini_domain::conversation::ConversationEntry::UserInput(input.clone()),
+            "user",
+            None,
+            created_at,
+            thread_dir,
+        )
+        .await
+    }
+
+    pub async fn insert_conversation_entry(
+        &self,
+        thread_id: &str,
+        entry: &omini_domain::conversation::ConversationEntry,
+        role: &str,
+        model_ref: Option<&str>,
         created_at: DateTime<Utc>,
         thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
@@ -41,10 +61,10 @@ impl Database {
             &self.pool,
             NewUiJson {
                 thread_id,
-                role: "user",
-                model_ref: None,
-                content: &serde_json::to_string(display)?,
-                kind: "user_input",
+                role,
+                model_ref,
+                content: &serde_json::to_string(entry)?,
+                kind: "conversation_entry",
                 created_at,
             },
             thread_dir,
@@ -55,7 +75,7 @@ impl Database {
     pub async fn insert_plan_message(
         &self,
         thread_id: &str,
-        plan: &DisplayPlan,
+        plan: &omini_domain::conversation::ProposedPlan,
         model_ref: &str,
         thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
@@ -65,8 +85,12 @@ impl Database {
                 thread_id,
                 role: "assistant",
                 model_ref: Some(model_ref),
-                content: &serde_json::to_string(plan)?,
-                kind: "plan",
+                content: &serde_json::to_string(
+                    &omini_domain::conversation::ConversationEntry::SystemEvent(
+                        omini_domain::conversation::SystemEvent::Plan(plan.clone()),
+                    ),
+                )?,
+                kind: "conversation_entry",
                 created_at: plan.created_at,
             },
             thread_dir,
@@ -77,7 +101,7 @@ impl Database {
     pub async fn insert_compact_summary_message(
         &self,
         thread_id: &str,
-        summary: &DisplaySummary,
+        summary: &omini_domain::conversation::CompactionSummary,
         model_ref: &str,
         thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
@@ -87,8 +111,12 @@ impl Database {
                 thread_id,
                 role: "assistant",
                 model_ref: Some(model_ref),
-                content: &serde_json::to_string(summary)?,
-                kind: "compact_summary",
+                content: &serde_json::to_string(
+                    &omini_domain::conversation::ConversationEntry::SystemEvent(
+                        omini_domain::conversation::SystemEvent::Summary(summary.clone()),
+                    ),
+                )?,
+                kind: "conversation_entry",
                 created_at: summary.created_at,
             },
             thread_dir,
@@ -158,15 +186,46 @@ async fn insert_ui_json(
     finish_prepared_write(result.map(|_| ()), &created_files)
 }
 fn extract_message_text(content_json: &str) -> String {
-    if let Ok(display) = serde_json::from_str::<omini_domain::input::DisplayUserInput>(content_json)
+    if let Ok(entry) =
+        serde_json::from_str::<omini_domain::conversation::ConversationEntry>(content_json)
     {
-        return display.text().replace('\n', " ").replace('\r', "");
-    }
-    if let Ok(display) = serde_json::from_str::<DisplayMessage>(content_json) {
-        return display.text.replace('\n', " ").replace('\r', "");
-    }
-    if let Ok(summary) = serde_json::from_str::<DisplaySummary>(content_json) {
-        return summary.markdown.replace('\n', " ").replace('\r', "");
+        let text = match entry {
+            omini_domain::conversation::ConversationEntry::UserInput(input) => input
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    omini_domain::input::InputPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>(),
+            omini_domain::conversation::ConversationEntry::AssistantMessage(output) => output
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    omini_domain::conversation::AssistantMessageBlock::Text { text } => {
+                        Some(text.as_str())
+                    }
+                    _ => None,
+                })
+                .collect::<String>(),
+            omini_domain::conversation::ConversationEntry::SystemEvent(
+                omini_domain::conversation::SystemEvent::Plan(plan),
+            ) => plan.markdown,
+            omini_domain::conversation::ConversationEntry::SystemEvent(
+                omini_domain::conversation::SystemEvent::Summary(summary),
+            ) => summary.markdown,
+            omini_domain::conversation::ConversationEntry::SystemEvent(
+                omini_domain::conversation::SystemEvent::AgentTaskNotification(_),
+            ) => String::new(),
+            omini_domain::conversation::ConversationEntry::SystemEvent(
+                omini_domain::conversation::SystemEvent::ToolResults { results },
+            ) => results
+                .iter()
+                .map(|result| result.content.as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
+        return text.replace('\n', " ").replace('\r', "");
     }
     serde_json::from_str::<Vec<serde_json::Value>>(content_json)
         .unwrap_or_default()

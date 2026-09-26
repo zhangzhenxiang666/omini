@@ -1,9 +1,9 @@
 mod support;
 
 use crate::support::store::*;
-use omini_domain::events::AgentTaskResult;
-use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::task::TaskStatus;
+use omini_model::message::{ContentBlock, Message, Role};
+use omini_runtime_contract::thread_domain::AgentTaskResult;
 use omini_server::history;
 
 #[tokio::test]
@@ -114,8 +114,8 @@ async fn agent_task_notification_is_idempotent() {
     db.append_llm_message("owner", &before, fixed_time(), &project.thread("owner"))
         .await
         .unwrap();
-    let notification = omini_domain::display::AgentTaskNotification {
-        tasks: vec![omini_domain::display::AgentTaskNotificationItem {
+    let notification = omini_domain::conversation::AgentTaskNotification {
+        tasks: vec![omini_domain::conversation::AgentTaskNotificationItem {
             task_id: "task_done".to_string(),
             agent: "general".to_string(),
             title: "Test agent".to_string(),
@@ -145,11 +145,11 @@ async fn agent_task_notification_is_idempotent() {
         .unwrap();
 
     let ui_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages WHERE thread_id = 'owner' AND kind = 'agent_task_notification'",
-        )
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+        "SELECT COUNT(*) FROM messages WHERE thread_id = 'owner' AND kind = 'conversation_entry'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
     let llm_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM llm_messages WHERE thread_id = 'owner' AND role = 'user'",
     )
@@ -169,7 +169,8 @@ async fn agent_task_notification_is_idempotent() {
         history::load_messages(&db, "owner", &project.thread("owner"))
             .await
             .as_slice(),
-        [omini_domain::display::HistoryItem::AgentTaskNotification(restored)]
-            if restored == &notification
+        [omini_domain::conversation::ConversationEntry::SystemEvent(
+            omini_domain::conversation::SystemEvent::AgentTaskNotification(restored)
+        )] if restored == &notification
     ));
 }

@@ -1,13 +1,13 @@
+use crate::thread_domain::{AgentTaskInfo, AgentTaskResult};
 use chrono::{DateTime, Utc};
 use omini_domain::agent_run::{
     AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
     ToolUseStatus,
 };
-use omini_domain::display::{AgentTaskNotification, DisplayPlan, DisplaySummary};
-use omini_domain::events::{AgentTaskInfo, AgentTaskResult};
-use omini_domain::message::Message;
+use omini_domain::conversation::{AgentTaskNotification, CompactionSummary, ProposedPlan};
 use omini_domain::task::{TaskInfo, TaskStatus};
 use omini_domain::usage::Usage;
+use omini_model::message::Message;
 use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
@@ -125,12 +125,12 @@ pub enum RuntimePersistenceEvent {
     },
     InsertPlanMessage {
         thread_id: String,
-        plan: DisplayPlan,
+        plan: ProposedPlan,
         model_ref: String,
     },
     InsertCompactSummaryMessage {
         thread_id: String,
-        summary: DisplaySummary,
+        summary: CompactionSummary,
         model_ref: String,
     },
     AppendLlmMessage {

@@ -1,4 +1,4 @@
-use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+use omini_model::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;

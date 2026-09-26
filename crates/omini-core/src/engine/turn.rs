@@ -8,12 +8,12 @@ use crate::error::RuntimeError;
 use crate::prompts::get_max_steps_prompt;
 use crate::runtime::compact::{self, AutoCompactState};
 use crate::types::events::EngineToRuntimeEvent;
-use omini_domain::events::CompactTrigger;
-use omini_domain::message::{
+use omini_model::message::{
     ContentBlock, Message, Role, TextBlock, ThinkingBlock, ToolResultBlock, ToolUseBlock,
 };
-use omini_domain::tool::ToolDefinition;
+use omini_provider_api::ToolDefinition;
 use omini_provider_api::{ApiEvent, ApiRequest, FinishReason, StreamError};
+use omini_runtime_contract::thread_domain::CompactTrigger;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -441,7 +441,7 @@ mod tests {
     use super::*;
     use crate::engine::tool::ToolRunResult;
     use crate::types::events::EngineToRuntimeEvent;
-    use omini_domain::message::{ContentBlock, Role, ToolResultBlock, ToolUseBlock};
+    use omini_model::message::{ContentBlock, Role, ToolResultBlock, ToolUseBlock};
     use std::collections::HashMap;
     use tokio::sync::mpsc;
     use tokio::task::JoinSet;

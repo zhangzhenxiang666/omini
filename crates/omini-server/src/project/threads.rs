@@ -98,7 +98,7 @@ impl ProjectManager {
         })?;
         let active_profile = request
             .profile
-            .unwrap_or(domain::events::ActiveProfile::Main);
+            .unwrap_or(runtime_contract::thread_domain::ActiveProfile::Main);
         // 新 thread 在数据库中还没有 UI 或 LLM 消息，因此两个视角都为空。
         let loaded = load_thread_snapshot(
             &self.db,
@@ -214,7 +214,7 @@ impl ProjectManager {
         // 走与普通 submit_run 完全相同的路径(包括 process_run 自动启动)。
         let plan_text = omini_core::compacted_plan_context(&plan_content);
         let submit_command = runtime_contract::thread::SubmitRunCommand {
-            input: domain::input::RuntimeUserInput {
+            input: omini_runtime_contract::thread::RuntimeUserInput {
                 parts: vec![domain::input::InputPart::Text { text: plan_text }],
                 attachments: Vec::new(),
             },
@@ -305,7 +305,7 @@ impl ProjectManager {
             &self.project,
             thread_id,
             &settings,
-            domain::events::ActiveProfile::Main,
+            runtime_contract::thread_domain::ActiveProfile::Main,
             &thread_record,
         )
         .await?;
@@ -327,7 +327,7 @@ impl ProjectManager {
             self.project.clone(),
             thread_id.to_string(),
             Arc::clone(&self.db),
-            domain::events::ActiveProfile::Main,
+            runtime_contract::thread_domain::ActiveProfile::Main,
             loaded,
         )?);
         self.threads
@@ -430,14 +430,14 @@ async fn load_thread_snapshot(
     project: &ProjectDir,
     thread_id: &str,
     settings: &Settings,
-    active_profile: domain::events::ActiveProfile,
+    active_profile: runtime_contract::thread_domain::ActiveProfile,
     thread: &store_model::Thread,
 ) -> Result<ThreadRuntimeInputs, CoreError> {
     let thread_dir = project.thread(thread_id);
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
     let messages = crate::history::load_messages(db, thread_id, &thread_dir).await;
     let agent_tasks = crate::history::load_agent_tasks_for_thread(db, thread_id, project).await;
-    let snapshot = domain::events::LoadedThread {
+    let snapshot = runtime_contract::thread_domain::LoadedThread {
         thread_id: thread.id.clone(),
         provider: thread.provider.clone(),
         model: thread.model.clone(),
@@ -446,7 +446,7 @@ async fn load_thread_snapshot(
         title: thread.title.clone(),
         messages,
         agent_tasks,
-        usage: domain::events::ThreadUsageSnapshot {
+        usage: runtime_contract::thread_domain::ThreadUsageSnapshot {
             current_context_tokens: thread.current_context_tokens,
             total_tokens: thread.total_tokens,
             total_cached_tokens: thread.total_cached_tokens,
@@ -487,7 +487,6 @@ mod tests {
         has_provider, project_manager_for, recv_runtime_event_kind, test_thread, unique_temp_root,
         write_config,
     };
-    use omini_domain as domain;
     use omini_protocol as client_proto;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -690,7 +689,10 @@ mod tests {
         let mut events = from_thread.subscribe();
 
         let to_thread_id = manager
-            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
+            .fork_thread_for_plan(
+                &from_thread_id,
+                runtime_contract::thread_domain::PlanExecutionProfile::Main,
+            )
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
@@ -748,7 +750,7 @@ mod tests {
         assert!(
             history.iter().any(|message| {
                 message.content.iter().any(|block| match block {
-                    domain::message::ContentBlock::Text(text) => text.text == plan_text,
+                    omini_model::message::ContentBlock::Text(text) => text.text == plan_text,
                     _ => false,
                 })
             }),
@@ -779,7 +781,10 @@ mod tests {
         std::fs::write(plans_dir.join("plan.md"), "# plan\n").expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
+            .fork_thread_for_plan(
+                &from_thread_id,
+                runtime_contract::thread_domain::PlanExecutionProfile::Main,
+            )
             .await
             .expect("fork should succeed");
 
@@ -814,7 +819,10 @@ mod tests {
             .expect("old plan file should be written");
 
         let error = manager
-            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
+            .fork_thread_for_plan(
+                &from_thread_id,
+                runtime_contract::thread_domain::PlanExecutionProfile::Main,
+            )
             .await
             .expect_err("fork should fail when plan file missing");
         let message = error.message();
@@ -862,7 +870,10 @@ mod tests {
         .expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(&from_thread_id, domain::events::PlanExecutionProfile::Main)
+            .fork_thread_for_plan(
+                &from_thread_id,
+                runtime_contract::thread_domain::PlanExecutionProfile::Main,
+            )
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);

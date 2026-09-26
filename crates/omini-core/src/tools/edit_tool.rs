@@ -3,7 +3,7 @@ use super::{
 };
 use crate::util::file_lock::FileLockService;
 use async_trait::async_trait;
-use omini_domain::events::{EditPermissionPreview, PermissionPreview};
+use omini_runtime_contract::thread_domain::{EditPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use similar::TextDiff;

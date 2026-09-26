@@ -8,6 +8,7 @@ pub(crate) mod error;
 pub(crate) mod frontmatter;
 pub(crate) mod mcp;
 pub(crate) mod prompts;
+pub(crate) mod proposed_plan;
 pub(crate) mod runtime;
 pub(crate) mod skills;
 pub(crate) mod subagents;
@@ -23,11 +24,11 @@ pub(crate) mod test_support;
 use crate::runtime::AgentRuntime;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
-use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
-use omini_domain::message::Message;
 use omini_domain::subagents as subagent_types;
+use omini_model::message::Message;
 use omini_runtime_contract::project as project_types;
 use omini_runtime_contract::thread as thread_types;
+use omini_runtime_contract::thread_domain::{ActiveProfile, ThreadUsageSnapshot};
 use omini_runtime_contract::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -156,7 +157,7 @@ pub struct AgentCoreThreadLoad {
     pub messages: Vec<Message>,
     pub llm_context_version: i64,
     pub usage: ThreadUsageSnapshot,
-    pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
+    pub agent_tasks: Vec<omini_runtime_contract::thread_domain::AgentTaskInfo>,
     pub background_tasks: Vec<omini_domain::task::TaskInfo>,
 }
 
@@ -385,7 +386,7 @@ impl AgentCoreThread {
     pub async fn intervene_agent_run(
         &self,
         run_id: String,
-        message: omini_domain::message::Message,
+        message: omini_model::message::Message,
     ) -> Result<(), CoreError> {
         self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
             run_id: Some(run_id),

@@ -1,7 +1,7 @@
 //! TOML 内联工具规则的解析与匹配，例如 `Read(**/...)` 和 `Agent(explorer)`。
 
 use omini_config::RawPermissionConfig;
-use omini_domain::events::{PermissionPreview, PermissionSource};
+use omini_runtime_contract::thread_domain::{PermissionPreview, PermissionSource};
 
 use crate::bash_parser::RuleDecision;
 use crate::engine::PermissionEngine;

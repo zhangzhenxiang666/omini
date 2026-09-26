@@ -1,14 +1,14 @@
+use crate::display::{DisplayImageAttachment, DisplayMessage, UserDraft};
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
     ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, CommandSummary, InteractionRequest,
     Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
-use omini_domain::display::{
-    AgentTaskNotification, DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft,
-};
-use omini_domain::message::Message;
+use omini_domain::conversation::{AgentTaskNotification, SystemEvent};
 use omini_domain::task::TaskStatus;
+use omini_model::message::Message;
+use omini_protocol::HistoryItem;
 use rand::Rng;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -199,18 +199,26 @@ impl UiMessage {
         items
             .into_iter()
             .map(|item| match item {
-                HistoryItem::Message(message) => Self::Message(message),
-                HistoryItem::Display(display) => Self::Display(display),
-                HistoryItem::UserInput(input) => Self::Display(input.display_message()),
-                HistoryItem::Plan(plan) => Self::ProposedPlan {
-                    text: plan.markdown,
-                },
-                HistoryItem::Summary(summary) => Self::CompactSummary {
-                    text: summary.markdown,
-                },
-                HistoryItem::AgentTaskNotification(notification) => {
-                    Self::AgentTaskNotification(notification)
+                HistoryItem::UserInput(input) => {
+                    Self::Display(crate::display::user_input_message(&input))
                 }
+                HistoryItem::AssistantMessage(output) => {
+                    Self::Message(crate::display::assistant_message(&output))
+                }
+                HistoryItem::SystemEvent(output) => match output {
+                    SystemEvent::Plan(plan) => Self::ProposedPlan {
+                        text: plan.markdown,
+                    },
+                    SystemEvent::Summary(summary) => Self::CompactSummary {
+                        text: summary.markdown,
+                    },
+                    SystemEvent::AgentTaskNotification(notification) => {
+                        Self::AgentTaskNotification(notification)
+                    }
+                    SystemEvent::ToolResults { results } => {
+                        Self::Message(crate::display::tool_results_message(&results))
+                    }
+                },
             })
             .collect()
     }
@@ -836,7 +844,7 @@ impl UiState {
             // 从后往前找当前正在累积（未计时）的 Thinking 块，
             // 已计时的块属于更早的思考段，不能覆盖。
             for block in pending.content.iter_mut().rev() {
-                if let omini_domain::message::ContentBlock::Thinking(tb) = block
+                if let omini_model::message::ContentBlock::Thinking(tb) = block
                     && tb.duration_ms.is_none()
                 {
                     tb.duration_ms = Some(duration_ms);
@@ -855,12 +863,12 @@ impl UiState {
         // 收集该消息中已有的 ToolResult id（同一消息内可能 Text → ToolUse → ToolResult）
         let mut resolved_ids = std::collections::HashSet::new();
         for block in &message.content {
-            if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
+            if let omini_model::message::ContentBlock::ToolResult(tr) = block {
                 resolved_ids.insert(&tr.tool_use_id);
             }
         }
         for block in &message.content {
-            if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+            if let omini_model::message::ContentBlock::ToolUse(tu) = block
                 && !resolved_ids.contains(&tu.id)
             {
                 self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
@@ -882,7 +890,7 @@ impl UiState {
                 continue;
             };
             for block in &message.content {
-                if let omini_domain::message::ContentBlock::ToolResult(tr) = block {
+                if let omini_model::message::ContentBlock::ToolResult(tr) = block {
                     all_resolved_ids.insert(&tr.tool_use_id);
                 }
             }
@@ -893,7 +901,7 @@ impl UiState {
                 continue;
             };
             for block in &message.content {
-                if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+                if let omini_model::message::ContentBlock::ToolUse(tu) = block
                     && !all_resolved_ids.contains(&tu.id)
                 {
                     self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
@@ -944,7 +952,7 @@ impl UiState {
             return false;
         };
         for block in &message.content {
-            if let omini_domain::message::ContentBlock::ToolUse(tu) = block {
+            if let omini_model::message::ContentBlock::ToolUse(tu) = block {
                 if self.pending_tool_message_map.contains_key(&tu.id) {
                     return true;
                 }
@@ -968,7 +976,7 @@ impl UiState {
             return false;
         };
         for block in &message.content {
-            if let omini_domain::message::ContentBlock::ToolUse(tu) = block
+            if let omini_model::message::ContentBlock::ToolUse(tu) = block
                 && matches!(tu.name.as_str(), "spawn_agent" | "run_agent")
                 && self
                     .subagents_by_tool_use

@@ -8,8 +8,8 @@ use instructions::{
     load_global_instructions, load_project_instructions, project_instructions_section,
 };
 use omini_config::Settings;
-use omini_domain::events::ActiveProfile;
 use omini_domain::subagents::AgentSummary;
+use omini_runtime_contract::thread_domain::ActiveProfile;
 use sections::{
     main_mode_body, max_steps_prompt, mode_header_section, plan_mode_body, subagent_section,
 };

@@ -1905,6 +1905,7 @@ dependencies = [
  "omini-config",
  "omini-domain",
  "omini-mcp-client",
+ "omini-model",
  "omini-permissions",
  "omini-provider-api",
  "omini-runtime-contract",
@@ -1949,11 +1950,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "omini-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "omini-permissions"
 version = "0.1.0"
 dependencies = [
  "omini-config",
  "omini-domain",
+ "omini-runtime-contract",
  "serde_json",
 ]
 
@@ -1963,6 +1973,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "omini-domain",
+ "omini-model",
+ "omini-runtime-contract",
  "serde",
  "serde_json",
 ]
@@ -1974,8 +1986,10 @@ dependencies = [
  "bytes",
  "http",
  "omini-domain",
+ "omini-model",
  "pin-project-lite",
  "reqwest",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -1990,6 +2004,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "omini-domain",
+ "omini-model",
  "serde",
  "serde_json",
  "tokio",
@@ -2010,6 +2025,7 @@ dependencies = [
  "omini-config",
  "omini-core",
  "omini-domain",
+ "omini-model",
  "omini-protocol",
  "omini-runtime-contract",
  "reqwest",
@@ -2036,7 +2052,9 @@ dependencies = [
  "dirs",
  "futures-util",
  "omini-domain",
+ "omini-model",
  "omini-protocol",
+ "omini-runtime-contract",
  "pulldown-cmark",
  "rand 0.8.6",
  "ratatui",

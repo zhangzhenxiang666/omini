@@ -1,7 +1,7 @@
 mod support;
 
 use crate::support::store::*;
-use omini_domain::message::Message;
+use omini_model::message::Message;
 use omini_runtime_contract::persistence::ThreadRecord;
 use omini_server::store::*;
 

@@ -6,7 +6,6 @@ use omini_config::{
     McpServerConfig as CoreMcpServerConfig,
     McpServerTransportConfig as CoreMcpServerTransportConfig, Settings,
 };
-use omini_domain::events::{McpPermissionPreview, PermissionPreview};
 use omini_mcp_client::{
     GetPromptResult, McpCallOutput, McpCatalog, McpClientSet,
     McpServerConfig as ClientMcpServerConfig, McpServerToolSpec,
@@ -16,6 +15,7 @@ use omini_mcp_client::{
 use omini_runtime_contract::mcp::{
     RuntimeMcpServerSnapshot, RuntimeMcpServerStatus, RuntimeMcpToolSnapshot,
 };
+use omini_runtime_contract::thread_domain::{McpPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};

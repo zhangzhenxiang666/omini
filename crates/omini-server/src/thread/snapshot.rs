@@ -1,6 +1,5 @@
 use crate::{event::bridge::protocol_events_from_loaded_thread_snapshot, thread::ThreadRuntime};
 use omini_core::CoreError;
-use omini_domain as domain;
 use omini_protocol as client_proto;
 
 impl ThreadRuntime {
@@ -25,7 +24,13 @@ impl ThreadRuntime {
 
     async fn load_snapshot(
         &self,
-    ) -> Result<(domain::events::LoadedThread, Vec<domain::message::Message>), CoreError> {
+    ) -> Result<
+        (
+            omini_runtime_contract::thread_domain::LoadedThread,
+            Vec<omini_model::message::Message>,
+        ),
+        CoreError,
+    > {
         let thread = self
             .db
             .get_thread(&self.thread_id)
@@ -43,7 +48,7 @@ impl ThreadRuntime {
             .lock()
             .expect("status projection lock poisoned")
             .active_profile();
-        let snapshot = domain::events::LoadedThread {
+        let snapshot = omini_runtime_contract::thread_domain::LoadedThread {
             thread_id: thread.id,
             provider: thread.provider.clone(),
             model: thread.model.clone(),
@@ -82,7 +87,10 @@ impl ThreadRuntime {
         Ok((snapshot, thread_messages))
     }
 
-    fn context_window_for_snapshot(&self, snapshot: &domain::events::LoadedThread) -> Option<u32> {
+    fn context_window_for_snapshot(
+        &self,
+        snapshot: &omini_runtime_contract::thread_domain::LoadedThread,
+    ) -> Option<u32> {
         self.settings
             .resolved_config()
             .model(&snapshot.provider, &snapshot.model)

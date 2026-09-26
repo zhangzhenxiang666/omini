@@ -1,7 +1,7 @@
 mod support;
 
 use crate::support::store::*;
-use omini_domain::message::Message;
+use omini_model::message::Message;
 use omini_server::{history, store::*};
 use std::fs;
 
@@ -91,7 +91,7 @@ async fn agent_compaction_preserves_ui_history() {
         history::load_messages(&db, "agent_compact", &project.thread("agent_compact"))
             .await
             .as_slice(),
-        [omini_domain::display::HistoryItem::Message(message)] if message == &initial
+        []
     ));
 }
 

@@ -1,13 +1,13 @@
-use omini_domain::agent_run::AgentRunSnapshot;
-use omini_domain::config::ThinkingEffort;
-use omini_domain::events::{
+use crate::thread_domain::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
     SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest, ToolPauseResponse,
 };
-use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_domain::agent_run::AgentRunSnapshot;
+use omini_domain::config::ThinkingEffort;
 use omini_domain::subagents::AgentRecord;
 use omini_domain::task::{TaskChangedEvent, TaskOutputDelta};
+use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
 use serde::{Deserialize, Serialize};
 
 /// server/facade 发往 runtime 的事件。
@@ -127,8 +127,8 @@ impl RuntimeToServerEvent {
 }
 
 mod serde_server_event_payload {
+    use crate::thread_domain::ActiveProfile;
     use omini_domain::config::ThinkingEffort;
-    use omini_domain::events::ActiveProfile;
     use serde::Deserialize;
     use serde::Serializer;
     use serde::ser::SerializeStruct;
@@ -185,7 +185,7 @@ mod serde_server_event_payload {
 }
 
 mod serde_runtime_event_payload {
-    use omini_domain::events::ActiveProfile;
+    use crate::thread_domain::ActiveProfile;
     use serde::Deserialize;
     use serde::Serializer;
     use serde::ser::SerializeStruct;

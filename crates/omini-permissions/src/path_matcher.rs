@@ -91,10 +91,10 @@ pub(crate) fn wildcard_match(pattern: &str, text: &str) -> bool {
 
 /// 从 `PermissionPreview` 或原始 JSON 输入中提取通用路径（read/edit/write/search 共用）。
 pub(crate) fn permission_path(
-    preview: Option<&omini_domain::events::PermissionPreview>,
+    preview: Option<&omini_runtime_contract::thread_domain::PermissionPreview>,
     raw_input: &serde_json::Value,
 ) -> Option<PathBuf> {
-    use omini_domain::events::PermissionPreview;
+    use omini_runtime_contract::thread_domain::PermissionPreview;
     match preview {
         Some(PermissionPreview::Read(preview)) => Some(PathBuf::from(&preview.file_path)),
         Some(PermissionPreview::Search(preview)) => Some(PathBuf::from(&preview.path)),
@@ -110,10 +110,10 @@ pub(crate) fn permission_path(
 
 /// 从 search 专用 preview 或原始 JSON 输入中提取搜索路径。
 pub(crate) fn search_path(
-    preview: Option<&omini_domain::events::PermissionPreview>,
+    preview: Option<&omini_runtime_contract::thread_domain::PermissionPreview>,
     raw_input: &serde_json::Value,
 ) -> Option<PathBuf> {
-    use omini_domain::events::PermissionPreview;
+    use omini_runtime_contract::thread_domain::PermissionPreview;
     match preview {
         Some(PermissionPreview::Search(preview)) => Some(PathBuf::from(&preview.path)),
         _ => raw_input
@@ -125,10 +125,10 @@ pub(crate) fn search_path(
 
 /// 从 read 专用 preview 或原始 JSON 输入中提取读取路径。
 pub(crate) fn read_path(
-    preview: Option<&omini_domain::events::PermissionPreview>,
+    preview: Option<&omini_runtime_contract::thread_domain::PermissionPreview>,
     raw_input: &serde_json::Value,
 ) -> Option<PathBuf> {
-    use omini_domain::events::PermissionPreview;
+    use omini_runtime_contract::thread_domain::PermissionPreview;
     match preview {
         Some(PermissionPreview::Read(preview)) => Some(PathBuf::from(&preview.file_path)),
         _ => raw_input

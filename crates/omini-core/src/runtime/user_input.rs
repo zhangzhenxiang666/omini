@@ -4,15 +4,16 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use omini_config::Settings;
 use omini_domain::config::InputModality;
-use omini_domain::input::{InputPart, RunCommand, RuntimeUserInput};
-use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::input::{InputPart, RunCommand};
+use omini_model::message::{ContentBlock, Message, Role};
+use omini_runtime_contract::thread::RuntimeUserInput;
 use sha2::{Digest, Sha256};
 
 pub const INIT_PROMPT: &str = include_str!("../prompts/init.txt");
 
 /// 校验并构建用户输入的 LLM 上下文消息：skill 展开、init prompt 注入、
 /// 附件完整性校验与 base64 编码都是 core 知识，因此留在这里。
-/// 用户级展示视图（`DisplayUserInput`）与此无关，由 server 在接收路径构建。
+/// 用户时间线记录与此无关，由 server 在接收路径构建。
 pub fn prepare_submission(
     input: RuntimeUserInput,
     command: Option<RunCommand>,
@@ -142,7 +143,8 @@ fn validate_non_empty(
 mod tests {
     use super::*;
     use crate::test_support::TestTempDir;
-    use omini_domain::input::{AttachmentMetadata, ResolvedAttachment};
+    use omini_domain::input::AttachmentMetadata;
+    use omini_runtime_contract::thread::ResolvedAttachment;
 
     #[test]
     fn expands_parts_in_their_original_order() {

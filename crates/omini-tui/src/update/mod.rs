@@ -2,12 +2,12 @@ use super::input;
 use super::protocol;
 use super::state::{AgentStatus, UiMessage, UiState};
 use crate::client::ClientRequest;
+use crate::display::UserDraft;
 use crate::types::events::{
     ActiveProfile, CommandKind, PlanApprovalAction, PlanExecutionProfile, RuntimeToUiEvent,
     ToolPauseKind,
 };
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use omini_domain::display::UserDraft;
 use tokio::sync::mpsc;
 
 mod mouse;
@@ -438,7 +438,7 @@ async fn handle_command_autocomplete_key(
                     let msg = std::mem::take(&mut state.input);
                     state.cursor_char = 0;
                     if !msg.is_empty() {
-                        let draft = omini_domain::display::UserDraft::plain(msg);
+                        let draft = crate::display::UserDraft::plain(msg);
                         if let Some(request) = request_from_command_draft(state, draft) {
                             let _ = request_tx.send(request).await;
                         }
@@ -660,28 +660,7 @@ async fn handle_composer_key(
                 } else {
                     state.clear_run_dividers();
                     state.show_start_screen = false;
-                    let ui_message = match draft.clone().history_item() {
-                        omini_domain::display::HistoryItem::Message(message) => {
-                            UiMessage::Message(message)
-                        }
-                        omini_domain::display::HistoryItem::Display(display) => {
-                            UiMessage::Display(display)
-                        }
-                        omini_domain::display::HistoryItem::UserInput(input) => {
-                            UiMessage::Display(input.display_message())
-                        }
-                        omini_domain::display::HistoryItem::Plan(plan) => UiMessage::ProposedPlan {
-                            text: plan.markdown,
-                        },
-                        omini_domain::display::HistoryItem::Summary(summary) => {
-                            UiMessage::CompactSummary {
-                                text: summary.markdown,
-                            }
-                        }
-                        omini_domain::display::HistoryItem::AgentTaskNotification(notification) => {
-                            UiMessage::AgentTaskNotification(notification)
-                        }
-                    };
+                    let ui_message = UiMessage::Display(draft.display_message());
                     let client_echo_id = uuid::Uuid::new_v4().to_string();
                     state.push_optimistic_echo(ui_message, client_echo_id.clone());
                     let _ = request_tx
@@ -734,6 +713,7 @@ async fn handle_composer_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::display::MentionKind;
     use crate::state::InputMention;
     use crate::types::events::{
         ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, CommandKind,
@@ -742,7 +722,6 @@ mod tests {
     };
     use chrono::Utc;
     use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
-    use omini_domain::display::MentionKind;
     use std::path::PathBuf;
 
     fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {

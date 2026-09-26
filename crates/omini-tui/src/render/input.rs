@@ -1,5 +1,5 @@
+use crate::display::UserDraft;
 use crate::state::UiState;
-use omini_domain::display::UserDraft;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

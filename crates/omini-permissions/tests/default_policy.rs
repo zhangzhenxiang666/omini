@@ -1,8 +1,8 @@
-use omini_domain::events::{
+use omini_permissions::{PermissionCheck, PermissionDecision, PermissionEngine};
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, BashPermissionPreview, PermissionPreview, ReadPermissionPreview,
     SearchPermissionPreview,
 };
-use omini_permissions::{PermissionCheck, PermissionDecision, PermissionEngine};
 use serde_json::json;
 
 #[test]

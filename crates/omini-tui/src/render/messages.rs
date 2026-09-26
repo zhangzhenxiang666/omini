@@ -7,6 +7,7 @@ use super::{
     line_to_plain_text, line_width, render_subagent_tool, styled_wrapped_display,
     styled_wrapped_text, truncate_str,
 };
+use crate::display::DisplayMessage;
 use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
@@ -14,8 +15,7 @@ use crate::widgets::{
     render_tool_compact, render_wait_tasks, thinking_duration_line, tool_error_display_text,
     truncate_display_width,
 };
-use omini_domain::display::DisplayMessage;
-use omini_domain::message::{ContentBlock, ToolUseBlock};
+use omini_model::message::{ContentBlock, ToolUseBlock};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -364,7 +364,7 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     render_cached_section(&compact_lines.0, compact_offset, &render_ctx, buf);
 }
 
-fn activity_prefix_len(state: &UiState, message: &omini_domain::message::Message) -> usize {
+fn activity_prefix_len(state: &UiState, message: &omini_model::message::Message) -> usize {
     message
         .content
         .iter()
@@ -454,7 +454,7 @@ fn render_message_range(
     let mut selectable_lines: Vec<String> = Vec::new();
 
     // 全量扫描构建 tool_result_map（成本低，O(n)）
-    let rendered_messages: Vec<&omini_domain::message::Message> = state
+    let rendered_messages: Vec<&omini_model::message::Message> = state
         .messages
         .iter()
         .filter_map(UiMessage::as_message)
@@ -554,7 +554,7 @@ fn render_message_range(
 }
 
 struct MessageRenderContext<'a> {
-    rendered_messages: &'a [&'a omini_domain::message::Message],
+    rendered_messages: &'a [&'a omini_model::message::Message],
     tool_result_map: &'a HashMap<String, Vec<(usize, usize)>>,
     state: &'a UiState,
     content_width: usize,
@@ -645,7 +645,7 @@ fn render_single_ui_message(
             // Claude Code 式活动收缩：assistant 消息的 thinking 时长与常规工具
             // 聚合为一行摘要（`⏺ Thought for 12s, ran 1 shell command`），
             // 常规工具按类别计数；特殊交互工具与正文保持独立渲染。
-            if include_activity_summary && message.role == omini_domain::message::Role::Assistant {
+            if include_activity_summary && message.role == omini_model::message::Role::Assistant {
                 let summary_lines = render_activity_summary(
                     &[message],
                     tool_result_map,
@@ -668,7 +668,7 @@ fn render_single_ui_message(
 
                 let mut block_lines: Vec<Line> = Vec::new();
                 match block {
-                    ContentBlock::Text(tb) if message.role == omini_domain::message::Role::User => {
+                    ContentBlock::Text(tb) if message.role == omini_model::message::Role::User => {
                         let user_bg = INPUT_BG;
                         let bg_style = Style::default().bg(user_bg);
                         let wrapped = styled_wrapped_text(
@@ -1051,10 +1051,56 @@ fn render_pending_compact_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_domain::message::ThinkingBlock;
-    use omini_domain::message::{ContentBlock, Message, Role};
+    use omini_domain::conversation::{
+        AssistantMessage, AssistantMessageBlock, SystemEvent, ToolResultRecord,
+    };
+    use omini_model::message::ThinkingBlock;
+    use omini_model::message::{ContentBlock, Message, Role};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+
+    fn history_item_from_model_message(message: Message) -> omini_protocol::HistoryItem {
+        match message.role {
+            Role::Assistant => {
+                let blocks = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Thinking(block) => Some(AssistantMessageBlock::Thinking {
+                            thinking: block.thinking,
+                            duration_ms: block.duration_ms,
+                        }),
+                        ContentBlock::Text(block) => {
+                            Some(AssistantMessageBlock::Text { text: block.text })
+                        }
+                        ContentBlock::ToolUse(block) => Some(AssistantMessageBlock::ToolUse {
+                            id: block.id,
+                            name: block.name,
+                            input: block.input,
+                        }),
+                        ContentBlock::Image(_) | ContentBlock::ToolResult(_) => None,
+                    })
+                    .collect();
+                omini_protocol::HistoryItem::AssistantMessage(AssistantMessage { blocks })
+            }
+            Role::User => {
+                let results = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::ToolResult(result) => Some(ToolResultRecord {
+                            tool_use_id: result.tool_use_id,
+                            is_error: result.is_error,
+                            content: result.content,
+                            metadata: result.metadata,
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                omini_protocol::HistoryItem::SystemEvent(SystemEvent::ToolResults { results })
+            }
+        }
+    }
 
     fn thought_and_shell_call(duration_ms: u64, id: &str, output: &str) -> Message {
         let input = HashMap::from([("command".to_string(), serde_json::json!("pwd"))]);
@@ -1323,19 +1369,16 @@ mod tests {
         state.apply_thread_snapshot(
             Some("restored-thread".into()),
             vec![
-                omini_domain::display::HistoryItem::Message(read_turn("r1", Some(5_000), None)),
-                omini_domain::display::HistoryItem::Message(tool_result("r1", "101: text,")),
-                omini_domain::display::HistoryItem::Message(read_turn("r2", None, None)),
-                omini_domain::display::HistoryItem::Message(tool_result("r2", "880: text,")),
-                omini_domain::display::HistoryItem::Message(read_turn(
+                history_item_from_model_message(read_turn("r1", Some(5_000), None)),
+                history_item_from_model_message(tool_result("r1", "101: text,")),
+                history_item_from_model_message(read_turn("r2", None, None)),
+                history_item_from_model_message(tool_result("r2", "880: text,")),
+                history_item_from_model_message(read_turn(
                     "r3",
                     Some(7_000),
                     Some("检查剩余的状态逻辑。"),
                 )),
-                omini_domain::display::HistoryItem::Message(tool_result(
-                    "r3",
-                    "225: if hours > 0 {",
-                )),
+                history_item_from_model_message(tool_result("r3", "225: if hours > 0 {")),
             ],
             Vec::new(),
             crate::types::events::ThreadUsageSnapshot::default(),
@@ -1366,7 +1409,7 @@ mod tests {
         state.apply_thread_snapshot(
             Some("thread-with-ask-user".into()),
             vec![
-                omini_domain::display::HistoryItem::Message(Message::new(
+                history_item_from_model_message(Message::new(
                     Role::Assistant,
                     vec![
                         ContentBlock::Thinking(ThinkingBlock {
@@ -1376,7 +1419,7 @@ mod tests {
                         ContentBlock::from_tool_use("shell-1".into(), "bash".into(), shell_input),
                     ],
                 )),
-                omini_domain::display::HistoryItem::Message(Message::new(
+                history_item_from_model_message(Message::new(
                     Role::User,
                     vec![ContentBlock::from_tool_result(
                         "shell-1".into(),
@@ -1384,7 +1427,7 @@ mod tests {
                         "Cargo.toml".into(),
                     )],
                 )),
-                omini_domain::display::HistoryItem::Message(Message::new(
+                history_item_from_model_message(Message::new(
                     Role::Assistant,
                     vec![
                         ContentBlock::Thinking(ThinkingBlock {

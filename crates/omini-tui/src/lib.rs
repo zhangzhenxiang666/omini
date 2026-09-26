@@ -24,3 +24,4 @@ pub fn run_ui(connection: StartupConnection) -> std::io::Result<()> {
         .build()?;
     runtime.block_on(app::run_ui_async(connection))
 }
+pub mod display;

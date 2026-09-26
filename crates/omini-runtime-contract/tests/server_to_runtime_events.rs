@@ -1,9 +1,9 @@
 use omini_domain::config::ThinkingEffort;
-use omini_domain::events::{
+use omini_model::message::Message;
+use omini_runtime_contract::ServerToRuntimeEvent;
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, PlanApprovalAction, PlanExecutionProfile, ToolPauseResponse,
 };
-use omini_domain::message::Message;
-use omini_runtime_contract::ServerToRuntimeEvent;
 use serde_json::{Value, json};
 
 #[test]

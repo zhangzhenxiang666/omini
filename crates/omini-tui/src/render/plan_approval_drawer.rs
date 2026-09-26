@@ -160,7 +160,7 @@ mod tests {
     use crate::selection::selected_text;
     use crate::state::{SelectionPoint, TextSelection};
     use chrono::Utc;
-    use omini_domain::display::DisplayPlan;
+    use omini_domain::conversation::ProposedPlan;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -230,7 +230,7 @@ mod tests {
         let backend = TestBackend::new(80, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.plan_approval = Some(DisplayPlan {
+        state.plan_approval = Some(ProposedPlan {
             id: "preview-plan".to_string(),
             title: "Plan".to_string(),
             markdown: "# Plan".to_string(),

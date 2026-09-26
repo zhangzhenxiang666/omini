@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use omini_domain::config::InputModality;
-use omini_domain::message::ContentBlock;
+use omini_model::message::ContentBlock;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};

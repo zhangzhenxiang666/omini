@@ -1,4 +1,4 @@
-use omini_domain::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
+use omini_model::message::{ContentBlock, Message, Role, ThinkingBlock, ToolResultBlock};
 use serde_json::json;
 use std::collections::HashMap;
 

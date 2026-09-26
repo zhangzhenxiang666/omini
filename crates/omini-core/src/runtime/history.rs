@@ -1,9 +1,9 @@
+use crate::proposed_plan::strip_proposed_plan_blocks;
 use crate::runtime::service::RunStart;
-use omini_domain::display::{DisplayPlan, DisplaySummary};
-use omini_domain::events::ActiveProfile;
-use omini_domain::message::{ContentBlock, Message, Role, TextBlock};
-use omini_domain::proposed_plan::strip_proposed_plan_blocks;
+use omini_domain::conversation::{CompactionSummary, ProposedPlan};
+use omini_model::message::{ContentBlock, Message, Role, TextBlock};
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::thread_domain::ActiveProfile;
 use tokio::sync::mpsc;
 
 pub async fn persist_initial_user_message(
@@ -97,7 +97,7 @@ fn ui_message_blocks(msg: &Message, active_profile: ActiveProfile) -> Vec<Conten
 
 pub async fn persist_plan_ui_message(
     thread_id: &str,
-    plan: &DisplayPlan,
+    plan: &ProposedPlan,
     model_ref: &str,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
@@ -112,7 +112,7 @@ pub async fn persist_plan_ui_message(
 
 pub async fn persist_compact_summary_ui_message(
     thread_id: &str,
-    summary: &DisplaySummary,
+    summary: &CompactionSummary,
     model_ref: &str,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {

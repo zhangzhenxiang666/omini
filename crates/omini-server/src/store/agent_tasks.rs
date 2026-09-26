@@ -240,7 +240,7 @@ impl Database {
     pub async fn insert_agent_task_notification(
         &self,
         owner_thread_id: &str,
-        notification: &omini_domain::display::AgentTaskNotification,
+        notification: &omini_domain::conversation::AgentTaskNotification,
         llm_message: &Message,
         task_ids: &[String],
         created_at: DateTime<Utc>,
@@ -264,7 +264,17 @@ impl Database {
             return Ok(());
         }
 
-        let notification_json = serde_json::to_string(notification)?;
+        let notification_json =
+            serde_json::to_string(&omini_domain::conversation::ConversationEntry::SystemEvent(
+                omini_domain::conversation::SystemEvent::AgentTaskNotification(
+                    notification.clone(),
+                ),
+            ))?;
+        let model_ref: String =
+            sqlx::query_scalar("SELECT provider || '/' || model FROM thread WHERE id = ?")
+                .bind(owner_thread_id)
+                .fetch_one(&mut *tx)
+                .await?;
         let llm_json = serde_json::to_string(&llm_message.content)?;
         sqlx::query(
             "INSERT INTO messages(
@@ -275,9 +285,10 @@ impl Database {
                     kind,
                     created_at
                 )
-                VALUES (?, 'user', NULL, ?, 'agent_task_notification', ?)",
+                VALUES (?, 'assistant', ?, ?, 'conversation_entry', ?)",
         )
         .bind(owner_thread_id)
+        .bind(model_ref)
         .bind(notification_json)
         .bind(created_at)
         .execute(&mut *tx)

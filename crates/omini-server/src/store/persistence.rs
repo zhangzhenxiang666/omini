@@ -15,18 +15,18 @@ impl Database {
         &self,
         request: AgentMessagePersistence<'_>,
     ) -> Result<(), StoreError> {
-        if request.display_in_ui {
-            self.insert_message(
-                &NewMessage {
-                    thread_id: request.thread_id.to_string(),
-                    role: request.message.role.to_string(),
-                    model_ref: (request.message.role == Role::Assistant)
-                        .then(|| request.model_ref.map(str::to_string))
-                        .flatten(),
-                    blocks: request.message.content.clone(),
-                    kind: "normal".to_string(),
-                    created_at: request.created_at,
-                },
+        if request.display_in_ui
+            && let Some(entry) =
+                crate::conversation::entry_from_model_message(request.message.clone())
+        {
+            self.insert_conversation_entry(
+                request.thread_id,
+                &entry,
+                &request.message.role.to_string(),
+                (request.message.role == Role::Assistant)
+                    .then_some(request.model_ref)
+                    .flatten(),
+                request.created_at,
                 &request.project.thread(request.thread_id),
             )
             .await?;
@@ -168,20 +168,20 @@ impl Database {
                 thread_id,
                 message,
                 model_ref,
-            } => {
-                self.insert_message(
-                    &NewMessage {
-                        thread_id: thread_id.clone(),
-                        role: message.role.to_string(),
-                        model_ref: model_ref.clone(),
-                        blocks: message.content.clone(),
-                        kind: "normal".to_string(),
-                        created_at: Utc::now(),
-                    },
-                    &project.thread(thread_id),
-                )
-                .await
-            }
+            } => match crate::conversation::entry_from_model_message(message.clone()) {
+                Some(entry) => {
+                    self.insert_conversation_entry(
+                        thread_id,
+                        &entry,
+                        &message.role.to_string(),
+                        model_ref.as_deref(),
+                        Utc::now(),
+                        &project.thread(thread_id),
+                    )
+                    .await
+                }
+                None => Ok(()),
+            },
             RuntimePersistenceEvent::InsertPlanMessage {
                 thread_id,
                 plan,

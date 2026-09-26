@@ -1,8 +1,8 @@
+pub use crate::tool::ToolDefinition;
 pub use omini_domain::config::ProviderEndpointKind as ProviderType;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::message::{Message, ToolUseBlock};
-use omini_domain::tool::ToolDefinition;
 use omini_domain::usage::Usage;
+use omini_model::message::{Message, ToolUseBlock};
 use std::sync::OnceLock;
 use std::time::Duration;
 use thiserror::Error;
@@ -13,6 +13,7 @@ use url::Url;
 pub mod anthropic;
 pub mod openai;
 pub mod sse;
+pub mod tool;
 
 #[derive(Debug, Clone)]
 pub struct LlmClient {

@@ -3,13 +3,13 @@ use crate::runtime::compact::AutoCompactState;
 use crate::tools::{PendingToolPauses, ToolRegistry, ToolRuntimeContext};
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
-use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
-use omini_domain::events::{ActiveProfile, ToolPauseResponse};
-use omini_domain::message::Message;
+use omini_domain::conversation::{AgentTaskNotification, AgentTaskNotificationItem};
 use omini_domain::task::TaskCompletion;
 use omini_domain::task::TaskStatus;
+use omini_model::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
+use omini_runtime_contract::thread_domain::{ActiveProfile, ToolPauseResponse};
 use serde::Serialize;
 use state::{FinalizationReason, QueryState, REPEAT_LIMIT, RepeatGuard, TurnOutcome};
 use std::collections::VecDeque;
@@ -503,7 +503,7 @@ mod tests {
             };
             assert_eq!(task_ids, ["task_1", "task_2"]);
             assert_eq!(notification.tasks.len(), 2);
-            let omini_domain::message::ContentBlock::Text(text) = &llm_message.content[0] else {
+            let omini_model::message::ContentBlock::Text(text) = &llm_message.content[0] else {
                 panic!("task notification should be a text message");
             };
             let payload = text
@@ -528,7 +528,7 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[1].content.as_slice(),
-            [omini_domain::message::ContentBlock::Text(text)]
+            [omini_model::message::ContentBlock::Text(text)]
                 if text.text.contains("agent_task_notifications")
         ));
     }

@@ -37,7 +37,7 @@ impl Tool for SendMessageTool {
         let Some(supervisor) = &runtime.task_supervisor else {
             return ToolResult::error("agent task supervisor is not available");
         };
-        let message = omini_domain::message::Message::from_user_text(text.to_string());
+        let message = omini_model::message::Message::from_user_text(text.to_string());
         match supervisor.send_message(
             runtime.task_id.as_deref(),
             runtime.agent_depth,

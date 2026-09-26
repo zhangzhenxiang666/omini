@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use omini_config::permissions::PermissionSources;
-use omini_domain::events::{
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, BashPermissionPreview, PermissionPreview, PermissionSource,
 };
 use serde_json::Value;

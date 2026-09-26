@@ -11,14 +11,9 @@ pub use omini_domain::agent_run::{
 pub use omini_domain::config::{
     InputModality, ModelInfo, ProviderEndpointKind, ProviderInfo, ThinkingEffort,
 };
-pub use omini_domain::display::HistoryItem;
-pub use omini_domain::events::{
-    ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, AgentTaskSnapshot, CompactTrigger, MAX_AGENT_DEPTH, PermissionPreview,
-    PlanApprovalAction, PlanExecutionProfile, SubmittedPlan, ThreadRuntimeState, ThreadSummary,
-    ThreadUsage, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+use omini_domain::conversation::{
+    AssistantMessage, SystemEvent, UserInput as ConversationUserInput,
 };
-pub use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 pub use omini_domain::subagents::{
     AgentDraft, AgentRecord as RuntimeAgentRecord, AgentSourceKind, AgentSummary,
     GeneratedAgentDraft,
@@ -26,9 +21,41 @@ pub use omini_domain::subagents::{
 pub use omini_domain::task::{
     TaskChangedEvent, TaskInfo, TaskKind, TaskOutputDelta, TaskOutputStream, TaskStatus,
 };
+pub use omini_model::message::{ToolResultBlock, ToolUseBlock};
+pub use omini_runtime_contract::thread_domain::{
+    ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
+    AgentTaskResult, AgentTaskSnapshot, CompactTrigger, MAX_AGENT_DEPTH, PermissionPreview,
+    PlanApprovalAction, PlanExecutionProfile, SubmittedPlan, ThreadRuntimeState, ThreadSummary,
+    ThreadUsage, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
+};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 4;
+pub const PROTOCOL_REVISION: u32 = 5;
+
+/// 用户时间线快照中的一个条目。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "entry", rename_all = "snake_case")]
+pub enum HistoryItem {
+    UserInput(ConversationUserInput),
+    AssistantMessage(AssistantMessage),
+    SystemEvent(SystemEvent),
+}
+
+impl From<omini_domain::conversation::ConversationEntry> for HistoryItem {
+    fn from(entry: omini_domain::conversation::ConversationEntry) -> Self {
+        match entry {
+            omini_domain::conversation::ConversationEntry::UserInput(input) => {
+                Self::UserInput(input)
+            }
+            omini_domain::conversation::ConversationEntry::AssistantMessage(output) => {
+                Self::AssistantMessage(output)
+            }
+            omini_domain::conversation::ConversationEntry::SystemEvent(output) => {
+                Self::SystemEvent(output)
+            }
+        }
+    }
+}
 
 /// daemon 健康检查响应，用于客户端确认本地服务可用并识别服务名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

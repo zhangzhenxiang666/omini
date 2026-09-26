@@ -1,7 +1,7 @@
 mod support;
 
 use omini_domain::config::ProviderEndpointKind;
-use omini_domain::message::Message;
+use omini_model::message::Message;
 use omini_provider_api::{ApiEvent, ApiRequest, is_retryable};
 use tokio_stream::StreamExt;
 

@@ -1,8 +1,8 @@
 use chrono::{TimeZone, Utc};
 use omini_config::project::ProjectDir;
-use omini_domain::events::{AgentTaskExecutionMode, AgentTaskInfo};
 use omini_domain::task::TaskStatus;
 use omini_runtime_contract::persistence::ThreadRecord;
+use omini_runtime_contract::thread_domain::{AgentTaskExecutionMode, AgentTaskInfo};
 use omini_server::store::{Database, Project, Thread};
 use std::fs;
 use std::path::PathBuf;

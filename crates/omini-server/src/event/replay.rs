@@ -216,12 +216,12 @@ impl RuntimeReplayBuffer {
                 message,
                 ..
             } if thread_id == owner_thread_id => {
-                if message.role == domain::message::Role::Assistant {
+                if message.role == omini_model::message::Role::Assistant {
                     self.drop_current_assistant_tail();
                 } else if message
                     .content
                     .iter()
-                    .any(domain::message::ContentBlock::is_tool_result)
+                    .any(omini_model::message::ContentBlock::is_tool_result)
                 {
                     self.drop_persisted_tool_results();
                 } else {
@@ -240,8 +240,8 @@ impl RuntimeReplayBuffer {
 
     pub fn record_snapshot(
         &mut self,
-        snapshot: &domain::events::LoadedThread,
-        thread_messages: &[domain::message::Message],
+        snapshot: &runtime_contract::thread_domain::LoadedThread,
+        thread_messages: &[omini_model::message::Message],
     ) {
         // 新连接发 snapshot 前再做一次裁剪，覆盖持久化事件和 snapshot 生成之间的竞态。
         self.drop_user_injections_in_snapshot(snapshot);
@@ -269,69 +269,76 @@ impl RuntimeReplayBuffer {
             client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) => envelope.payload.clone(),
             _ => return,
         };
-        if matches!(payload, domain::events::AgentTaskEvent::Finished { .. }) {
+        if matches!(
+            payload,
+            runtime_contract::thread_domain::AgentTaskEvent::Finished { .. }
+        ) {
             self.agent_streams.remove(&task_id);
             return;
         }
         let stream = self.agent_streams.entry(task_id).or_default();
         match payload {
-            domain::events::AgentTaskEvent::Started { .. } => {
+            runtime_contract::thread_domain::AgentTaskEvent::Started { .. } => {
                 stream.events.clear();
                 stream.delta_bytes = 0;
                 stream.truncated = false;
                 stream.events.push(event);
             }
-            domain::events::AgentTaskEvent::TurnStarted => {
+            runtime_contract::thread_domain::AgentTaskEvent::TurnStarted => {
                 stream.events.retain(|entry| {
                     matches!(
                         &entry.event.event,
                         client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
-                            if matches!(envelope.payload, domain::events::AgentTaskEvent::Started { .. })
+                            if matches!(envelope.payload, runtime_contract::thread_domain::AgentTaskEvent::Started { .. })
                     )
                 });
                 stream.delta_bytes = 0;
                 stream.truncated = false;
                 stream.events.push(event);
             }
-            domain::events::AgentTaskEvent::ThinkingDelta { delta } => {
+            runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta } => {
                 push_agent_delta(stream, event, delta, true);
             }
-            domain::events::AgentTaskEvent::TextDelta { delta } => {
+            runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } => {
                 push_agent_delta(stream, event, delta, false);
             }
-            domain::events::AgentTaskEvent::MessageCommitted { message, .. } => {
-                if message.role == domain::message::Role::Assistant {
+            runtime_contract::thread_domain::AgentTaskEvent::MessageCommitted {
+                message, ..
+            } => {
+                if message.role == omini_model::message::Role::Assistant {
                     stream.events.retain(|entry| {
                         !matches!(
                             &entry.event.event,
                             client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
                                 if matches!(
                                     envelope.payload,
-                                    domain::events::AgentTaskEvent::ThinkingDelta { .. }
-                                        | domain::events::AgentTaskEvent::TextDelta { .. }
-                                        | domain::events::AgentTaskEvent::ToolUse { .. }
+                                    runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { .. }
+                                        | runtime_contract::thread_domain::AgentTaskEvent::TextDelta { .. }
+                                        | runtime_contract::thread_domain::AgentTaskEvent::ToolUse { .. }
                                 )
                         )
                     });
                 } else if message
                     .content
                     .iter()
-                    .any(domain::message::ContentBlock::is_tool_result)
+                    .any(omini_model::message::ContentBlock::is_tool_result)
                 {
                     stream.events.retain(|entry| {
                         !matches!(
                             &entry.event.event,
                             client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
-                                if matches!(envelope.payload, domain::events::AgentTaskEvent::ToolResult { .. })
+                                if matches!(envelope.payload, runtime_contract::thread_domain::AgentTaskEvent::ToolResult { .. })
                         )
                     });
                 }
                 stream.delta_bytes = agent_delta_bytes(&stream.events);
             }
-            domain::events::AgentTaskEvent::ToolUse { .. }
-            | domain::events::AgentTaskEvent::ToolResult { .. }
-            | domain::events::AgentTaskEvent::TurnEnded => stream.events.push(event),
-            domain::events::AgentTaskEvent::Finished { .. } => unreachable!(),
+            runtime_contract::thread_domain::AgentTaskEvent::ToolUse { .. }
+            | runtime_contract::thread_domain::AgentTaskEvent::ToolResult { .. }
+            | runtime_contract::thread_domain::AgentTaskEvent::TurnEnded => {
+                stream.events.push(event)
+            }
+            runtime_contract::thread_domain::AgentTaskEvent::Finished { .. } => unreachable!(),
         }
     }
 
@@ -402,14 +409,20 @@ impl RuntimeReplayBuffer {
         self.clear_compact_tail();
     }
 
-    fn drop_user_injections_in_snapshot(&mut self, snapshot: &domain::events::LoadedThread) {
+    fn drop_user_injections_in_snapshot(
+        &mut self,
+        snapshot: &runtime_contract::thread_domain::LoadedThread,
+    ) {
         self.pending_prefix
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
         self.current_tail
             .retain(|event| !user_injection_is_in_snapshot(event, snapshot));
     }
 
-    fn drop_thread_title_in_snapshot(&mut self, snapshot: &domain::events::LoadedThread) {
+    fn drop_thread_title_in_snapshot(
+        &mut self,
+        snapshot: &runtime_contract::thread_domain::LoadedThread,
+    ) {
         let Some(event) = &self.latest_thread_title else {
             return;
         };
@@ -420,24 +433,24 @@ impl RuntimeReplayBuffer {
 
     fn current_assistant_tail_is_in_snapshot(
         &self,
-        thread_messages: &[domain::message::Message],
+        thread_messages: &[omini_model::message::Message],
     ) -> bool {
         let blocks = assistant_tail_blocks(&self.current_tail);
         !blocks.is_empty()
             && thread_messages.iter().any(|message| {
-                message.role == domain::message::Role::Assistant
+                message.role == omini_model::message::Role::Assistant
                     && strip_thinking_durations(&message.content) == blocks
             })
     }
 
     fn current_tool_results_are_in_snapshot(
         &self,
-        thread_messages: &[domain::message::Message],
+        thread_messages: &[omini_model::message::Message],
     ) -> bool {
         let blocks = tool_result_tail_blocks(&self.current_tail);
         !blocks.is_empty()
             && thread_messages.iter().any(|message| {
-                message.role == domain::message::Role::User && message.content == blocks
+                message.role == omini_model::message::Role::User && message.content == blocks
             })
     }
 }
@@ -484,13 +497,14 @@ fn truncate_task_output(replay: &mut TaskStreamReplay, stream: domain::task::Tas
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
 fn user_injection_is_in_snapshot(
     event: &SequencedRuntimeEvent,
-    snapshot: &domain::events::LoadedThread,
+    snapshot: &runtime_contract::thread_domain::LoadedThread,
 ) -> bool {
     let client_proto::TypedRuntimeEvent::UserMessageInjected { item, .. } = &event.event.event
     else {
         return false;
     };
-    snapshot.messages.iter().any(|message| message == item)
+    let item = crate::conversation::domain_entry(item.clone());
+    snapshot.messages.iter().any(|message| message == &item)
 }
 
 fn thread_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&String>> {
@@ -501,7 +515,9 @@ fn thread_title_payload(event: &client_proto::RuntimeEvent) -> Option<Option<&St
 }
 
 /// 把当前 assistant 流式尾部重组为完整内容块，供 snapshot 去重比较。
-fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::message::ContentBlock> {
+fn assistant_tail_blocks(
+    events: &[SequencedRuntimeEvent],
+) -> Vec<omini_model::message::ContentBlock> {
     // 增量事件需要还原成完整 ContentBlock，才能和 snapshot 中的 assistant message 比较。
     let mut blocks = Vec::new();
     for event in events {
@@ -513,7 +529,9 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::messag
                 push_delta_block(&mut blocks, &event.delta, false)
             }
             client_proto::TypedRuntimeEvent::ToolUse(tool_use) => {
-                blocks.push(domain::message::ContentBlock::ToolUse(tool_use.clone()));
+                blocks.push(omini_model::message::ContentBlock::ToolUse(
+                    tool_use.clone(),
+                ));
             }
             _ => {}
         }
@@ -522,12 +540,14 @@ fn assistant_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::messag
 }
 
 /// 收集当前尾部中尚未被 snapshot 覆盖的工具结果块。
-fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::message::ContentBlock> {
+fn tool_result_tail_blocks(
+    events: &[SequencedRuntimeEvent],
+) -> Vec<omini_model::message::ContentBlock> {
     events
         .iter()
         .filter_map(|event| match &event.event.event {
             client_proto::TypedRuntimeEvent::ToolResult(tool_result) => Some(
-                domain::message::ContentBlock::ToolResult(tool_result.clone()),
+                omini_model::message::ContentBlock::ToolResult(tool_result.clone()),
             ),
             _ => None,
         })
@@ -538,11 +558,11 @@ fn tool_result_tail_blocks(events: &[SequencedRuntimeEvent]) -> Vec<domain::mess
 /// delta 重建的尾部块不带时长（时长由 engine 在 turn 结束时写入持久化消息），
 /// 全等比较前需先剥离该显示元数据，否则去重失效会导致重连时重放已持久化内容。
 fn strip_thinking_durations(
-    content: &[domain::message::ContentBlock],
-) -> Vec<domain::message::ContentBlock> {
+    content: &[omini_model::message::ContentBlock],
+) -> Vec<omini_model::message::ContentBlock> {
     let mut content = content.to_vec();
     for block in &mut content {
-        if let domain::message::ContentBlock::Thinking(thinking) = block {
+        if let omini_model::message::ContentBlock::Thinking(thinking) = block {
             thinking.duration_ms = None;
         }
     }
@@ -550,16 +570,24 @@ fn strip_thinking_durations(
 }
 
 /// 将连续文本或 thinking delta 合并成可比较的 `ContentBlock`。
-fn push_delta_block(blocks: &mut Vec<domain::message::ContentBlock>, delta: &str, thinking: bool) {
+fn push_delta_block(
+    blocks: &mut Vec<omini_model::message::ContentBlock>,
+    delta: &str,
+    thinking: bool,
+) {
     match (thinking, blocks.last_mut()) {
-        (true, Some(domain::message::ContentBlock::Thinking(block))) => {
+        (true, Some(omini_model::message::ContentBlock::Thinking(block))) => {
             block.thinking.push_str(delta)
         }
-        (false, Some(domain::message::ContentBlock::Text(block))) => block.text.push_str(delta),
-        (true, _) => blocks.push(domain::message::ContentBlock::from_thinking(
+        (false, Some(omini_model::message::ContentBlock::Text(block))) => {
+            block.text.push_str(delta)
+        }
+        (true, _) => blocks.push(omini_model::message::ContentBlock::from_thinking(
             delta.to_string(),
         )),
-        (false, _) => blocks.push(domain::message::ContentBlock::from_text(delta.to_string())),
+        (false, _) => blocks.push(omini_model::message::ContentBlock::from_text(
+            delta.to_string(),
+        )),
     }
 }
 
@@ -575,8 +603,14 @@ fn push_agent_delta(
             return false;
         };
         match (&mut envelope.payload, thinking) {
-            (domain::events::AgentTaskEvent::ThinkingDelta { delta: current }, true)
-            | (domain::events::AgentTaskEvent::TextDelta { delta: current }, false) => {
+            (
+                runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta: current },
+                true,
+            )
+            | (
+                runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta: current },
+                false,
+            ) => {
                 current.push_str(&delta);
                 true
             }
@@ -607,8 +641,8 @@ fn truncate_agent_stream(stream: &mut AgentStreamReplay) {
             continue;
         };
         let delta = match &mut envelope.payload {
-            domain::events::AgentTaskEvent::ThinkingDelta { delta }
-            | domain::events::AgentTaskEvent::TextDelta { delta } => delta,
+            runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta }
+            | runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } => delta,
             _ => continue,
         };
         if delta.len() <= excess {
@@ -628,8 +662,10 @@ fn truncate_agent_stream(stream: &mut AgentStreamReplay) {
             return true;
         };
         match &envelope.payload {
-            domain::events::AgentTaskEvent::ThinkingDelta { delta }
-            | domain::events::AgentTaskEvent::TextDelta { delta } => !delta.is_empty(),
+            runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta }
+            | runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } => {
+                !delta.is_empty()
+            }
             _ => true,
         }
     });
@@ -641,8 +677,8 @@ fn truncate_agent_stream(stream: &mut AgentStreamReplay) {
         };
         matches!(
             envelope.payload,
-            domain::events::AgentTaskEvent::ThinkingDelta { .. }
-                | domain::events::AgentTaskEvent::TextDelta { .. }
+            runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { .. }
+                | runtime_contract::thread_domain::AgentTaskEvent::TextDelta { .. }
         )
         .then_some(envelope)
     }) {
@@ -659,8 +695,10 @@ fn agent_delta_bytes(events: &[SequencedRuntimeEvent]) -> usize {
                 return None;
             };
             match &envelope.payload {
-                domain::events::AgentTaskEvent::ThinkingDelta { delta }
-                | domain::events::AgentTaskEvent::TextDelta { delta } => Some(delta.len()),
+                runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta }
+                | runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } => {
+                    Some(delta.len())
+                }
                 _ => None,
             }
         })
@@ -711,13 +749,13 @@ mod tests {
     fn agent_event(
         seq: u64,
         task_id: &str,
-        payload: domain::events::AgentTaskEvent,
+        payload: runtime_contract::thread_domain::AgentTaskEvent,
     ) -> SequencedRuntimeEvent {
         SequencedRuntimeEvent {
             seq,
             event: client_proto::RuntimeEvent::new(
                 client_proto::TypedRuntimeEvent::AgentTaskEvent(
-                    domain::events::AgentTaskEventEnvelope {
+                    runtime_contract::thread_domain::AgentTaskEventEnvelope {
                         task_id: task_id.to_string(),
                         thread_id: format!("thread_{task_id}"),
                         parent_task_id: None,
@@ -740,8 +778,8 @@ mod tests {
                 })
             }
             "user_message_injected" => client_proto::TypedRuntimeEvent::UserMessageInjected {
-                item: domain::display::HistoryItem::Message(
-                    domain::message::Message::from_user_text("hello".to_string()),
+                item: crate::conversation::history_item_from_model_message(
+                    omini_model::message::Message::from_user_text("hello".to_string()),
                 ),
                 client_echo_id: None,
             },
@@ -749,13 +787,15 @@ mod tests {
             "run_finished" => client_proto::TypedRuntimeEvent::RunFinished,
             "turn_started" => client_proto::TypedRuntimeEvent::TurnStarted,
             "turn_ended" => client_proto::TypedRuntimeEvent::TurnEnded,
-            "tool_use" => client_proto::TypedRuntimeEvent::ToolUse(domain::message::ToolUseBlock {
-                id: "tool_1".to_string(),
-                name: "read".to_string(),
-                input: HashMap::new(),
-            }),
+            "tool_use" => {
+                client_proto::TypedRuntimeEvent::ToolUse(omini_model::message::ToolUseBlock {
+                    id: "tool_1".to_string(),
+                    name: "read".to_string(),
+                    input: HashMap::new(),
+                })
+            }
             "tool_result" => {
-                client_proto::TypedRuntimeEvent::ToolResult(domain::message::ToolResultBlock {
+                client_proto::TypedRuntimeEvent::ToolResult(omini_model::message::ToolResultBlock {
                     tool_use_id: "tool_1".to_string(),
                     is_error: false,
                     content: "done".to_string(),
@@ -763,15 +803,15 @@ mod tests {
                 })
             }
             "tool_pause_requested" => client_proto::TypedRuntimeEvent::ToolPauseRequested(
-                domain::events::ToolPauseRequest {
+                runtime_contract::thread_domain::ToolPauseRequest {
                     tool_use_id: "tool_1".to_string(),
                     preview_tool_use_id: None,
                     tool_name: "bash".to_string(),
                     permission_source: None,
                     source_thread_id: None,
                     source_agent_label: None,
-                    kind: domain::events::ToolPauseKind::Permission(
-                        domain::events::PermissionPreview::Custom {
+                    kind: runtime_contract::thread_domain::ToolPauseKind::Permission(
+                        runtime_contract::thread_domain::PermissionPreview::Custom {
                             tool_name: "bash".to_string(),
                             payload: serde_json::Map::new(),
                         },
@@ -783,7 +823,7 @@ mod tests {
                     thread_id: "s1".to_string(),
                     messages: Vec::new(),
                     agent_tasks: Vec::new(),
-                    usage: domain::events::ThreadUsageSnapshot::default(),
+                    usage: runtime_contract::thread_domain::ThreadUsageSnapshot::default(),
                 })
             }
             _ => panic!("unsupported test event kind: {kind}"),
@@ -817,36 +857,39 @@ mod tests {
             .collect()
     }
 
-    fn snapshot(messages: Vec<domain::display::HistoryItem>) -> domain::events::LoadedThread {
+    fn snapshot(
+        messages: Vec<domain::conversation::ConversationEntry>,
+    ) -> runtime_contract::thread_domain::LoadedThread {
         snapshot_with_title(None, messages)
     }
 
     fn snapshot_with_title(
         title: Option<String>,
-        messages: Vec<domain::display::HistoryItem>,
-    ) -> domain::events::LoadedThread {
-        domain::events::LoadedThread {
+        messages: Vec<domain::conversation::ConversationEntry>,
+    ) -> runtime_contract::thread_domain::LoadedThread {
+        runtime_contract::thread_domain::LoadedThread {
             thread_id: "s1".to_string(),
             provider: "main".to_string(),
             model: "test-model".to_string(),
             thinking_effort: None,
-            active_profile: domain::events::ActiveProfile::Main,
+            active_profile: runtime_contract::thread_domain::ActiveProfile::Main,
             title,
             messages,
             agent_tasks: Vec::new(),
-            usage: domain::events::ThreadUsageSnapshot::default(),
+            usage: runtime_contract::thread_domain::ThreadUsageSnapshot::default(),
         }
     }
 
     fn persisted_message(
         thread_id: &str,
-        role: domain::message::Role,
-        blocks: Vec<domain::message::ContentBlock>,
+        role: omini_model::message::Role,
+        blocks: Vec<omini_model::message::ContentBlock>,
     ) -> runtime_contract::RuntimePersistenceEvent {
         runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
             thread_id: thread_id.to_string(),
-            message: domain::message::Message::new(role.clone(), blocks),
-            model_ref: (role == domain::message::Role::Assistant).then(|| "test/model".to_string()),
+            message: omini_model::message::Message::new(role.clone(), blocks),
+            model_ref: (role == omini_model::message::Role::Assistant)
+                .then(|| "test/model".to_string()),
         }
     }
 
@@ -987,13 +1030,15 @@ mod tests {
 
         buffer.record(runtime_event(
             1,
-            runtime_contract::RuntimeToServerEvent::PlanSubmitted(domain::events::SubmittedPlan {
-                id: "plan".to_string(),
-                title: "Plan".to_string(),
-                markdown: "# Plan".to_string(),
-                path: PathBuf::new(),
-                created_at: fixed_time(),
-            }),
+            runtime_contract::RuntimeToServerEvent::PlanSubmitted(
+                runtime_contract::thread_domain::SubmittedPlan {
+                    id: "plan".to_string(),
+                    title: "Plan".to_string(),
+                    markdown: "# Plan".to_string(),
+                    path: PathBuf::new(),
+                    created_at: fixed_time(),
+                },
+            ),
         ));
 
         assert_eq!(replay_kinds(&buffer), vec!["plan_submitted"]);
@@ -1026,12 +1071,17 @@ mod tests {
     #[test]
     fn replay_buffer_drops_user_injection_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let item = domain::display::HistoryItem::Message(domain::message::Message::from_user_text(
-            "hello".to_string(),
-        ));
+        let input = domain::conversation::UserInput {
+            intent: domain::input::UserInputIntent::Message,
+            parts: vec![domain::input::InputPart::Text {
+                text: "hello".to_string(),
+            }],
+            attachments: Vec::new(),
+        };
+        let item = domain::conversation::ConversationEntry::UserInput(input.clone());
         let event =
             client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::UserMessageInjected {
-                item: item.clone(),
+                item: client_proto::HistoryItem::UserInput(input),
                 client_echo_id: Some("echo-1".to_string()),
             });
 
@@ -1050,8 +1100,8 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                domain::message::Role::User,
-                vec![domain::message::ContentBlock::from_text(
+                omini_model::message::Role::User,
+                vec![omini_model::message::ContentBlock::from_text(
                     "hello".to_string(),
                 )],
             ),
@@ -1075,11 +1125,11 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                domain::message::Role::Assistant,
+                omini_model::message::Role::Assistant,
                 vec![
-                    domain::message::ContentBlock::from_thinking("thinking".to_string()),
-                    domain::message::ContentBlock::from_text("answer".to_string()),
-                    domain::message::ContentBlock::from_tool_use(
+                    omini_model::message::ContentBlock::from_thinking("thinking".to_string()),
+                    omini_model::message::ContentBlock::from_text("answer".to_string()),
+                    omini_model::message::ContentBlock::from_tool_use(
                         "tool_1".to_string(),
                         "read".to_string(),
                         HashMap::new(),
@@ -1097,12 +1147,12 @@ mod tests {
     #[test]
     fn replay_buffer_drops_assistant_tail_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let assistant = domain::message::Message::new(
-            domain::message::Role::Assistant,
+        let assistant = omini_model::message::Message::new(
+            omini_model::message::Role::Assistant,
             vec![
-                domain::message::ContentBlock::from_thinking("thinking".to_string()),
-                domain::message::ContentBlock::from_text("answer".to_string()),
-                domain::message::ContentBlock::from_tool_use(
+                omini_model::message::ContentBlock::from_thinking("thinking".to_string()),
+                omini_model::message::ContentBlock::from_text("answer".to_string()),
+                omini_model::message::ContentBlock::from_tool_use(
                     "tool_1".to_string(),
                     "read".to_string(),
                     HashMap::new(),
@@ -1119,7 +1169,7 @@ mod tests {
             event: runtime_event_from_runtime_contract_event(
                 runtime_contract::RuntimeToServerEvent::ToolUse(
                     match assistant.content[2].clone() {
-                        domain::message::ContentBlock::ToolUse(tool_use) => tool_use,
+                        omini_model::message::ContentBlock::ToolUse(tool_use) => tool_use,
                         _ => unreachable!(),
                     },
                 ),
@@ -1137,14 +1187,14 @@ mod tests {
     fn replay_buffer_drops_assistant_tail_with_thinking_duration_in_snapshot() {
         // 持久化消息的 thinking 块带 engine 测量的时长，而 delta 重建块没有；
         // 去重比较必须剥离时长，否则重连会重放已持久化的思考/正文 delta。
-        let assistant = domain::message::Message::new(
-            domain::message::Role::Assistant,
+        let assistant = omini_model::message::Message::new(
+            omini_model::message::Role::Assistant,
             vec![
-                domain::message::ContentBlock::Thinking(domain::message::ThinkingBlock {
+                omini_model::message::ContentBlock::Thinking(omini_model::message::ThinkingBlock {
                     thinking: "thinking".to_string(),
                     duration_ms: Some(5300),
                 }),
-                domain::message::ContentBlock::from_text("answer".to_string()),
+                omini_model::message::ContentBlock::from_text("answer".to_string()),
             ],
         );
         let mut buffer = RuntimeReplayBuffer::default();
@@ -1171,8 +1221,8 @@ mod tests {
             "s1",
             &persisted_message(
                 "s1",
-                domain::message::Role::User,
-                vec![domain::message::ContentBlock::from_tool_result(
+                omini_model::message::Role::User,
+                vec![omini_model::message::ContentBlock::from_tool_result(
                     "tool_1".to_string(),
                     false,
                     "done".to_string(),
@@ -1186,12 +1236,12 @@ mod tests {
     #[test]
     fn replay_buffer_drops_tool_result_found_in_snapshot() {
         let mut buffer = RuntimeReplayBuffer::default();
-        let tool_result = domain::message::ContentBlock::from_tool_result(
+        let tool_result = omini_model::message::ContentBlock::from_tool_result(
             "tool_1".to_string(),
             false,
             "done".to_string(),
         );
-        let domain::message::ContentBlock::ToolResult(tool_result_event) = tool_result.clone()
+        let omini_model::message::ContentBlock::ToolResult(tool_result_event) = tool_result.clone()
         else {
             unreachable!();
         };
@@ -1207,7 +1257,7 @@ mod tests {
         });
         // LLM 级去重使用单独传入的当前 context 消息。
         let tool_result_message =
-            domain::message::Message::new(domain::message::Role::User, vec![tool_result]);
+            omini_model::message::Message::new(omini_model::message::Role::User, vec![tool_result]);
         buffer.record_snapshot(&snapshot(Vec::new()), &[tool_result_message]);
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
@@ -1257,8 +1307,8 @@ mod tests {
         buffer.record(runtime_event(
             1,
             runtime_contract::RuntimeToServerEvent::CompactSummaryStarted(
-                domain::events::CompactEvent {
-                    trigger: domain::events::CompactTrigger::Manual,
+                runtime_contract::thread_domain::CompactEvent {
+                    trigger: runtime_contract::thread_domain::CompactTrigger::Manual,
                     thread_id: Some("s1".to_string()),
                     agent_label: None,
                 },
@@ -1267,8 +1317,8 @@ mod tests {
         buffer.record(runtime_event(
             2,
             runtime_contract::RuntimeToServerEvent::CompactSummaryDelta(
-                domain::events::CompactSummaryDeltaEvent {
-                    trigger: domain::events::CompactTrigger::Manual,
+                runtime_contract::thread_domain::CompactSummaryDeltaEvent {
+                    trigger: runtime_contract::thread_domain::CompactTrigger::Manual,
                     delta: "partial".to_string(),
                     thread_id: Some("s1".to_string()),
                     agent_label: None,
@@ -1321,14 +1371,14 @@ mod tests {
         buffer.record(agent_event(
             1,
             "one",
-            domain::events::AgentTaskEvent::TextDelta {
+            runtime_contract::thread_domain::AgentTaskEvent::TextDelta {
                 delta: "first".to_string(),
             },
         ));
         buffer.record(agent_event(
             2,
             "two",
-            domain::events::AgentTaskEvent::ThinkingDelta {
+            runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta {
                 delta: "second".to_string(),
             },
         ));
@@ -1342,7 +1392,7 @@ mod tests {
                 if envelope.task_id == "one"
                     && matches!(
                         &envelope.payload,
-                        domain::events::AgentTaskEvent::TextDelta { delta } if delta == "first"
+                        runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } if delta == "first"
                     )
         ));
         assert!(matches!(
@@ -1351,7 +1401,7 @@ mod tests {
                 if envelope.task_id == "two"
                     && matches!(
                         &envelope.payload,
-                        domain::events::AgentTaskEvent::ThinkingDelta { delta } if delta == "second"
+                        runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { delta } if delta == "second"
                     )
         ));
     }
@@ -1363,14 +1413,14 @@ mod tests {
         buffer.record(agent_event(
             1,
             "one",
-            domain::events::AgentTaskEvent::TextDelta {
+            runtime_contract::thread_domain::AgentTaskEvent::TextDelta {
                 delta: "hel".to_string(),
             },
         ));
         buffer.record(agent_event(
             2,
             "one",
-            domain::events::AgentTaskEvent::TextDelta {
+            runtime_contract::thread_domain::AgentTaskEvent::TextDelta {
                 delta: "lo".to_string(),
             },
         ));
@@ -1382,17 +1432,17 @@ mod tests {
             client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
                 if matches!(
                     &envelope.payload,
-                    domain::events::AgentTaskEvent::TextDelta { delta } if delta == "hello"
+                    runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } if delta == "hello"
                 )
         ));
 
         buffer.record(agent_event(
             3,
             "one",
-            domain::events::AgentTaskEvent::MessageCommitted {
-                message: domain::message::Message::new(
-                    domain::message::Role::Assistant,
-                    vec![domain::message::ContentBlock::from_text(
+            runtime_contract::thread_domain::AgentTaskEvent::MessageCommitted {
+                message: omini_model::message::Message::new(
+                    omini_model::message::Role::Assistant,
+                    vec![omini_model::message::ContentBlock::from_text(
                         "hello".to_string(),
                     )],
                 ),
@@ -1404,8 +1454,8 @@ mod tests {
             client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope)
                 if matches!(
                     envelope.payload,
-                    domain::events::AgentTaskEvent::TextDelta { .. }
-                        | domain::events::AgentTaskEvent::ThinkingDelta { .. }
+                    runtime_contract::thread_domain::AgentTaskEvent::TextDelta { .. }
+                        | runtime_contract::thread_domain::AgentTaskEvent::ThinkingDelta { .. }
                 )
         )));
     }
@@ -1418,7 +1468,7 @@ mod tests {
         buffer.record(agent_event(
             1,
             "one",
-            domain::events::AgentTaskEvent::TextDelta { delta: text },
+            runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta: text },
         ));
 
         let replay = buffer.replay();
@@ -1427,7 +1477,9 @@ mod tests {
         else {
             panic!("expected agent task event");
         };
-        let domain::events::AgentTaskEvent::TextDelta { delta } = &envelope.payload else {
+        let runtime_contract::thread_domain::AgentTaskEvent::TextDelta { delta } =
+            &envelope.payload
+        else {
             panic!("expected text delta");
         };
         assert!(envelope.truncated);

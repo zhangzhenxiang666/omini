@@ -2,12 +2,13 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::display::{DisplayMessage, DisplayPlan, DisplaySummary};
-use omini_domain::events::{AgentTaskExecutionMode, AgentTaskInfo, AgentTaskResult};
-use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::task::TaskStatus;
 use omini_domain::usage::Usage;
+use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::persistence::{RuntimePersistenceEvent, ThreadRecord};
+use omini_runtime_contract::thread_domain::{
+    AgentTaskExecutionMode, AgentTaskInfo, AgentTaskResult,
+};
 use sha2::{Digest, Sha256};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{FromRow, SqlitePool};

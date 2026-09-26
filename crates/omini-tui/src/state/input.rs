@@ -2,7 +2,7 @@ use super::{
     InputImageAttachment, InputMention, InputPasteMarker, InputVisualLine, MAX_INPUT_VISIBLE_LINES,
     MentionCandidate, PASTE_MARKER_THRESHOLD_CHARS, PASTE_MARKER_THRESHOLD_NEWLINES, UiState,
 };
-use omini_domain::display::{DisplayImageAttachment, DisplayMention, MentionKind, UserDraft};
+use crate::display::{DisplayImageAttachment, DisplayMention, MentionKind, UserDraft};
 use std::path::{Path, PathBuf};
 use unicode_width::UnicodeWidthChar;
 

@@ -1,13 +1,13 @@
 use super::*;
+use crate::display::MentionKind;
 use crate::types::events::{
     AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
     PermissionPreview, RuntimeToUiEvent, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
 };
 use chrono::Utc;
-use omini_domain::display::MentionKind;
-use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use omini_domain::task::{TaskChangedEvent, TaskInfo, TaskKind};
+use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_protocol as protocol;
 use std::time::Duration;
 use tokio::time::Instant;

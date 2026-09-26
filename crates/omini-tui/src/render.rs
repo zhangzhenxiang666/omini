@@ -4,7 +4,7 @@ use crate::state::{
 };
 use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
 use crate::widgets::{display_path, render_tool};
-use omini_domain::message::{ContentBlock, ToolUseBlock};
+use omini_model::message::{ContentBlock, ToolUseBlock};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -58,8 +58,8 @@ mod tests {
         UserInputPreview, UserInputQuestion,
     };
     use chrono::Utc;
-    use omini_domain::display::DisplayPlan;
-    use omini_domain::message::{Message, Role};
+    use omini_domain::conversation::ProposedPlan;
+    use omini_model::message::{Message, Role};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -600,7 +600,7 @@ mod tests {
         let backend = TestBackend::new(80, 4);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.plan_approval = Some(DisplayPlan {
+        state.plan_approval = Some(ProposedPlan {
             id: "20260522T000000Z-plan".to_string(),
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),
@@ -616,7 +616,7 @@ mod tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.plan_approval = Some(DisplayPlan {
+        state.plan_approval = Some(ProposedPlan {
             id: "20260522T000000Z-plan".to_string(),
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),

@@ -12,16 +12,16 @@ use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
-use omini_domain::events::{
-    ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind, ToolPauseResponse,
-};
-use omini_domain::message::{ContentBlock, Message, Role};
 use omini_domain::task::{TaskCompletion, TaskInfo, TaskKind, TaskStatus};
+use omini_model::message::{ContentBlock, Message, Role};
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::persistence::{RuntimePersistenceEvent, ThreadRecord};
+use omini_runtime_contract::thread_domain::{
+    ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
+    AgentTaskResult, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind, ToolPauseResponse,
+};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1530,9 +1530,11 @@ fn extract_final_text(messages: &[Message]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::tools::{PendingToolPause, PendingToolPauses};
-    use omini_domain::events::{PermissionPreview, ThreadUsageSnapshot, ToolPauseRequest};
-    use omini_domain::message::{ToolResultBlock, ToolUseBlock};
     use omini_domain::usage::Usage;
+    use omini_model::message::{ToolResultBlock, ToolUseBlock};
+    use omini_runtime_contract::thread_domain::{
+        PermissionPreview, ThreadUsageSnapshot, ToolPauseRequest,
+    };
     use std::collections::HashMap;
 
     use super::*;

@@ -1,7 +1,7 @@
 use super::{build_assistant_text_lines, line_to_plain_text};
 use crate::state::{UiMessage, UiState};
 use crate::widgets::{ToolCategory, activity_summary_line, is_special_tool, tool_category};
-use omini_domain::message::{ContentBlock, Message, Role};
+use omini_model::message::{ContentBlock, Message, Role};
 use ratatui::text::Line;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -125,7 +125,7 @@ pub(super) fn render_pending_activity_group(
 
     let tool_result_map = tool_result_index(&rendered_messages);
     let pending_prefix = Message::new(
-        omini_domain::message::Role::Assistant,
+        omini_model::message::Role::Assistant,
         pending.content[..pending_prefix_len].to_vec(),
     );
     let mut activity_messages = state.messages[group_start..]

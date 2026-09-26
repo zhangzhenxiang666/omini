@@ -3,8 +3,8 @@ use crate::{
     api_channel, endpoint_url, send_with_retry, sse::IntoSseStream,
 };
 use omini_domain::config::ThinkingEffort;
-use omini_domain::message::{ContentBlock, Message, Role, ToolUseBlock};
 use omini_domain::usage::Usage;
+use omini_model::message::{ContentBlock, Message, Role, ToolUseBlock};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::time::Duration;

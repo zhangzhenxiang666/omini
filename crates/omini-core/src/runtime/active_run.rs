@@ -1,10 +1,10 @@
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_domain::config::ThinkingEffort;
-use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_runtime_contract::thread_domain::{ActiveProfile, ThreadUsageSnapshot};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 

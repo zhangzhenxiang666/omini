@@ -43,7 +43,7 @@ pub async fn submit_run_command_from_protocol_request_for_thread(
     normalize_input_parts(&mut input.parts, thread.cwd())?;
     let attachments = thread.resolve_attachments(&input.attachment_ids).await?;
     Ok(runtime_contract::thread::SubmitRunCommand {
-        input: domain::input::RuntimeUserInput {
+        input: omini_runtime_contract::thread::RuntimeUserInput {
             parts: input.parts,
             attachments,
         },
@@ -323,9 +323,9 @@ pub fn fallback_thread_title_from_user_input(input: &client_proto::UserInput) ->
 
 /// 将持久化 snapshot 转成一组 runtime 事件供 TUI 恢复 UI。
 pub fn protocol_events_from_loaded_thread_snapshot(
-    snapshot: domain::events::LoadedThread,
+    snapshot: runtime_contract::thread_domain::LoadedThread,
     context_window: Option<u32>,
-    active_profile: domain::events::ActiveProfile,
+    active_profile: runtime_contract::thread_domain::ActiveProfile,
 ) -> Result<Vec<client_proto::RuntimeEvent>, omini_core::CoreError> {
     let mut usage = snapshot.usage;
     usage.context_window = context_window;
@@ -349,7 +349,7 @@ pub fn protocol_events_from_loaded_thread_snapshot(
         client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ThreadSnapshot(
             client_proto::ThreadSnapshotEvent {
                 thread_id: snapshot.thread_id,
-                messages: snapshot.messages,
+                messages: snapshot.messages.into_iter().map(Into::into).collect(),
                 agent_tasks: snapshot.agent_tasks,
                 usage,
             },
@@ -388,7 +388,7 @@ fn typed_runtime_event_from_runtime_contract_event(
         }
         runtime_contract::RuntimeToServerEvent::PlanApprovalAccepted { message } => {
             client_proto::TypedRuntimeEvent::UserMessageInjected {
-                item: domain::display::HistoryItem::Message(message),
+                item: crate::conversation::history_item_from_model_message(message),
                 client_echo_id: None,
             }
         }
@@ -528,12 +528,18 @@ fn typed_runtime_event_from_runtime_contract_event(
 }
 
 fn notification_level_to_protocol(
-    kind: domain::events::NotificationKind,
+    kind: runtime_contract::thread_domain::NotificationKind,
 ) -> client_proto::NotificationLevel {
     match kind {
-        domain::events::NotificationKind::Info => client_proto::NotificationLevel::Info,
-        domain::events::NotificationKind::Warn => client_proto::NotificationLevel::Warn,
-        domain::events::NotificationKind::Error => client_proto::NotificationLevel::Error,
+        runtime_contract::thread_domain::NotificationKind::Info => {
+            client_proto::NotificationLevel::Info
+        }
+        runtime_contract::thread_domain::NotificationKind::Warn => {
+            client_proto::NotificationLevel::Warn
+        }
+        runtime_contract::thread_domain::NotificationKind::Error => {
+            client_proto::NotificationLevel::Error
+        }
     }
 }
 
@@ -631,18 +637,24 @@ mod tests {
     #[test]
     fn thread_snapshot_events_replay_current_thread_state() {
         let events = protocol_events_from_loaded_thread_snapshot(
-            domain::events::LoadedThread {
+            runtime_contract::thread_domain::LoadedThread {
                 thread_id: "s1".to_string(),
                 provider: "main".to_string(),
                 model: "test-model".to_string(),
                 thinking_effort: None,
-                active_profile: domain::events::ActiveProfile::Main,
+                active_profile: runtime_contract::thread_domain::ActiveProfile::Main,
                 title: Some("hello".to_string()),
-                messages: vec![domain::display::HistoryItem::Message(
-                    domain::message::Message::from_user_text("hello".to_string()),
+                messages: vec![domain::conversation::ConversationEntry::UserInput(
+                    domain::conversation::UserInput {
+                        intent: domain::input::UserInputIntent::Message,
+                        parts: vec![domain::input::InputPart::Text {
+                            text: "hello".to_string(),
+                        }],
+                        attachments: Vec::new(),
+                    },
                 )],
                 agent_tasks: Vec::new(),
-                usage: domain::events::ThreadUsageSnapshot {
+                usage: runtime_contract::thread_domain::ThreadUsageSnapshot {
                     current_context_tokens: 3,
                     total_tokens: 5,
                     total_cached_tokens: 1,
@@ -650,7 +662,7 @@ mod tests {
                 },
             },
             Some(1000),
-            domain::events::ActiveProfile::Plan,
+            runtime_contract::thread_domain::ActiveProfile::Plan,
         )
         .expect("snapshot events should encode");
 
@@ -691,7 +703,7 @@ mod tests {
     fn active_profile_changed_is_typed() {
         let event = runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::ActiveProfileChanged(
-                domain::events::ActiveProfile::Plan,
+                runtime_contract::thread_domain::ActiveProfile::Plan,
             ),
         )
         .expect("event should encode");
@@ -711,8 +723,8 @@ mod tests {
     fn compact_summary_finished_is_typed() {
         let event = runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::CompactSummaryFinished(
-                domain::events::CompactSummaryFinishedEvent {
-                    trigger: domain::events::CompactTrigger::Manual,
+                runtime_contract::thread_domain::CompactSummaryFinishedEvent {
+                    trigger: runtime_contract::thread_domain::CompactTrigger::Manual,
                     summary: "summary".to_string(),
                     after_tokens: 42,
                     thread_id: Some("thread_1".to_string()),
@@ -742,7 +754,7 @@ mod tests {
         let event = runtime_event_from_runtime_contract_event(
             runtime_contract::RuntimeToServerEvent::PlanApprovalResolved {
                 plan_id: "plan".to_string(),
-                action: domain::events::PlanApprovalAction::ContinueDiscussing,
+                action: runtime_contract::thread_domain::PlanApprovalAction::ContinueDiscussing,
             },
         )
         .expect("event should encode");

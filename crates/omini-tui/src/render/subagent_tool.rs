@@ -2,8 +2,8 @@ use super::truncate_str;
 use crate::state::{SubagentNode, pause_preview_tool_use_id};
 use crate::types::events::{ToolPauseKind, ToolPauseRequest};
 use crate::widgets::{display_path, tool_title_style};
-use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use omini_domain::task::TaskStatus;
+use omini_model::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -373,7 +373,7 @@ mod tests {
     use super::*;
     use crate::render::line_to_plain_text;
     use crate::types::events::{PermissionPreview, ReadPermissionPreview};
-    use omini_domain::message::{Message, Role};
+    use omini_model::message::{Message, Role};
 
     #[test]
     fn rejected_subagent_without_started_event_renders_finished() {

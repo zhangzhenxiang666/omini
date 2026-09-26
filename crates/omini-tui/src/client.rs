@@ -1894,8 +1894,8 @@ mod tests {
             permission_source: None,
             source_thread_id: None,
             source_agent_label: None,
-            kind: omini_domain::events::ToolPauseKind::Permission(
-                omini_domain::events::PermissionPreview::Custom {
+            kind: omini_runtime_contract::thread_domain::ToolPauseKind::Permission(
+                omini_runtime_contract::thread_domain::PermissionPreview::Custom {
                     tool_name: "bash".to_string(),
                     payload: serde_json::Map::new(),
                 },

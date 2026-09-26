@@ -1,6 +1,6 @@
 use super::{Tool, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
-use omini_domain::events::{
+use omini_runtime_contract::thread_domain::{
     ToolPauseResponse, UserInputOption, UserInputPreview, UserInputQuestion,
 };
 use schemars::JsonSchema;

@@ -258,7 +258,7 @@ impl AgentRuntime {
                                 "tool pause requested"
                             );
                             if let Some(mut record) = tool_uses.get(&req.tool_use_id).cloned()
-                                && matches!(req.kind, omini_domain::events::ToolPauseKind::Permission(_))
+                                && matches!(req.kind, omini_runtime_contract::thread_domain::ToolPauseKind::Permission(_))
                                 && let Some(run_id) = &run_id_for_events
                             {
                                 record.updated_at = chrono::Utc::now();

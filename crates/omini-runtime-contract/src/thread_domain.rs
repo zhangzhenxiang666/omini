@@ -1,8 +1,8 @@
-use crate::config::ThinkingEffort;
-use crate::display::{DisplayPlan, HistoryItem};
-use crate::message::{Message, ToolResultBlock, ToolUseBlock};
-use crate::task::TaskStatus;
 use chrono::{DateTime, Utc};
+use omini_domain::config::ThinkingEffort;
+use omini_domain::conversation::{ConversationEntry, ProposedPlan};
+use omini_domain::task::TaskStatus;
+use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
@@ -258,7 +258,7 @@ pub struct CompactSummaryFailedEvent {
     pub agent_label: Option<String>,
 }
 
-pub type SubmittedPlan = DisplayPlan;
+pub type SubmittedPlan = ProposedPlan;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -351,7 +351,7 @@ pub struct LoadedThread {
     #[serde(default)]
     pub active_profile: ActiveProfile,
     pub title: Option<String>,
-    pub messages: Vec<HistoryItem>,
+    pub messages: Vec<ConversationEntry>,
     pub agent_tasks: Vec<AgentTaskSnapshot>,
     pub usage: ThreadUsageSnapshot,
 }

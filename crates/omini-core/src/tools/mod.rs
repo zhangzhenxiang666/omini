@@ -5,13 +5,13 @@ use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
-use omini_domain::events::{
+use omini_model::message::{ContentBlock, ToolResultBlock};
+use omini_permissions::{PermissionDecision, PermissionEngine};
+use omini_provider_api::ToolDefinition;
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, PermissionPreview, PermissionSource, ToolPauseKind, ToolPauseRequest,
     ToolPauseResponse, UserInputPreview,
 };
-use omini_domain::message::{ContentBlock, ToolResultBlock};
-use omini_domain::tool::ToolDefinition;
-use omini_permissions::{PermissionDecision, PermissionEngine};
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::de::DeserializeOwned;
@@ -823,7 +823,7 @@ pub fn create_agent_registry_from_parent(
     }
 
     let mut registry = parent.filtered(&selected);
-    let run_agent_allowed = depth < omini_domain::events::MAX_AGENT_DEPTH
+    let run_agent_allowed = depth < omini_runtime_contract::thread_domain::MAX_AGENT_DEPTH
         && allow.is_none_or(|tools| tools.iter().any(|tool| tool == "run_agent"))
         && !deny_names.contains("run_agent");
     if run_agent_allowed {
@@ -1225,7 +1225,7 @@ mod tests {
     fn tool_result_preserves_error_metadata_and_extra_blocks() {
         let result = ToolResult::error("failed")
             .with_metadata(tool_metadata([("kind", serde_json::json!("test"))]))
-            .with_extra_blocks(vec![omini_domain::message::ContentBlock::from_text(
+            .with_extra_blocks(vec![omini_model::message::ContentBlock::from_text(
                 "extra".into(),
             )]);
 
@@ -1239,7 +1239,7 @@ mod tests {
         );
         assert_eq!(
             extra_blocks,
-            Some(vec![omini_domain::message::ContentBlock::from_text(
+            Some(vec![omini_model::message::ContentBlock::from_text(
                 "extra".into()
             )])
         );
@@ -1250,9 +1250,11 @@ mod tests {
     #[tokio::test]
     async fn todo_tool_rejects_empty_input_and_serializes_full_list() {
         let empty = todo_tool::TodoWriteTool
-            .prepare(todo_tool::TodoWriteInput { todos: Vec::new() })
-            .await
-            .expect_err("empty todo list should reject");
+            .call(
+                todo_tool::TodoWriteInput { todos: Vec::new() },
+                crate::test_support::tool_context(Path::new("."), "todo_write", false),
+            )
+            .await;
         assert!(empty.is_error);
         assert_eq!(empty.output, "todos must contain at least one item");
         assert_eq!(empty.metadata, None);
@@ -1264,12 +1266,14 @@ mod tests {
                 status: todo_tool::TodoStatus::InProgress,
             }],
         };
-        let prepared = todo_tool::TodoWriteTool
-            .prepare(input)
-            .await
-            .expect("valid todo should prepare");
-        assert_eq!(prepared.todos.len(), 1);
-        assert_eq!(prepared.todos[0].content, "Implement focused tests");
+        let result = todo_tool::TodoWriteTool
+            .call(
+                input,
+                crate::test_support::tool_context(Path::new("."), "todo_write", false),
+            )
+            .await;
+        assert!(!result.is_error);
+        assert!(result.output.contains("Implement focused tests"));
     }
 
     #[tokio::test]
@@ -1338,33 +1342,38 @@ mod tests {
 
         for result in [
             read_tool::ReadTool
-                .prepare(read_tool::ReadInput {
-                    file_path: "relative.txt".into(),
-                    offset: None,
-                    limit: None,
-                })
-                .await
-                .err(),
+                .call(
+                    read_tool::ReadInput {
+                        file_path: "relative.txt".into(),
+                        offset: None,
+                        limit: None,
+                    },
+                    crate::test_support::tool_context(temp.path(), "read", false),
+                )
+                .await,
             write_tool::WriteTool
-                .prepare(write_tool::WriteInput {
-                    file_path: "relative.txt".into(),
-                    content: "x".into(),
-                })
-                .await
-                .err(),
+                .call(
+                    write_tool::WriteInput {
+                        file_path: "relative.txt".into(),
+                        content: "x".into(),
+                    },
+                    crate::test_support::tool_context(temp.path(), "write", false),
+                )
+                .await,
             edit_tool::EditTool
-                .prepare(edit_tool::EditInput {
-                    file_path: "relative.txt".into(),
-                    old_string: "x".into(),
-                    new_string: "y".into(),
-                    replace_all: None,
-                })
-                .await
-                .err(),
+                .call(
+                    edit_tool::EditInput {
+                        file_path: "relative.txt".into(),
+                        old_string: "x".into(),
+                        new_string: "y".into(),
+                        replace_all: None,
+                    },
+                    crate::test_support::tool_context(temp.path(), "edit", false),
+                )
+                .await,
         ] {
-            let error = result.expect("relative path should reject");
-            assert!(error.is_error);
-            assert_eq!(error.output, "file_path must be absolute: relative.txt");
+            assert!(result.is_error, "relative path should reject");
+            assert_eq!(result.output, "file_path must be absolute: relative.txt");
         }
     }
 
@@ -1460,12 +1469,10 @@ mod tests {
         assert!(!result.is_error);
         assert_eq!(
             result.extra_blocks,
-            Some(vec![
-                omini_domain::message::ContentBlock::from_base64_image(
-                    "image/png".into(),
-                    "cG5nLWJ5dGVz".into()
-                )
-            ])
+            Some(vec![omini_model::message::ContentBlock::from_base64_image(
+                "image/png".into(),
+                "cG5nLWJ5dGVz".into()
+            )])
         );
 
         let rejected = view_image_tool::ViewImageTool

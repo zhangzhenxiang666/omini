@@ -47,7 +47,7 @@ fn tool_pause_update(event: &runtime_contract::RuntimeToServerEvent) -> Option<T
             Some(ToolPauseUpdate::Remove(vec![result.tool_use_id.clone()]))
         }
         runtime_contract::RuntimeToServerEvent::AgentTaskEvent(event) => match &event.payload {
-            omini_domain::events::AgentTaskEvent::ToolResult { tool_result } => {
+            omini_runtime_contract::thread_domain::AgentTaskEvent::ToolResult { tool_result } => {
                 let tool_use_id = &tool_result.tool_use_id;
                 Some(ToolPauseUpdate::Remove(vec![format!(
                     "{}:{tool_use_id}",
@@ -65,8 +65,10 @@ fn tool_pause_update(event: &runtime_contract::RuntimeToServerEvent) -> Option<T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omini_domain::events::{ToolPauseKind, ToolPauseRequest, UserInputPreview};
-    use omini_domain::message::ToolResultBlock;
+    use omini_model::message::ToolResultBlock;
+    use omini_runtime_contract::thread_domain::{
+        ToolPauseKind, ToolPauseRequest, UserInputPreview,
+    };
 
     #[test]
     fn pending_pauses_deduplicate_and_clear() {

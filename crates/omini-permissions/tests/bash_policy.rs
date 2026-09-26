@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use omini_config::{PermissionSources, RawBashRulesFile};
-use omini_domain::events::{BashPermissionPreview, PermissionPreview, PermissionSource};
 use omini_permissions::{PermissionCheck, PermissionDecision, PermissionEngine};
+use omini_runtime_contract::thread_domain::{
+    BashPermissionPreview, PermissionPreview, PermissionSource,
+};
 use serde_json::json;
 
 const RULES_PATH: &str = "/workspace/.omini/rules/test.rules";

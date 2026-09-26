@@ -8,6 +8,7 @@ pub mod mcp;
 pub mod persistence;
 pub mod project;
 pub mod thread;
+pub mod thread_domain;
 
 pub use events::{RuntimeToServerEvent, ServerToRuntimeEvent};
 pub use persistence::{RuntimePersistenceEvent, ThreadRecord};

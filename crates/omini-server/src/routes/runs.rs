@@ -155,7 +155,7 @@ pub async fn intervene_agent_run(
     thread
         .intervene_agent_run(
             run_id,
-            omini_domain::message::Message::from_user_text(message.to_string()),
+            omini_model::message::Message::from_user_text(message.to_string()),
         )
         .await
         .map_err(core_error)?;

@@ -1,4 +1,4 @@
-use omini_domain::display::{DisplayMention, MentionKind};
+use crate::display::{DisplayMention, MentionKind};
 use omini_domain::subagents::AgentSummary;
 use std::collections::HashMap;
 use std::fs;

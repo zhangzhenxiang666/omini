@@ -22,6 +22,7 @@ omini-cli / omini-tui
 | `omini-server` | 本地服务、项目和线程生命周期、事件投影与重放、SQLite 持久化。 |
 | `omini-runtime-contract` | 服务端与核心之间的命令、事件、快照和持久化请求。 |
 | `omini-core` | Agent 执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
+| `omini-model` | Provider 对话上下文的消息、角色和内容块；不代表用户可见的会话时间线。 |
 | `omini-config` | 用户和项目配置，以及 Omini 管理的文件路径。 |
 | `omini-domain` | 不含传输、运行时或持久化逻辑的共享领域类型。 |
 | `omini-permissions` | 权限策略解析及允许、询问、拒绝决策。 |
@@ -32,6 +33,7 @@ omini-cli / omini-tui
 
 - `omini-protocol` 是公开客户端/服务端边界；`omini-runtime-contract` 是内部服务端/核心边界，两者不放运行时实现。
 - `omini-domain` 只承载共享词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
+- 会话时间线使用 `ConversationEntry`，原始 `UserInput`、助手消息和系统事件分别建模；Provider 上下文独立使用 `omini-model::Message`。
 - Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
 - SQLite、事务、事件重放和持久化投影归服务端；核心事件只表达领域事实。
 - 服务端通过核心公开的项目/线程能力工作，不依赖核心内部的 Skill、任务、工具或引擎模块。
@@ -60,11 +62,11 @@ omini-cli / omini-tui
 
 - `AgentRun` 是一次运行的治理和查询单位，关联 Thread、可选父 Run、类型、状态、时间和累计 Token。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 等非 Agent Run 不创建虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 4 暴露 Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 5 暴露 Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 
-用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，任务通知在持久化成功后投影；核心只发领域事实和模型上下文消息，不构造 UI 历史项。
+用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，任务通知在持久化成功后投影；核心不构造 UI 历史项。工具结果由系统生成，在模型上下文中作为紧跟对应 ToolUse 的 `Role::User` 消息保存，同时作为独立的 `SystemEvent::ToolResults` 时间线记录投影，两个序列各自保留顺序。
 
 ## 输入与附件
 

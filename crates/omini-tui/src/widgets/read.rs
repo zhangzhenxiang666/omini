@@ -1,5 +1,5 @@
 use crate::types::events::{PermissionPreview, ToolPauseKind, ToolPauseRequest};
-use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+use omini_model::message::{ToolResultBlock, ToolUseBlock};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use std::path::Path;

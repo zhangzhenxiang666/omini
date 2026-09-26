@@ -1,10 +1,10 @@
-use omini_domain::display::AgentTaskNotification;
-use omini_domain::events::{
+use omini_domain::conversation::AgentTaskNotification;
+use omini_domain::usage::Usage;
+use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_runtime_contract::thread_domain::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, ToolPauseRequest,
 };
-use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
-use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
 
 /// engine 发往 runtime 的 core 内部事件。

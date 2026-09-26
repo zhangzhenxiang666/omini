@@ -4,8 +4,8 @@ use crate::support::store::*;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use omini_config::project::ThreadDir;
-use omini_domain::display::DisplaySummary;
-use omini_domain::message::{ContentBlock, ImageSource, ImageSourceType, Message, Role, TextBlock};
+use omini_domain::conversation::CompactionSummary;
+use omini_model::message::{ContentBlock, ImageSource, ImageSourceType, Message, Role, TextBlock};
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_server::{history, store::*};
 use std::fs;
@@ -17,7 +17,7 @@ async fn images_use_assets_and_round_trip() {
     project.create_thread("t1").unwrap();
     db.create_thread(&test_thread("t1")).await.unwrap();
     let raw = b"not-really-a-png";
-    let image = ContentBlock::Image(omini_domain::message::ImageBlock {
+    let image = ContentBlock::Image(omini_model::message::ImageBlock {
         source: ImageSource {
             source_type: ImageSourceType::Base64,
             media_type: "image/png".to_string(),
@@ -54,7 +54,7 @@ async fn compact_reuses_existing_media_asset() {
     db.create_thread(&test_thread("t1")).await.unwrap();
     let image_message = Message::new(
         Role::User,
-        vec![ContentBlock::Image(omini_domain::message::ImageBlock {
+        vec![ContentBlock::Image(omini_model::message::ImageBlock {
             source: ImageSource {
                 source_type: ImageSourceType::Base64,
                 media_type: "image/png".to_string(),
@@ -100,7 +100,7 @@ async fn large_summary_uses_sidecar() {
     let (db, project, _root) = temp_db().await;
     project.create_thread("t1").unwrap();
     db.create_thread(&test_thread("t1")).await.unwrap();
-    let summary = DisplaySummary {
+    let summary = CompactionSummary {
         id: "summary-1".to_string(),
         title: "Compacted".to_string(),
         markdown: "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
@@ -132,7 +132,9 @@ async fn large_summary_uses_sidecar() {
     let loaded = history::load_messages(&db, "t1", &project.thread("t1")).await;
     assert_eq!(
         loaded,
-        vec![omini_domain::display::HistoryItem::Summary(summary)]
+        vec![omini_domain::conversation::ConversationEntry::SystemEvent(
+            omini_domain::conversation::SystemEvent::Summary(summary)
+        )]
     );
 }
 

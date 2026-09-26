@@ -140,7 +140,14 @@ fn typed_event_payloads() -> Vec<(&'static str, Value)> {
             "user_message_injected",
             json!({
                 "type": "user_message_injected",
-                "item": { "type": "message", "role": "user", "content": [] },
+                "item": {
+                    "type": "user_input",
+                    "entry": {
+                        "intent": {"type": "message"},
+                        "parts": [],
+                        "attachments": []
+                    }
+                },
                 "client_echo_id": "echo_1"
             }),
         ),

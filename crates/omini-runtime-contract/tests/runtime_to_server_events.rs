@@ -1,14 +1,14 @@
 use chrono::{DateTime, TimeZone, Utc};
-use omini_domain::display::DisplayPlan;
-use omini_domain::events::{
+use omini_domain::conversation::ProposedPlan;
+use omini_domain::task::{TaskChangedEvent, TaskOutputDelta, TaskOutputStream, TaskStatus};
+use omini_model::message::{Message, Role, ToolResultBlock, ToolUseBlock};
+use omini_runtime_contract::RuntimeToServerEvent;
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, CompactTrigger, Notification,
     NotificationKind, PlanApprovalAction, PlanExecutionProfile, ThreadUsageSnapshot, ToolPauseKind,
     ToolPauseRequest, UserInputPreview,
 };
-use omini_domain::message::{Message, Role, ToolResultBlock, ToolUseBlock};
-use omini_domain::task::{TaskChangedEvent, TaskOutputDelta, TaskOutputStream, TaskStatus};
-use omini_runtime_contract::RuntimeToServerEvent;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -293,7 +293,7 @@ fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
             questions: Vec::new(),
         }),
     };
-    let plan = DisplayPlan {
+    let plan = ProposedPlan {
         id: "plan-1".into(),
         title: "Plan".into(),
         markdown: "- step".into(),

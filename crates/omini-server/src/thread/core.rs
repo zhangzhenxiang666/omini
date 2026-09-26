@@ -2,10 +2,9 @@ use crate::{store, thread::ThreadRuntime};
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
-use omini_domain::input::{
-    AttachmentMetadata, DisplayUserInput, ResolvedAttachment, UserInputIntent,
-};
-use omini_runtime_contract as runtime_contract;
+use omini_domain::conversation::UserInput;
+use omini_domain::input::{AttachmentMetadata, UserInputIntent};
+use omini_runtime_contract::{self as runtime_contract, thread::ResolvedAttachment};
 
 impl ThreadRuntime {
     pub(crate) fn cwd(&self) -> &std::path::Path {
@@ -205,16 +204,27 @@ impl ThreadRuntime {
                 UserInputIntent::Command { command }
             }
         };
-        let display = DisplayUserInput::from_runtime_input(&command.input, intent);
+        let mut attachments = command
+            .input
+            .attachments
+            .iter()
+            .map(|attachment| attachment.metadata.clone())
+            .collect::<Vec<_>>();
+        attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+        let input = UserInput {
+            intent,
+            parts: command.input.parts.clone(),
+            attachments,
+        };
         self.db
-            .insert_user_input(&self.thread_id, &display, Utc::now(), &self.thread_dir())
+            .insert_user_input(&self.thread_id, &input, Utc::now(), &self.thread_dir())
             .await
             .map_err(|error| {
                 CoreError::persistence("failed to persist user input", error.to_string())
             })?;
         let echo = omini_protocol::RuntimeEvent::new(
             omini_protocol::TypedRuntimeEvent::UserMessageInjected {
-                item: omini_domain::display::HistoryItem::UserInput(display),
+                item: omini_protocol::HistoryItem::UserInput(input),
                 client_echo_id: command.client_echo_id.clone(),
             },
         );
@@ -233,7 +243,7 @@ impl ThreadRuntime {
     pub async fn intervene_agent_run(
         &self,
         run_id: String,
-        message: omini_domain::message::Message,
+        message: omini_model::message::Message,
     ) -> Result<(), CoreError> {
         self.core.intervene_agent_run(run_id, message).await
     }

@@ -1,6 +1,12 @@
 # Client / Server Protocol
 
-Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `2`。这是一次破坏性版本：旧的 `text + context_refs + attachments/local_path` 请求不会被兼容解析。客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。
+Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `5`。Revision 5 调整线程快照中的历史记录格式；客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。旧本地消息历史不会按旧 JSON 形状读取；项目和配置数据保留。
+
+## 会话历史
+
+线程快照中的每条历史记录使用 `HistoryItem` 的 `type` 区分 `user_input`、`assistant_message` 和 `system_event`。系统事件使用各自的事件类型保存计划、压缩摘要、子 Agent 通知和工具结果。用户提交的原始输入与助手可见消息不会复用 Provider 上下文的 `Message` 结构。
+
+工具结果由系统执行工具后生成：它在 Provider 上下文中仍是 `role: "user"` 的 ToolResult 消息，并紧跟对应的 ToolUse；用户可见历史另保存 `system_event` 类型的 `tool_results` 记录。两者用途不同，模型上下文顺序和会话历史顺序分别保持。
 
 ## 用户输入
 

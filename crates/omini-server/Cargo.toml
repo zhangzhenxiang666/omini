@@ -15,6 +15,7 @@ futures-util.workspace = true
 omini-config.workspace = true
 omini-core.workspace = true
 omini-domain.workspace = true
+omini-model.workspace = true
 omini-protocol.workspace = true
 omini-runtime-contract.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }

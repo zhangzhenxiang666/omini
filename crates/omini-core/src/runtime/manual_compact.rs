@@ -2,9 +2,9 @@ use super::usage::record_total_usage_and_notify;
 use super::*;
 use crate::error::RuntimeError;
 use crate::runtime::compact::{self, CompactRequestContext};
-use omini_domain::events::CompactTrigger;
-use omini_domain::tool::ToolDefinition;
 use omini_provider_api::LlmClient;
+use omini_provider_api::ToolDefinition;
+use omini_runtime_contract::thread_domain::CompactTrigger;
 use std::sync::Arc;
 use tracing::Instrument;
 
@@ -263,11 +263,11 @@ pub async fn execute_manual_compact(
 
 pub async fn persist_compact_summary_event(
     thread_id: &str,
-    event: &omini_domain::events::CompactSummaryFinishedEvent,
+    event: &omini_runtime_contract::thread_domain::CompactSummaryFinishedEvent,
     model_ref: &str,
     persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
 ) {
-    let summary = DisplaySummary {
+    let summary = CompactionSummary {
         id: Uuid::new_v4().to_string(),
         title: "LLM Summary".to_string(),
         markdown: event.summary.clone(),

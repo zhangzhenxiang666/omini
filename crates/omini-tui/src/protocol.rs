@@ -1,6 +1,6 @@
+use crate::display as display_types;
 use crate::types::config as config_types;
 use crate::types::events as event_types;
-use omini_domain::display as display_types;
 use omini_domain::subagents as subagent_types;
 
 #[derive(Debug, Clone)]

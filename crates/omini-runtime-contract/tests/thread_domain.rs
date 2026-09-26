@@ -1,5 +1,7 @@
 use chrono::{DateTime, TimeZone, Utc};
-use omini_domain::events::{
+use omini_domain::task::TaskStatus;
+use omini_model::message::Message;
+use omini_runtime_contract::thread_domain::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
     AgentTaskResult, AgentTaskSnapshot, BashPermissionPreview, CompactTrigger,
     EditPermissionPreview, LoadedThread, McpPermissionPreview, Notification, NotificationKind,
@@ -7,8 +9,6 @@ use omini_domain::events::{
     SearchPermissionPreview, ThreadRuntimeState, ThreadSummary, ThreadUsage, ThreadUsageSnapshot,
     ToolPauseKind, ToolPauseResponse, UserInputOption, UserInputPreview, UserInputQuestion,
 };
-use omini_domain::message::Message;
-use omini_domain::task::TaskStatus;
 use serde_json::{Value, json};
 
 #[test]

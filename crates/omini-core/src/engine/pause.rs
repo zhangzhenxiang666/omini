@@ -1,6 +1,6 @@
 use crate::error::RuntimeError;
 use crate::tools::{PendingToolPause, PendingToolPauses};
-use omini_domain::events::ToolPauseResponse;
+use omini_runtime_contract::thread_domain::ToolPauseResponse;
 use std::sync::Arc;
 
 /// 负责匹配并解除工具执行中的权限或用户输入暂停。

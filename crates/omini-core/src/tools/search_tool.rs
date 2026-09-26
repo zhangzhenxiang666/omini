@@ -1,6 +1,6 @@
 use super::{Tool, ToolExecutionContext, ToolPolicy, ToolResult, tool_metadata};
 use async_trait::async_trait;
-use omini_domain::events::{PermissionPreview, SearchPermissionPreview};
+use omini_runtime_contract::thread_domain::{PermissionPreview, SearchPermissionPreview};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;

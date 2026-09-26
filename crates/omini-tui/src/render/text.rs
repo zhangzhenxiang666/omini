@@ -1,6 +1,6 @@
+use crate::display::{DisplayMention, DisplayMessage, MentionKind};
 use crate::state::UiState;
-use omini_domain::display::{DisplayMention, DisplayMessage, MentionKind};
-use omini_domain::message::TextBlock;
+use omini_model::message::TextBlock;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};

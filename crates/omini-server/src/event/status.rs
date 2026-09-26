@@ -1,6 +1,5 @@
 use crate::event::bridge::thread_runtime_skills_from_runtime_snapshot;
 use chrono::{DateTime, Utc};
-use omini_domain as domain;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::collections::HashMap;
@@ -50,7 +49,7 @@ struct RuntimeAgentTaskContext {
 #[derive(Debug, Default)]
 pub struct RuntimeStatusProjection {
     // active profile 不落入持久化消息；新连接只能从运行态投影拿到当前值。
-    active_profile: domain::events::ActiveProfile,
+    active_profile: runtime_contract::thread_domain::ActiveProfile,
     query_started_at: Option<DateTime<Utc>>,
     compact_started_at: Option<DateTime<Utc>>,
     query_pause_started_at: Option<DateTime<Utc>>,
@@ -77,7 +76,9 @@ pub struct RuntimeStatusSnapshotContext {
 }
 
 impl RuntimeStatusProjection {
-    pub fn with_active_profile(active_profile: domain::events::ActiveProfile) -> Self {
+    pub fn with_active_profile(
+        active_profile: runtime_contract::thread_domain::ActiveProfile,
+    ) -> Self {
         Self {
             active_profile,
             ..Self::default()
@@ -383,7 +384,7 @@ impl RuntimeStatusProjection {
         }
     }
 
-    pub fn active_profile(&self) -> domain::events::ActiveProfile {
+    pub fn active_profile(&self) -> runtime_contract::thread_domain::ActiveProfile {
         self.active_profile
     }
 
@@ -494,9 +495,9 @@ mod tests {
     use super::*;
     use crate::event::replay::SequencedRuntimeEvent;
     use chrono::TimeZone;
-    use omini_domain::events as event_types;
-    use omini_domain::message::{ToolResultBlock, ToolUseBlock};
+    use omini_model::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::mcp::RuntimeMcpToolSnapshot;
+    use omini_runtime_contract::thread_domain as event_types;
 
     fn fixed_time() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
@@ -604,7 +605,7 @@ mod tests {
             &client_proto::RuntimeEvent::new(
                 client_proto::TypedRuntimeEvent::ActiveProfileChanged(
                     client_proto::ActiveProfileChangedEvent {
-                        profile: domain::events::ActiveProfile::Plan,
+                        profile: runtime_contract::thread_domain::ActiveProfile::Plan,
                     },
                 ),
             ),
@@ -613,7 +614,7 @@ mod tests {
 
         assert_eq!(
             projection.active_profile(),
-            domain::events::ActiveProfile::Plan
+            runtime_contract::thread_domain::ActiveProfile::Plan
         );
         assert_eq!(
             status_snapshot(&projection, fixed_time()).active_profile,

@@ -36,8 +36,8 @@ mod tool_pause;
 /// - `thread_messages` 是从当前 `llm_messages` context version 加载、
 ///   最终交给 core/LLM 的消息；`build` 不再过滤或合并。
 pub struct ThreadRuntimeInputs {
-    snapshot: domain::events::LoadedThread,
-    thread_messages: Vec<domain::message::Message>,
+    snapshot: omini_runtime_contract::thread_domain::LoadedThread,
+    thread_messages: Vec<omini_model::message::Message>,
     llm_context_version: i64,
     background_tasks: Vec<domain::task::TaskInfo>,
 }
@@ -81,8 +81,8 @@ pub struct ThreadRuntime {
 
 impl ThreadRuntimeInputs {
     pub fn new(
-        snapshot: domain::events::LoadedThread,
-        thread_messages: Vec<domain::message::Message>,
+        snapshot: omini_runtime_contract::thread_domain::LoadedThread,
+        thread_messages: Vec<omini_model::message::Message>,
         llm_context_version: i64,
     ) -> Self {
         Self {
