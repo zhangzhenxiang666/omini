@@ -1,7 +1,7 @@
 use super::*;
 use omini_domain::agent_run::{
-    AgentRunKind, AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus,
-    ToolUseExecutionSnapshot, ToolUseStatus,
+    AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
+    ToolUseStatus,
 };
 
 #[derive(Debug, FromRow)]
@@ -9,7 +9,6 @@ struct AgentRunRow {
     id: String,
     thread_id: String,
     parent_run_id: Option<String>,
-    kind: String,
     status: String,
     created_at: DateTime<Utc>,
     started_at: Option<DateTime<Utc>>,
@@ -43,13 +42,12 @@ struct ToolUseExecutionRow {
 impl Database {
     pub async fn create_agent_run(&self, run: &AgentRunSnapshot) -> Result<(), StoreError> {
         sqlx::query(
-            "INSERT INTO agent_run(id, thread_id, parent_run_id, kind, status, created_at, started_at, finished_at, total_tokens, archived_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO agent_run(id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&run.id)
         .bind(&run.thread_id)
         .bind(&run.parent_run_id)
-        .bind(run.kind.as_str())
         .bind(run.status.as_str())
         .bind(run.created_at)
         .bind(run.started_at)
@@ -166,14 +164,14 @@ impl Database {
     ) -> Result<Vec<AgentRunSnapshot>, StoreError> {
         let rows = if include_archived {
             sqlx::query_as::<_, AgentRunRow>(
-                "SELECT * FROM agent_run WHERE thread_id = ? ORDER BY created_at, id",
+                "SELECT id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at FROM agent_run WHERE thread_id = ? ORDER BY created_at, id",
             )
             .bind(thread_id)
             .fetch_all(&self.pool)
             .await?
         } else {
             sqlx::query_as::<_, AgentRunRow>(
-                "SELECT * FROM agent_run WHERE thread_id = ? AND archived_at IS NULL ORDER BY created_at, id",
+                "SELECT id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at FROM agent_run WHERE thread_id = ? AND archived_at IS NULL ORDER BY created_at, id",
             )
             .bind(thread_id)
             .fetch_all(&self.pool)
@@ -187,13 +185,15 @@ impl Database {
         thread_id: &str,
         run_id: &str,
     ) -> Result<Option<AgentRunSnapshot>, StoreError> {
-        sqlx::query_as::<_, AgentRunRow>("SELECT * FROM agent_run WHERE thread_id = ? AND id = ?")
-            .bind(thread_id)
-            .bind(run_id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(TryInto::try_into)
-            .transpose()
+        sqlx::query_as::<_, AgentRunRow>(
+            "SELECT id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at FROM agent_run WHERE thread_id = ? AND id = ?",
+        )
+        .bind(thread_id)
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
     pub async fn list_agent_steps(
@@ -231,15 +231,6 @@ impl TryFrom<AgentRunRow> for AgentRunSnapshot {
             id: row.id,
             thread_id: row.thread_id,
             parent_run_id: row.parent_run_id,
-            kind: match row.kind.as_str() {
-                "agent" => AgentRunKind::Agent,
-                "bash" => AgentRunKind::Bash,
-                value => {
-                    return Err(StoreError::InvalidData(format!(
-                        "unknown run kind '{value}'"
-                    )));
-                }
-            },
             status: parse_run_status(&row.status)?,
             created_at: row.created_at,
             started_at: row.started_at,

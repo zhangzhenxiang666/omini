@@ -207,6 +207,7 @@ impl AgentTaskSupervisor {
         }) {
             supervisor.task_manager.notify_completed(TaskCompletion {
                 task_id: task.task_id,
+                kind: TaskKind::SubAgent,
                 label: task.agent,
                 title: task.title,
                 status: task.status,
@@ -975,9 +976,9 @@ impl AgentTaskSupervisor {
                         warnings.push(error);
                     }
                 }
-                EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } => {
+                EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
                     let _ = ack.send(Err(
-                        "agent task notifications are only supported by the main engine"
+                        "background task notifications are only supported by the main engine"
                             .to_string(),
                     ));
                 }
@@ -1265,6 +1266,7 @@ impl AgentTaskSupervisor {
         if notify_owner {
             self.task_manager.notify_completed(TaskCompletion {
                 task_id: info.task_id.clone(),
+                kind: TaskKind::SubAgent,
                 label: info.agent.clone(),
                 title: info.title.clone(),
                 status: info.status,

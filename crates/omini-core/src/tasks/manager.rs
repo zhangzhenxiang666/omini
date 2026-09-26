@@ -211,6 +211,7 @@ impl TaskManager {
         self.update(task.clone()).await?;
         self.notify_completed(TaskCompletion {
             task_id: task.task_id,
+            kind: task.kind,
             label,
             title: task.title,
             status,

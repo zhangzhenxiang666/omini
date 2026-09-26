@@ -1,4 +1,5 @@
 use crate::input::{AttachmentMetadata, InputPart, UserInputIntent};
+use crate::task::TaskCompletion;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -55,18 +56,8 @@ pub struct CompactionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct AgentTaskNotificationItem {
-    pub task_id: String,
-    pub agent: String,
-    pub title: String,
-    pub status: crate::task::TaskStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct AgentTaskNotification {
-    pub tasks: Vec<AgentTaskNotificationItem>,
+pub struct TaskNotification {
+    pub tasks: Vec<TaskCompletion>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -85,7 +76,7 @@ pub struct ToolResultRecord {
 pub enum SystemEvent {
     Plan(ProposedPlan),
     Summary(CompactionSummary),
-    AgentTaskNotification(AgentTaskNotification),
+    TaskNotification(TaskNotification),
     ToolResults { results: Vec<ToolResultRecord> },
 }
 
@@ -96,4 +87,40 @@ pub enum ConversationEntry {
     UserInput(UserInput),
     AssistantMessage(AssistantMessage),
     SystemEvent(SystemEvent),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task::{TaskCompletion, TaskKind, TaskStatus};
+    use chrono::TimeZone;
+
+    #[test]
+    fn task_notification_uses_generic_tag_and_rejects_the_old_tag() {
+        let notification =
+            ConversationEntry::SystemEvent(SystemEvent::TaskNotification(TaskNotification {
+                tasks: vec![TaskCompletion {
+                    task_id: "bash-1".to_string(),
+                    kind: TaskKind::Bash,
+                    label: "Bash".to_string(),
+                    title: "Run command".to_string(),
+                    status: TaskStatus::Completed,
+                    summary: None,
+                }],
+                created_at: chrono::Utc.with_ymd_and_hms(2026, 9, 26, 0, 0, 0).unwrap(),
+            }));
+        let value = serde_json::to_value(&notification).unwrap();
+        assert_eq!(value["content"]["type"], "task_notification");
+        assert_eq!(value["content"]["tasks"][0]["kind"], "bash");
+
+        let old_entry = serde_json::json!({
+            "kind": "system_event",
+            "content": {
+                "type": "agent_task_notification",
+                "tasks": [],
+                "created_at": "2026-09-26T00:00:00Z"
+            }
+        });
+        assert!(serde_json::from_value::<ConversationEntry>(old_entry).is_err());
+    }
 }

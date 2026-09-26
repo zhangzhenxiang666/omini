@@ -30,7 +30,7 @@ pub async fn persist_initial_user_message(
         RunStart::UserInput => {
             persist_llm_history_only(thread_id, &llm_message, persistence_tx).await;
         }
-        RunStart::PendingAgentTaskNotification | RunStart::PersistedAgentTaskNotification => {}
+        RunStart::PendingTaskNotification | RunStart::PersistedTaskNotification => {}
     }
 }
 

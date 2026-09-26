@@ -56,9 +56,9 @@ pub enum RunStart {
     /// 用户消息的展示行与 echo 已由 server 处理，启动前只需追加 LLM 上下文行。
     UserInput,
     /// 由待持久化的 Agent task completion 启动；落库前禁止请求 provider。
-    PendingAgentTaskNotification,
+    PendingTaskNotification,
     /// 通知已在上一个 query 的终止边界持久化，只需继续请求 provider。
-    PersistedAgentTaskNotification,
+    PersistedTaskNotification,
 }
 
 impl RunStart {
@@ -66,8 +66,8 @@ impl RunStart {
         match self {
             Self::UserMessage => "user_message",
             Self::UserInput => "user_input",
-            Self::PendingAgentTaskNotification => "pending_agent_task_notification",
-            Self::PersistedAgentTaskNotification => "persisted_agent_task_notification",
+            Self::PendingTaskNotification => "pending_task_notification",
+            Self::PersistedTaskNotification => "persisted_task_notification",
         }
     }
 }
@@ -265,8 +265,9 @@ mod tests {
     use crate::types::events::EngineToRuntimeEvent;
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{RawConfig, ResolvedConfig, Settings};
-    use omini_domain::conversation::{AgentTaskNotification, AgentTaskNotificationItem};
+    use omini_domain::conversation::TaskNotification;
     use omini_domain::task::TaskStatus;
+    use omini_domain::task::{TaskCompletion, TaskKind};
     use omini_domain::usage::Usage;
     use omini_model::message::{ContentBlock, Role};
     use omini_runtime_contract::thread_domain::{
@@ -1282,11 +1283,12 @@ thinking = true
         let active_profile_handle = Arc::clone(&runtime.active_profile);
         let (tool_pause_resolver, permission_rx) = permission_tool_pause_resolver("tool_1");
         let processor = runtime
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 ActiveProfile::Main,
                 active_profile_handle,
                 tool_pause_resolver,
+                None,
             )
             .await;
 
@@ -1336,11 +1338,12 @@ thinking = true
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
         let processor = runtime
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 ActiveProfile::Main,
                 active_profile_handle,
                 empty_tool_pause_resolver(),
+                None,
             )
             .await;
 
@@ -1384,11 +1387,12 @@ thinking = true
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
         let processor = runtime
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 ActiveProfile::Main,
                 active_profile_handle,
                 empty_tool_pause_resolver(),
+                None,
             )
             .await;
         let message = Message::from_user_text("intervention".to_string());
@@ -1437,17 +1441,19 @@ thinking = true
             drain_events(&mut event_rx);
             let (engine_tx, engine_rx) = mpsc::channel(4);
             let processor = runtime
-                .spawn_event_processor(
+                .spawn_event_processor_for_run(
                     engine_rx,
                     ActiveProfile::Main,
                     Arc::clone(&runtime.active_profile),
                     empty_tool_pause_resolver(),
+                    None,
                 )
                 .await;
-            let notification = AgentTaskNotification {
-                tasks: vec![AgentTaskNotificationItem {
+            let notification = TaskNotification {
+                tasks: vec![TaskCompletion {
                     task_id: "task_1".to_string(),
-                    agent: "general".to_string(),
+                    kind: TaskKind::SubAgent,
+                    label: "general".to_string(),
                     title: "Test".to_string(),
                     status: TaskStatus::Completed,
                     summary: None,
@@ -1456,7 +1462,7 @@ thinking = true
             };
             let (ack, result) = tokio::sync::oneshot::channel();
             engine_tx
-                .send(EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+                .send(EngineToRuntimeEvent::TaskNotificationsProduced {
                     notification: notification.clone(),
                     llm_message: Message::from_user_text("task completed".to_string()),
                     task_ids: vec!["task_1".to_string()],
@@ -1465,7 +1471,7 @@ thinking = true
                 .await
                 .unwrap();
 
-            let RuntimePersistenceEvent::InsertAgentTaskNotification { ack, .. } =
+            let RuntimePersistenceEvent::InsertTaskNotification { ack, .. } =
                 persistence_rx.recv().await.unwrap()
             else {
                 panic!("expected task notification persistence event");
@@ -1504,11 +1510,12 @@ thinking = true
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
         let processor = runtime
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 ActiveProfile::Main,
                 active_profile_handle,
                 empty_tool_pause_resolver(),
+                None,
             )
             .await;
 
@@ -1595,11 +1602,12 @@ thinking = true
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let active_profile_handle = Arc::clone(&runtime.active_profile);
         let processor = runtime
-            .spawn_event_processor(
+            .spawn_event_processor_for_run(
                 engine_rx,
                 ActiveProfile::Main,
                 active_profile_handle,
                 empty_tool_pause_resolver(),
+                None,
             )
             .await;
 

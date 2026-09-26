@@ -77,7 +77,6 @@ impl Database {
                 id              TEXT PRIMARY KEY,
                 thread_id       TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
                 parent_run_id   TEXT REFERENCES agent_run(id) ON DELETE CASCADE,
-                kind            TEXT NOT NULL CHECK (kind IN ('agent', 'bash')),
                 status          TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled', 'interrupted')),
                 created_at      TEXT NOT NULL,
                 started_at      TEXT,

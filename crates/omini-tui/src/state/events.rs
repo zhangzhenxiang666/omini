@@ -33,8 +33,8 @@ fn ui_message_from_history_item(item: HistoryItem) -> UiMessage {
             SystemEvent::Summary(summary) => UiMessage::CompactSummary {
                 text: summary.markdown,
             },
-            SystemEvent::AgentTaskNotification(notification) => {
-                UiMessage::AgentTaskNotification(notification)
+            SystemEvent::TaskNotification(notification) => {
+                UiMessage::TaskNotification(notification)
             }
             SystemEvent::ToolResults { results } => {
                 UiMessage::Message(crate::display::tool_results_message(&results))

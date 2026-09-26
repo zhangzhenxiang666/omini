@@ -624,12 +624,13 @@ fn render_single_ui_message(
             selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
             all_lines.extend(block_lines);
         }
-        UiMessage::AgentTaskNotification(notification) => {
+        UiMessage::TaskNotification(notification) => {
             let dim = Style::default().fg(Color::Rgb(140, 145, 155));
             for task in &notification.tasks {
                 let text = format!(
-                    "background task · {} · {} · {}",
-                    task.agent,
+                    "background task · {} · {} · {} · {}",
+                    task.kind.as_str(),
+                    task.label,
                     task.title,
                     task.status.as_str()
                 );

@@ -60,13 +60,13 @@ omini-cli / omini-tui
 
 ## Agent Run 与工具调用
 
-- `AgentRun` 是一次运行的治理和查询单位，关联 Thread、可选父 Run、类型、状态、时间和累计 Token。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 等非 Agent Run 不创建虚假的 Step。
+- `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 5 暴露 Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 6 暴露 Agent Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 
-用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，任务通知在持久化成功后投影；核心不构造 UI 历史项。工具结果由系统生成，在模型上下文中作为紧跟对应 ToolUse 的 `Role::User` 消息保存，同时作为独立的 `SystemEvent::ToolResults` 时间线记录投影，两个序列各自保留顺序。
+用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，后台任务完成通知在持久化成功后投影；核心不构造 UI 历史项。工具结果由系统生成，在模型上下文中作为紧跟对应 ToolUse 的 `Role::User` 消息保存，同时作为独立的 `SystemEvent::ToolResults` 时间线记录投影，两个序列各自保留顺序。
 
 ## 输入与附件
 
@@ -79,7 +79,7 @@ omini-cli / omini-tui
 
 派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 
-`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、等待、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；完成通知使用通用 `TaskCompletion`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
+`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、等待、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；所有类型的完成通知都使用 `TaskCompletion` 并投影为 `SystemEvent::TaskNotification`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
 
 只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task`、`wait_tasks` 和 `cancel_task` 可操作不同类型的后台任务。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
 

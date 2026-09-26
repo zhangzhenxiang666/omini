@@ -1,4 +1,4 @@
-use omini_domain::conversation::AgentTaskNotification;
+use omini_domain::conversation::TaskNotification;
 use omini_domain::usage::Usage;
 use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_runtime_contract::thread_domain::{
@@ -17,9 +17,9 @@ pub enum EngineToRuntimeEvent {
     /// 它们由 server 在接收输入时直接落库与广播，两条数据流各自独立。
     UserMessageProduced(Message),
 
-    /// Agent task completion 已到达安全输入边界，等待原子持久化后进入内存历史。
-    AgentTaskNotificationsProduced {
-        notification: AgentTaskNotification,
+    /// 后台任务完成通知已到达安全输入边界，等待原子持久化后进入内存历史。
+    TaskNotificationsProduced {
+        notification: TaskNotification,
         llm_message: Message,
         task_ids: Vec<String>,
         ack: oneshot::Sender<Result<(), String>>,

@@ -81,7 +81,7 @@ async fn agent_task_creation_and_recovery() {
 
 #[tokio::test]
 // 重复投递同一任务完成通知不能重复写入 UI 或 LLM 历史。
-async fn agent_task_notification_is_idempotent() {
+async fn task_notification_is_idempotent() {
     let (db, project, _root) = temp_db().await;
     project.create_thread("owner").unwrap();
     db.create_thread(&test_thread("owner")).await.unwrap();
@@ -114,10 +114,11 @@ async fn agent_task_notification_is_idempotent() {
     db.append_llm_message("owner", &before, fixed_time(), &project.thread("owner"))
         .await
         .unwrap();
-    let notification = omini_domain::conversation::AgentTaskNotification {
-        tasks: vec![omini_domain::conversation::AgentTaskNotificationItem {
+    let notification = omini_domain::conversation::TaskNotification {
+        tasks: vec![omini_domain::task::TaskCompletion {
             task_id: "task_done".to_string(),
-            agent: "general".to_string(),
+            kind: omini_domain::task::TaskKind::SubAgent,
+            label: "general".to_string(),
             title: "Test agent".to_string(),
             status: TaskStatus::Completed,
             summary: None,
@@ -126,7 +127,7 @@ async fn agent_task_notification_is_idempotent() {
     };
     let llm_message = Message::from_user_text("agent task completed".to_string());
     for _ in 0..2 {
-        db.insert_agent_task_notification(
+        db.insert_task_notification(
             "owner",
             &notification,
             &llm_message,
@@ -170,7 +171,64 @@ async fn agent_task_notification_is_idempotent() {
             .await
             .as_slice(),
         [omini_domain::conversation::ConversationEntry::SystemEvent(
-            omini_domain::conversation::SystemEvent::AgentTaskNotification(restored)
+            omini_domain::conversation::SystemEvent::TaskNotification(restored)
         )] if restored == &notification
     ));
+}
+
+#[tokio::test]
+async fn bash_task_notification_is_persisted_as_a_generic_task_event() {
+    let (db, project, _root) = temp_db().await;
+    project.create_thread("owner").unwrap();
+    db.create_thread(&test_thread("owner")).await.unwrap();
+    let now = fixed_time();
+    db.upsert_task(&omini_domain::task::TaskInfo {
+        task_id: "bash_task".to_string(),
+        owner_thread_id: "owner".to_string(),
+        kind: omini_domain::task::TaskKind::Bash,
+        title: "Run build command".to_string(),
+        status: TaskStatus::Completed,
+        created_at: now,
+        updated_at: now,
+        completed_at: Some(now),
+        result_summary: Some("build finished".to_string()),
+    })
+    .await
+    .unwrap();
+    let notification = omini_domain::conversation::TaskNotification {
+        tasks: vec![omini_domain::task::TaskCompletion {
+            task_id: "bash_task".to_string(),
+            kind: omini_domain::task::TaskKind::Bash,
+            label: "Bash".to_string(),
+            title: "Run build command".to_string(),
+            status: TaskStatus::Completed,
+            summary: Some("build finished".to_string()),
+        }],
+        created_at: now,
+    };
+
+    db.insert_task_notification(
+        "owner",
+        &notification,
+        &Message::from_user_text("bash task completed".to_string()),
+        &["bash_task".to_string()],
+        now,
+    )
+    .await
+    .unwrap();
+
+    let history = history::load_messages(&db, "owner", &project.thread("owner")).await;
+    assert!(matches!(
+        history.as_slice(),
+        [omini_domain::conversation::ConversationEntry::SystemEvent(
+            omini_domain::conversation::SystemEvent::TaskNotification(restored)
+        )] if restored == &notification
+    ));
+    let delivered: i64 = sqlx::query_scalar(
+        "SELECT notification_delivered FROM background_task WHERE task_id = 'bash_task'",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(delivered, 1);
 }

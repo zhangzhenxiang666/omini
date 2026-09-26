@@ -215,7 +215,7 @@ fn extract_message_text(content_json: &str) -> String {
                 omini_domain::conversation::SystemEvent::Summary(summary),
             ) => summary.markdown,
             omini_domain::conversation::ConversationEntry::SystemEvent(
-                omini_domain::conversation::SystemEvent::AgentTaskNotification(_),
+                omini_domain::conversation::SystemEvent::TaskNotification(_),
             ) => String::new(),
             omini_domain::conversation::ConversationEntry::SystemEvent(
                 omini_domain::conversation::SystemEvent::ToolResults { results },

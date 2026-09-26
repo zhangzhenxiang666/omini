@@ -4,7 +4,7 @@ use omini_domain::agent_run::{
     AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
     ToolUseStatus,
 };
-use omini_domain::conversation::{AgentTaskNotification, CompactionSummary, ProposedPlan};
+use omini_domain::conversation::{CompactionSummary, ProposedPlan, TaskNotification};
 use omini_domain::task::{TaskInfo, TaskStatus};
 use omini_domain::usage::Usage;
 use omini_model::message::Message;
@@ -96,9 +96,9 @@ pub enum RuntimePersistenceEvent {
     UpsertTask {
         task: TaskInfo,
     },
-    InsertAgentTaskNotification {
+    InsertTaskNotification {
         owner_thread_id: String,
-        notification: AgentTaskNotification,
+        notification: TaskNotification,
         llm_message: Message,
         task_ids: Vec<String>,
         ack: oneshot::Sender<Result<(), String>>,

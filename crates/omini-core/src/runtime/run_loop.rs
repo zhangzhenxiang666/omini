@@ -105,7 +105,7 @@ impl AgentRuntime {
                     Some(completion) = self.task_completion_rx.recv() => {
                         self.query_engine.enqueue_task_completion(completion);
                         self.collect_task_completions().await;
-                        self.process_run(RunStart::PendingAgentTaskNotification).await;
+                        self.process_run(RunStart::PendingTaskNotification).await;
                     }
                     else => break,
                 }
@@ -179,7 +179,6 @@ impl AgentRuntime {
                 id: run_id.clone(),
                 thread_id: self.thread_id.clone(),
                 parent_run_id: None,
-                kind: omini_domain::agent_run::AgentRunKind::Agent,
                 status: omini_domain::agent_run::AgentRunStatus::Running,
                 created_at,
                 started_at: Some(created_at),
@@ -245,9 +244,9 @@ impl AgentRuntime {
                 .await;
             let collected_after_run = self.collect_task_completions().await;
             start = if follow_up {
-                RunStart::PersistedAgentTaskNotification
+                RunStart::PersistedTaskNotification
             } else if collected_after_run {
-                RunStart::PendingAgentTaskNotification
+                RunStart::PendingTaskNotification
             } else {
                 break;
             };
@@ -261,7 +260,7 @@ impl AgentRuntime {
         thread_id: String,
     ) -> (bool, bool) {
         tracing::info!("agent run started");
-        let requires_internal_input = matches!(start, RunStart::PendingAgentTaskNotification);
+        let requires_internal_input = matches!(start, RunStart::PendingTaskNotification);
         let model = self.settings.active_model();
         history::persist_initial_user_message(
             &self.thread_id,

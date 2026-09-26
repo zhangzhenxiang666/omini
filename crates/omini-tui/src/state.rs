@@ -5,7 +5,7 @@ use crate::types::events::{
     Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
-use omini_domain::conversation::{AgentTaskNotification, SystemEvent};
+use omini_domain::conversation::{SystemEvent, TaskNotification};
 use omini_domain::task::TaskStatus;
 use omini_model::message::Message;
 use omini_protocol::HistoryItem;
@@ -162,7 +162,7 @@ pub enum UiMessage {
     RunDivider { elapsed: Duration },
     Notification(Notification),
     CompactSummary { text: String },
-    AgentTaskNotification(AgentTaskNotification),
+    TaskNotification(TaskNotification),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,8 +212,8 @@ impl UiMessage {
                     SystemEvent::Summary(summary) => Self::CompactSummary {
                         text: summary.markdown,
                     },
-                    SystemEvent::AgentTaskNotification(notification) => {
-                        Self::AgentTaskNotification(notification)
+                    SystemEvent::TaskNotification(notification) => {
+                        Self::TaskNotification(notification)
                     }
                     SystemEvent::ToolResults { results } => {
                         Self::Message(crate::display::tool_results_message(&results))
@@ -231,7 +231,7 @@ impl UiMessage {
             | Self::RunDivider { .. }
             | Self::Notification(_)
             | Self::CompactSummary { .. }
-            | Self::AgentTaskNotification(_) => None,
+            | Self::TaskNotification(_) => None,
         }
     }
 
@@ -243,7 +243,7 @@ impl UiMessage {
             | Self::RunDivider { .. }
             | Self::Notification(_)
             | Self::CompactSummary { .. }
-            | Self::AgentTaskNotification(_) => None,
+            | Self::TaskNotification(_) => None,
         }
     }
 }

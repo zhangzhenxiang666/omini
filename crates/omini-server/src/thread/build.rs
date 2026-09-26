@@ -107,21 +107,22 @@ impl ThreadRuntime {
                             .lock()
                             .expect("replay buffer lock poisoned")
                             .record_persistence(&replay_thread_id, &event);
-                        if let runtime_contract::RuntimePersistenceEvent::InsertAgentTaskNotification {
+                        if let runtime_contract::RuntimePersistenceEvent::InsertTaskNotification {
                             notification,
                             ..
                         } = &event
                         {
-                            let _ = persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
-                                client_proto::TypedRuntimeEvent::UserMessageInjected {
-                                    item: omini_protocol::HistoryItem::SystemEvent(
-                                        domain::conversation::SystemEvent::AgentTaskNotification(
-                                            notification.clone(),
+                            let _ =
+                                persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
+                                    client_proto::TypedRuntimeEvent::UserMessageInjected {
+                                        item: omini_protocol::HistoryItem::SystemEvent(
+                                            domain::conversation::SystemEvent::TaskNotification(
+                                                notification.clone(),
+                                            ),
                                         ),
-                                    ),
-                                    client_echo_id: None,
-                                },
-                            ));
+                                        client_echo_id: None,
+                                    },
+                                ));
                         }
                     } else if let Err(error) = &result {
                         tracing::error!(error = %error, "runtime persistence event failed");
@@ -138,10 +139,20 @@ impl ThreadRuntime {
                                     .map_err(|error| error.to_string()),
                             );
                         }
-                        runtime_contract::RuntimePersistenceEvent::CreateAgentTask { ack, .. }
-                        | runtime_contract::RuntimePersistenceEvent::PersistAgentMessage { ack, .. }
-                        | runtime_contract::RuntimePersistenceEvent::FinishAgentTask { ack, .. }
-                        | runtime_contract::RuntimePersistenceEvent::InsertAgentTaskNotification { ack, .. } => {
+                        runtime_contract::RuntimePersistenceEvent::CreateAgentTask {
+                            ack, ..
+                        }
+                        | runtime_contract::RuntimePersistenceEvent::PersistAgentMessage {
+                            ack,
+                            ..
+                        }
+                        | runtime_contract::RuntimePersistenceEvent::FinishAgentTask {
+                            ack, ..
+                        }
+                        | runtime_contract::RuntimePersistenceEvent::InsertTaskNotification {
+                            ack,
+                            ..
+                        } => {
                             let _ = ack.send(result.map_err(|error| error.to_string()));
                         }
                         _ => {}

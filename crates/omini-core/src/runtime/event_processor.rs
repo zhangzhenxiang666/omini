@@ -5,26 +5,6 @@ use super::*;
 use tracing::Instrument;
 
 impl AgentRuntime {
-    /// 启动事件处理器。
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub async fn spawn_event_processor(
-        &self,
-        engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
-        active_profile: ActiveProfile,
-        active_profile_handle: Arc<RwLock<ActiveProfile>>,
-        tool_pause_resolver: ToolPauseResolver,
-    ) -> tokio::task::JoinHandle<()> {
-        self.spawn_event_processor_for_run(
-            engine_rx,
-            active_profile,
-            active_profile_handle,
-            tool_pause_resolver,
-            None,
-        )
-        .await
-    }
-
     pub async fn spawn_event_processor_for_run(
         &self,
         mut engine_rx: mpsc::Receiver<EngineToRuntimeEvent>,
@@ -64,7 +44,7 @@ impl AgentRuntime {
                             )
                             .await;
                         }
-                        EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+                        EngineToRuntimeEvent::TaskNotificationsProduced {
                             notification,
                             llm_message,
                             task_ids,
@@ -73,7 +53,7 @@ impl AgentRuntime {
                             let (persistence_ack, persistence_result) =
                                 tokio::sync::oneshot::channel();
                             let result = if persistence_tx
-                                .send(RuntimePersistenceEvent::InsertAgentTaskNotification {
+                                .send(RuntimePersistenceEvent::InsertTaskNotification {
                                     owner_thread_id: thread_id.clone(),
                                     notification: notification.clone(),
                                     llm_message,
@@ -83,13 +63,13 @@ impl AgentRuntime {
                                 .await
                                 .is_err()
                             {
-                                Err("agent task notification persistence channel closed"
+                                Err("background task notification persistence channel closed"
                                     .to_string())
                             } else {
                                 persistence_result
                                     .await
                                     .map_err(|_| {
-                                        "agent task notification acknowledgement dropped"
+                                        "background task notification acknowledgement dropped"
                                             .to_string()
                                     })
                                     .and_then(|result| result)

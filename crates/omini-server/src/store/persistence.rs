@@ -129,14 +129,14 @@ impl Database {
                 self.set_agent_tasks_cancelling(task_ids, Utc::now()).await
             }
             RuntimePersistenceEvent::UpsertTask { task } => self.upsert_task(task).await,
-            RuntimePersistenceEvent::InsertAgentTaskNotification {
+            RuntimePersistenceEvent::InsertTaskNotification {
                 owner_thread_id,
                 notification,
                 llm_message,
                 task_ids,
                 ..
             } => {
-                self.insert_agent_task_notification(
+                self.insert_task_notification(
                     owner_thread_id,
                     notification,
                     llm_message,

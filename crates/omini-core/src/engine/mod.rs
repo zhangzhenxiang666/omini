@@ -3,14 +3,12 @@ use crate::runtime::compact::AutoCompactState;
 use crate::tools::{PendingToolPauses, ToolRegistry, ToolRuntimeContext};
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
-use omini_domain::conversation::{AgentTaskNotification, AgentTaskNotificationItem};
+use omini_domain::conversation::TaskNotification;
 use omini_domain::task::TaskCompletion;
-use omini_domain::task::TaskStatus;
 use omini_model::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
 use omini_runtime_contract::thread_domain::{ActiveProfile, ToolPauseResponse};
-use serde::Serialize;
 use state::{FinalizationReason, QueryState, REPEAT_LIMIT, RepeatGuard, TurnOutcome};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -117,7 +115,7 @@ impl QueryEngine {
     pub fn enqueue_task_completion(&self, completion: TaskCompletion) {
         self.pending_task_completions
             .lock()
-            .expect("pending agent task completions mutex poisoned")
+            .expect("pending background task completions mutex poisoned")
             .push_back(completion);
     }
 
@@ -183,14 +181,14 @@ impl QueryEngine {
         let mut notification_persistence_failed = false;
 
         match self.drain_task_completions(ctx.messages, &event_tx).await {
-            AgentTaskNotificationDrain::Injected => {}
-            AgentTaskNotificationDrain::Empty if !ctx.requires_internal_input => {}
-            AgentTaskNotificationDrain::Empty | AgentTaskNotificationDrain::Failed => {
+            TaskNotificationDrain::Injected => {}
+            TaskNotificationDrain::Empty if !ctx.requires_internal_input => {}
+            TaskNotificationDrain::Empty | TaskNotificationDrain::Failed => {
                 notification_persistence_failed = true;
                 if ctx.requires_internal_input {
                     let mut result = state.into_result();
                     result.finish_reason = FinishReason::Error(
-                        "agent task notification could not be persisted".to_string(),
+                        "background task notification could not be persisted".to_string(),
                     );
                     return result;
                 }
@@ -240,9 +238,8 @@ impl QueryEngine {
             };
 
             let task_notification = self.drain_task_completions(ctx.messages, &event_tx).await;
-            let had_task_notification = task_notification == AgentTaskNotificationDrain::Injected;
-            notification_persistence_failed |=
-                task_notification == AgentTaskNotificationDrain::Failed;
+            let had_task_notification = task_notification == TaskNotificationDrain::Injected;
+            notification_persistence_failed |= task_notification == TaskNotificationDrain::Failed;
 
             if had_task_notification && mode.is_finalization() {
                 follow_up = true;
@@ -280,7 +277,7 @@ impl QueryEngine {
         let has_pending_notification = !self
             .pending_task_completions
             .lock()
-            .expect("pending agent task completions mutex poisoned")
+            .expect("pending background task completions mutex poisoned")
             .is_empty();
         let mut result = state.into_result();
         if has_pending_notification
@@ -326,41 +323,24 @@ impl QueryEngine {
         &self,
         messages: &mut Vec<Message>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-    ) -> AgentTaskNotificationDrain {
+    ) -> TaskNotificationDrain {
         let completions = self
             .pending_task_completions
             .lock()
-            .expect("pending agent task completions mutex poisoned")
+            .expect("pending background task completions mutex poisoned")
             .drain(..)
             .collect::<Vec<_>>();
         if completions.is_empty() {
-            return AgentTaskNotificationDrain::Empty;
+            return TaskNotificationDrain::Empty;
         }
 
-        let notification = AgentTaskNotification {
-            tasks: completions
-                .iter()
-                .map(|completion| AgentTaskNotificationItem {
-                    task_id: completion.task_id.clone(),
-                    agent: completion.label.clone(),
-                    title: completion.title.clone(),
-                    status: completion.status,
-                    summary: completion.summary.clone(),
-                })
-                .collect(),
+        let notification = TaskNotification {
+            tasks: completions.clone(),
             created_at: chrono::Utc::now(),
         };
-        let llm_tasks = completions
-            .iter()
-            .map(|completion| TaskCompletionNotification {
-                task_id: &completion.task_id,
-                status: completion.status,
-                summary: completion.summary.as_deref(),
-            })
-            .collect::<Vec<_>>();
         let llm_message = Message::from_user_text(format!(
-            "<agent_task_notifications>{}</agent_task_notifications>",
-            serde_json::to_string(&llm_tasks).unwrap_or_else(|_| "[]".to_string())
+            "<task_notifications>{}</task_notifications>",
+            serde_json::to_string(&completions).unwrap_or_else(|_| "[]".to_string())
         ));
         let task_ids = completions
             .iter()
@@ -368,7 +348,7 @@ impl QueryEngine {
             .collect::<Vec<_>>();
         let (ack, result) = tokio::sync::oneshot::channel();
         let persisted = if event_tx
-            .send(EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+            .send(EngineToRuntimeEvent::TaskNotificationsProduced {
                 notification,
                 llm_message: llm_message.clone(),
                 task_ids,
@@ -388,42 +368,34 @@ impl QueryEngine {
         match persisted {
             Ok(()) => {
                 messages.push(llm_message);
-                AgentTaskNotificationDrain::Injected
+                TaskNotificationDrain::Injected
             }
             Err(error) => {
                 {
                     let mut pending = self
                         .pending_task_completions
                         .lock()
-                        .expect("pending agent task completions mutex poisoned");
+                        .expect("pending background task completions mutex poisoned");
                     for completion in completions.into_iter().rev() {
                         pending.push_front(completion);
                     }
                 }
                 let _ = event_tx
                     .send(EngineToRuntimeEvent::Warning(format!(
-                        "Failed to persist agent task notification: {error}"
+                        "Failed to persist background task notification: {error}"
                     )))
                     .await;
-                AgentTaskNotificationDrain::Failed
+                TaskNotificationDrain::Failed
             }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentTaskNotificationDrain {
+enum TaskNotificationDrain {
     Empty,
     Injected,
     Failed,
-}
-
-#[derive(Serialize)]
-struct TaskCompletionNotification<'a> {
-    task_id: &'a str,
-    status: TaskStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    summary: Option<&'a str>,
 }
 
 impl Default for QueryEngine {
@@ -439,7 +411,7 @@ mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
     use omini_domain::config::ProviderEndpointKind;
-    use omini_domain::task::TaskCompletion;
+    use omini_domain::task::{TaskCompletion, TaskKind};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::Path;
@@ -474,9 +446,10 @@ mod tests {
         )
     }
 
-    fn task_completion(task_id: &str) -> TaskCompletion {
+    fn task_completion(task_id: &str, kind: TaskKind) -> TaskCompletion {
         TaskCompletion {
             task_id: task_id.to_string(),
+            kind,
             label: "general".to_string(),
             title: format!("Task {task_id}"),
             status: omini_domain::task::TaskStatus::Completed,
@@ -487,11 +460,11 @@ mod tests {
     #[tokio::test]
     async fn task_notifications_are_batched_and_enter_history_only_after_ack() {
         let engine = QueryEngine::default();
-        engine.enqueue_task_completion(task_completion("task_1"));
-        engine.enqueue_task_completion(task_completion("task_2"));
+        engine.enqueue_task_completion(task_completion("task_1", TaskKind::SubAgent));
+        engine.enqueue_task_completion(task_completion("task_2", TaskKind::Bash));
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let observer = tokio::spawn(async move {
-            let EngineToRuntimeEvent::AgentTaskNotificationsProduced {
+            let EngineToRuntimeEvent::TaskNotificationsProduced {
                 notification,
                 llm_message,
                 task_ids,
@@ -499,22 +472,26 @@ mod tests {
                 ..
             } = event_rx.recv().await.unwrap()
             else {
-                panic!("expected agent task notification event");
+                panic!("expected background task notification event");
             };
             assert_eq!(task_ids, ["task_1", "task_2"]);
             assert_eq!(notification.tasks.len(), 2);
+            assert_eq!(notification.tasks[0].kind, TaskKind::SubAgent);
+            assert_eq!(notification.tasks[1].kind, TaskKind::Bash);
             let omini_model::message::ContentBlock::Text(text) = &llm_message.content[0] else {
                 panic!("task notification should be a text message");
             };
             let payload = text
                 .text
-                .strip_prefix("<agent_task_notifications>")
-                .and_then(|text| text.strip_suffix("</agent_task_notifications>"))
+                .strip_prefix("<task_notifications>")
+                .and_then(|text| text.strip_suffix("</task_notifications>"))
                 .expect("task notification envelope");
             let tasks: serde_json::Value = serde_json::from_str(payload).unwrap();
             assert_eq!(tasks[0]["task_id"], "task_1");
             assert_eq!(tasks[0]["status"], "completed");
-            assert_eq!(tasks[0].as_object().unwrap().len(), 2);
+            assert_eq!(tasks[0]["kind"], "sub_agent");
+            assert_eq!(tasks[0]["label"], "general");
+            assert_eq!(tasks[0].as_object().unwrap().len(), 5);
             ack.send(Ok(())).unwrap();
         });
         let mut messages = vec![Message::from_user_text("before".to_string())];
@@ -524,25 +501,25 @@ mod tests {
             .await;
 
         observer.await.unwrap();
-        assert_eq!(outcome, AgentTaskNotificationDrain::Injected);
+        assert_eq!(outcome, TaskNotificationDrain::Injected);
         assert_eq!(messages.len(), 2);
         assert!(matches!(
             messages[1].content.as_slice(),
             [omini_model::message::ContentBlock::Text(text)]
-                if text.text.contains("agent_task_notifications")
+                if text.text.contains("task_notifications")
         ));
     }
 
     #[tokio::test]
     async fn failed_task_notification_persistence_keeps_queue_and_history_unchanged() {
         let engine = QueryEngine::default();
-        engine.enqueue_task_completion(task_completion("task_1"));
+        engine.enqueue_task_completion(task_completion("task_1", TaskKind::SubAgent));
         let (event_tx, mut event_rx) = mpsc::channel(2);
         let observer = tokio::spawn(async move {
-            let EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } =
+            let EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } =
                 event_rx.recv().await.unwrap()
             else {
-                panic!("expected agent task notification event");
+                panic!("expected background task notification event");
             };
             ack.send(Err("database unavailable".to_string())).unwrap();
             assert!(matches!(
@@ -557,7 +534,7 @@ mod tests {
             .await;
 
         observer.await.unwrap();
-        assert_eq!(outcome, AgentTaskNotificationDrain::Failed);
+        assert_eq!(outcome, TaskNotificationDrain::Failed);
         assert_eq!(messages.len(), 1);
         assert_eq!(
             engine
@@ -734,10 +711,13 @@ mod tests {
                     EngineToRuntimeEvent::MessageProduced(_) => {
                         assistant_messages += 1;
                         if assistant_messages == 1 {
-                            observer_engine.enqueue_task_completion(task_completion("task_1"));
+                            observer_engine.enqueue_task_completion(task_completion(
+                                "task_1",
+                                TaskKind::SubAgent,
+                            ));
                         }
                     }
-                    EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } => {
+                    EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
                         notifications += 1;
                         ack.send(Ok(())).unwrap();
                     }
@@ -805,10 +785,13 @@ mod tests {
                     EngineToRuntimeEvent::ToolUse(_) => {
                         tool_uses += 1;
                         if tool_uses == REPEAT_LIMIT {
-                            observer_engine.enqueue_task_completion(task_completion("task_1"));
+                            observer_engine.enqueue_task_completion(task_completion(
+                                "task_1",
+                                TaskKind::SubAgent,
+                            ));
                         }
                     }
-                    EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } => {
+                    EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
                         notifications += 1;
                         ack.send(Ok(())).unwrap();
                     }

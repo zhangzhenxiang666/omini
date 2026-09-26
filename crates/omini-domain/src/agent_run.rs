@@ -4,22 +4,6 @@ use serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AgentRunKind {
-    Agent,
-    Bash,
-}
-
-impl AgentRunKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Bash => "bash",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Queued,
     Running,
@@ -97,7 +81,6 @@ pub struct AgentRunSnapshot {
     pub id: String,
     pub thread_id: String,
     pub parent_run_id: Option<String>,
-    pub kind: AgentRunKind,
     pub status: AgentRunStatus,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,

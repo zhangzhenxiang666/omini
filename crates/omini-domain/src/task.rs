@@ -93,6 +93,7 @@ pub struct TaskInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TaskCompletion {
     pub task_id: String,
+    pub kind: TaskKind,
     pub label: String,
     pub title: String,
     pub status: TaskStatus,

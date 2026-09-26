@@ -103,8 +103,8 @@ impl Database {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "INSERT INTO agent_run(id, thread_id, parent_run_id, kind, status, created_at, started_at, finished_at, total_tokens, archived_at)
-             VALUES (?, ?, ?, 'agent', 'running', ?, ?, NULL, 0, NULL)",
+            "INSERT INTO agent_run(id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at)
+             VALUES (?, ?, ?, 'running', ?, ?, NULL, 0, NULL)",
         )
         .bind(&task.task_id)
         .bind(&task.thread_id)
@@ -237,10 +237,10 @@ impl Database {
         Ok(())
     }
 
-    pub async fn insert_agent_task_notification(
+    pub async fn insert_task_notification(
         &self,
         owner_thread_id: &str,
-        notification: &omini_domain::conversation::AgentTaskNotification,
+        notification: &omini_domain::conversation::TaskNotification,
         llm_message: &Message,
         task_ids: &[String],
         created_at: DateTime<Utc>,
@@ -266,9 +266,7 @@ impl Database {
 
         let notification_json =
             serde_json::to_string(&omini_domain::conversation::ConversationEntry::SystemEvent(
-                omini_domain::conversation::SystemEvent::AgentTaskNotification(
-                    notification.clone(),
-                ),
+                omini_domain::conversation::SystemEvent::TaskNotification(notification.clone()),
             ))?;
         let model_ref: String =
             sqlx::query_scalar("SELECT provider || '/' || model FROM thread WHERE id = ?")

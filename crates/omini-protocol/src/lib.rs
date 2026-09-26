@@ -5,8 +5,8 @@
 
 use chrono::{DateTime, Utc};
 pub use omini_domain::agent_run::{
-    AgentRunKind, AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus,
-    ToolUseExecutionSnapshot, ToolUseStatus,
+    AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
+    ToolUseStatus,
 };
 pub use omini_domain::config::{
     InputModality, ModelInfo, ProviderEndpointKind, ProviderInfo, ThinkingEffort,
@@ -30,7 +30,7 @@ pub use omini_runtime_contract::thread_domain::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 5;
+pub const PROTOCOL_REVISION: u32 = 6;
 
 /// 用户时间线快照中的一个条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
