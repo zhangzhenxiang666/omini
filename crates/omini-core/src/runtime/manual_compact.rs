@@ -33,6 +33,7 @@ impl AgentRuntime {
             owner_thread_id: self.thread_id.clone(),
             agent_registry: subagent_registry,
             skill_registry,
+            task_manager: Some(self.task_supervisor.task_manager()),
             task_supervisor: Some(Arc::clone(&self.task_supervisor)),
             project: self.project.clone(),
         });

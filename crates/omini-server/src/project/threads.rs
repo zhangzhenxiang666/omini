@@ -457,11 +457,13 @@ async fn load_thread_snapshot(
         .load_current_llm_context(thread_id, &thread_dir)
         .await
         .map_err(|error| CoreError::persistence("failed to load LLM context", error.to_string()))?;
-    Ok(ThreadRuntimeInputs::new(
-        snapshot,
-        thread_messages,
-        llm_context_version,
-    ))
+    let background_tasks = db.list_background_tasks(thread_id).await.map_err(|error| {
+        CoreError::persistence("failed to load background tasks", error.to_string())
+    })?;
+    Ok(
+        ThreadRuntimeInputs::new(snapshot, thread_messages, llm_context_version)
+            .with_background_tasks(background_tasks),
+    )
 }
 
 fn thread_summaries_with_runtime_states(

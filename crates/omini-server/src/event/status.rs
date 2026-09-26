@@ -776,7 +776,7 @@ mod tests {
                     owner_thread_id: "s1".to_string(),
                     truncated: false,
                     payload: client_proto::AgentTaskEvent::Finished {
-                        status: client_proto::AgentTaskStatus::Cancelled,
+                        status: Some(client_proto::TaskStatus::Cancelled),
                         result: None,
                     },
                 },

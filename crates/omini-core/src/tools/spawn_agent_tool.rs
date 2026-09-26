@@ -44,7 +44,7 @@ impl Tool for SpawnAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Start a named agent as a background task. Returns task_id and status immediately. Completion is reported automatically; usually continue your work without polling or reading task status. If this turn needs to wait for results, use wait_agents. The child follows the owner thread's active profile. Only the main agent can use this tool."
+        "Start a named agent as a background task. Returns task_id and status immediately. Completion is reported automatically; usually continue your work without polling or reading task status. If this turn needs to wait for results, use wait_tasks. The child follows the owner thread's active profile. Only the main agent can use this tool."
     }
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {

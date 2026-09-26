@@ -11,6 +11,7 @@ pub(crate) mod prompts;
 pub(crate) mod runtime;
 pub(crate) mod skills;
 pub(crate) mod subagents;
+pub(crate) mod tasks;
 pub(crate) mod title_generation;
 pub(crate) mod tools;
 pub(crate) mod types;
@@ -156,6 +157,7 @@ pub struct AgentCoreThreadLoad {
     pub llm_context_version: i64,
     pub usage: ThreadUsageSnapshot,
     pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
+    pub background_tasks: Vec<omini_domain::task::TaskInfo>,
 }
 
 impl AgentCoreThread {
@@ -177,6 +179,7 @@ impl AgentCoreThread {
             llm_context_version,
             usage,
             agent_tasks,
+            background_tasks,
         } = load;
         let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
         let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
@@ -204,6 +207,7 @@ impl AgentCoreThread {
             usage,
             active_profile,
             agent_tasks,
+            background_tasks,
         };
         let runtime = AgentRuntime::with_capability_handles(channels, deps, handles);
         let runtime_handle = runtime.run();

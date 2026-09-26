@@ -1,13 +1,14 @@
 use chrono::{DateTime, TimeZone, Utc};
 use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, AgentTaskSnapshot, AgentTaskStatus, BashPermissionPreview, CompactTrigger,
+    AgentTaskResult, AgentTaskSnapshot, BashPermissionPreview, CompactTrigger,
     EditPermissionPreview, LoadedThread, McpPermissionPreview, Notification, NotificationKind,
     PermissionPreview, PlanApprovalAction, PlanExecutionProfile, ReadPermissionPreview,
     SearchPermissionPreview, ThreadRuntimeState, ThreadSummary, ThreadUsage, ThreadUsageSnapshot,
     ToolPauseKind, ToolPauseResponse, UserInputOption, UserInputPreview, UserInputQuestion,
 };
 use omini_domain::message::Message;
+use omini_domain::task::TaskStatus;
 use serde_json::{Value, json};
 
 #[test]
@@ -46,12 +47,12 @@ fn task_modes_statuses_and_compact_triggers_are_exhaustive() {
     }
 
     for (status, text, terminal) in [
-        (AgentTaskStatus::Running, "running", false),
-        (AgentTaskStatus::Cancelling, "cancelling", false),
-        (AgentTaskStatus::Completed, "completed", true),
-        (AgentTaskStatus::Failed, "failed", true),
-        (AgentTaskStatus::Cancelled, "cancelled", true),
-        (AgentTaskStatus::Interrupted, "interrupted", true),
+        (TaskStatus::Running, "running", false),
+        (TaskStatus::Cancelling, "cancelling", false),
+        (TaskStatus::Completed, "completed", true),
+        (TaskStatus::Failed, "failed", true),
+        (TaskStatus::Cancelled, "cancelled", true),
+        (TaskStatus::Interrupted, "interrupted", true),
     ] {
         assert_eq!(status.as_str(), text);
         assert_eq!(status.is_terminal(), terminal);
@@ -553,7 +554,7 @@ fn task_info() -> AgentTaskInfo {
         title: "Review".into(),
         depth: 1,
         execution_mode: AgentTaskExecutionMode::Background,
-        status: AgentTaskStatus::Running,
+        status: TaskStatus::Running,
         result: None,
         created_at: fixed_time(),
         updated_at: fixed_time(),

@@ -142,6 +142,48 @@ impl Database {
         .execute(&mut *tx)
         .await?;
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS background_task (
+                task_id          TEXT PRIMARY KEY,
+                owner_thread_id  TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                kind             TEXT NOT NULL CHECK (kind IN ('sub_agent', 'bash')),
+                title            TEXT NOT NULL,
+                status           TEXT NOT NULL CHECK (status IN ('running', 'cancelling', 'completed', 'failed', 'cancelled', 'interrupted')),
+                result_summary  TEXT,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL,
+                completed_at     TEXT,
+                notification_delivered INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        let has_task_notification_state: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('background_task') WHERE name = 'notification_delivered'",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        if has_task_notification_state == 0 {
+            sqlx::query(
+                "ALTER TABLE background_task ADD COLUMN notification_delivered INTEGER NOT NULL DEFAULT 0",
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO background_task(
+                task_id, owner_thread_id, kind, title, status, result_summary,
+                created_at, updated_at, completed_at, notification_delivered
+            ) SELECT task_id, owner_thread_id, 'sub_agent', title, status,
+                json_extract(result_json, '$.output'), created_at, updated_at, completed_at,
+                notification_delivered
+              FROM agent_task",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         let has_parent_run_id: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM pragma_table_info('agent_task') WHERE name = 'parent_run_id'",
         )
@@ -188,6 +230,11 @@ impl Database {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_background_task_owner ON background_task(owner_thread_id, updated_at DESC)",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_agent_run_thread ON agent_run(thread_id, created_at)",
         )
         .execute(&mut *tx)
@@ -202,26 +249,25 @@ impl Database {
         .await?;
 
         sqlx::query(
-            "UPDATE agent_task SET status = 'cancelled', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status = 'running'",
+            "UPDATE agent_task SET status = 'interrupted', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status IN ('running', 'cancelling')",
         )
         .bind(Utc::now())
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE agent_run SET status = 'cancelled', finished_at = COALESCE(finished_at, ?) WHERE id IN (SELECT task_id FROM agent_task WHERE status = 'cancelled') AND status IN ('queued', 'running', 'waiting_approval')",
+            "UPDATE background_task SET status = 'interrupted', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status IN ('running', 'cancelling')",
         )
+        .bind(Utc::now())
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "UPDATE agent_task SET status = 'cancelled', completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE status = 'cancelling'",
+            "UPDATE agent_run SET status = 'interrupted', finished_at = COALESCE(finished_at, ?) WHERE id IN (SELECT task_id FROM agent_task WHERE status = 'interrupted') AND status IN ('queued', 'running', 'waiting_approval')",
         )
-        .bind(Utc::now())
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;
-
         let now = Utc::now();
         sqlx::query(
             "UPDATE agent_run SET status = 'interrupted', finished_at = COALESCE(finished_at, ?) WHERE parent_run_id IS NULL AND status = 'running'",

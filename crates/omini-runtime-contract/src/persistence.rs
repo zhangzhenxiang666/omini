@@ -4,8 +4,9 @@ use omini_domain::agent_run::{
     ToolUseStatus,
 };
 use omini_domain::display::{AgentTaskNotification, DisplayPlan, DisplaySummary};
-use omini_domain::events::{AgentTaskInfo, AgentTaskResult, AgentTaskStatus};
+use omini_domain::events::{AgentTaskInfo, AgentTaskResult};
 use omini_domain::message::Message;
+use omini_domain::task::{TaskInfo, TaskStatus};
 use omini_domain::usage::Usage;
 use tokio::sync::oneshot;
 
@@ -83,13 +84,17 @@ pub enum RuntimePersistenceEvent {
     /// 持久化通道严格有序，因此只有全部子线程消息处理完后才会提交终态。
     FinishAgentTask {
         task_id: String,
-        status: AgentTaskStatus,
+        status: TaskStatus,
         result: AgentTaskResult,
         completed_at: DateTime<Utc>,
         ack: oneshot::Sender<Result<(), String>>,
     },
     SetAgentTasksCancelling {
         task_ids: Vec<String>,
+    },
+    /// 创建或更新通用后台任务索引，不包含执行器专属数据。
+    UpsertTask {
+        task: TaskInfo,
     },
     InsertAgentTaskNotification {
         owner_thread_id: String,

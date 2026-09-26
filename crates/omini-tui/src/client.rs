@@ -891,6 +891,10 @@ fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEven
         protocol::TypedRuntimeEvent::ToolResult(tool_result) => {
             RuntimeToUiEvent::ToolResult(tool_result)
         }
+        protocol::TypedRuntimeEvent::TaskChanged(task) => RuntimeToUiEvent::TaskChanged(task),
+        protocol::TypedRuntimeEvent::TaskOutputDelta(output) => {
+            RuntimeToUiEvent::TaskOutputDelta(output)
+        }
         protocol::TypedRuntimeEvent::CompactSummaryStarted(event) => {
             RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
                 trigger: event.trigger,

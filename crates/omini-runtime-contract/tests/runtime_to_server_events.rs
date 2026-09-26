@@ -7,6 +7,7 @@ use omini_domain::events::{
     ToolPauseRequest, UserInputPreview,
 };
 use omini_domain::message::{Message, Role, ToolResultBlock, ToolUseBlock};
+use omini_domain::task::{TaskChangedEvent, TaskOutputDelta, TaskOutputStream, TaskStatus};
 use omini_runtime_contract::RuntimeToServerEvent;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -211,16 +212,17 @@ fn runtime_to_server_event_malformed_shapes_are_rejected_with_stable_reasons() {
             "unknown variant `unknown`",
         ),
         (
-            json!({"type": "user_message_injected"}),
-            "missing field `item`",
+            json!({
+                "type": "task_output_delta",
+                "task_id": "bash_1",
+                "tool_use_id": "tool_1",
+                "stream": "stdout"
+            }),
+            "missing field `delta`",
         ),
         (
-            json!({
-                "type": "user_message_injected",
-                "item": {"type": "message", "role": "user", "content": []},
-                "client_echo_id": 1
-            }),
-            "expected a string",
+            json!({"type": "task_output_delta", "task_id": "bash_1", "tool_use_id": "tool_1", "stream": "unknown", "delta": ""}),
+            "unknown variant `unknown`",
         ),
         (
             json!({
@@ -237,6 +239,7 @@ fn runtime_to_server_event_malformed_shapes_are_rejected_with_stable_reasons() {
 }
 
 fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
+    let now = Utc.with_ymd_and_hms(2026, 9, 26, 0, 0, 0).single().unwrap();
     let notification = Notification::info("notice");
     let usage = ThreadUsageSnapshot {
         current_context_tokens: 1,
@@ -444,6 +447,48 @@ fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
             RuntimeToServerEvent::AgentTaskEvent(task_event.clone()),
             tagged_payload("agent_task_event", &task_event),
         ),
+        (
+            RuntimeToServerEvent::TaskChanged(TaskChangedEvent {
+                task: omini_domain::task::TaskInfo {
+                    task_id: "bash_1".to_string(),
+                    owner_thread_id: "thread_1".to_string(),
+                    kind: omini_domain::task::TaskKind::Bash,
+                    title: "cargo check".to_string(),
+                    status: TaskStatus::Running,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                    result_summary: None,
+                },
+            }),
+            json!({
+                "type": "task_changed",
+                "task": {
+                    "task_id": "bash_1",
+                    "owner_thread_id": "thread_1",
+                    "kind": "bash",
+                    "title": "cargo check",
+                    "status": "running",
+                    "created_at": now,
+                    "updated_at": now
+                }
+            }),
+        ),
+        (
+            RuntimeToServerEvent::TaskOutputDelta(TaskOutputDelta {
+                task_id: "bash_1".to_string(),
+                tool_use_id: "tool_1".to_string(),
+                stream: TaskOutputStream::Stderr,
+                delta: "checking crate".to_string(),
+            }),
+            json!({
+                "type": "task_output_delta",
+                "task_id": "bash_1",
+                "tool_use_id": "tool_1",
+                "stream": "stderr",
+                "delta": "checking crate"
+            }),
+        ),
     ]
 }
 
@@ -475,6 +520,8 @@ fn runtime_event_type(event: &RuntimeToServerEvent) -> &'static str {
         RuntimeToServerEvent::ThreadSwitched { .. } => "thread_switched",
         RuntimeToServerEvent::AgentRunChanged(_) => "agent_run_changed",
         RuntimeToServerEvent::AgentTaskEvent(_) => "agent_task_event",
+        RuntimeToServerEvent::TaskChanged(_) => "task_changed",
+        RuntimeToServerEvent::TaskOutputDelta(_) => "task_output_delta",
     }
 }
 

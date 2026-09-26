@@ -65,7 +65,7 @@ pub struct AgentTask {
     pub spawn_tool_use_id: String,
     pub depth: u8,
     pub execution_mode: AgentTaskExecutionMode,
-    pub status: AgentTaskStatus,
+    pub status: TaskStatus,
     pub agent_name: String,
     pub title: String,
     pub result: Option<AgentTaskResult>,
@@ -220,14 +220,14 @@ impl TryFrom<AgentTaskRow> for AgentTask {
     }
 }
 
-fn parse_agent_task_status(value: &str) -> Result<AgentTaskStatus, StoreError> {
+fn parse_agent_task_status(value: &str) -> Result<TaskStatus, StoreError> {
     match value {
-        "running" => Ok(AgentTaskStatus::Running),
-        "cancelling" => Ok(AgentTaskStatus::Cancelling),
-        "completed" => Ok(AgentTaskStatus::Completed),
-        "failed" => Ok(AgentTaskStatus::Failed),
-        "cancelled" => Ok(AgentTaskStatus::Cancelled),
-        "interrupted" => Ok(AgentTaskStatus::Interrupted),
+        "running" => Ok(TaskStatus::Running),
+        "cancelling" => Ok(TaskStatus::Cancelling),
+        "completed" => Ok(TaskStatus::Completed),
+        "failed" => Ok(TaskStatus::Failed),
+        "cancelled" => Ok(TaskStatus::Cancelled),
+        "interrupted" => Ok(TaskStatus::Interrupted),
         _ => Err(StoreError::InvalidData(format!(
             "unknown agent task status '{value}'"
         ))),

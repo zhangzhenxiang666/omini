@@ -1,8 +1,9 @@
 mod support;
 
 use crate::support::store::*;
-use omini_domain::events::{AgentTaskResult, AgentTaskStatus};
+use omini_domain::events::AgentTaskResult;
 use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::task::TaskStatus;
 use omini_server::history;
 
 #[tokio::test]
@@ -65,7 +66,7 @@ async fn agent_task_creation_and_recovery() {
             .find(|task| task.task_id == "task_running")
             .unwrap()
             .status,
-        AgentTaskStatus::Interrupted
+        TaskStatus::Interrupted
     );
     assert_eq!(
         tasks
@@ -73,7 +74,7 @@ async fn agent_task_creation_and_recovery() {
             .find(|task| task.task_id == "task_cancelling")
             .unwrap()
             .status,
-        AgentTaskStatus::Cancelled
+        TaskStatus::Interrupted
     );
     assert!(tasks.iter().all(|task| task.completed_at.is_some()));
 }
@@ -96,7 +97,7 @@ async fn agent_task_notification_is_idempotent() {
     let completed_at = fixed_time();
     db.finish_agent_task(
         "task_done",
-        AgentTaskStatus::Completed,
+        TaskStatus::Completed,
         &AgentTaskResult {
             output: Some("done".to_string()),
             error: None,
@@ -118,7 +119,8 @@ async fn agent_task_notification_is_idempotent() {
             task_id: "task_done".to_string(),
             agent: "general".to_string(),
             title: "Test agent".to_string(),
-            status: AgentTaskStatus::Completed,
+            status: TaskStatus::Completed,
+            summary: None,
         }],
         created_at: completed_at,
     };

@@ -9,7 +9,6 @@ mod tasks;
 
 pub use generator::{GenerateAgentDraftError, generate_agent_draft_checked_from_settings};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind, AgentSummary};
-pub use tasks::AgentTaskCompletion;
 pub use tasks::AgentTaskSupervisor;
 
 #[derive(Debug, Clone)]
@@ -209,7 +208,7 @@ fn record_from_spec(
         .filter(|tool| {
             !matches!(
                 tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_agents" | "cancel_task"
+                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
             )
         })
         .collect();
@@ -222,7 +221,7 @@ fn record_from_spec(
         .filter(|tool| {
             !matches!(
                 tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_agents" | "cancel_task"
+                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
             )
         })
         .collect();
@@ -275,7 +274,7 @@ fn render_agent_file(draft: &AgentDraft) -> String {
         .filter(|tool| {
             !matches!(
                 tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_agents" | "cancel_task"
+                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
             )
         })
         .cloned()
@@ -287,7 +286,7 @@ fn render_agent_file(draft: &AgentDraft) -> String {
         .filter(|tool| {
             !matches!(
                 tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_agents" | "cancel_task"
+                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
             )
         })
         .cloned()

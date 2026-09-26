@@ -103,7 +103,7 @@ impl AgentRuntime {
                         }
                     }
                     Some(completion) = self.task_completion_rx.recv() => {
-                        self.query_engine.enqueue_agent_task_completion(completion);
+                        self.query_engine.enqueue_task_completion(completion);
                         self.collect_task_completions().await;
                         self.process_run(RunStart::PendingAgentTaskNotification).await;
                     }
@@ -317,6 +317,7 @@ impl AgentRuntime {
                     owner_thread_id: self.thread_id.clone(),
                     agent_registry: Arc::clone(&subagent_registry),
                     skill_registry: Arc::clone(&skill_registry),
+                    task_manager: Some(self.task_supervisor.task_manager()),
                     task_supervisor: Some(Arc::clone(&self.task_supervisor)),
                     project: self.project.clone(),
                 })),
@@ -485,10 +486,10 @@ impl AgentRuntime {
                         }
                     }
                     Some(completion) = self.task_completion_rx.recv() => {
-                        self.query_engine.enqueue_agent_task_completion(completion);
+                        self.query_engine.enqueue_task_completion(completion);
                         tokio::task::yield_now().await;
                         while let Ok(completion) = self.task_completion_rx.try_recv() {
-                            self.query_engine.enqueue_agent_task_completion(completion);
+                            self.query_engine.enqueue_task_completion(completion);
                         }
                     }
                     else => break,
@@ -544,7 +545,7 @@ impl AgentRuntime {
         tokio::task::yield_now().await;
         let mut collected = false;
         while let Ok(completion) = self.task_completion_rx.try_recv() {
-            self.query_engine.enqueue_agent_task_completion(completion);
+            self.query_engine.enqueue_task_completion(completion);
             collected = true;
         }
         collected

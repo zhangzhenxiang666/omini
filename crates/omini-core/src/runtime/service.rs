@@ -1,12 +1,13 @@
 use super::capabilities::CapabilityStore;
 use crate::engine::QueryEngine;
 use crate::mcp::McpManager;
-use crate::subagents::{AgentTaskCompletion, AgentTaskSupervisor};
+use crate::subagents::AgentTaskSupervisor;
 use crate::tools::ToolRegistry;
 use omini_config::Settings;
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::events::{ActiveProfile, ThreadUsageSnapshot};
 use omini_domain::message::Message;
+use omini_domain::task::TaskCompletion;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
@@ -45,6 +46,7 @@ pub struct AgentRuntimeDeps {
     pub usage: ThreadUsageSnapshot,
     pub active_profile: ActiveProfile,
     pub agent_tasks: Vec<omini_domain::events::AgentTaskInfo>,
+    pub background_tasks: Vec<omini_domain::task::TaskInfo>,
 }
 
 #[derive(Debug)]
@@ -105,7 +107,7 @@ pub struct AgentRuntime {
     pub mcp_initialized: bool,
     /// 长期存活的后台 task supervisor，不依赖前台运行生命周期。
     pub task_supervisor: Arc<AgentTaskSupervisor>,
-    pub task_completion_rx: mpsc::UnboundedReceiver<AgentTaskCompletion>,
+    pub task_completion_rx: mpsc::UnboundedReceiver<TaskCompletion>,
     /// runtime 管理的能力注册状态；每次 query 开始时生成只读快照。
     pub capabilities: Arc<CapabilityStore>,
     /// 取消标志，用于 CancelRun。
@@ -145,6 +147,7 @@ impl AgentRuntime {
             usage,
             active_profile,
             agent_tasks,
+            background_tasks,
         } = deps;
         let model = settings.active_model();
         let llm_client = LlmClient::new(
@@ -190,6 +193,7 @@ impl AgentRuntime {
             Arc::clone(&active_profile),
             Arc::clone(&thread_usage),
             agent_tasks,
+            background_tasks,
         );
         task_supervisor.set_parent_inbox(query_engine.shared_user_messages());
 
@@ -263,11 +267,11 @@ mod tests {
     use omini_config::{RawConfig, ResolvedConfig, Settings};
     use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
     use omini_domain::events::{
-        AgentTaskStatus, CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview,
-        PlanApprovalAction, PlanExecutionProfile, ToolPauseKind, ToolPauseRequest,
-        ToolPauseResponse,
+        CompactSummaryFinishedEvent, CompactTrigger, PermissionPreview, PlanApprovalAction,
+        PlanExecutionProfile, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
     };
     use omini_domain::message::{ContentBlock, Role};
+    use omini_domain::task::TaskStatus;
     use omini_domain::usage::Usage;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -391,6 +395,7 @@ thinking = true
             usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
+            background_tasks: Vec::new(),
         };
         let runtime = AgentRuntime::new_for_test(channels, deps);
         (runtime, event_rx)
@@ -425,6 +430,7 @@ thinking = true
             usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
+            background_tasks: Vec::new(),
         };
         let runtime = AgentRuntime::new_for_test(channels, deps);
         (runtime, event_rx, persistence_rx)
@@ -570,6 +576,7 @@ thinking = true
             usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
+            background_tasks: Vec::new(),
         };
         let mut runtime = AgentRuntime::new_for_test(channels, deps);
         drain_events(&mut event_rx);
@@ -990,6 +997,7 @@ thinking = true
             usage: ThreadUsageSnapshot::default(),
             active_profile: ActiveProfile::Main,
             agent_tasks: Vec::new(),
+            background_tasks: Vec::new(),
         };
         let mut runtime = AgentRuntime::new_for_test(channels, deps);
 
@@ -1441,7 +1449,8 @@ thinking = true
                     task_id: "task_1".to_string(),
                     agent: "general".to_string(),
                     title: "Test".to_string(),
-                    status: AgentTaskStatus::Completed,
+                    status: TaskStatus::Completed,
+                    summary: None,
                 }],
                 created_at: chrono::Utc::now(),
             };

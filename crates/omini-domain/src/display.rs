@@ -36,7 +36,9 @@ pub struct AgentTaskNotificationItem {
     pub task_id: String,
     pub agent: String,
     pub title: String,
-    pub status: crate::events::AgentTaskStatus,
+    pub status: crate::task::TaskStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]

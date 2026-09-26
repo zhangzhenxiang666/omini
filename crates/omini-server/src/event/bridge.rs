@@ -458,6 +458,12 @@ fn typed_runtime_event_from_runtime_contract_event(
         runtime_contract::RuntimeToServerEvent::ToolResult(tool_result) => {
             client_proto::TypedRuntimeEvent::ToolResult(tool_result)
         }
+        runtime_contract::RuntimeToServerEvent::TaskChanged(task) => {
+            client_proto::TypedRuntimeEvent::TaskChanged(task)
+        }
+        runtime_contract::RuntimeToServerEvent::TaskOutputDelta(output) => {
+            client_proto::TypedRuntimeEvent::TaskOutputDelta(output)
+        }
         runtime_contract::RuntimeToServerEvent::ToolPauseRequested(request) => {
             client_proto::TypedRuntimeEvent::ToolPauseRequested(request)
         }

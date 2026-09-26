@@ -11,7 +11,7 @@ use crate::state::{UiMessage, UiState, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
     build_bordered_lines, format_thinking_duration, is_special_tool, render_read_task, render_tool,
-    render_tool_compact, render_wait_agents, thinking_duration_line, tool_error_display_text,
+    render_tool_compact, render_wait_tasks, thinking_duration_line, tool_error_display_text,
     truncate_display_width,
 };
 use omini_domain::display::DisplayMessage;
@@ -628,7 +628,7 @@ fn render_single_ui_message(
             let dim = Style::default().fg(Color::Rgb(140, 145, 155));
             for task in &notification.tasks {
                 let text = format!(
-                    "agent task · {} · {} · {}",
+                    "background task · {} · {} · {}",
                     task.agent,
                     task.title,
                     task.status.as_str()
@@ -747,8 +747,8 @@ fn render_single_ui_message(
                                     consumed.insert(*pos);
                                 }
                             }
-                        } else if tu.name == "wait_agents" {
-                            block_lines.extend(render_wait_agents(tu, false));
+                        } else if tu.name == "wait_tasks" {
+                            block_lines.extend(render_wait_tasks(tu, false));
                             if let Some(positions) = tool_result_map.get(&tu.id) {
                                 for pos in positions {
                                     consumed.insert(*pos);
@@ -909,8 +909,8 @@ fn render_pending_assistant_lines(
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }
-                } else if tu.name == "wait_agents" {
-                    block_lines.extend(render_wait_agents(tu, false));
+                } else if tu.name == "wait_tasks" {
+                    block_lines.extend(render_wait_tasks(tu, false));
                     if let Some(&bi) = tr_indices.get(&tu.id) {
                         consumed_tr.insert(bi);
                     }

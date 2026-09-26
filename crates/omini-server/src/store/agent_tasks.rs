@@ -51,6 +51,20 @@ impl Database {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
+            "INSERT INTO background_task(
+                task_id, owner_thread_id, kind, title, status, result_summary,
+                created_at, updated_at, completed_at
+            ) VALUES (?, ?, 'sub_agent', ?, ?, NULL, ?, ?, NULL)",
+        )
+        .bind(&task.task_id)
+        .bind(&task.owner_thread_id)
+        .bind(&task.title)
+        .bind(task_status_for_generic(task.status))
+        .bind(task.created_at)
+        .bind(task.updated_at)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
             "INSERT INTO agent_task(
                     task_id,
                     owner_thread_id,
@@ -149,7 +163,7 @@ impl Database {
     pub async fn finish_agent_task(
         &self,
         task_id: &str,
-        status: AgentTaskStatus,
+        status: TaskStatus,
         result: &AgentTaskResult,
         completed_at: DateTime<Utc>,
     ) -> Result<(), StoreError> {
@@ -168,12 +182,22 @@ impl Database {
         .bind(task_id)
         .execute(&self.pool)
         .await?;
+        sqlx::query(
+            "UPDATE background_task SET status = ?, result_summary = ?, updated_at = ?, completed_at = ? WHERE task_id = ?",
+        )
+        .bind(task_status_for_generic(status))
+        .bind(&result.output)
+        .bind(completed_at)
+        .bind(completed_at)
+        .bind(task_id)
+        .execute(&self.pool)
+        .await?;
         let run_status = match status {
-            AgentTaskStatus::Running | AgentTaskStatus::Cancelling => "running",
-            AgentTaskStatus::Completed => "completed",
-            AgentTaskStatus::Failed => "failed",
-            AgentTaskStatus::Cancelled => "cancelled",
-            AgentTaskStatus::Interrupted => "interrupted",
+            TaskStatus::Running | TaskStatus::Cancelling => "running",
+            TaskStatus::Completed => "completed",
+            TaskStatus::Failed => "failed",
+            TaskStatus::Cancelled => "cancelled",
+            TaskStatus::Interrupted => "interrupted",
         };
         sqlx::query("UPDATE agent_run SET status = ?, finished_at = ? WHERE id = ?")
             .bind(run_status)
@@ -201,6 +225,13 @@ impl Database {
             .bind(task_id)
             .execute(&mut *tx)
             .await?;
+            sqlx::query(
+                "UPDATE background_task SET status = 'cancelling', updated_at = ? WHERE task_id = ? AND status = 'running'",
+            )
+            .bind(updated_at)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -219,7 +250,7 @@ impl Database {
         for task_id in task_ids {
             let pending: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
-                    SELECT 1 FROM agent_task
+                    SELECT 1 FROM background_task
                     WHERE task_id = ? AND notification_delivered = 0
                 )",
             )
@@ -283,6 +314,13 @@ impl Database {
         .await?;
         for task_id in task_ids {
             sqlx::query(
+                "UPDATE background_task SET notification_delivered = 1, updated_at = ? WHERE task_id = ? AND notification_delivered = 0",
+            )
+            .bind(created_at)
+            .bind(task_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query(
                 "UPDATE agent_task SET
                         notification_delivered = 1,
                         updated_at = ?
@@ -296,4 +334,8 @@ impl Database {
         tx.commit().await?;
         Ok(())
     }
+}
+
+fn task_status_for_generic(status: TaskStatus) -> &'static str {
+    status.as_str()
 }

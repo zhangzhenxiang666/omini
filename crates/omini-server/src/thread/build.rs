@@ -40,6 +40,7 @@ impl ThreadRuntime {
             snapshot: loaded,
             thread_messages,
             llm_context_version,
+            background_tasks,
         } = inputs;
         let thread_usage = loaded.usage;
         let agent_tasks = loaded
@@ -73,6 +74,7 @@ impl ThreadRuntime {
                 llm_context_version,
                 usage: thread_usage,
                 agent_tasks,
+                background_tasks,
             },
         )?;
         let mut persistence_rx = core

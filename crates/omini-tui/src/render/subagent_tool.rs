@@ -1,8 +1,9 @@
 use super::truncate_str;
 use crate::state::{SubagentNode, pause_preview_tool_use_id};
-use crate::types::events::{AgentTaskStatus, ToolPauseKind, ToolPauseRequest};
+use crate::types::events::{ToolPauseKind, ToolPauseRequest};
 use crate::widgets::{display_path, tool_title_style};
 use omini_domain::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
+use omini_domain::task::TaskStatus;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -30,19 +31,16 @@ pub(super) fn render_subagent_tool(
         .or_else(|| {
             result.map(|result| {
                 if result.is_error {
-                    AgentTaskStatus::Failed
+                    TaskStatus::Failed
                 } else {
-                    AgentTaskStatus::Completed
+                    TaskStatus::Completed
                 }
             })
         })
-        .unwrap_or(AgentTaskStatus::Running);
+        .unwrap_or(TaskStatus::Running);
 
     let mut header = vec![Span::raw("⏺ ")];
-    if matches!(
-        status,
-        AgentTaskStatus::Running | AgentTaskStatus::Cancelling
-    ) {
+    if matches!(status, TaskStatus::Running | TaskStatus::Cancelling) {
         header.push(Span::styled(label, tool_title_style(accent, true)));
     } else {
         header.push(Span::styled(
@@ -433,7 +431,7 @@ mod tests {
             agent_label: "explorer".to_string(),
             title: "Explore".to_string(),
             execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
-            status: AgentTaskStatus::Running,
+            status: TaskStatus::Running,
             messages: vec![Message::new(
                 Role::Assistant,
                 vec![
@@ -483,7 +481,7 @@ mod tests {
             agent_label: "explorer".to_string(),
             title: "Explore".to_string(),
             execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
-            status: AgentTaskStatus::Running,
+            status: TaskStatus::Running,
             messages: vec![Message::new(
                 Role::Assistant,
                 vec![ContentBlock::ToolUse(ToolUseBlock {

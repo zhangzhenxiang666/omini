@@ -486,7 +486,7 @@ fn error_notification_does_not_fail_running_subagents() {
             agent_label: "worker".to_string(),
             title: "Work".to_string(),
             execution_mode: AgentTaskExecutionMode::Background,
-            status: AgentTaskStatus::Running,
+            status: TaskStatus::Running,
             messages: Vec::new(),
         },
     );
@@ -496,5 +496,5 @@ fn error_notification_does_not_fail_running_subagents() {
     ));
 
     let sub = state.subagents.get("sub-1").unwrap();
-    assert_eq!(sub.status, AgentTaskStatus::Running);
+    assert_eq!(sub.status, TaskStatus::Running);
 }

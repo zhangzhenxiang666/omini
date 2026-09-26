@@ -1,12 +1,13 @@
 use crate::error::RuntimeError;
 use crate::runtime::compact::AutoCompactState;
-use crate::subagents::AgentTaskCompletion;
 use crate::tools::{PendingToolPauses, ToolRegistry, ToolRuntimeContext};
 use crate::types::events::EngineToRuntimeEvent;
 use omini_config::Settings;
 use omini_domain::display::{AgentTaskNotification, AgentTaskNotificationItem};
-use omini_domain::events::{ActiveProfile, AgentTaskStatus, ToolPauseResponse};
+use omini_domain::events::{ActiveProfile, ToolPauseResponse};
 use omini_domain::message::Message;
+use omini_domain::task::TaskCompletion;
+use omini_domain::task::TaskStatus;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
 use serde::Serialize;
@@ -55,7 +56,7 @@ pub struct QueryEngine {
     pending_user_messages: SharedPendingUserMessages,
     // Task completion 还需要原子持久化、失败重排队和 delivered 标记，
     // 生命周期不同于一次性的用户干预消息。
-    pending_agent_task_completions: Mutex<VecDeque<AgentTaskCompletion>>,
+    pending_task_completions: Mutex<VecDeque<TaskCompletion>>,
 }
 
 pub type SharedPendingUserMessages = Arc<Mutex<VecDeque<Message>>>;
@@ -70,7 +71,7 @@ impl QueryEngine {
             cancel_notify: Arc::new(Notify::new()),
             drain_pauses_on_start: true,
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
-            pending_agent_task_completions: Mutex::new(VecDeque::new()),
+            pending_task_completions: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -85,7 +86,7 @@ impl QueryEngine {
             cancel_notify,
             drain_pauses_on_start: false,
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
-            pending_agent_task_completions: Mutex::new(VecDeque::new()),
+            pending_task_completions: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -113,8 +114,8 @@ impl QueryEngine {
             .push_back(message);
     }
 
-    pub fn enqueue_agent_task_completion(&self, completion: AgentTaskCompletion) {
-        self.pending_agent_task_completions
+    pub fn enqueue_task_completion(&self, completion: TaskCompletion) {
+        self.pending_task_completions
             .lock()
             .expect("pending agent task completions mutex poisoned")
             .push_back(completion);
@@ -181,10 +182,7 @@ impl QueryEngine {
         let mut follow_up = false;
         let mut notification_persistence_failed = false;
 
-        match self
-            .drain_agent_task_completions(ctx.messages, &event_tx)
-            .await
-        {
+        match self.drain_task_completions(ctx.messages, &event_tx).await {
             AgentTaskNotificationDrain::Injected => {}
             AgentTaskNotificationDrain::Empty if !ctx.requires_internal_input => {}
             AgentTaskNotificationDrain::Empty | AgentTaskNotificationDrain::Failed => {
@@ -241,9 +239,7 @@ impl QueryEngine {
                 break;
             };
 
-            let task_notification = self
-                .drain_agent_task_completions(ctx.messages, &event_tx)
-                .await;
+            let task_notification = self.drain_task_completions(ctx.messages, &event_tx).await;
             let had_task_notification = task_notification == AgentTaskNotificationDrain::Injected;
             notification_persistence_failed |=
                 task_notification == AgentTaskNotificationDrain::Failed;
@@ -282,7 +278,7 @@ impl QueryEngine {
         self.tool_pause_resolver.drain_pending_tool_pauses();
         self.clear_pending_user_messages();
         let has_pending_notification = !self
-            .pending_agent_task_completions
+            .pending_task_completions
             .lock()
             .expect("pending agent task completions mutex poisoned")
             .is_empty();
@@ -326,13 +322,13 @@ impl QueryEngine {
         injected
     }
 
-    async fn drain_agent_task_completions(
+    async fn drain_task_completions(
         &self,
         messages: &mut Vec<Message>,
         event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
     ) -> AgentTaskNotificationDrain {
         let completions = self
-            .pending_agent_task_completions
+            .pending_task_completions
             .lock()
             .expect("pending agent task completions mutex poisoned")
             .drain(..)
@@ -346,18 +342,20 @@ impl QueryEngine {
                 .iter()
                 .map(|completion| AgentTaskNotificationItem {
                     task_id: completion.task_id.clone(),
-                    agent: completion.agent.clone(),
+                    agent: completion.label.clone(),
                     title: completion.title.clone(),
                     status: completion.status,
+                    summary: completion.summary.clone(),
                 })
                 .collect(),
             created_at: chrono::Utc::now(),
         };
         let llm_tasks = completions
             .iter()
-            .map(|completion| AgentTaskCompletionNotification {
+            .map(|completion| TaskCompletionNotification {
                 task_id: &completion.task_id,
                 status: completion.status,
+                summary: completion.summary.as_deref(),
             })
             .collect::<Vec<_>>();
         let llm_message = Message::from_user_text(format!(
@@ -395,7 +393,7 @@ impl QueryEngine {
             Err(error) => {
                 {
                     let mut pending = self
-                        .pending_agent_task_completions
+                        .pending_task_completions
                         .lock()
                         .expect("pending agent task completions mutex poisoned");
                     for completion in completions.into_iter().rev() {
@@ -421,9 +419,11 @@ enum AgentTaskNotificationDrain {
 }
 
 #[derive(Serialize)]
-struct AgentTaskCompletionNotification<'a> {
+struct TaskCompletionNotification<'a> {
     task_id: &'a str,
-    status: AgentTaskStatus,
+    status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<&'a str>,
 }
 
 impl Default for QueryEngine {
@@ -437,9 +437,9 @@ impl Default for QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::subagents::AgentTaskCompletion;
     use crate::tools::ToolRegistry;
     use omini_domain::config::ProviderEndpointKind;
+    use omini_domain::task::TaskCompletion;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::path::Path;
@@ -474,20 +474,21 @@ mod tests {
         )
     }
 
-    fn task_completion(task_id: &str) -> AgentTaskCompletion {
-        AgentTaskCompletion {
+    fn task_completion(task_id: &str) -> TaskCompletion {
+        TaskCompletion {
             task_id: task_id.to_string(),
-            agent: "general".to_string(),
+            label: "general".to_string(),
             title: format!("Task {task_id}"),
-            status: omini_domain::events::AgentTaskStatus::Completed,
+            status: omini_domain::task::TaskStatus::Completed,
+            summary: None,
         }
     }
 
     #[tokio::test]
     async fn task_notifications_are_batched_and_enter_history_only_after_ack() {
         let engine = QueryEngine::default();
-        engine.enqueue_agent_task_completion(task_completion("task_1"));
-        engine.enqueue_agent_task_completion(task_completion("task_2"));
+        engine.enqueue_task_completion(task_completion("task_1"));
+        engine.enqueue_task_completion(task_completion("task_2"));
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let observer = tokio::spawn(async move {
             let EngineToRuntimeEvent::AgentTaskNotificationsProduced {
@@ -519,7 +520,7 @@ mod tests {
         let mut messages = vec![Message::from_user_text("before".to_string())];
 
         let outcome = engine
-            .drain_agent_task_completions(&mut messages, &event_tx)
+            .drain_task_completions(&mut messages, &event_tx)
             .await;
 
         observer.await.unwrap();
@@ -535,7 +536,7 @@ mod tests {
     #[tokio::test]
     async fn failed_task_notification_persistence_keeps_queue_and_history_unchanged() {
         let engine = QueryEngine::default();
-        engine.enqueue_agent_task_completion(task_completion("task_1"));
+        engine.enqueue_task_completion(task_completion("task_1"));
         let (event_tx, mut event_rx) = mpsc::channel(2);
         let observer = tokio::spawn(async move {
             let EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } =
@@ -552,7 +553,7 @@ mod tests {
         let mut messages = vec![Message::from_user_text("before".to_string())];
 
         let outcome = engine
-            .drain_agent_task_completions(&mut messages, &event_tx)
+            .drain_task_completions(&mut messages, &event_tx)
             .await;
 
         observer.await.unwrap();
@@ -560,7 +561,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(
             engine
-                .pending_agent_task_completions
+                .pending_task_completions
                 .lock()
                 .expect("pending completions mutex poisoned")
                 .len(),
@@ -733,8 +734,7 @@ mod tests {
                     EngineToRuntimeEvent::MessageProduced(_) => {
                         assistant_messages += 1;
                         if assistant_messages == 1 {
-                            observer_engine
-                                .enqueue_agent_task_completion(task_completion("task_1"));
+                            observer_engine.enqueue_task_completion(task_completion("task_1"));
                         }
                     }
                     EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } => {
@@ -805,8 +805,7 @@ mod tests {
                     EngineToRuntimeEvent::ToolUse(_) => {
                         tool_uses += 1;
                         if tool_uses == REPEAT_LIMIT {
-                            observer_engine
-                                .enqueue_agent_task_completion(task_completion("task_1"));
+                            observer_engine.enqueue_task_completion(task_completion("task_1"));
                         }
                     }
                     EngineToRuntimeEvent::AgentTaskNotificationsProduced { ack, .. } => {

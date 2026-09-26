@@ -60,7 +60,7 @@ omini-cli / omini-tui
 
 - `AgentRun` 是一次运行的治理和查询单位，关联 Thread、可选父 Run、类型、状态、时间和累计 Token。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 等非 Agent Run 不创建虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 3 暴露 Run 快照、详情、归档状态和状态事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 4 暴露 Run 快照、详情、归档状态和状态事件，并增加通用后台任务状态及 Bash 输出增量事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 
@@ -77,8 +77,10 @@ omini-cli / omini-tui
 
 派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 
-只有主 Agent 可调用 `spawn_agent`、`read_task`、`wait_agents` 和 `cancel_task`。`read_task` 查询单个任务；`wait_agents` 等待指定任务，未指定时等待当前运行的根后台任务。完成通知自动送达，无需轮询。
+`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、等待、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；完成通知使用通用 `TaskCompletion`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
 
-任务是归属于同一项目和主线程的子线程。核心负责实时监督、事件流和层级取消；服务端负责 SQLite 状态、重放、重连快照、通知、重启恢复和运行时回收；TUI 展示任务状态与完成通知，不把子任务的增量输出混入主 Agent 回复。
+只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task`、`wait_tasks` 和 `cancel_task` 可操作不同类型的后台任务。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
+
+SubAgent 任务归属于主线程并拥有子线程；Bash 任务关联原始工具调用。Bash stdout/stderr 以带 task ID、tool use ID 和流类型的 `TaskOutput` 事件增量发送，服务端在进程内为重连保留受限近期输出尾部。Client 接收通用任务状态和输出事件，自行决定呈现方式。最终结果持久化，增量输出只驻留内存；服务重启或关闭不恢复进程，启动时将未结束任务标记为 `interrupted`。
 
 已提交消息是持久化边界。完成通知先持久化，再进入模型历史或界面，以保持“当前轮次 → 任务通知 → 下一轮回复”的顺序。服务重启后不恢复运行中的任务，未提交的增量可丢弃。取消任务会影响其后代，不影响兄弟任务；取消前台运行或关闭运行时也会取消主线程拥有的任务树。

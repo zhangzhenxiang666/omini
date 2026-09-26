@@ -7,6 +7,7 @@ use omini_domain::events::{
 };
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::AgentRecord;
+use omini_domain::task::{TaskChangedEvent, TaskOutputDelta};
 use serde::{Deserialize, Serialize};
 
 /// server/facade 发往 runtime 的事件。
@@ -85,6 +86,8 @@ pub enum RuntimeToServerEvent {
     ProposedPlanDelta(#[serde(with = "serde_runtime_event_payload::delta")] String),
     ToolUse(ToolUseBlock),
     ToolResult(ToolResultBlock),
+    TaskChanged(TaskChangedEvent),
+    TaskOutputDelta(TaskOutputDelta),
     CompactSummaryStarted(CompactEvent),
     CompactSummaryDelta(CompactSummaryDeltaEvent),
     CompactSummaryFinished(CompactSummaryFinishedEvent),

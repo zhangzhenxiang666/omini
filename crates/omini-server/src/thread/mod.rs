@@ -39,6 +39,7 @@ pub struct ThreadRuntimeInputs {
     snapshot: domain::events::LoadedThread,
     thread_messages: Vec<domain::message::Message>,
     llm_context_version: i64,
+    background_tasks: Vec<domain::task::TaskInfo>,
 }
 
 /// projection 和 replay buffer。HTTP 路由拿到的 `ThreadRuntime` 不直接操作 core 的内部
@@ -88,6 +89,12 @@ impl ThreadRuntimeInputs {
             snapshot,
             thread_messages,
             llm_context_version,
+            background_tasks: Vec::new(),
         }
+    }
+
+    pub fn with_background_tasks(mut self, tasks: Vec<domain::task::TaskInfo>) -> Self {
+        self.background_tasks = tasks;
+        self
     }
 }

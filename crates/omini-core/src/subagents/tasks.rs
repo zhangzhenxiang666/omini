@@ -1,6 +1,9 @@
 use crate::engine::{QueryContext, QueryEngine, SharedPendingUserMessages};
 use crate::skills::SkillSummary;
 use crate::subagents::{AgentSpec, AgentTaskRequest};
+use crate::tasks::{
+    BackgroundTaskReservation, DEFAULT_MAX_BACKGROUND_TASKS, TaskCancellation, TaskManager,
+};
 use crate::tools::{
     PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult, ToolRuntimeContext,
     create_agent_registry_from_parent,
@@ -11,10 +14,10 @@ use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
 use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, AgentTaskStatus, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind,
-    ToolPauseResponse,
+    AgentTaskResult, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind, ToolPauseResponse,
 };
 use omini_domain::message::{ContentBlock, Message, Role};
+use omini_domain::task::{TaskCompletion, TaskInfo, TaskKind, TaskStatus};
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
 use omini_runtime_contract::RuntimeToServerEvent;
@@ -27,68 +30,60 @@ use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::Instrument;
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
-pub struct AgentTaskCompletion {
-    pub task_id: String,
-    pub agent: String,
-    pub title: String,
-    pub status: AgentTaskStatus,
-}
-
 const BACKGROUND_TASK_MEMORY_LIMIT: usize = 30;
-const MAX_BACKGROUND_AGENT_TASKS: usize = 8;
 const MAX_SYNCHRONOUS_AGENT_TASKS: usize = 10;
+
+fn task_info_from_agent(task: &AgentTaskInfo) -> TaskInfo {
+    TaskInfo {
+        task_id: task.task_id.clone(),
+        owner_thread_id: task.owner_thread_id.clone(),
+        kind: TaskKind::SubAgent,
+        title: task.title.clone(),
+        status: task.status,
+        created_at: task.created_at,
+        updated_at: task.updated_at,
+        completed_at: task.completed_at,
+        result_summary: task
+            .result
+            .as_ref()
+            .and_then(|result| result.output.clone().or_else(|| result.error.clone())),
+    }
+}
 
 #[derive(Debug, Default)]
 struct ActiveTaskSlots {
-    background: usize,
     synchronous: usize,
 }
 
 impl ActiveTaskSlots {
-    fn reserve(&mut self, execution_mode: AgentTaskExecutionMode) -> Result<(), String> {
-        let (active, limit, mode, tool_name) = match execution_mode {
-            AgentTaskExecutionMode::Background => (
-                &mut self.background,
-                MAX_BACKGROUND_AGENT_TASKS,
-                "background",
-                "spawn_agent",
-            ),
-            AgentTaskExecutionMode::Synchronous => (
-                &mut self.synchronous,
-                MAX_SYNCHRONOUS_AGENT_TASKS,
-                "synchronous",
-                "run_agent",
-            ),
-        };
-        if *active >= limit {
+    fn reserve_synchronous(&mut self) -> Result<(), String> {
+        if self.synchronous >= MAX_SYNCHRONOUS_AGENT_TASKS {
             return Err(format!(
-                "{mode} agent task limit reached: at most {limit} tasks may run concurrently; wait for a task to finish or cancel one before calling {tool_name} again"
+                "synchronous agent task limit reached: at most {MAX_SYNCHRONOUS_AGENT_TASKS} tasks may run concurrently; wait for a task to finish before calling run_agent again"
             ));
         }
-        *active += 1;
+        self.synchronous += 1;
         Ok(())
     }
 
-    fn release(&mut self, execution_mode: AgentTaskExecutionMode) {
-        let active = match execution_mode {
-            AgentTaskExecutionMode::Background => &mut self.background,
-            AgentTaskExecutionMode::Synchronous => &mut self.synchronous,
-        };
-        *active = active
+    fn release_synchronous(&mut self) {
+        self.synchronous = self
+            .synchronous
             .checked_sub(1)
-            .expect("releasing unreserved agent task slot");
+            .expect("releasing unreserved synchronous task slot");
     }
 }
 
 struct TaskSlotReservation {
-    supervisor: Arc<AgentTaskSupervisor>,
-    execution_mode: AgentTaskExecutionMode,
+    supervisor: Option<Arc<AgentTaskSupervisor>>,
+    _background: Option<BackgroundTaskReservation>,
 }
 
 impl Drop for TaskSlotReservation {
     fn drop(&mut self) {
-        self.supervisor.release_task_slot(self.execution_mode);
+        if let Some(supervisor) = &self.supervisor {
+            supervisor.release_synchronous_slot();
+        }
     }
 }
 
@@ -118,9 +113,6 @@ struct PreparedTask {
 
 /// 归属于主线程的长期服务，管理后台根 task 及其同步后代。
 pub struct AgentTaskSupervisor {
-    event_tx: mpsc::Sender<RuntimeToServerEvent>,
-    persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-    completion_tx: mpsc::UnboundedSender<AgentTaskCompletion>,
     pending_tool_pauses: PendingToolPauses,
     permission_engine: Arc<PermissionEngine>,
     active_profile: Arc<RwLock<ActiveProfile>>,
@@ -129,6 +121,7 @@ pub struct AgentTaskSupervisor {
     parent_inbox: Mutex<Option<SharedPendingUserMessages>>,
     active_task_slots: Mutex<ActiveTaskSlots>,
     idle_notify: Notify,
+    task_manager: Arc<TaskManager>,
 }
 
 impl std::fmt::Debug for AgentTaskSupervisor {
@@ -147,13 +140,31 @@ impl AgentTaskSupervisor {
     pub fn new(
         event_tx: mpsc::Sender<RuntimeToServerEvent>,
         persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
-        completion_tx: mpsc::UnboundedSender<AgentTaskCompletion>,
+        completion_tx: mpsc::UnboundedSender<TaskCompletion>,
         pending_tool_pauses: PendingToolPauses,
         permission_engine: Arc<PermissionEngine>,
         active_profile: Arc<RwLock<ActiveProfile>>,
         owner_usage: Arc<Mutex<ThreadUsageSnapshot>>,
         initial_tasks: Vec<AgentTaskInfo>,
+        background_tasks: Vec<TaskInfo>,
     ) -> Arc<Self> {
+        let mut generic_initial = background_tasks
+            .into_iter()
+            .map(|task| (task.task_id.clone(), task))
+            .collect::<HashMap<_, _>>();
+        for task in initial_tasks
+            .iter()
+            .filter(|task| task.execution_mode == AgentTaskExecutionMode::Background)
+        {
+            generic_initial.insert(task.task_id.clone(), task_info_from_agent(task));
+        }
+        let task_manager = TaskManager::new(
+            event_tx.clone(),
+            persistence_tx.clone(),
+            generic_initial.into_values().collect(),
+            DEFAULT_MAX_BACKGROUND_TASKS,
+            completion_tx.clone(),
+        );
         let mut initial_tasks = initial_tasks
             .into_iter()
             .filter(|task| {
@@ -178,9 +189,6 @@ impl AgentTaskSupervisor {
             })
             .collect();
         let supervisor = Arc::new(Self {
-            event_tx,
-            persistence_tx,
-            completion_tx,
             pending_tool_pauses,
             permission_engine,
             active_profile,
@@ -189,6 +197,7 @@ impl AgentTaskSupervisor {
             parent_inbox: Mutex::new(None),
             active_task_slots: Mutex::new(ActiveTaskSlots::default()),
             idle_notify: Notify::new(),
+            task_manager,
         });
         for task in initial_tasks.into_iter().filter(|task| {
             task.parent_task_id.is_none()
@@ -196,14 +205,19 @@ impl AgentTaskSupervisor {
                 && task.status.is_terminal()
                 && !task.notification_delivered
         }) {
-            let _ = supervisor.completion_tx.send(AgentTaskCompletion {
+            supervisor.task_manager.notify_completed(TaskCompletion {
                 task_id: task.task_id,
-                agent: task.agent,
+                label: task.agent,
                 title: task.title,
                 status: task.status,
+                summary: None,
             });
         }
         supervisor
+    }
+
+    pub fn task_manager(&self) -> Arc<TaskManager> {
+        Arc::clone(&self.task_manager)
     }
 
     pub fn set_parent_inbox(&self, inbox: SharedPendingUserMessages) {
@@ -443,7 +457,7 @@ impl AgentTaskSupervisor {
                 .collect::<Vec<_>>();
             for id in &ids {
                 if let Some(task) = tasks.get_mut(id) {
-                    task.info.status = AgentTaskStatus::Cancelling;
+                    task.info.status = TaskStatus::Cancelling;
                     task.info.updated_at = Utc::now();
                     task.cancelled.store(true, Ordering::Relaxed);
                     task.cancel_notify.notify_waiters();
@@ -455,6 +469,17 @@ impl AgentTaskSupervisor {
                 .unwrap_or_else(|| serialization_failure_payload(task_id));
             (response, ids, thread_ids)
         };
+        for task_id in &cancelling_ids {
+            let task = self
+                .tasks
+                .lock()
+                .expect("agent task mutex poisoned")
+                .get(task_id)
+                .map(|task| task_info_from_agent(&task.info));
+            if let Some(task) = task {
+                let _ = self.task_manager.update(task).await;
+            }
+        }
         self.pending_tool_pauses
             .lock()
             .expect("pending tool pause mutex poisoned")
@@ -464,7 +489,8 @@ impl AgentTaskSupervisor {
                     .any(|thread_id| pause_id.starts_with(&format!("{thread_id}:")))
             });
         let _ = self
-            .persistence_tx
+            .task_manager
+            .persistence_sender()
             .send(RuntimePersistenceEvent::SetAgentTasksCancelling {
                 task_ids: cancelling_ids,
             })
@@ -522,21 +548,29 @@ impl AgentTaskSupervisor {
         self: &Arc<Self>,
         execution_mode: AgentTaskExecutionMode,
     ) -> Result<TaskSlotReservation, String> {
-        self.active_task_slots
-            .lock()
-            .expect("agent task slot mutex poisoned")
-            .reserve(execution_mode)?;
-        Ok(TaskSlotReservation {
-            supervisor: Arc::clone(self),
-            execution_mode,
-        })
+        match execution_mode {
+            AgentTaskExecutionMode::Background => Ok(TaskSlotReservation {
+                supervisor: None,
+                _background: Some(self.task_manager.reserve_background()?),
+            }),
+            AgentTaskExecutionMode::Synchronous => {
+                self.active_task_slots
+                    .lock()
+                    .expect("agent task slot mutex poisoned")
+                    .reserve_synchronous()?;
+                Ok(TaskSlotReservation {
+                    supervisor: Some(Arc::clone(self)),
+                    _background: None,
+                })
+            }
+        }
     }
 
-    fn release_task_slot(&self, execution_mode: AgentTaskExecutionMode) {
+    fn release_synchronous_slot(&self) {
         self.active_task_slots
             .lock()
             .expect("agent task slot mutex poisoned")
-            .release(execution_mode);
+            .release_synchronous();
     }
 
     async fn prepare_task(
@@ -592,7 +626,7 @@ impl AgentTaskSupervisor {
             title: request.title,
             depth,
             execution_mode,
-            status: AgentTaskStatus::Running,
+            status: TaskStatus::Running,
             result: None,
             created_at: now,
             updated_at: now,
@@ -620,7 +654,8 @@ impl AgentTaskSupervisor {
         let initial_message = Message::from_user_text(request.prompt);
         let (ack_tx, ack_rx) = oneshot::channel();
         let creation_result = self
-            .persistence_tx
+            .task_manager
+            .persistence_sender()
             .send(RuntimePersistenceEvent::CreateAgentTask {
                 task: Box::new(info.clone()),
                 thread,
@@ -662,6 +697,18 @@ impl AgentTaskSupervisor {
                     inbox: Arc::clone(&inbox),
                 },
             );
+        if execution_mode == AgentTaskExecutionMode::Background {
+            let _ = self
+                .task_manager
+                .register(
+                    task_info_from_agent(&info),
+                    Some(TaskCancellation::new(
+                        Arc::clone(&cancelled),
+                        Arc::clone(&cancel_notify),
+                    )),
+                )
+                .await;
+        }
         self.emit(
             &info,
             AgentTaskEvent::Started {
@@ -750,6 +797,7 @@ impl AgentTaskSupervisor {
             owner_thread_id: info.owner_thread_id.clone(),
             agent_registry,
             skill_registry,
+            task_manager: Some(self.task_manager()),
             task_supervisor: Some(Arc::clone(&self)),
             project,
         });
@@ -792,11 +840,11 @@ impl AgentTaskSupervisor {
             Err(error) => warnings.push(format!("agent event bridge failed: {error}")),
         }
         let status = if cancelled.load(Ordering::Relaxed) {
-            AgentTaskStatus::Cancelled
+            TaskStatus::Cancelled
         } else if matches!(result.finish_reason, FinishReason::Error(_)) {
-            AgentTaskStatus::Failed
+            TaskStatus::Failed
         } else {
-            AgentTaskStatus::Completed
+            TaskStatus::Completed
         };
         let task_result = AgentTaskResult {
             output: extract_final_text(&messages),
@@ -826,7 +874,8 @@ impl AgentTaskSupervisor {
                     let step_id = Uuid::new_v4().to_string();
                     active_step_id = Some(step_id.clone());
                     let _ = self
-                        .persistence_tx
+                        .task_manager
+                        .persistence_sender()
                         .send(RuntimePersistenceEvent::UpsertAgentStep {
                             step: omini_domain::agent_run::AgentStepSnapshot {
                                 id: step_id,
@@ -845,7 +894,8 @@ impl AgentTaskSupervisor {
                 EngineToRuntimeEvent::TurnEnded => {
                     if let Some(step_id) = active_step_id.take() {
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpdateAgentStep {
                                 step_id,
                                 status: omini_domain::agent_run::AgentStepStatus::Completed,
@@ -877,7 +927,8 @@ impl AgentTaskSupervisor {
                         };
                         tool_uses.insert(tool_use.id.clone(), record.clone());
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpsertToolUseExecution {
                                 tool_use: record,
                                 status: omini_domain::agent_run::ToolUseStatus::Running,
@@ -896,7 +947,8 @@ impl AgentTaskSupervisor {
                         };
                         record.status = status;
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpsertToolUseExecution {
                                 tool_use: record,
                                 status,
@@ -952,7 +1004,8 @@ impl AgentTaskSupervisor {
                     ack,
                 } => {
                     let _ = self
-                        .persistence_tx
+                        .task_manager
+                        .persistence_sender()
                         .send(RuntimePersistenceEvent::ReplaceLlmContext {
                             thread_id,
                             expected_version,
@@ -968,14 +1021,16 @@ impl AgentTaskSupervisor {
                         record.updated_at = Utc::now();
                         record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpsertToolUseExecution {
                                 tool_use: record,
                                 status: omini_domain::agent_run::ToolUseStatus::WaitingApproval,
                             })
                             .await;
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpdateAgentRun {
                                 run_id: info.task_id.clone(),
                                 status: omini_domain::agent_run::AgentRunStatus::WaitingApproval,
@@ -1007,20 +1062,23 @@ impl AgentTaskSupervisor {
                         continue;
                     }
                     let _ = self
-                        .event_tx
+                        .task_manager
+                        .event_sender()
                         .send(RuntimeToServerEvent::ToolPauseRequested(*request))
                         .await;
                 }
                 EngineToRuntimeEvent::UsageRecorded(usage) => {
                     let _ = self
-                        .persistence_tx
+                        .task_manager
+                        .persistence_sender()
                         .send(RuntimePersistenceEvent::RecordThreadUsage {
                             thread_id: info.thread_id.clone(),
                             usage,
                         })
                         .await;
                     let _ = self
-                        .persistence_tx
+                        .task_manager
+                        .persistence_sender()
                         .send(RuntimePersistenceEvent::UpdateAgentRun {
                             run_id: info.task_id.clone(),
                             status: omini_domain::agent_run::AgentRunStatus::Running,
@@ -1031,7 +1089,8 @@ impl AgentTaskSupervisor {
                         .await;
                     if let Some(step_id) = &active_step_id {
                         let _ = self
-                            .persistence_tx
+                            .task_manager
+                            .persistence_sender()
                             .send(RuntimePersistenceEvent::UpdateAgentStep {
                                 step_id: step_id.clone(),
                                 status: omini_domain::agent_run::AgentStepStatus::Running,
@@ -1054,7 +1113,8 @@ impl AgentTaskSupervisor {
                 | EngineToRuntimeEvent::CompactSummaryFailed(_) => {}
                 EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
                     let _ = self
-                        .persistence_tx
+                        .task_manager
+                        .persistence_sender()
                         .send(RuntimePersistenceEvent::RecordThreadTotalUsage {
                             thread_id: info.thread_id.clone(),
                             usage,
@@ -1073,7 +1133,8 @@ impl AgentTaskSupervisor {
         usage: omini_domain::usage::Usage,
     ) {
         let _ = self
-            .persistence_tx
+            .task_manager
+            .persistence_sender()
             .send(RuntimePersistenceEvent::RecordOwnerAgentUsage {
                 thread_id: info.owner_thread_id.clone(),
                 usage,
@@ -1090,7 +1151,8 @@ impl AgentTaskSupervisor {
             (snapshot.total_tokens, snapshot.total_cached_tokens)
         };
         let _ = self
-            .event_tx
+            .task_manager
+            .event_sender()
             .send(RuntimeToServerEvent::UsageTotalsChanged {
                 total_tokens,
                 total_cached_tokens,
@@ -1107,7 +1169,8 @@ impl AgentTaskSupervisor {
         display_in_ui: bool,
     ) -> Result<(), String> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        self.persistence_tx
+        self.task_manager
+            .persistence_sender()
             .send(RuntimePersistenceEvent::PersistAgentMessage {
                 thread_id: info.thread_id.clone(),
                 message: message.clone(),
@@ -1139,13 +1202,14 @@ impl AgentTaskSupervisor {
     async fn finish_task(
         &self,
         task_id: &str,
-        status: AgentTaskStatus,
+        status: TaskStatus,
         result: AgentTaskResult,
     ) -> AgentTaskInfo {
         let completed_at = Utc::now();
         let (ack_tx, ack_rx) = oneshot::channel();
         let persistence_result = self
-            .persistence_tx
+            .task_manager
+            .persistence_sender()
             .send(RuntimePersistenceEvent::FinishAgentTask {
                 task_id: task_id.to_string(),
                 status,
@@ -1170,7 +1234,7 @@ impl AgentTaskSupervisor {
             let final_status = if persistence_result.is_ok() {
                 status
             } else {
-                AgentTaskStatus::Failed
+                TaskStatus::Failed
             };
             let mut final_result = result;
             if let Err(error) = persistence_result {
@@ -1186,20 +1250,25 @@ impl AgentTaskSupervisor {
                     && entry.info.parent_task_id.is_none(),
             )
         };
+        if info.execution_mode == AgentTaskExecutionMode::Background {
+            let _ = self.task_manager.update(task_info_from_agent(&info)).await;
+        }
         self.emit(
             &info,
             AgentTaskEvent::Finished {
-                status: info.status,
+                status: (info.execution_mode == AgentTaskExecutionMode::Synchronous)
+                    .then_some(info.status),
                 result: info.result.clone(),
             },
         )
         .await;
         if notify_owner {
-            let _ = self.completion_tx.send(AgentTaskCompletion {
+            self.task_manager.notify_completed(TaskCompletion {
                 task_id: info.task_id.clone(),
-                agent: info.agent.clone(),
+                label: info.agent.clone(),
                 title: info.title.clone(),
                 status: info.status,
+                summary: None,
             });
         }
         self.idle_notify.notify_waiters();
@@ -1217,7 +1286,7 @@ impl AgentTaskSupervisor {
             return Some(
                 self.finish_task(
                     task_id,
-                    AgentTaskStatus::Failed,
+                    TaskStatus::Failed,
                     AgentTaskResult {
                         output: None,
                         error: Some(error),
@@ -1232,7 +1301,8 @@ impl AgentTaskSupervisor {
 
     async fn emit(&self, info: &AgentTaskInfo, payload: AgentTaskEvent) {
         let _ = self
-            .event_tx
+            .task_manager
+            .event_sender()
             .send(RuntimeToServerEvent::AgentTaskEvent(
                 AgentTaskEventEnvelope {
                     task_id: info.task_id.clone(),
@@ -1303,21 +1373,21 @@ fn descendant_ids(tasks: &HashMap<String, TaskEntry>, task_id: &str) -> Vec<Stri
 }
 
 #[derive(Serialize)]
-struct AgentTaskStatusResponse<'a> {
+struct TaskStatusResponse<'a> {
     task_id: &'a str,
-    status: AgentTaskStatus,
+    status: TaskStatus,
 }
 
 #[derive(Serialize)]
 struct AgentTaskResultResponse<'a> {
     task_id: &'a str,
-    status: AgentTaskStatus,
+    status: TaskStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<&'a AgentTaskResult>,
 }
 
 fn task_status_payload(info: &AgentTaskInfo) -> String {
-    serde_json::to_string(&AgentTaskStatusResponse {
+    serde_json::to_string(&TaskStatusResponse {
         task_id: &info.task_id,
         status: info.status,
     })
@@ -1352,7 +1422,7 @@ fn serialization_failure_payload(task_id: &str) -> String {
 fn task_result_response(info: &AgentTaskInfo) -> ToolResult {
     // warnings 保留给调用模型，用于判断模型回退和持久化异常是否影响结果可靠性。
     let payload = task_result_payload(info);
-    if info.status == AgentTaskStatus::Completed {
+    if info.status == TaskStatus::Completed {
         ToolResult::ok(payload)
     } else {
         ToolResult::error(payload)
@@ -1485,7 +1555,7 @@ mod tests {
             } else {
                 AgentTaskExecutionMode::Synchronous
             },
-            status: AgentTaskStatus::Running,
+            status: TaskStatus::Running,
             result: None,
             created_at: now,
             updated_at: now,
@@ -1518,6 +1588,7 @@ mod tests {
             Arc::clone(&active_profile),
             Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
             initial_tasks,
+            Vec::new(),
         );
         (
             supervisor,
@@ -1531,7 +1602,7 @@ mod tests {
     fn complete_test_task(
         supervisor: &AgentTaskSupervisor,
         task_id: &str,
-        status: AgentTaskStatus,
+        status: TaskStatus,
         result: AgentTaskResult,
     ) {
         let mut tasks = supervisor.tasks.lock().expect("agent task mutex poisoned");
@@ -1549,7 +1620,7 @@ mod tests {
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(Vec::new());
         let mut background_slots = Vec::new();
-        for _ in 0..MAX_BACKGROUND_AGENT_TASKS {
+        for _ in 0..DEFAULT_MAX_BACKGROUND_TASKS {
             background_slots.push(
                 supervisor
                     .reserve_task_slot(AgentTaskExecutionMode::Background)
@@ -1563,7 +1634,7 @@ mod tests {
             };
         assert_eq!(
             background_error,
-            "background agent task limit reached: at most 8 tasks may run concurrently; wait for a task to finish or cancel one before calling spawn_agent again"
+            "background task limit reached: at most 8 tasks may run concurrently"
         );
 
         let mut synchronous_slots = Vec::new();
@@ -1581,7 +1652,7 @@ mod tests {
             };
         assert_eq!(
             synchronous_error,
-            "synchronous agent task limit reached: at most 10 tasks may run concurrently; wait for a task to finish or cancel one before calling run_agent again"
+            "synchronous agent task limit reached: at most 10 tasks may run concurrently; wait for a task to finish before calling run_agent again"
         );
 
         drop(background_slots.pop());
@@ -1593,7 +1664,7 @@ mod tests {
     #[test]
     fn model_visible_task_payloads_hide_internal_fields_and_empty_warnings() {
         let mut info = task_info(1);
-        info.status = AgentTaskStatus::Completed;
+        info.status = TaskStatus::Completed;
         info.result = Some(AgentTaskResult {
             output: Some("done".to_string()),
             error: None,
@@ -1646,7 +1717,7 @@ mod tests {
             complete_test_task(
                 &supervisor,
                 task_id,
-                AgentTaskStatus::Completed,
+                TaskStatus::Completed,
                 AgentTaskResult {
                     output: Some(format!("result for {task_id}")),
                     error: None,
@@ -1668,7 +1739,7 @@ mod tests {
         let mut completed = task_info(4);
         completed.task_id = "done".to_string();
         completed.execution_mode = AgentTaskExecutionMode::Background;
-        completed.status = AgentTaskStatus::Completed;
+        completed.status = TaskStatus::Completed;
         completed.result = Some(AgentTaskResult {
             output: Some("already done".to_string()),
             error: None,
@@ -1690,7 +1761,7 @@ mod tests {
         complete_test_task(
             &supervisor,
             &active.task_id,
-            AgentTaskStatus::Completed,
+            TaskStatus::Completed,
             AgentTaskResult {
                 output: Some("active result".to_string()),
                 error: None,
@@ -1707,7 +1778,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_tasks_returns_completed_tasks_and_rejects_unknown_ids() {
         let mut completed = task_info(1);
-        completed.status = AgentTaskStatus::Failed;
+        completed.status = TaskStatus::Failed;
         completed.result = Some(AgentTaskResult {
             output: None,
             error: Some("failed".to_string()),
@@ -1734,7 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn wait_for_tasks_without_active_roots_returns_an_empty_list() {
         let mut completed = task_info(1);
-        completed.status = AgentTaskStatus::Completed;
+        completed.status = TaskStatus::Completed;
         completed.result = Some(AgentTaskResult {
             output: Some("done".to_string()),
             error: None,
@@ -1751,7 +1822,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_cancel_is_idempotent_and_returns_only_status() {
         let mut info = task_info(1);
-        info.status = AgentTaskStatus::Failed;
+        info.status = TaskStatus::Failed;
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(vec![info]);
 
@@ -1767,10 +1838,10 @@ mod tests {
     #[test]
     fn recovery_keeps_background_history_but_drops_terminal_synchronous_tasks() {
         let mut background = task_info(1);
-        background.status = AgentTaskStatus::Completed;
+        background.status = TaskStatus::Completed;
         background.notification_delivered = true;
         let mut synchronous = task_info(2);
-        synchronous.status = AgentTaskStatus::Failed;
+        synchronous.status = TaskStatus::Failed;
         let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(vec![background, synchronous]);
 
@@ -1787,7 +1858,7 @@ mod tests {
             task.task_id = format!("done_{index:02}");
             task.thread_id = format!("thread_done_{index:02}");
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
-            task.status = AgentTaskStatus::Completed;
+            task.status = TaskStatus::Completed;
             task.notification_delivered = true;
             task.updated_at = now + chrono::Duration::seconds(i64::from(index));
             task.completed_at = Some(task.updated_at);
@@ -1814,7 +1885,7 @@ mod tests {
             task.task_id = format!("done_{index:02}");
             task.thread_id = format!("thread_done_{index:02}");
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
-            task.status = AgentTaskStatus::Completed;
+            task.status = TaskStatus::Completed;
             task.notification_delivered = true;
             task.updated_at = now + chrono::Duration::seconds(i64::from(index));
             task.completed_at = Some(task.updated_at);
@@ -1830,7 +1901,7 @@ mod tests {
         undelivered.task_id = "undelivered_old".to_string();
         undelivered.thread_id = "thread_undelivered_old".to_string();
         undelivered.spawn_tool_use_id = "spawn_undelivered_old".to_string();
-        undelivered.status = AgentTaskStatus::Completed;
+        undelivered.status = TaskStatus::Completed;
         undelivered.notification_delivered = false;
         undelivered.updated_at = now - chrono::Duration::seconds(101);
         undelivered.completed_at = Some(undelivered.updated_at);
@@ -1854,7 +1925,7 @@ mod tests {
             task.task_id = format!("task_{index:02}");
             task.thread_id = format!("thread_{index:02}");
             task.spawn_tool_use_id = format!("spawn_{index:02}");
-            task.status = AgentTaskStatus::Completed;
+            task.status = TaskStatus::Completed;
             task.notification_delivered = false;
             task.updated_at = now + chrono::Duration::seconds(i64::from(index));
             task.completed_at = Some(task.updated_at);
@@ -1883,7 +1954,7 @@ mod tests {
             task.task_id = format!("done_{index:02}");
             task.thread_id = format!("thread_done_{index:02}");
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
-            task.status = AgentTaskStatus::Completed;
+            task.status = TaskStatus::Completed;
             task.notification_delivered = false;
             task.updated_at = now + chrono::Duration::seconds(i64::from(index));
             task.completed_at = Some(task.updated_at);
@@ -1900,7 +1971,7 @@ mod tests {
         undelivered.task_id = "undelivered_old".to_string();
         undelivered.thread_id = "thread_undelivered_old".to_string();
         undelivered.spawn_tool_use_id = "spawn_undelivered_old".to_string();
-        undelivered.status = AgentTaskStatus::Completed;
+        undelivered.status = TaskStatus::Completed;
         undelivered.notification_delivered = false;
         undelivered.updated_at = now - chrono::Duration::seconds(101);
         undelivered.completed_at = Some(undelivered.updated_at);
@@ -1918,7 +1989,7 @@ mod tests {
 
     #[tokio::test]
     async fn synchronous_terminal_and_panicked_executions_are_removed() {
-        for status in [AgentTaskStatus::Completed, AgentTaskStatus::Failed] {
+        for status in [TaskStatus::Completed, TaskStatus::Failed] {
             let initial = task_info(2);
             let task_id = initial.task_id.clone();
             let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
@@ -1926,8 +1997,8 @@ mod tests {
             let mut finished = initial;
             finished.status = status;
             finished.result = Some(AgentTaskResult {
-                output: (status == AgentTaskStatus::Completed).then(|| "done".to_string()),
-                error: (status == AgentTaskStatus::Failed).then(|| "failed".to_string()),
+                output: (status == TaskStatus::Completed).then(|| "done".to_string()),
+                error: (status == TaskStatus::Failed).then(|| "failed".to_string()),
                 warnings: Vec::new(),
             });
 
@@ -1935,7 +2006,7 @@ mod tests {
                 .finish_synchronous_execution(&task_id, tokio::spawn(async move { finished }))
                 .await;
 
-            assert_eq!(response.is_error, status != AgentTaskStatus::Completed);
+            assert_eq!(response.is_error, status != TaskStatus::Completed);
             let payload: serde_json::Value = serde_json::from_str(&response.output).unwrap();
             assert_eq!(payload["task_id"], task_id);
             assert_eq!(payload["status"], status.as_str());
@@ -2071,6 +2142,7 @@ mod tests {
             Arc::new(RwLock::new(ActiveProfile::Main)),
             Arc::new(Mutex::new(owner_usage)),
             Vec::new(),
+            Vec::new(),
         );
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let info = task_info(1);
@@ -2129,6 +2201,7 @@ mod tests {
                 Arc::new(PermissionEngine::empty("/tmp")),
                 Arc::new(RwLock::new(ActiveProfile::Main)),
                 Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
+                Vec::new(),
                 Vec::new(),
             );
             let persistence = tokio::spawn(async move {

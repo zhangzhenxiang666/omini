@@ -185,6 +185,31 @@ fn typed_event_payloads() -> Vec<(&'static str, Value)> {
             }),
         ),
         (
+            "task_changed",
+            json!({
+                "type": "task_changed",
+                "task": {
+                    "task_id": "bash_1",
+                    "owner_thread_id": "thread_1",
+                    "kind": "bash",
+                    "title": "cargo check",
+                    "status": "running",
+                    "created_at": "2026-09-26T00:00:00Z",
+                    "updated_at": "2026-09-26T00:00:00Z"
+                }
+            }),
+        ),
+        (
+            "task_output_delta",
+            json!({
+                "type": "task_output_delta",
+                "task_id": "bash_1",
+                "tool_use_id": "tool_1",
+                "stream": "stderr",
+                "delta": "checking crate"
+            }),
+        ),
+        (
             "plan_submitted",
             json!({
                 "type": "plan_submitted",

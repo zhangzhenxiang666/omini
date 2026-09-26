@@ -1,11 +1,12 @@
 use crate::tools::{Tool, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
+use omini_domain::task::TaskKind;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadTaskInput {
-    /// Task ID returned by `spawn_agent`.
+    /// Task ID returned when a background task starts.
     pub task_id: String,
 }
 
@@ -20,7 +21,7 @@ impl Tool for ReadTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Read an agent task's current status and optional terminal output/error/warnings. Usually rely on automatic completion notifications; use this only when you need to inspect a task without waiting. Only the main agent can use this tool."
+        "Read a background task's current status and optional terminal result. Usually rely on automatic completion notifications; use this only when you need to inspect a task without waiting. Only the main agent can use this tool."
     }
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
@@ -34,9 +35,26 @@ impl Tool for ReadTaskTool {
         if runtime.agent_depth != 0 {
             return ToolResult::error("read_task is only available to the main agent");
         }
-        let Some(supervisor) = &runtime.task_supervisor else {
-            return ToolResult::error("agent task supervisor is not available");
+        let Some(manager) = &runtime.task_manager else {
+            return ToolResult::error("task manager is not available");
         };
-        supervisor.read_task(&task_id)
+        let supervisor = runtime.task_supervisor.as_ref();
+        let Some(task) = manager.get(&task_id) else {
+            return supervisor.map_or_else(
+                || ToolResult::error(format!("unknown task '{task_id}'")),
+                |supervisor| supervisor.read_task(&task_id),
+            );
+        };
+        if task.owner_thread_id != runtime.owner_thread_id {
+            return ToolResult::error(format!("unknown task '{task_id}'"));
+        }
+        if task.kind == TaskKind::SubAgent {
+            supervisor.map_or_else(
+                || ToolResult::error("agent task supervisor is not available"),
+                |supervisor| supervisor.read_task(&task_id),
+            )
+        } else {
+            ToolResult::ok(serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string()))
+        }
     }
 }

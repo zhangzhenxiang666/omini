@@ -1,13 +1,14 @@
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandSummary,
-    InteractionRequest, Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
+    ActiveProfile, AgentTaskExecutionMode, AgentTaskSnapshot, CommandSummary, InteractionRequest,
+    Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::display::{
     AgentTaskNotification, DisplayImageAttachment, DisplayMessage, HistoryItem, UserDraft,
 };
 use omini_domain::message::Message;
+use omini_domain::task::TaskStatus;
 use rand::Rng;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
@@ -173,7 +174,7 @@ pub struct SubagentNode {
     pub agent_label: String,
     pub title: String,
     pub execution_mode: AgentTaskExecutionMode,
-    pub status: AgentTaskStatus,
+    pub status: TaskStatus,
     pub messages: Vec<Message>,
 }
 
@@ -983,13 +984,10 @@ impl UiState {
 
     /// 从 `start_idx` 开始找第一个含 running subagent 的消息索引。
     fn find_earliest_running_subagent_from(&self, start_idx: usize) -> usize {
-        let has_running = self.subagents.values().any(|node| {
-            matches!(
-                node.status,
-                crate::types::events::AgentTaskStatus::Running
-                    | crate::types::events::AgentTaskStatus::Cancelling
-            )
-        });
+        let has_running = self
+            .subagents
+            .values()
+            .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling));
         if !has_running {
             return usize::MAX;
         }
@@ -1018,23 +1016,15 @@ impl UiState {
     }
 
     pub fn has_active_agent_tasks(&self) -> bool {
-        self.subagents.values().any(|node| {
-            matches!(
-                node.status,
-                crate::types::events::AgentTaskStatus::Running
-                    | crate::types::events::AgentTaskStatus::Cancelling
-            )
-        })
+        self.subagents
+            .values()
+            .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling))
     }
 }
 
 impl SubagentNode {
     fn status_keeps_message_live(&self) -> bool {
-        matches!(
-            self.status,
-            crate::types::events::AgentTaskStatus::Running
-                | crate::types::events::AgentTaskStatus::Cancelling
-        )
+        matches!(self.status, TaskStatus::Running | TaskStatus::Cancelling)
     }
 }
 

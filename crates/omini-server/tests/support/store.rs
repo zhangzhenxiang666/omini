@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use omini_config::project::ProjectDir;
-use omini_domain::events::{AgentTaskExecutionMode, AgentTaskInfo, AgentTaskStatus};
+use omini_domain::events::{AgentTaskExecutionMode, AgentTaskInfo};
+use omini_domain::task::TaskStatus;
 use omini_runtime_contract::persistence::ThreadRecord;
 use omini_server::store::{Database, Project, Thread};
 use std::fs;
@@ -94,7 +95,7 @@ pub fn test_agent_task(task_id: &str, thread_id: &str, owner_thread_id: &str) ->
         title: "Test agent".to_string(),
         depth: 1,
         execution_mode: AgentTaskExecutionMode::Background,
-        status: AgentTaskStatus::Running,
+        status: TaskStatus::Running,
         result: None,
         created_at: now,
         updated_at: now,

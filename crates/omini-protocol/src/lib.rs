@@ -14,19 +14,21 @@ pub use omini_domain::config::{
 pub use omini_domain::display::HistoryItem;
 pub use omini_domain::events::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, AgentTaskSnapshot, AgentTaskStatus, CompactTrigger, MAX_AGENT_DEPTH,
-    PermissionPreview, PlanApprovalAction, PlanExecutionProfile, SubmittedPlan, ThreadRuntimeState,
-    ThreadSummary, ThreadUsage, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
-    ToolPauseResponse,
+    AgentTaskResult, AgentTaskSnapshot, CompactTrigger, MAX_AGENT_DEPTH, PermissionPreview,
+    PlanApprovalAction, PlanExecutionProfile, SubmittedPlan, ThreadRuntimeState, ThreadSummary,
+    ThreadUsage, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
 };
 pub use omini_domain::message::{ToolResultBlock, ToolUseBlock};
 pub use omini_domain::subagents::{
     AgentDraft, AgentRecord as RuntimeAgentRecord, AgentSourceKind, AgentSummary,
     GeneratedAgentDraft,
 };
+pub use omini_domain::task::{
+    TaskChangedEvent, TaskInfo, TaskKind, TaskOutputDelta, TaskOutputStream, TaskStatus,
+};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 3;
+pub const PROTOCOL_REVISION: u32 = 4;
 
 /// daemon 健康检查响应，用于客户端确认本地服务可用并识别服务名。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,6 +274,8 @@ pub enum TypedRuntimeEvent {
     ProposedPlanDelta(RuntimeDeltaEvent),
     ToolUse(ToolUseBlock),
     ToolResult(ToolResultBlock),
+    TaskChanged(TaskChangedEvent),
+    TaskOutputDelta(TaskOutputDelta),
     CompactSummaryStarted(CompactSummaryStartedEvent),
     CompactSummaryDelta(CompactSummaryDeltaEvent),
     CompactSummaryFinished(CompactSummaryFinishedEvent),
@@ -308,6 +312,8 @@ impl TypedRuntimeEvent {
             Self::ProposedPlanDelta(_) => "proposed_plan_delta",
             Self::ToolUse(_) => "tool_use",
             Self::ToolResult(_) => "tool_result",
+            Self::TaskChanged(_) => "task_changed",
+            Self::TaskOutputDelta(_) => "task_output_delta",
             Self::GitBranchChanged(_) => "git_branch_changed",
             Self::CompactSummaryStarted(_) => "compact_summary_started",
             Self::CompactSummaryDelta(_) => "compact_summary_delta",

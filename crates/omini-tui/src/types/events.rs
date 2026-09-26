@@ -5,6 +5,7 @@ use omini_domain::display::{DisplayMessage, HistoryItem, UserDraft};
 pub use omini_domain::events::*;
 use omini_domain::message::{Message, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::{AgentDraft, AgentRecord, AgentSourceKind};
+pub use omini_domain::task::{TaskChangedEvent, TaskOutputDelta};
 use omini_domain::usage::Usage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -237,6 +238,10 @@ pub enum RuntimeToUiEvent {
     ToolUse(ToolUseBlock),
     /// 工具执行完成，产出结果
     ToolResult(ToolResultBlock),
+    /// 通用后台任务状态变更；呈现由 Client 决定。
+    TaskChanged(TaskChangedEvent),
+    /// 后台 Bash 的 stdout/stderr 增量；呈现由 Client 决定。
+    TaskOutputDelta(TaskOutputDelta),
     /// 当前 thread 开始 LLM 压缩摘要。
     CompactSummaryStarted(CompactEvent),
     /// 当前 thread 正在流式输出压缩摘要。

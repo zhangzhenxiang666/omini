@@ -4,6 +4,8 @@ use omini_runtime_contract as runtime_contract;
 use std::collections::HashMap;
 
 pub const MAX_AGENT_STREAM_SNAPSHOT_BYTES: usize = 64 * 1024;
+const MAX_TASK_OUTPUT_SNAPSHOT_BYTES: usize = 256 * 1024;
+const MAX_TASK_REPLAY_COUNT: usize = 30;
 
 #[derive(Clone)]
 pub struct SequencedRuntimeEvent {
@@ -31,6 +33,8 @@ pub struct RuntimeReplayBuffer {
     latest_agent_management: Option<SequencedRuntimeEvent>,
     // Agent task 流不依赖前台运行生命周期，并按 task ID 相互隔离。
     agent_streams: HashMap<String, AgentStreamReplay>,
+    // 通用任务状态和 Bash 输出同样跨 run 生命周期保留，供同一 server 进程内重连。
+    task_streams: HashMap<String, TaskStreamReplay>,
 }
 
 #[derive(Default)]
@@ -40,8 +44,39 @@ struct AgentStreamReplay {
     truncated: bool,
 }
 
+#[derive(Default)]
+struct TaskStreamReplay {
+    changed: Option<SequencedRuntimeEvent>,
+    outputs: Vec<SequencedRuntimeEvent>,
+    output_bytes: HashMap<domain::task::TaskOutputStream, usize>,
+}
+
 impl RuntimeReplayBuffer {
     pub fn record(&mut self, event: SequencedRuntimeEvent) {
+        match &event.event.event {
+            client_proto::TypedRuntimeEvent::TaskChanged(changed) => {
+                let task_id = changed.task.task_id.clone();
+                self.task_streams.entry(task_id).or_default().changed = Some(event);
+                self.prune_task_streams();
+                return;
+            }
+            client_proto::TypedRuntimeEvent::TaskOutputDelta(output) => {
+                let task_id = output.task_id.clone();
+                let stream = output.stream;
+                let replay = self.task_streams.entry(task_id).or_default();
+                let size = output.delta.len();
+                replay
+                    .output_bytes
+                    .entry(stream)
+                    .and_modify(|bytes| *bytes = bytes.saturating_add(size))
+                    .or_insert(size);
+                replay.outputs.push(event);
+                truncate_task_output(replay, stream);
+                self.prune_task_streams();
+                return;
+            }
+            _ => {}
+        }
         if let client_proto::TypedRuntimeEvent::AgentTaskEvent(envelope) = &event.event.event {
             self.record_agent_event(envelope.task_id.clone(), event);
             return;
@@ -133,6 +168,11 @@ impl RuntimeReplayBuffer {
                     .agent_streams
                     .values()
                     .map(|stream| stream.events.len())
+                    .sum::<usize>()
+                + self
+                    .task_streams
+                    .values()
+                    .map(|stream| stream.outputs.len() + usize::from(stream.changed.is_some()))
                     .sum::<usize>(),
         );
         replay.extend(self.pending_prefix.iter().cloned());
@@ -155,6 +195,10 @@ impl RuntimeReplayBuffer {
         }
         for stream in self.agent_streams.values() {
             replay.extend(stream.events.iter().cloned());
+        }
+        for stream in self.task_streams.values() {
+            replay.extend(stream.changed.iter().cloned());
+            replay.extend(stream.outputs.iter().cloned());
         }
         replay.sort_by_key(|event| event.seq);
         replay
@@ -291,6 +335,23 @@ impl RuntimeReplayBuffer {
         }
     }
 
+    fn prune_task_streams(&mut self) {
+        while self.task_streams.len() > MAX_TASK_REPLAY_COUNT {
+            let oldest = self
+                .task_streams
+                .iter()
+                .min_by_key(|(_, replay)| {
+                    replay.changed.as_ref().map_or_else(
+                        || replay.outputs.first().map_or(0, |event| event.seq),
+                        |event| event.seq,
+                    )
+                })
+                .map(|(task_id, _)| task_id.clone());
+            let Some(oldest) = oldest else { break };
+            self.task_streams.remove(&oldest);
+        }
+    }
+
     fn clear_compact_tail(&mut self) {
         self.compact_started = None;
         self.compact_tail.clear();
@@ -379,6 +440,45 @@ impl RuntimeReplayBuffer {
                 message.role == domain::message::Role::User && message.content == blocks
             })
     }
+}
+
+fn truncate_task_output(replay: &mut TaskStreamReplay, stream: domain::task::TaskOutputStream) {
+    let mut excess = replay
+        .output_bytes
+        .get(&stream)
+        .copied()
+        .unwrap_or_default()
+        .saturating_sub(MAX_TASK_OUTPUT_SNAPSHOT_BYTES);
+    if excess == 0 {
+        return;
+    }
+    for event in &mut replay.outputs {
+        if excess == 0 {
+            break;
+        }
+        let client_proto::TypedRuntimeEvent::TaskOutputDelta(output) = &mut event.event.event
+        else {
+            continue;
+        };
+        if output.stream != stream {
+            continue;
+        }
+        let mut boundary = excess.min(output.delta.len());
+        while boundary < output.delta.len() && !output.delta.is_char_boundary(boundary) {
+            boundary += 1;
+        }
+        output.delta.drain(..boundary);
+        excess = excess.saturating_sub(boundary);
+    }
+    replay.outputs.retain(|event| {
+        matches!(
+            &event.event.event,
+            client_proto::TypedRuntimeEvent::TaskOutputDelta(output) if !output.delta.is_empty()
+        )
+    });
+    replay
+        .output_bytes
+        .insert(stream, MAX_TASK_OUTPUT_SNAPSHOT_BYTES);
 }
 
 /// 判断待 replay 的用户注入事件是否已经出现在持久化 snapshot 中。
@@ -763,6 +863,45 @@ mod tests {
         buffer.record(sequenced(1, "notification"));
 
         assert!(buffer.replay().is_empty());
+    }
+
+    #[test]
+    fn replay_buffer_restores_task_status_and_bounded_output_after_run_end() {
+        let mut buffer = RuntimeReplayBuffer::default();
+        let task = domain::task::TaskInfo {
+            task_id: "bash_tool_1".to_string(),
+            owner_thread_id: "owner".to_string(),
+            kind: domain::task::TaskKind::Bash,
+            title: "cargo check".to_string(),
+            status: domain::task::TaskStatus::Running,
+            created_at: fixed_time(),
+            updated_at: fixed_time(),
+            completed_at: None,
+            result_summary: None,
+        };
+        buffer.record(runtime_event(
+            1,
+            runtime_contract::RuntimeToServerEvent::TaskChanged(domain::task::TaskChangedEvent {
+                task,
+            }),
+        ));
+        buffer.record(runtime_event(
+            2,
+            runtime_contract::RuntimeToServerEvent::TaskOutputDelta(
+                domain::task::TaskOutputDelta {
+                    task_id: "bash_tool_1".to_string(),
+                    tool_use_id: "bash_tool_1".to_string(),
+                    stream: domain::task::TaskOutputStream::Stdout,
+                    delta: "progress".to_string(),
+                },
+            ),
+        ));
+        buffer.record(sequenced(3, "run_finished"));
+
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 2);
+        assert_eq!(replay[0].event.kind(), "task_changed");
+        assert_eq!(replay[1].event.kind(), "task_output_delta");
     }
 
     #[test]

@@ -5,13 +5,13 @@ use super::{
 };
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
-    AgentTaskEvent, AgentTaskExecutionMode, AgentTaskSnapshot, AgentTaskStatus, CommandKind,
-    CommandSummary, CompactTrigger, InteractionRequest, Notification, NotificationKind,
-    RuntimeToUiEvent,
+    AgentTaskEvent, AgentTaskExecutionMode, AgentTaskSnapshot, CommandKind, CommandSummary,
+    CompactTrigger, InteractionRequest, Notification, NotificationKind, RuntimeToUiEvent,
 };
 use omini_domain::display::{HistoryItem, UserDraft};
 use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock};
 use omini_domain::subagents::AgentSummary;
+use omini_domain::task::TaskStatus;
 use std::collections::VecDeque;
 
 const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
@@ -396,6 +396,18 @@ impl UiState {
                 }
                 self.on_tool_result(&tool_use_id);
             }
+            RuntimeToUiEvent::TaskChanged(event) => {
+                if event.task.kind == omini_domain::task::TaskKind::SubAgent
+                    && let Some(node) = self
+                        .subagents
+                        .values_mut()
+                        .find(|node| node.task_id == event.task.task_id)
+                {
+                    node.status = event.task.status;
+                    self.update_live_boundary();
+                }
+            }
+            RuntimeToUiEvent::TaskOutputDelta(_) => {}
             RuntimeToUiEvent::TurnEnded => {
                 self.settle_active_thinking_segment();
                 if let Some(msg) = self.pending_assistant.take()
@@ -484,7 +496,7 @@ impl UiState {
                                 agent_label: agent,
                                 title,
                                 execution_mode,
-                                status: AgentTaskStatus::Running,
+                                status: TaskStatus::Running,
                                 messages: Vec::new(),
                             },
                         );
@@ -499,7 +511,9 @@ impl UiState {
                         self.finish_tool_pause_removal(removed_active);
                     }
                     AgentTaskEvent::Finished { status, .. } => {
-                        if let Some(node) = self.subagents.get_mut(&event.thread_id) {
+                        if let Some(status) = status
+                            && let Some(node) = self.subagents.get_mut(&event.thread_id)
+                        {
                             node.status = status;
                         }
                         let removed_active =
@@ -735,7 +749,7 @@ impl UiState {
         let Some(node) = self.subagents.get_mut(thread_id) else {
             return;
         };
-        if node.status != AgentTaskStatus::Running {
+        if node.status != TaskStatus::Running {
             return;
         }
 
@@ -745,12 +759,12 @@ impl UiState {
 
         node.status = if result.is_error {
             if result.content.trim() == "Execution cancelled" {
-                AgentTaskStatus::Cancelled
+                TaskStatus::Cancelled
             } else {
-                AgentTaskStatus::Failed
+                TaskStatus::Failed
             }
         } else {
-            AgentTaskStatus::Completed
+            TaskStatus::Completed
         };
     }
 

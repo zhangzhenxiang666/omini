@@ -405,7 +405,7 @@ pub fn is_special_tool(tool_use: &ToolUseBlock) -> bool {
             | "spawn_agent"
             | "run_agent"
             | "read_task"
-            | "wait_agents"
+            | "wait_tasks"
     )
 }
 
@@ -591,7 +591,7 @@ pub fn render_read_task(
     ])]
 }
 
-pub fn render_wait_agents(tool_use: &ToolUseBlock, pending: bool) -> Vec<Line<'static>> {
+pub fn render_wait_tasks(tool_use: &ToolUseBlock, pending: bool) -> Vec<Line<'static>> {
     let target = tool_use
         .input
         .get("task_ids")
@@ -601,7 +601,7 @@ pub fn render_wait_agents(tool_use: &ToolUseBlock, pending: bool) -> Vec<Line<'s
     let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
     vec![Line::from(vec![
         Span::raw("⏺ "),
-        Span::styled("WaitAgents", title_style),
+        Span::styled("WaitTasks", title_style),
         Span::raw("("),
         Span::raw(target),
         Span::raw(")"),
@@ -1196,15 +1196,15 @@ mod tests {
     }
 
     #[test]
-    fn wait_agents_renders_selected_task_count() {
+    fn wait_tasks_renders_selected_task_count() {
         let tool_use = ToolUseBlock {
             id: "toolu_wait".to_string(),
-            name: "wait_agents".to_string(),
+            name: "wait_tasks".to_string(),
             input: serde_json::from_value(serde_json::json!({"task_ids": ["task-a", "task-b"]}))
                 .unwrap(),
         };
 
-        let lines = render_wait_agents(&tool_use, false);
-        assert_eq!(plain(&lines[0]), "⏺ WaitAgents(2 task(s))");
+        let lines = render_wait_tasks(&tool_use, false);
+        assert_eq!(plain(&lines[0]), "⏺ WaitTasks(2 task(s))");
     }
 }

@@ -66,7 +66,7 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
             );
         }
     }
-    section.push_str("- Completion notifications arrive automatically and contain task identity and status. Do not poll running tasks; use `read_task` once after completion if you need its output, or `wait_agents` when this turn must synchronize with one or more tasks and receive their terminal results.\n");
+    section.push_str("- Completion notifications arrive automatically and contain task identity and status. Do not poll running tasks; use `read_task` once after completion if you need its output, or `wait_tasks` when this turn must synchronize with one or more tasks and receive their terminal results.\n");
     section.push_str(
         "- Do not duplicate an agent task's investigation in the main context. Use its result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
     );

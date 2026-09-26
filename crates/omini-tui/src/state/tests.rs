@@ -7,6 +7,7 @@ use chrono::Utc;
 use omini_domain::display::MentionKind;
 use omini_domain::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
 use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
+use omini_domain::task::{TaskChangedEvent, TaskInfo, TaskKind};
 use omini_protocol as protocol;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -60,6 +61,29 @@ fn start_subagent_with_execution_mode(state: &mut UiState, execution_mode: Agent
     }));
 }
 
+#[test]
+fn background_subagent_status_comes_from_task_changed() {
+    let mut state = UiState::new();
+    start_subagent(&mut state);
+    let now = Utc::now();
+
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: "task_1".to_string(),
+            owner_thread_id: "parent".to_string(),
+            kind: TaskKind::SubAgent,
+            title: "Explore".to_string(),
+            status: TaskStatus::Completed,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            result_summary: None,
+        },
+    }));
+
+    assert_eq!(state.subagents["sub_1"].status, TaskStatus::Completed);
+}
+
 fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
     let now = Utc::now();
     AgentTaskSnapshot {
@@ -75,7 +99,7 @@ fn subagent_snapshot(messages: Vec<Message>) -> AgentTaskSnapshot {
             title: "Explore".to_string(),
             depth: 1,
             execution_mode: AgentTaskExecutionMode::Background,
-            status: AgentTaskStatus::Completed,
+            status: TaskStatus::Completed,
             result: None,
             created_at: now,
             updated_at: now,
@@ -379,7 +403,7 @@ fn finished_subagent_removes_its_pending_pause() {
         owner_thread_id: "parent".to_string(),
         truncated: false,
         payload: AgentTaskEvent::Finished {
-            status: AgentTaskStatus::Cancelled,
+            status: Some(TaskStatus::Cancelled),
             result: None,
         },
     }));
@@ -680,7 +704,7 @@ fn subagent_spawn_tool_error_finishes_running_state() {
     }));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, AgentTaskStatus::Failed);
+    assert_eq!(node.status, TaskStatus::Failed);
 }
 
 #[test]
@@ -693,7 +717,7 @@ fn runtime_error_does_not_fail_running_subagent_state() {
     ));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, AgentTaskStatus::Running);
+    assert_eq!(node.status, TaskStatus::Running);
 }
 
 #[test]
@@ -705,7 +729,7 @@ fn parent_run_finished_does_not_finish_running_agent_task() {
 
     assert_eq!(
         state.subagents.get("sub_1").unwrap().status,
-        AgentTaskStatus::Running
+        TaskStatus::Running
     );
 }
 
@@ -738,7 +762,7 @@ fn background_spawn_tool_result_keeps_running_subagent_live() {
     state.apply_event(RuntimeToUiEvent::RunFinished);
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, AgentTaskStatus::Running);
+    assert_eq!(node.status, TaskStatus::Running);
     assert!(state.pending_tool_message_map.is_empty());
     assert_eq!(state.live_message_start, 0);
     assert_eq!(state.render_cache.completed_message_count, 0);
@@ -757,7 +781,7 @@ fn synchronous_agent_tool_result_finishes_subagent_state() {
     }));
 
     let node = state.subagents.get("sub_1").unwrap();
-    assert_eq!(node.status, AgentTaskStatus::Completed);
+    assert_eq!(node.status, TaskStatus::Completed);
 }
 
 #[test]

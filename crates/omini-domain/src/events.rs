@@ -1,6 +1,7 @@
 use crate::config::ThinkingEffort;
 use crate::display::{DisplayPlan, HistoryItem};
 use crate::message::{Message, ToolResultBlock, ToolUseBlock};
+use crate::task::TaskStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
@@ -90,37 +91,6 @@ impl AgentTaskExecutionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskStatus {
-    Running,
-    Cancelling,
-    Completed,
-    Failed,
-    Cancelled,
-    Interrupted,
-}
-
-impl AgentTaskStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Running => "running",
-            Self::Cancelling => "cancelling",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-            Self::Interrupted => "interrupted",
-        }
-    }
-
-    pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentTaskResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,7 +116,7 @@ pub struct AgentTaskInfo {
     pub title: String,
     pub depth: u8,
     pub execution_mode: AgentTaskExecutionMode,
-    pub status: AgentTaskStatus,
+    pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentTaskResult>,
     pub created_at: DateTime<Utc>,
@@ -207,7 +177,9 @@ pub enum AgentTaskEvent {
     },
     TurnEnded,
     Finished {
-        status: AgentTaskStatus,
+        /// 后台 Agent 的终态由通用 `TaskChanged` 发送；同步 Agent 通过此字段报告终态。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<TaskStatus>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<AgentTaskResult>,
     },
