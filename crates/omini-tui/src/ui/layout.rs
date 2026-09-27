@@ -1,9 +1,11 @@
 use crate::app::state::{AgentStatus, InteractionStep, format_run_duration};
 use crate::ui::context::ViewContext;
+use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const PLAN_APPROVAL_TOP_SPACER_HEIGHT: u16 = 1;
 const PLAN_APPROVAL_MIN_MESSAGES_HEIGHT: u16 = 1;
@@ -189,6 +191,7 @@ fn render_session_selector(state: &ViewContext<'_>, frame: &mut ratatui::Frame, 
     let selected_style = Style::default()
         .fg(crate::ui::theme::ACCENT)
         .add_modifier(Modifier::BOLD);
+    let now = chrono::Utc::now();
     let mut rows = Vec::with_capacity(state.session_count());
     rows.push(("main".to_string(), None, 0usize));
     for (index, task_id) in state.sessions.subagent_order.iter().enumerate() {
@@ -202,56 +205,107 @@ fn render_session_selector(state: &ViewContext<'_>, frame: &mut ratatui::Frame, 
         };
         rows.push((
             format!("{}  {}", node.agent_label, node.title),
-            Some(node.status),
+            Some(node),
             index + 1,
         ));
     }
-    let lines = rows
-        .into_iter()
-        .take(area.height as usize)
-        .map(|(label, status, index)| {
-            let selected = if state.sessions.session_selector_focused {
-                state.sessions.session_selection_index == index
+    for (row, (label, node, index)) in rows.into_iter().take(area.height as usize).enumerate() {
+        let highlighted = state.sessions.session_selector_focused
+            && state.sessions.session_selection_index == index;
+        let active = state
+            .sessions
+            .active_session_task_id
+            .as_ref()
+            .is_some_and(|task_id| {
+                state.sessions.subagent_order.get(index.wrapping_sub(1)) == Some(task_id)
+            })
+            || (index == 0 && state.sessions.active_session_task_id.is_none());
+        let focus_marker = if highlighted { "❯ " } else { "  " };
+        let session_marker = if active { "● " } else { "○ " };
+        let label_style = if highlighted {
+            selected_style
+        } else if active {
+            active_style
+        } else {
+            dim
+        };
+        let suffix = node.map(|node| {
+            let duration = if node.status.is_terminal() {
+                node.duration.unwrap_or_default()
             } else {
-                state
-                    .sessions
-                    .active_session_task_id
-                    .as_ref()
-                    .is_some_and(|task_id| {
-                        state.sessions.subagent_order.get(index.wrapping_sub(1)) == Some(task_id)
-                    })
-                    || (index == 0 && state.sessions.active_session_task_id.is_none())
+                now.signed_duration_since(node.started_at)
+                    .to_std()
+                    .unwrap_or_default()
             };
-            let marker = if selected { "● " } else { "○ " };
-            let mut spans = vec![Span::styled(
-                marker,
-                if selected { selected_style } else { dim },
-            )];
-            spans.push(Span::styled(
-                label,
-                if selected { active_style } else { dim },
-            ));
-            if let Some(status) = status {
-                spans.push(Span::styled(
-                    format!("  {}", task_status_label(status)),
-                    dim,
-                ));
+            let elapsed = format_run_duration(duration);
+            match task_status_label(node.status) {
+                Some(status) => format!("{status}  {elapsed}"),
+                None => elapsed,
             }
-            Line::from(spans)
-        })
-        .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), area);
+        });
+        // 状态与时长独立占位，长任务名只在左侧截断，不挤走计时。
+        let suffix_width = suffix
+            .as_ref()
+            .map(|text| {
+                UnicodeWidthStr::width(text.as_str()).min(area.width.saturating_sub(5) as usize)
+            })
+            .unwrap_or(0) as u16;
+        let label_width = area
+            .width
+            .saturating_sub(suffix_width + u16::from(suffix_width > 0));
+        let row_area = Rect::new(area.x, area.y + row as u16, label_width, 1);
+        let label = truncate_session_label(&label, label_width.saturating_sub(4) as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(focus_marker, if highlighted { selected_style } else { dim }),
+                Span::styled(session_marker, if active { selected_style } else { dim }),
+                Span::styled(label, label_style),
+            ])),
+            row_area,
+        );
+        if let Some(suffix) = suffix
+            && suffix_width > 0
+        {
+            frame.render_widget(
+                Paragraph::new(suffix)
+                    .alignment(Alignment::Right)
+                    .style(dim),
+                Rect::new(area.right() - suffix_width, row_area.y, suffix_width, 1),
+            );
+        }
+    }
 }
 
-fn task_status_label(status: omini_domain::task::TaskStatus) -> &'static str {
+fn truncate_session_label(label: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(label) <= width {
+        return label.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let mut result = String::new();
+    let mut used = 0;
+    for ch in label.chars() {
+        let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + char_width >= width {
+            break;
+        }
+        result.push(ch);
+        used += char_width;
+    }
+    result.push('…');
+    result
+}
+
+fn task_status_label(status: omini_domain::task::TaskStatus) -> Option<&'static str> {
     use omini_domain::task::TaskStatus;
     match status {
-        TaskStatus::Running => "running",
-        TaskStatus::Cancelling => "cancelling",
-        TaskStatus::Completed => "completed",
-        TaskStatus::Failed => "failed",
-        TaskStatus::Cancelled => "cancelled",
-        TaskStatus::Interrupted => "interrupted",
+        TaskStatus::Running => None,
+        TaskStatus::Cancelling => Some("cancelling"),
+        TaskStatus::Completed => Some("completed"),
+        TaskStatus::Failed => Some("failed"),
+        TaskStatus::Cancelled => Some("cancelled"),
+        TaskStatus::Interrupted => Some("interrupted"),
     }
 }
 

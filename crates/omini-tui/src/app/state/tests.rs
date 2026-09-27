@@ -1029,6 +1029,47 @@ fn task_history_snapshot() {
     assert_eq!(state.sessions.views["task_1"].messages.len(), 4);
 }
 
+/// 验证重新进入主会话后，子任务列表仍以快照中的创建时间计算耗时。
+#[test]
+fn restore_task_timer() {
+    let mut state = AppState::new();
+    let started_at = Utc::now() - chrono::Duration::seconds(95);
+    let mut snapshot = subagent_snapshot(Vec::new());
+    snapshot.task.status = TaskStatus::Running;
+    snapshot.task.created_at = started_at;
+    snapshot.task.completed_at = None;
+
+    state.apply_thread_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![snapshot.clone()],
+        ThreadUsageSnapshot::default(),
+    );
+    state.apply_thread_snapshot(
+        Some("other".to_string()),
+        Vec::new(),
+        Vec::new(),
+        ThreadUsageSnapshot::default(),
+    );
+    state.apply_thread_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![snapshot],
+        ThreadUsageSnapshot::default(),
+    );
+
+    let node = &state.sessions.subagents["sub_1"];
+    assert_eq!(node.started_at, started_at);
+    assert_eq!(node.status, TaskStatus::Running);
+    assert!(
+        Utc::now()
+            .signed_duration_since(node.started_at)
+            .num_seconds()
+            >= 95
+    );
+    assert_eq!(state.sessions.subagent_order, ["task_1"]);
+}
+
 #[test]
 fn snapshot_omits_old_terminal() {
     let mut state = AppState::new();

@@ -6,6 +6,7 @@ pub enum Focus {
     Pause,
     Help,
     Model,
+    SessionSelector,
     Composer,
 }
 /// 页面、计划和暂停请求拥有稳定优先级；关闭后恢复原来的局部交互。
@@ -23,6 +24,8 @@ pub fn current(state: &AppState) -> Focus {
         Focus::Help
     } else if state.dialogs.interaction_step.is_some() {
         Focus::Model
+    } else if state.sessions.session_selector_focused {
+        Focus::SessionSelector
     } else {
         Focus::Composer
     }

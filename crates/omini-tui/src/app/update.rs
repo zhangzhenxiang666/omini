@@ -58,10 +58,7 @@ pub fn handle_input_event(
             UpdateOutcome::redraw()
         }
         Event::Paste(text)
-            if state.dialogs.interaction_step.is_none()
-                && state.active_tool_pause().is_none()
-                && state.dialogs.plan.plan_approval.is_none()
-                && state.dialogs.help_drawer.is_none() =>
+            if crate::app::focus::current(state) == crate::app::focus::Focus::Composer =>
         {
             state.composer.insert_paste(text);
             state.composer.update_input_autocomplete();
@@ -145,8 +142,13 @@ fn handle_key_event(
         return true;
     }
 
+    if focus == crate::app::focus::Focus::SessionSelector {
+        crate::features::sessions::update::handle_selector_key(state, code);
+        return true;
+    }
+
     if code == KeyCode::Esc {
-        if let Some(task_id) = state.selected_task_id()
+        if let Some(task_id) = state.sessions.active_session_task_id.clone()
             && state.sessions.subagents.values().any(|node| {
                 node.task_id == task_id
                     && matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling)
@@ -520,27 +522,54 @@ mod tests {
     fn session_list_navigation() {
         let mut state = AppState::new();
         add_background_task(&mut state, "task_1", "thread_1");
+        add_background_task(&mut state, "task_2", "thread_2");
         state.composer.input = "first\nsecond".to_string();
         state.composer.cursor_char = 6;
         let mut tx = Effects::default();
 
-        handle_composer_key(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
         assert_eq!(state.composer.cursor_char, 0);
         assert!(!state.sessions.session_selector_focused);
-        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
         assert_eq!(state.composer.cursor_char, 6);
         assert!(!state.sessions.session_selector_focused);
-        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
         assert!(state.sessions.session_selector_focused);
-        handle_composer_key(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        assert!(state.sessions.active_session_task_id.is_none());
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
         assert_eq!(state.sessions.session_selection_index, 1);
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
-
+        assert!(state.sessions.active_session_task_id.is_none());
+        assert!(state.sessions.session_selector_focused);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.sessions.session_selection_index, 2);
+        assert!(state.sessions.active_session_task_id.is_none());
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.sessions.session_selection_index, 1);
+        assert!(state.sessions.active_session_task_id.is_none());
+        assert_eq!(state.composer.cursor_char, 6);
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
         assert_eq!(
             state.sessions.active_session_task_id.as_deref(),
             Some("task_1")
         );
         assert!(!state.sessions.session_selector_focused);
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.composer.cursor_char, 0);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.sessions.session_selection_index, 0);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_1")
+        );
+        assert!(state.sessions.session_selector_focused);
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        assert!(!state.sessions.session_selector_focused);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_1")
+        );
         assert_eq!(state.composer.input, "first\nsecond");
         assert!(tx.requests.is_empty());
     }
@@ -553,14 +582,98 @@ mod tests {
         state.sessions.active_session_task_id = Some("task_1".to_string());
         state.sessions.subagents.get_mut("thread_1").unwrap().status = TaskStatus::Completed;
         state.sessions.session_selector_focused = true;
-        state.sessions.session_selection_index = 0;
+        state.sessions.session_selection_index = 1;
         let mut tx = Effects::default();
 
-        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.sessions.session_selection_index, 2);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_1")
+        );
+        assert!(state.sessions.views.contains_key("task_1"));
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
 
-        assert!(state.sessions.active_session_task_id.is_none());
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_2")
+        );
         assert_eq!(state.sessions.subagent_order, vec!["task_2"]);
+        assert_eq!(state.sessions.session_selection_index, 1);
+        assert!(!state.sessions.session_selector_focused);
         assert!(!state.sessions.views.contains_key("task_1"));
+    }
+
+    /// 验证回收列表前部的终态任务后，高亮项仍指向原候选会话。
+    #[test]
+    fn verify_task_pruning() {
+        let mut state = AppState::new();
+        for index in 1..=4 {
+            add_background_task(
+                &mut state,
+                &format!("task_{index}"),
+                &format!("thread_{index}"),
+            );
+        }
+        state.sessions.active_session_task_id = Some("task_3".to_string());
+        state.sessions.session_selector_focused = true;
+        state.sessions.session_selection_index = 4;
+        state.sessions.subagents.get_mut("thread_1").unwrap().status = TaskStatus::Completed;
+
+        state.prune_terminal_tasks();
+
+        assert_eq!(
+            state.sessions.subagent_order,
+            vec!["task_2", "task_3", "task_4"]
+        );
+        assert_eq!(state.sessions.session_selection_index, 3);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_3")
+        );
+    }
+
+    /// 验证列表焦点隔离输入与粘贴，Esc 只退出列表而不取消任务。
+    #[test]
+    fn verify_selector_focus() {
+        let mut state = AppState::new();
+        add_background_task(&mut state, "task_1", "thread_1");
+        add_background_task(&mut state, "task_2", "thread_2");
+        state.sessions.active_session_task_id = Some("task_1".to_string());
+        state.sessions.session_selector_focused = true;
+        state.sessions.session_selection_index = 1;
+        state.composer.input = "draft".to_string();
+        state.composer.cursor_char = 5;
+        let mut tx = Effects::default();
+
+        assert_eq!(
+            crate::app::focus::current(&state),
+            crate::app::focus::Focus::SessionSelector
+        );
+
+        handle_key_event(&mut state, KeyCode::Down, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.sessions.session_selection_index, 2);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_1")
+        );
+        handle_input_event(&mut state, Event::Paste(" pasted".into()), &mut tx);
+        handle_key_event(&mut state, KeyCode::Char('x'), KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.composer.input, "draft");
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert!(!state.sessions.session_selector_focused);
+        assert_eq!(
+            state.sessions.active_session_task_id.as_deref(),
+            Some("task_1")
+        );
+        assert!(tx.requests.is_empty());
+        handle_input_event(&mut state, Event::Paste(" pasted".into()), &mut tx);
+        assert_eq!(state.composer.input, "draft pasted");
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert!(matches!(
+            tx.requests.pop_front(),
+            Some(ClientRequest::AgentTaskCancel { task_id }) if task_id == "task_1"
+        ));
     }
 
     #[test]

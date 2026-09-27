@@ -410,19 +410,6 @@ impl AppState {
         1 + self.sessions.subagent_order.len()
     }
 
-    /// 返回会话列表当前选择的子任务，用于执行任务级操作。
-    pub fn selected_task_id(&self) -> Option<String> {
-        if self.sessions.session_selector_focused {
-            return self
-                .sessions
-                .session_selection_index
-                .checked_sub(1)
-                .and_then(|index| self.sessions.subagent_order.get(index))
-                .cloned();
-        }
-        self.sessions.active_session_task_id.clone()
-    }
-
     /// 判断当前子任务会话是否已结束并应保持只读。
     pub fn session_is_terminal(&self) -> bool {
         self.sessions
@@ -438,6 +425,14 @@ impl AppState {
 
     /// 移除已结束且当前未查看的直接异步子任务。
     pub fn prune_terminal_tasks(&mut self) {
+        // 异步结束可能删掉高亮项之前的行，按任务 ID 恢复高亮而不切换当前视图。
+        let highlighted_main = self.sessions.session_selection_index == 0;
+        let highlighted_task_id = self
+            .sessions
+            .session_selection_index
+            .checked_sub(1)
+            .and_then(|index| self.sessions.subagent_order.get(index))
+            .cloned();
         let removed = self
             .sessions
             .subagent_order
@@ -487,10 +482,34 @@ impl AppState {
         self.sessions
             .subagents_by_tool_use
             .retain(|_, thread_id| !removed_threads.contains(thread_id));
-        self.sessions.session_selection_index = self
-            .sessions
-            .session_selection_index
-            .min(self.session_count().saturating_sub(1));
+        if self.sessions.subagent_order.is_empty() {
+            self.sessions.session_selector_focused = false;
+        }
+        let selected = if self.sessions.session_selector_focused && highlighted_main {
+            None
+        } else {
+            highlighted_task_id
+                .as_ref()
+                .filter(|_| self.sessions.session_selector_focused)
+                .and_then(|task_id| {
+                    self.sessions
+                        .subagent_order
+                        .iter()
+                        .position(|id| id == task_id)
+                })
+                .or_else(|| {
+                    self.sessions
+                        .active_session_task_id
+                        .as_ref()
+                        .and_then(|task_id| {
+                            self.sessions
+                                .subagent_order
+                                .iter()
+                                .position(|id| id == task_id)
+                        })
+                })
+        };
+        self.sessions.session_selection_index = selected.map(|index| index + 1).unwrap_or(0);
     }
 }
 

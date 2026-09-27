@@ -224,38 +224,6 @@ pub fn handle_composer_key(
     request_tx: &mut Effects,
 ) -> bool {
     let page_amt = 1.max(state.geometry.messages_area.height as usize / 2);
-    if state.sessions.session_selector_focused {
-        match code {
-            KeyCode::Up => {
-                if state.sessions.session_selection_index == 0 {
-                    state.sessions.session_selector_focused = false;
-                } else {
-                    state.sessions.session_selection_index -= 1;
-                }
-            }
-            KeyCode::Down => {
-                state.sessions.session_selection_index = (state.sessions.session_selection_index
-                    + 1)
-                .min(state.session_count().saturating_sub(1));
-            }
-            KeyCode::Enter => {
-                state.sessions.active_session_task_id =
-                    if state.sessions.session_selection_index == 0 {
-                        None
-                    } else {
-                        state
-                            .sessions
-                            .subagent_order
-                            .get(state.sessions.session_selection_index - 1)
-                            .cloned()
-                    };
-                state.sessions.session_selector_focused = false;
-                state.prune_terminal_tasks();
-            }
-            _ => {}
-        }
-        return true;
-    }
     if state.session_is_terminal()
         && !state.composer.input.starts_with('/')
         && !(state.composer.input.is_empty()

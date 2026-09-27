@@ -7,6 +7,9 @@ use ratatui::widgets::{Clear, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 pub fn render_autocomplete(state: &ViewContext<'_>, frame: &mut ratatui::Frame, input_area: Rect) {
+    if state.sessions.session_selector_focused {
+        return;
+    }
     if state.composer.mention_autocomplete.visible {
         render_mentions(state, frame, input_area);
         return;

@@ -496,6 +496,80 @@ mod tests {
         assert_eq!(main_row, footer_row + 2);
     }
 
+    /// 验证两种终端尺寸下的焦点标记、右侧计时与终态固定时长。
+    #[test]
+    fn verify_selector_render() {
+        use omini_domain::task::TaskStatus;
+        for (width, height) in [(120, 36), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut state = AppState::new();
+            state.start.show_start_screen = false;
+            state.sessions.subagent_order.push("task-1".to_string());
+            state.sessions.subagents.insert(
+                "thread-1".to_string(),
+                crate::features::sessions::model::SubagentNode {
+                    task_id: "task-1".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    parent_thread_id: "main-thread".to_string(),
+                    spawn_tool_use_id: "tool-1".to_string(),
+                    agent_label: "Explore".to_string(),
+                    title: "Inspect project files ".repeat(12),
+                    execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
+                    status: TaskStatus::Running,
+                    duration: None,
+                    started_at: Utc::now() - chrono::Duration::seconds(67),
+                    messages: Vec::new(),
+                },
+            );
+            state.sessions.views.insert(
+                "task-1".to_string(),
+                crate::app::state::SessionState::default(),
+            );
+            state.sessions.session_selector_focused = true;
+            state.sessions.session_selection_index = 1;
+
+            let row = |terminal: &Terminal<TestBackend>| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, height - 1)].symbol())
+                    .collect::<String>()
+            };
+            terminal
+                .draw(|frame| crate::app::draw(&mut state, frame))
+                .unwrap();
+            let running = row(&terminal);
+            assert!(running.starts_with("❯ ○ Explore"));
+            let main_row = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, height - 2)].symbol())
+                .collect::<String>();
+            assert!(main_row.starts_with("  ● main"));
+            assert!(running.contains('…'));
+            assert!(running.ends_with("1m07s"));
+            assert!(!running.contains("running"));
+
+            state
+                .sessions
+                .subagents
+                .get_mut("thread-1")
+                .unwrap()
+                .started_at -= chrono::Duration::seconds(1);
+            terminal
+                .draw(|frame| crate::app::draw(&mut state, frame))
+                .unwrap();
+            assert!(row(&terminal).ends_with("1m08s"));
+
+            let node = state.sessions.subagents.get_mut("thread-1").unwrap();
+            node.status = TaskStatus::Completed;
+            node.duration = Some(std::time::Duration::from_secs(68));
+            node.started_at -= chrono::Duration::seconds(100);
+            state.sessions.active_session_task_id = Some("task-1".to_string());
+            terminal
+                .draw(|frame| crate::app::draw(&mut state, frame))
+                .unwrap();
+            assert!(row(&terminal).starts_with("❯ ● Explore"));
+            assert!(row(&terminal).ends_with("completed  1m08s"));
+        }
+    }
+
     #[test]
     fn active_status_uses_one_row_and_idle_status_uses_none() {
         let backend = TestBackend::new(80, 24);

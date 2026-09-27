@@ -55,7 +55,13 @@ pub fn render_input(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, are
     .style(bg);
     frame.render_widget(line_bg, input_body);
 
-    let prefix_style = Style::default().fg(crate::ui::theme::MUTED);
+    let prefix_style = if state.sessions.session_selector_focused {
+        Style::default()
+            .fg(crate::ui::theme::MUTED)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(crate::ui::theme::MUTED)
+    };
     let cmd_color = Style::default().fg(crate::ui::theme::ACCENT);
     let read_only_task = state.session_is_terminal();
     let lines = if state.composer.input.is_empty() {
@@ -98,7 +104,11 @@ pub fn render_input(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, are
             input_body.y + visible_line as u16,
         )
     };
-    if !read_only_task && input_body.width > 2 && input_body.height > 0 {
+    if !read_only_task
+        && crate::app::focus::current(state) == crate::app::focus::Focus::Composer
+        && input_body.width > 2
+        && input_body.height > 0
+    {
         frame.set_cursor_position((
             cursor_x.min(input_body.right().saturating_sub(1)),
             cursor_y.min(input_body.bottom().saturating_sub(1)),
