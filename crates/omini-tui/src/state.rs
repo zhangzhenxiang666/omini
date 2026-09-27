@@ -467,6 +467,8 @@ pub struct UiState {
     pub agent_runs: HashMap<String, AgentRunSnapshot>,
     /// 子 agent 视图模型，按 thread id 存储完整消息。
     pub subagents: HashMap<String, SubagentNode>,
+    /// 当前主线程未结束的后台任务；按任务 ID 去重，同时覆盖 Agent 与 Bash。
+    pub background_tasks: HashMap<String, TaskStatus>,
     /// 子 agent 节点回收后仍用于完成通知的运行时长。
     pub subagent_completion_durations: HashMap<String, Duration>,
     /// 父 tool_use_id 到子 agent thread id 的映射。
@@ -574,6 +576,7 @@ impl UiState {
             pending_tool_pauses: VecDeque::new(),
             agent_runs: HashMap::new(),
             subagents: HashMap::new(),
+            background_tasks: HashMap::new(),
             subagent_completion_durations: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
             subagent_order: Vec::new(),
@@ -897,6 +900,25 @@ impl UiState {
         self.subagents
             .values()
             .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling))
+    }
+
+    /// 更新主线程后台任务计数；终态立即移除，不受子会话节点回收影响。
+    pub(crate) fn track_background_task(&mut self, task_id: String, status: TaskStatus) {
+        if status.is_terminal() {
+            self.background_tasks.remove(&task_id);
+        } else {
+            self.background_tasks.insert(task_id, status);
+        }
+    }
+
+    /// 仅在主会话空闲时返回提示数量，避免覆盖子会话或前台活动状态。
+    pub(crate) fn background_wait_count(&self) -> usize {
+        if self.active_session_task_id.is_none() && !self.is_run_active() && !self.main_query_active
+        {
+            self.background_tasks.len()
+        } else {
+            0
+        }
     }
 
     pub fn session_count(&self) -> usize {

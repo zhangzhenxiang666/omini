@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadTaskInput {
-    /// Task ID returned when a background task starts.
+    /// 后台任务启动时返回的任务 ID。
     pub task_id: String,
 }
 
@@ -21,7 +21,7 @@ impl Tool for ReadTaskTool {
     }
 
     fn description(&self) -> &str {
-        "Read a background task's current status and optional terminal result. Usually rely on automatic completion notifications; use this only when you need to inspect a task without waiting. Only the main agent can use this tool."
+        "Read a background task's current status and optional terminal result immediately. Completion notifications arrive automatically and resume the main agent, even after the current turn ends. Do not poll unfinished tasks; continue independent work or end the current turn. Use this tool after completion if you need the full output. Only the main agent can use this tool."
     }
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
@@ -40,21 +40,36 @@ impl Tool for ReadTaskTool {
         };
         let supervisor = runtime.task_supervisor.as_ref();
         let Some(task) = manager.get(&task_id) else {
-            return supervisor.map_or_else(
+            return add_completion_hint(supervisor.map_or_else(
                 || ToolResult::error(format!("unknown task '{task_id}'")),
                 |supervisor| supervisor.read_task(&task_id),
-            );
+            ));
         };
         if task.owner_thread_id != runtime.owner_thread_id {
             return ToolResult::error(format!("unknown task '{task_id}'"));
         }
-        if task.kind == TaskKind::SubAgent {
+        let result = if task.kind == TaskKind::SubAgent {
             supervisor.map_or_else(
                 || ToolResult::error("agent task supervisor is not available"),
                 |supervisor| supervisor.read_task(&task_id),
             )
         } else {
             ToolResult::ok(serde_json::to_string(&task).unwrap_or_else(|_| "{}".to_string()))
-        }
+        };
+        add_completion_hint(result)
     }
+}
+
+/// 仅给未结束任务的读取结果补充通知指引，不改变同步 Agent 或终态结果的契约。
+fn add_completion_hint(mut result: ToolResult) -> ToolResult {
+    if !result.is_error
+        && let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&result.output)
+        && matches!(payload["status"].as_str(), Some("running" | "cancelling"))
+    {
+        payload["guidance"] = serde_json::json!(
+            "You will be notified automatically when this task finishes. Do not poll its status; continue other work or end the current turn."
+        );
+        result.output = payload.to_string();
+    }
+    result
 }

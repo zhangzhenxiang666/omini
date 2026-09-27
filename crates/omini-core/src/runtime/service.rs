@@ -1491,6 +1491,137 @@ thinking = true
         }
     }
 
+    /// 主回合正常结束后，后台任务继续运行；完成通知持久化成功后自动唤醒主 Agent。
+    #[tokio::test]
+    async fn idle_completion_resumes() {
+        let root = crate::test_support::TestTempDir::new("idle-completion");
+        let cwd = root.path().join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let config = test_user_config();
+        let project = ProjectsDir::new(root.path())
+            .for_storage_key("test-project", &config)
+            .unwrap();
+        let (base_url, server) = crate::engine::tests::spawn_stop_server(2);
+        let settings = settings_for_cwd(&config, &cwd);
+        let (mut runtime, mut events, mut persistence) =
+            runtime_for_thread_with_persistence(settings, project);
+        runtime.llm_client = LlmClient::new(
+            omini_config::ProviderProtocol::OpenAI,
+            "test-key".into(),
+            base_url.parse().unwrap(),
+        );
+        let (notification_tx, notification_rx) = tokio::sync::oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let mut notification_tx = Some(notification_tx);
+            while let Some(event) = persistence.recv().await {
+                if let RuntimePersistenceEvent::InsertTaskNotification {
+                    notification,
+                    llm_message,
+                    ack,
+                    ..
+                } = event
+                {
+                    // 将确认交给测试控制，确保完成通知提交前不会继续调用模型。
+                    notification_tx
+                        .take()
+                        .unwrap()
+                        .send((notification, llm_message, ack))
+                        .unwrap();
+                }
+            }
+        });
+        let manager = runtime.task_supervisor.task_manager();
+        let now = chrono::Utc::now();
+        manager
+            .register(
+                omini_domain::task::TaskInfo {
+                    task_id: "background_bash".into(),
+                    owner_thread_id: runtime.thread_id.clone(),
+                    kind: TaskKind::Bash,
+                    title: "Slow command".into(),
+                    status: TaskStatus::Running,
+                    created_at: now,
+                    updated_at: now,
+                    completed_at: None,
+                    result_summary: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_user_message(Message::from_user_text("hello".into()))
+            .await;
+        let first_run = drain_events(&mut events);
+        assert!(
+            first_run
+                .iter()
+                .any(|event| matches!(event, RuntimeToServerEvent::RunFinished))
+        );
+        assert!(first_run.iter().any(|event| matches!(event, RuntimeToServerEvent::AgentRunChanged(run) if run.status == omini_domain::agent_run::AgentRunStatus::Completed)));
+        assert_eq!(
+            manager.get("background_bash").unwrap().status,
+            TaskStatus::Running
+        );
+
+        let (requests, request_rx) = mpsc::channel(1);
+        runtime.request_rx = request_rx;
+        let handle = runtime.run();
+        manager
+            .complete(
+                "background_bash",
+                TaskStatus::Completed,
+                "bash".into(),
+                "done".into(),
+            )
+            .await
+            .unwrap();
+        let (notification, message, ack) =
+            tokio::time::timeout(Duration::from_secs(5), notification_rx)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(notification.tasks[0].task_id, "background_bash");
+        assert_eq!(notification.tasks[0].status, TaskStatus::Completed);
+        assert!(text_content(&message).contains("task_notifications"));
+        let pending = drain_events(&mut events);
+        assert!(
+            pending
+                .iter()
+                .any(|event| matches!(event, RuntimeToServerEvent::RunStarted))
+        );
+        assert!(
+            !pending
+                .iter()
+                .any(|event| matches!(event, RuntimeToServerEvent::TextDelta(_)))
+        );
+        ack.send(Ok(())).unwrap();
+        let resumed = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut reply = String::new();
+            loop {
+                match events.recv().await.unwrap() {
+                    RuntimeToServerEvent::TextDelta(text) => reply.push_str(&text),
+                    RuntimeToServerEvent::RunFinished => break reply,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(resumed, "answer 1");
+        requests
+            .send(ServerToRuntimeEvent::CloseRuntime)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        drop(manager);
+        writer.await.unwrap();
+        server.join().unwrap();
+    }
+
     #[tokio::test]
     async fn split_tool_result_history_writes_image_only_to_llm_context() {
         ensure_test_persistence().await;

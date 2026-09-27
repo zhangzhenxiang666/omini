@@ -10,6 +10,8 @@
 
 ![欢迎界面](assets/welcome.png)
 
+后台 Agent 和耗时 Bash 任务完成后会自动通知主 Agent，无需轮询。主 Agent 结束当前回合后，输入框上方显示 `Waiting for N background tasks to finish`，随未结束任务数量更新；此时仍可输入新消息。任务全部结束后提示消失，主 Agent 收到完成通知后自动继续处理。`read_task` 可立即读取状态和结果；未结束时会提示依赖自动通知。
+
 ### 计划模式
 
 支持在执行前进行任务规划，先展示计划再执行：

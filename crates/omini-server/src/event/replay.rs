@@ -347,6 +347,16 @@ impl RuntimeReplayBuffer {
             let oldest = self
                 .task_streams
                 .iter()
+                // 活跃任务必须保留到终态，否则长期任务会在重连时漏报状态。
+                .filter(|(_, replay)| {
+                    replay.changed.as_ref().is_none_or(|event| {
+                        matches!(
+                            &event.event.event,
+                            client_proto::TypedRuntimeEvent::TaskChanged(changed)
+                                if changed.task.status.is_terminal()
+                        )
+                    })
+                })
                 .min_by_key(|(_, replay)| {
                     replay.changed.as_ref().map_or_else(
                         || replay.outputs.first().map_or(0, |event| event.seq),
@@ -988,6 +998,70 @@ mod tests {
         assert_eq!(replay.len(), 2);
         assert_eq!(replay[0].event.kind(), "task_changed");
         assert_eq!(replay[1].event.kind(), "task_output_delta");
+    }
+
+    /// 近期任务超过缓存上限时，长时间运行和取消中的任务必须仍能重放。
+    #[test]
+    fn retain_active_tasks() {
+        let mut buffer = RuntimeReplayBuffer::default();
+        for seq in 1..=(MAX_TASK_REPLAY_COUNT as u64 + 10) {
+            let status = match seq {
+                1 => domain::task::TaskStatus::Running,
+                2 => domain::task::TaskStatus::Cancelling,
+                _ => domain::task::TaskStatus::Completed,
+            };
+            buffer.record(runtime_event(
+                seq,
+                runtime_contract::RuntimeToServerEvent::TaskChanged(
+                    domain::task::TaskChangedEvent {
+                        task: domain::task::TaskInfo {
+                            task_id: format!("task_{seq}"),
+                            owner_thread_id: "owner".into(),
+                            kind: if seq == 1 {
+                                domain::task::TaskKind::SubAgent
+                            } else {
+                                domain::task::TaskKind::Bash
+                            },
+                            title: "work".into(),
+                            status,
+                            created_at: fixed_time(),
+                            updated_at: fixed_time(),
+                            completed_at: status.is_terminal().then_some(fixed_time()),
+                            result_summary: None,
+                        },
+                    },
+                ),
+            ));
+        }
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), MAX_TASK_REPLAY_COUNT);
+        assert_eq!(replay[0].seq, 1);
+        assert_eq!(replay[1].seq, 2);
+        assert!(!buffer.task_streams.contains_key("task_3"));
+
+        // 进入终态后即可正常清理，活跃任务没有永久豁免。
+        if let client_proto::TypedRuntimeEvent::TaskChanged(changed) = &mut buffer
+            .task_streams
+            .get_mut("task_1")
+            .unwrap()
+            .changed
+            .as_mut()
+            .unwrap()
+            .event
+            .event
+        {
+            changed.task.status = domain::task::TaskStatus::Failed;
+        }
+        let mut new_task = buffer.task_streams["task_2"].changed.clone().unwrap();
+        new_task.seq = 100;
+        if let client_proto::TypedRuntimeEvent::TaskChanged(changed) = &mut new_task.event.event {
+            changed.task.task_id = "new".into();
+            changed.task.status = domain::task::TaskStatus::Running;
+        }
+        buffer.record(new_task);
+        assert_eq!(buffer.task_streams.len(), MAX_TASK_REPLAY_COUNT);
+        assert!(!buffer.task_streams.contains_key("task_1"));
+        assert!(buffer.task_streams.contains_key("task_2"));
     }
 
     #[test]

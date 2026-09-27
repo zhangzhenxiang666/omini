@@ -39,7 +39,6 @@ pub mod spawn_agent_tool;
 mod task_support;
 pub mod todo_tool;
 pub mod view_image_tool;
-pub mod wait_tasks_tool;
 pub mod write_tool;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -873,7 +872,6 @@ fn create_registry_with_allowed(
     if agent_tool_set == AgentToolSet::Main {
         registry.register(spawn_agent_tool::SpawnAgentTool);
         registry.register(read_task_tool::ReadTaskTool);
-        registry.register(wait_tasks_tool::WaitTasksTool);
         registry.register(cancel_task_tool::CancelTaskTool);
     }
     if tool_allowed(allowed, "send_message") {
@@ -900,9 +898,8 @@ fn tool_definition_priority(name: &str) -> usize {
         "spawn_agent" => 9,
         "run_agent" => 10,
         "read_task" => 11,
-        "wait_tasks" => 12,
-        "cancel_task" => 13,
-        "send_message" => 14,
+        "cancel_task" => 12,
+        "send_message" => 13,
         _ => 100,
     }
 }
@@ -915,7 +912,7 @@ enum AgentToolSet {
 fn is_agent_control_tool(name: &str) -> bool {
     matches!(
         name,
-        "spawn_agent" | "run_agent" | "read_task" | "wait_tasks" | "cancel_task"
+        "spawn_agent" | "run_agent" | "read_task" | "cancel_task"
     )
 }
 
@@ -1062,11 +1059,12 @@ mod tests {
                 "spawn_agent",
                 "todo_write",
                 "view_image",
-                "wait_tasks",
                 "write",
             ]
         );
         assert!(!registry.contains("get_task"));
+        assert!(!registry.contains("wait_tasks"));
+        assert!(!registry.contains("wait_agents"));
         assert_eq!(
             registry
                 .definitions()
@@ -1085,7 +1083,6 @@ mod tests {
                 "todo_write",
                 "spawn_agent",
                 "read_task",
-                "wait_tasks",
                 "cancel_task",
                 "send_message",
             ]
@@ -1119,25 +1116,11 @@ mod tests {
                 .description()
                 .contains("Completion is reported automatically")
         );
-        let wait_schema = wait_tasks_tool::WaitTasksTool.input_schema();
-        assert!(
-            !wait_schema["required"]
-                .as_array()
-                .is_some_and(|fields| fields.iter().any(|field| field == "task_ids"))
-        );
-        assert!(
-            wait_schema["properties"]["task_ids"]["description"]
-                .as_str()
-                .is_some_and(|description| {
-                    description.contains("Waits for all listed tasks")
-                        && description.contains("omit this field")
-                })
-        );
         let read_schema = read_task_tool::ReadTaskTool.input_schema();
         assert!(
             read_schema["properties"]["task_id"]["description"]
                 .as_str()
-                .is_some_and(|description| description.contains("background task starts"))
+                .is_some_and(|description| !description.is_empty())
         );
         let spawn_schema = spawn_agent_tool::SpawnAgentTool.input_schema();
         assert!(spawn_schema["properties"]["title"]["description"].is_string());
@@ -1194,31 +1177,6 @@ mod tests {
             .expect("default policy should retain ordinary tools");
         assert!(!deep_child.contains("run_agent"));
         assert!(deep_warnings.is_empty());
-    }
-
-    #[tokio::test]
-    async fn wait_tasks_accepts_optional_ids_and_rejects_empty_lists() {
-        assert_eq!(
-            wait_tasks_tool::normalize_wait_input(wait_tasks_tool::WaitTasksInput {
-                task_ids: None
-            })
-            .unwrap(),
-            None
-        );
-        assert_eq!(
-            wait_tasks_tool::normalize_wait_input(wait_tasks_tool::WaitTasksInput {
-                task_ids: Some(vec![" task-1 ".to_string(), "task-1".to_string()]),
-            })
-            .unwrap(),
-            Some(vec!["task-1".to_string()])
-        );
-        assert!(
-            wait_tasks_tool::normalize_wait_input(wait_tasks_tool::WaitTasksInput {
-                task_ids: Some(Vec::new()),
-            })
-            .unwrap_err()
-            .is_error
-        );
     }
 
     #[test]

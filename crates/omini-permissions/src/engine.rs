@@ -305,8 +305,9 @@ impl PermissionEngine {
             }
             "edit" | "write" => PermissionDecision::Ask,
             "todo_write" => PermissionDecision::Allow,
-            "ask_user" | "skill" | "spawn_agent" | "run_agent" | "read_task" | "wait_tasks"
-            | "cancel_task" => PermissionDecision::Allow,
+            "ask_user" | "skill" | "spawn_agent" | "run_agent" | "read_task" | "cancel_task" => {
+                PermissionDecision::Allow
+            }
             _ => PermissionDecision::Ask,
         }
     }

@@ -412,6 +412,13 @@ impl UiState {
                 }
             }
             RuntimeToUiEvent::TaskChanged(event) => {
+                if self
+                    .current_thread_id
+                    .as_ref()
+                    .is_none_or(|thread_id| thread_id == &event.task.owner_thread_id)
+                {
+                    self.track_background_task(event.task.task_id.clone(), event.task.status);
+                }
                 if event.task.kind == omini_domain::task::TaskKind::SubAgent
                     && let Some(node) = self
                         .subagents
@@ -520,6 +527,14 @@ impl UiState {
                         execution_mode,
                         ..
                     } if depth == 1 && direct_child => {
+                        if execution_mode == AgentTaskExecutionMode::Background
+                            && self
+                                .current_thread_id
+                                .as_ref()
+                                .is_none_or(|thread_id| thread_id == &event.owner_thread_id)
+                        {
+                            self.track_background_task(task_id.clone(), TaskStatus::Running);
+                        }
                         let new_task = !self.subagents.contains_key(&thread_id);
                         self.subagents_by_tool_use
                             .insert(spawn_tool_use_id.clone(), thread_id.clone());
@@ -951,6 +966,7 @@ impl UiState {
         self.status_bar.total_cached_tokens = usage.total_cached_tokens;
         self.status_bar.context_window = usage.context_window;
         self.subagents.clear();
+        self.background_tasks.clear();
         self.subagents_by_tool_use.clear();
         self.subagent_order.clear();
         self.subagent_views.clear();
@@ -964,6 +980,13 @@ impl UiState {
                 || subagent.task.execution_mode != AgentTaskExecutionMode::Background
             {
                 continue;
+            }
+            if self
+                .current_thread_id
+                .as_ref()
+                .is_none_or(|thread_id| thread_id == &subagent.task.owner_thread_id)
+            {
+                self.track_background_task(task_id.clone(), subagent.task.status);
             }
             if subagent.task.status.is_terminal() && active_task_id.as_ref() != Some(&task_id) {
                 continue;

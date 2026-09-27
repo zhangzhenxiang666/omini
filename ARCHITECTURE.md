@@ -81,11 +81,13 @@ TUI 按时间线顺序扫描历史和流式助手消息，并在同一助手消�
 
 TUI 的状态栏紧跟输入框；存在可切换任务时，会话列表在状态栏下方空一行显示 `main` 和按创建顺序排列的直接异步子 Agent。输入光标在最后一行按 Down 后进入列表，Enter 切换消息视图并把焦点还给输入框；任务视图按 task ID 保存时间线、流式缓冲和滚动状态。主线程继续在后台接收自己的事件。运行中的任务可切换查看；任务结束后会从列表移除，除非用户当时正在查看它。活动终态视图保留历史并只读，切换到其他视图后移除。Esc 只取消当前选中的子任务及其后代。`spawn_agent` 在主时间线独立显示任务名称和状态；其他编排工具调用计入普通活动摘要，后台任务通知作为分界事件单独显示。
 
+主 Agent 回合结束后，主会话在输入框上方显示 `Waiting for N background tasks to finish` 临时状态，统计当前主线程的异步 Agent 和后台 Bash，包含取消中的任务。任务完成后数量减少，全部结束后提示消失；前台重新运行时显示原有活动状态。提示不进入消息历史、不计入主 Agent 运行时长，也不阻塞用户输入。TUI 按任务 ID 保存通用任务状态，快照恢复后台 Agent，重放恢复后台 Bash；服务端重放缓存只淘汰非活跃任务，保留长期任务直到终态。
+
 派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 
-`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、等待、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；所有类型的完成通知都使用 `TaskCompletion` 并投影为 `SystemEvent::TaskNotification`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
+`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；所有类型的完成通知都使用 `TaskCompletion` 并投影为 `SystemEvent::TaskNotification`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
 
-只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task`、`wait_tasks` 和 `cancel_task` 可操作不同类型的后台任务。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
+只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task` 和 `cancel_task` 可操作不同类型的后台任务，不提供等待工具或兼容别名。`read_task` 立即返回；未结束任务的结果附带 `guidance`，说明完成后自动通知，无需轮询，可继续其他工作或结束当前回合。主 Agent 空闲时收到完成通知会自动开始后续运行；运行中则在安全边界处理通知。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
 
 SubAgent 任务归属于主线程并拥有子线程；Bash 任务关联原始工具调用。Bash stdout/stderr 以带 task ID、tool use ID 和流类型的 `TaskOutput` 事件增量发送，服务端在进程内为重连保留受限近期输出尾部。Client 接收通用任务状态和输出事件，自行决定呈现方式。最终结果持久化，增量输出只驻留内存；服务重启或关闭不恢复进程，启动时将未结束任务标记为 `interrupted`。
 

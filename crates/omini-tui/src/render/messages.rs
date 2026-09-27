@@ -1085,7 +1085,6 @@ mod tests {
             }),
             ContentBlock::from_tool_use("run-1".into(), "run_agent".into(), HashMap::new()),
             ContentBlock::from_tool_use("read-1".into(), "read_task".into(), HashMap::new()),
-            ContentBlock::from_tool_use("wait-1".into(), "wait_tasks".into(), HashMap::new()),
             ContentBlock::from_tool_use("cancel-1".into(), "cancel_task".into(), HashMap::new()),
             ContentBlock::from_tool_use(
                 "spawn-1".into(),
@@ -1097,7 +1096,7 @@ mod tests {
             ),
             ContentBlock::from_tool_use("run-2".into(), "run_agent".into(), HashMap::new()),
         ];
-        let results = ["run-1", "read-1", "wait-1", "cancel-1", "spawn-1", "run-2"]
+        let results = ["run-1", "read-1", "cancel-1", "spawn-1", "run-2"]
             .into_iter()
             .map(|id| ContentBlock::from_tool_result(id.into(), false, "hidden result".into()))
             .collect::<Vec<_>>();
@@ -1155,7 +1154,6 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("used read_task ×1"), "{rendered}");
-        assert!(rendered.contains("used wait_tasks ×1"), "{rendered}");
         assert!(rendered.contains("used cancel_task ×1"), "{rendered}");
         assert!(rendered.contains("Used run_agent ×1"), "{rendered}");
         assert_eq!(

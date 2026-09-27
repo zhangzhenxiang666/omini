@@ -389,61 +389,6 @@ impl AgentTaskSupervisor {
         ToolResult::ok(task_result_payload(&task.info))
     }
 
-    pub async fn wait_for_tasks(&self, task_ids: Option<&[String]>) -> ToolResult {
-        let task_ids = {
-            let tasks = self.tasks.lock().expect("agent task mutex poisoned");
-            match task_ids {
-                Some(task_ids) => {
-                    for task_id in task_ids {
-                        if !tasks.contains_key(task_id) {
-                            return ToolResult::error(format!("unknown agent task '{task_id}'"));
-                        }
-                    }
-                    task_ids.to_vec()
-                }
-                None => {
-                    let mut task_ids = tasks
-                        .values()
-                        .filter(|entry| {
-                            entry.info.parent_task_id.is_none()
-                                && entry.info.execution_mode == AgentTaskExecutionMode::Background
-                                && !entry.info.status.is_terminal()
-                        })
-                        .map(|entry| entry.info.task_id.clone())
-                        .collect::<Vec<_>>();
-                    task_ids.sort();
-                    task_ids
-                }
-            }
-        };
-
-        loop {
-            // 先注册通知，再检查状态，避免任务恰好在检查与 await 之间完成后等待者错过唤醒。
-            let notified = self.idle_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-
-            let completed = {
-                let tasks = self.tasks.lock().expect("agent task mutex poisoned");
-                let mut completed = Vec::with_capacity(task_ids.len());
-                let mut all_terminal = true;
-                for task_id in &task_ids {
-                    let Some(task) = tasks.get(task_id) else {
-                        return ToolResult::error(format!("unknown agent task '{task_id}'"));
-                    };
-                    all_terminal &= task.info.status.is_terminal();
-                    completed.push(task.info.clone());
-                }
-                all_terminal.then_some(completed)
-            };
-
-            if let Some(completed) = completed {
-                return ToolResult::ok(task_results_payload(&completed));
-            }
-            notified.await;
-        }
-    }
-
     pub async fn cancel_task(&self, task_id: &str) -> ToolResult {
         let (response, cancelling_ids, cancelling_thread_ids) = {
             let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
@@ -1415,18 +1360,6 @@ fn task_result_payload(info: &AgentTaskInfo) -> String {
     .unwrap_or_else(|_| serialization_failure_payload(&info.task_id))
 }
 
-fn task_results_payload(infos: &[AgentTaskInfo]) -> String {
-    let responses = infos
-        .iter()
-        .map(|info| AgentTaskResultResponse {
-            task_id: &info.task_id,
-            status: info.status,
-            result: info.result.as_ref(),
-        })
-        .collect::<Vec<_>>();
-    serde_json::to_string(&responses).unwrap_or_else(|_| "[]".to_string())
-}
-
 fn serialization_failure_payload(task_id: &str) -> String {
     format!(r#"{{"task_id":"{task_id}","status":"failed"}}"#)
 }
@@ -1541,7 +1474,8 @@ fn extract_final_text(messages: &[Message]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::tools::{PendingToolPause, PendingToolPauses};
+    use crate::tools::read_task_tool::{ReadTaskInput, ReadTaskTool};
+    use crate::tools::{PendingToolPause, PendingToolPauses, Tool};
     use omini_domain::usage::Usage;
     use omini_model::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::thread_domain::{
@@ -1613,20 +1547,125 @@ mod tests {
         )
     }
 
-    fn complete_test_task(
-        supervisor: &AgentTaskSupervisor,
-        task_id: &str,
-        status: TaskStatus,
-        result: AgentTaskResult,
-    ) {
-        let mut tasks = supervisor.tasks.lock().expect("agent task mutex poisoned");
-        let task = tasks.get_mut(task_id).expect("test task should exist");
-        task.info.status = status;
-        task.info.result = Some(result);
-        task.info.completed_at = Some(Utc::now());
-        task.info.updated_at = task.info.completed_at.expect("completion timestamp");
-        drop(tasks);
-        supervisor.idle_notify.notify_waiters();
+    /// 构造主 Agent 工具上下文，使用真实任务管理器和 Supervisor 的查询路径。
+    fn read_context(supervisor: &Arc<AgentTaskSupervisor>) -> ToolExecutionContext {
+        let mut context = ToolExecutionContext::test("read_task");
+        let project = omini_config::project::ProjectDir::from_path("/tmp".into());
+        context.runtime = Some(Arc::new(ToolRuntimeContext {
+            thread_id: "owner".into(),
+            run_id: None,
+            thread_type: "main".into(),
+            agent_label: None,
+            thread_dir: project.thread("owner"),
+            llm_context_version: Arc::new(std::sync::atomic::AtomicI64::new(1)),
+            agent_depth: 0,
+            task_id: None,
+            owner_thread_id: "owner".into(),
+            agent_registry: Arc::new(crate::subagents::AgentRegistry {
+                agents: HashMap::new(),
+                diagnostics: Vec::new(),
+            }),
+            skill_registry: Arc::new(crate::skills::SkillRegistry {
+                skills: HashMap::new(),
+                diagnostics: Vec::new(),
+            }),
+            task_manager: Some(supervisor.task_manager()),
+            task_supervisor: Some(Arc::clone(supervisor)),
+            project,
+        }));
+        context
+    }
+
+    /// 两类任务的读取均立即返回，仅未结束状态附带提示，并保留原有终态结果。
+    #[tokio::test]
+    async fn read_task_guidance() {
+        for status in [
+            TaskStatus::Running,
+            TaskStatus::Cancelling,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::Interrupted,
+        ] {
+            let mut agent = task_info(1);
+            agent.status = status;
+            if status.is_terminal() {
+                agent.result = Some(AgentTaskResult {
+                    output: Some("agent output".into()),
+                    error: (status == TaskStatus::Failed).then(|| "agent failed".into()),
+                    warnings: vec!["model fallback".into()],
+                });
+            }
+            let (supervisor, _events, _persistence, _pauses, _profile) =
+                test_supervisor(vec![agent.clone()]);
+            let mut bash = task_info_from_agent(&agent);
+            bash.task_id = "bash_1".into();
+            bash.kind = TaskKind::Bash;
+            bash.result_summary = status.is_terminal().then(|| "bash output".into());
+            supervisor
+                .task_manager
+                .register(bash.clone(), None)
+                .await
+                .unwrap();
+
+            for (task_id, baseline) in [
+                ("task_1", task_result_payload(&agent)),
+                ("bash_1", serde_json::to_string(&bash).unwrap()),
+            ] {
+                let response = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    ReadTaskTool.call(
+                        ReadTaskInput {
+                            task_id: task_id.into(),
+                        },
+                        read_context(&supervisor),
+                    ),
+                )
+                .await
+                .expect("read_task must not wait for completion");
+                assert!(!response.is_error);
+                let mut payload: serde_json::Value =
+                    serde_json::from_str(&response.output).unwrap();
+                let guidance = payload.as_object_mut().unwrap().remove("guidance");
+                assert_eq!(guidance.is_some(), !status.is_terminal());
+                if let Some(guidance) = guidance {
+                    assert!(guidance.as_str().is_some_and(|hint| !hint.is_empty()));
+                }
+                assert_eq!(
+                    payload,
+                    serde_json::from_str::<serde_json::Value>(&baseline).unwrap()
+                );
+            }
+            // 同步执行共享的结果序列化保持原样，不包含读取工具特有的提示。
+            assert!(!task_result_payload(&agent).contains("guidance"));
+        }
+    }
+
+    /// 读取提示不能绕过任务归属、主 Agent 权限或未知任务检查。
+    #[tokio::test]
+    async fn read_task_boundaries() {
+        let (supervisor, _events, _persistence, _pauses, _profile) =
+            test_supervisor(vec![task_info(1)]);
+        for (task_id, owner, depth) in [
+            ("missing", "owner", 0),
+            ("task_1", "other", 0),
+            ("task_1", "owner", 1),
+        ] {
+            let mut context = read_context(&supervisor);
+            let runtime = Arc::make_mut(context.runtime.as_mut().unwrap());
+            runtime.owner_thread_id = owner.into();
+            runtime.agent_depth = depth;
+            let response = ReadTaskTool
+                .call(
+                    ReadTaskInput {
+                        task_id: task_id.into(),
+                    },
+                    context,
+                )
+                .await;
+            assert!(response.is_error);
+            assert!(!response.output.contains("guidance"));
+        }
     }
 
     #[test]
@@ -1712,125 +1751,6 @@ mod tests {
         info.result.as_mut().unwrap().warnings = vec!["fallback model used".to_string()];
         let result: serde_json::Value = serde_json::from_str(&task_result_payload(&info)).unwrap();
         assert_eq!(result["result"]["warnings"][0], "fallback model used");
-    }
-
-    #[tokio::test]
-    async fn wait_for_tasks_returns_all_terminal_results_after_concurrent_completion() {
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
-            test_supervisor(vec![task_info(1), task_info(2)]);
-        let task_ids = vec!["task_1".to_string(), "task_2".to_string()];
-        let waiter = {
-            let supervisor = Arc::clone(&supervisor);
-            let task_ids = task_ids.clone();
-            tokio::spawn(async move { supervisor.wait_for_tasks(Some(&task_ids)).await })
-        };
-
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        for task_id in &task_ids {
-            complete_test_task(
-                &supervisor,
-                task_id,
-                TaskStatus::Completed,
-                AgentTaskResult {
-                    output: Some(format!("result for {task_id}")),
-                    error: None,
-                    warnings: Vec::new(),
-                },
-            );
-        }
-
-        let result = waiter.await.expect("wait task should finish");
-        assert!(!result.is_error);
-        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
-        assert_eq!(payload.as_array().unwrap().len(), 2);
-        assert_eq!(payload[0]["task_id"], "task_1");
-        assert_eq!(payload[1]["result"]["output"], "result for task_2");
-    }
-
-    #[tokio::test]
-    async fn wait_for_tasks_defaults_to_active_root_background_tasks() {
-        let mut completed = task_info(4);
-        completed.task_id = "done".to_string();
-        completed.execution_mode = AgentTaskExecutionMode::Background;
-        completed.status = TaskStatus::Completed;
-        completed.result = Some(AgentTaskResult {
-            output: Some("already done".to_string()),
-            error: None,
-            warnings: Vec::new(),
-        });
-        completed.notification_delivered = true;
-        let active = task_info(1);
-        let mut child = task_info(2);
-        child.parent_task_id = Some(active.task_id.clone());
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
-            test_supervisor(vec![completed, active.clone(), child]);
-
-        let waiter = {
-            let supervisor = Arc::clone(&supervisor);
-            tokio::spawn(async move { supervisor.wait_for_tasks(None).await })
-        };
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-        complete_test_task(
-            &supervisor,
-            &active.task_id,
-            TaskStatus::Completed,
-            AgentTaskResult {
-                output: Some("active result".to_string()),
-                error: None,
-                warnings: Vec::new(),
-            },
-        );
-
-        let result = waiter.await.expect("default wait should finish");
-        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
-        assert_eq!(payload.as_array().unwrap().len(), 1);
-        assert_eq!(payload[0]["task_id"], active.task_id);
-    }
-
-    #[tokio::test]
-    async fn wait_for_tasks_returns_completed_tasks_and_rejects_unknown_ids() {
-        let mut completed = task_info(1);
-        completed.status = TaskStatus::Failed;
-        completed.result = Some(AgentTaskResult {
-            output: None,
-            error: Some("failed".to_string()),
-            warnings: vec!["retry exhausted".to_string()],
-        });
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
-            test_supervisor(vec![completed]);
-
-        let result = supervisor
-            .wait_for_tasks(Some(&["task_1".to_string()]))
-            .await;
-        assert!(!result.is_error);
-        let payload: serde_json::Value = serde_json::from_str(&result.output).unwrap();
-        assert_eq!(payload[0]["status"], "failed");
-        assert_eq!(payload[0]["result"]["warnings"][0], "retry exhausted");
-
-        let result = supervisor
-            .wait_for_tasks(Some(&["missing".to_string()]))
-            .await;
-        assert!(result.is_error);
-        assert!(result.output.contains("unknown agent task 'missing'"));
-    }
-
-    #[tokio::test]
-    async fn wait_for_tasks_without_active_roots_returns_an_empty_list() {
-        let mut completed = task_info(1);
-        completed.status = TaskStatus::Completed;
-        completed.result = Some(AgentTaskResult {
-            output: Some("done".to_string()),
-            error: None,
-            warnings: Vec::new(),
-        });
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
-            test_supervisor(vec![completed]);
-
-        let result = supervisor.wait_for_tasks(None).await;
-        assert!(!result.is_error);
-        assert_eq!(result.output, "[]");
     }
 
     #[tokio::test]

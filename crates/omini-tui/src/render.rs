@@ -73,6 +73,91 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    /// 两种终端尺寸均在消息区下方显示临时状态，保持输入与子会话活动可用。
+    #[test]
+    fn background_wait_rendering() {
+        use omini_domain::task::TaskStatus;
+        for (width, height) in [(120, 36), (80, 24)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut state = UiState::new();
+            state.show_start_screen = false;
+            state.input = "next request".into();
+            state.track_background_task("agent".into(), TaskStatus::Running);
+            state.track_background_task("bash".into(), TaskStatus::Cancelling);
+            terminal.draw(|frame| render(&mut state, frame)).unwrap();
+            let hint = state
+                .selectable_screen_lines
+                .iter()
+                .find(|line| {
+                    line.text
+                        .contains("Waiting for 2 background tasks to finish")
+                })
+                .unwrap();
+            assert!(hint.row >= state.messages_area.bottom());
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains("next request"));
+            assert!(state.messages.is_empty());
+            assert!(state.run_timer.is_none());
+
+            state.apply_event(RuntimeToUiEvent::RunStarted);
+            terminal.draw(|frame| render(&mut state, frame)).unwrap();
+            assert!(
+                state
+                    .selectable_screen_lines
+                    .iter()
+                    .all(|line| !line.text.contains("background tasks to finish"))
+            );
+            state.apply_event(RuntimeToUiEvent::RunFinished);
+            state.track_background_task("bash".into(), TaskStatus::Cancelled);
+            terminal.draw(|frame| render(&mut state, frame)).unwrap();
+            assert!(state.selectable_screen_lines.iter().any(|line| {
+                line.text
+                    .contains("Waiting for 1 background task to finish")
+            }));
+
+            // 查看子会话时应呈现子任务自身的活动状态，不显示主会话的后台提示。
+            state.start_run_timer();
+            let child_timer = state.run_timer.take();
+            state.active_session_task_id = Some("agent".into());
+            state.subagent_views.insert(
+                "agent".into(),
+                crate::state::SessionViewState {
+                    agent_status: crate::state::AgentStatus::Thinking,
+                    run_timer: child_timer,
+                    ..crate::state::SessionViewState::default()
+                },
+            );
+            terminal.draw(|frame| render(&mut state, frame)).unwrap();
+            assert!(
+                state
+                    .selectable_screen_lines
+                    .iter()
+                    .all(|line| !line.text.contains("background task to finish"))
+            );
+            assert!(
+                state
+                    .selectable_screen_lines
+                    .iter()
+                    .any(|line| line.text.contains("Thinking"))
+            );
+            state.active_session_task_id = None;
+            state.track_background_task("agent".into(), TaskStatus::Completed);
+            terminal.draw(|frame| render(&mut state, frame)).unwrap();
+            assert!(
+                state
+                    .selectable_screen_lines
+                    .iter()
+                    .all(|line| !line.text.contains("Waiting for"))
+            );
+        }
+    }
+
     #[test]
     fn help_drawer_renders_in_tiny_terminal() {
         let backend = TestBackend::new(169, 8);

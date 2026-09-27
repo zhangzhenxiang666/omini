@@ -407,7 +407,7 @@ impl Default for QueryEngine {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
     use omini_domain::config::ProviderEndpointKind;
@@ -603,7 +603,8 @@ mod tests {
         (base_url, responded_rx, handle)
     }
 
-    fn spawn_openai_stop_server(requests: usize) -> (String, thread::JoinHandle<()>) {
+    /// 提供正常结束的本地 Provider 响应，供引擎与运行时生命周期测试复用。
+    pub(crate) fn spawn_stop_server(requests: usize) -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
         let base_url = format!(
             "http://{}",
@@ -699,7 +700,7 @@ mod tests {
         max_turns: Option<usize>,
         expected_requests: usize,
     ) -> (QueryResult, Vec<Message>, usize) {
-        let (base_url, server) = spawn_openai_stop_server(expected_requests);
+        let (base_url, server) = spawn_stop_server(expected_requests);
         let engine = Arc::new(QueryEngine::default());
         let observer_engine = Arc::clone(&engine);
         let (event_tx, mut event_rx) = mpsc::channel(1);

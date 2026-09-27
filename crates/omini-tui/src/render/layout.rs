@@ -116,7 +116,7 @@ pub(super) fn render(state: &mut UiState, frame: &mut ratatui::Frame) {
         state.session_count().min(u16::MAX as usize) as u16
     };
     let session_list_gap_height = u16::from(session_list_height > 0);
-    let activity_height = if state.is_run_active() { 1 } else { 0 };
+    let activity_height = u16::from(state.is_run_active() || state.background_wait_count() > 0);
     let activity_gap_height = if activity_height > 0 {
         MESSAGE_STATUS_GAP_HEIGHT
     } else {
@@ -264,7 +264,23 @@ fn render_background(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 fn render_activity(state: &mut UiState, frame: &mut ratatui::Frame, area: Rect) {
-    if area.height == 0 || !state.is_run_active() {
+    if area.height == 0 {
+        return;
+    }
+
+    let count = state.background_wait_count();
+    if count > 0 {
+        let noun = if count == 1 { "task" } else { "tasks" };
+        let line = Line::styled(
+            format!("• Waiting for {count} background {noun} to finish"),
+            Style::default().fg(Color::Rgb(0x7a, 0x82, 0x8e)),
+        );
+        super::register_selectable_lines(state, area, std::slice::from_ref(&line));
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
+    if !state.is_run_active() {
         return;
     }
 

@@ -16,7 +16,6 @@ pub(crate) struct TaskManager {
     cancellation: Mutex<HashMap<String, TaskCancellation>>,
     active_background: Mutex<usize>,
     max_background: usize,
-    changed: Notify,
     event_tx: mpsc::Sender<RuntimeToServerEvent>,
     persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
     completion_tx: mpsc::UnboundedSender<TaskCompletion>,
@@ -56,7 +55,6 @@ impl TaskManager {
             cancellation: Mutex::new(HashMap::new()),
             active_background: Mutex::new(active_background),
             max_background,
-            changed: Notify::new(),
             event_tx,
             persistence_tx,
             completion_tx,
@@ -107,17 +105,6 @@ impl TaskManager {
             .cloned()
     }
 
-    pub fn active_ids(&self, owner_thread_id: &str) -> Vec<String> {
-        let records = self.records.lock().expect("task lock poisoned");
-        let mut task_ids = records
-            .values()
-            .filter(|task| task.owner_thread_id == owner_thread_id && !task.status.is_terminal())
-            .map(|task| task.task_id.clone())
-            .collect::<Vec<_>>();
-        task_ids.sort();
-        task_ids
-    }
-
     pub fn event_sender(&self) -> &mpsc::Sender<RuntimeToServerEvent> {
         &self.event_tx
     }
@@ -163,7 +150,6 @@ impl TaskManager {
             .send(RuntimeToServerEvent::TaskChanged(TaskChangedEvent { task }))
             .await
             .map_err(|_| "task event channel closed".to_string())?;
-        self.changed.notify_waiters();
         Ok(())
     }
 
@@ -222,38 +208,6 @@ impl TaskManager {
 
     pub fn notify_completed(&self, completion: TaskCompletion) {
         let _ = self.completion_tx.send(completion);
-    }
-
-    pub async fn wait_for(
-        &self,
-        owner_thread_id: &str,
-        task_ids: &[String],
-    ) -> Result<Vec<TaskInfo>, String> {
-        loop {
-            let notified = self.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            let (terminal, result) = {
-                let records = self.records.lock().expect("task lock poisoned");
-                let mut result = Vec::with_capacity(task_ids.len());
-                let mut terminal = true;
-                for id in task_ids {
-                    let task = records
-                        .get(id)
-                        .ok_or_else(|| format!("unknown task '{id}'"))?;
-                    if task.owner_thread_id != owner_thread_id {
-                        return Err(format!("unknown task '{id}'"));
-                    }
-                    terminal &= task.status.is_terminal();
-                    result.push(task.clone());
-                }
-                (terminal, result)
-            };
-            if terminal {
-                return Ok(result);
-            }
-            notified.await;
-        }
     }
 
     fn release_background(&self) {
@@ -380,22 +334,6 @@ mod tests {
             "a"
         );
         assert_eq!(manager.list("owner_b", None, 10)[0].task_id, "c");
-    }
-
-    #[tokio::test]
-    async fn wait_rejects_tasks_owned_by_another_thread_and_returns_terminal_state() {
-        let (manager, _events, _persistence) = manager(1);
-        manager
-            .register(task("owned", "owner_a", TaskStatus::Completed), None)
-            .await
-            .unwrap();
-        let ids = vec!["owned".to_string()];
-
-        assert!(manager.wait_for("owner_b", &ids).await.is_err());
-        assert_eq!(
-            manager.wait_for("owner_a", &ids).await.unwrap()[0].status,
-            TaskStatus::Completed
-        );
     }
 
     #[tokio::test]

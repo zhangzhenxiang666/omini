@@ -311,7 +311,7 @@ prefix_rule(
 | `search` | 允许 | 搜索操作直接允许 |
 | `edit`、`write` | 需确认 | 写入操作需要用户确认 |
 | `todo_write` | 允许 | 创建待办清单直接允许 |
-| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`wait_agents`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
+| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
 | `bash` | 按规则判断 | 根据 Bash 规则和内置策略决定 |
 
 ## 相关文档

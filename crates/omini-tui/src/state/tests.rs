@@ -69,6 +69,123 @@ fn start_subagent_with_execution_mode(state: &mut UiState, execution_mode: Agent
     }));
 }
 
+/// 通过通用事件更新任务，模拟实时事件与重连重放共用的输入路径。
+fn change_task(state: &mut UiState, task_id: &str, kind: TaskKind, status: TaskStatus) {
+    let now = Utc::now();
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: task_id.into(),
+            owner_thread_id: "parent".into(),
+            kind,
+            title: "Background work".into(),
+            status,
+            created_at: now,
+            updated_at: now,
+            completed_at: status.is_terminal().then_some(now),
+            result_summary: None,
+        },
+    }));
+}
+
+/// 主回合结束只显示后台状态，不阻塞输入；任务事件去重并随终态收敛。
+#[test]
+fn background_wait_lifecycle() {
+    let mut state = UiState::new();
+    state.current_thread_id = Some("parent".into());
+    state.input = "new request".into();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    start_subagent(&mut state);
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Running,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Cancelling);
+    assert_eq!(state.background_tasks.len(), 2);
+    assert_eq!(state.background_wait_count(), 0);
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+    assert_eq!(state.background_wait_count(), 2);
+    assert!(!state.is_main_query_active());
+    assert!(state.run_timer.is_none());
+    assert_eq!(state.input, "new request");
+
+    state.active_session_task_id = Some("task_1".into());
+    assert_eq!(state.background_wait_count(), 0);
+    state.active_session_task_id = None;
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    assert_eq!(state.background_wait_count(), 0);
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+    assert_eq!(state.background_wait_count(), 2);
+
+    change_task(&mut state, "task_1", TaskKind::SubAgent, TaskStatus::Failed);
+    assert_eq!(state.background_wait_count(), 1);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Cancelled);
+    change_task(
+        &mut state,
+        "bash_1",
+        TaskKind::Bash,
+        TaskStatus::Interrupted,
+    );
+    assert_eq!(state.background_wait_count(), 0);
+
+    // 同步 Agent 与其他线程的后台任务均不进入主会话计数。
+    start_subagent_with_execution_mode(&mut state, AgentTaskExecutionMode::Synchronous);
+    assert!(state.background_tasks.is_empty());
+    state.current_thread_id = Some("other".into());
+    change_task(&mut state, "foreign", TaskKind::Bash, TaskStatus::Running);
+    assert!(state.background_tasks.is_empty());
+}
+
+/// 快照先清除旧计数，再恢复直接后台 Agent；Bash 从重放恢复且不会重复计数。
+#[test]
+fn background_wait_recovery() {
+    let mut state = UiState::new();
+    change_task(&mut state, "old_bash", TaskKind::Bash, TaskStatus::Running);
+    let mut background = subagent_snapshot(Vec::new());
+    background.task.status = TaskStatus::Running;
+    background.task.completed_at = None;
+    let mut synchronous = background.clone();
+    synchronous.task.task_id = "sync".into();
+    synchronous.task.execution_mode = AgentTaskExecutionMode::Synchronous;
+    state.apply_thread_snapshot(
+        Some("parent".into()),
+        Vec::new(),
+        vec![background, synchronous],
+        ThreadUsageSnapshot::default(),
+    );
+    assert_eq!(state.background_wait_count(), 1);
+    assert!(!state.background_tasks.contains_key("old_bash"));
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Running,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    assert_eq!(state.background_wait_count(), 2);
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Completed,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Completed);
+    assert_eq!(state.background_wait_count(), 0);
+
+    change_task(&mut state, "remaining", TaskKind::Bash, TaskStatus::Running);
+    state.apply_thread_snapshot(
+        Some("other".into()),
+        Vec::new(),
+        Vec::new(),
+        ThreadUsageSnapshot::default(),
+    );
+    assert!(state.background_tasks.is_empty());
+}
+
 #[test]
 fn task_completion_prunes() {
     let mut state = UiState::new();

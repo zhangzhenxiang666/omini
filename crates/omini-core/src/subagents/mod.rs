@@ -205,12 +205,7 @@ fn record_from_spec(
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .filter(|tool| {
-            !matches!(
-                tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
-            )
-        })
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "read_task" | "cancel_task"))
         .collect();
     let disallow_tools = spec
         .tool_policy
@@ -218,12 +213,7 @@ fn record_from_spec(
         .clone()
         .unwrap_or_default()
         .into_iter()
-        .filter(|tool| {
-            !matches!(
-                tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
-            )
-        })
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "read_task" | "cancel_task"))
         .collect();
     let model = spec
         .model
@@ -271,24 +261,14 @@ fn render_agent_file(draft: &AgentDraft) -> String {
     let tools = draft
         .tools
         .iter()
-        .filter(|tool| {
-            !matches!(
-                tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
-            )
-        })
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "read_task" | "cancel_task"))
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
     let disallow_tools = draft
         .disallow_tools
         .iter()
-        .filter(|tool| {
-            !matches!(
-                tool.as_str(),
-                "spawn_agent" | "read_task" | "wait_tasks" | "cancel_task"
-            )
-        })
+        .filter(|tool| !matches!(tool.as_str(), "spawn_agent" | "read_task" | "cancel_task"))
         .cloned()
         .collect::<Vec<_>>()
         .join(", ");
