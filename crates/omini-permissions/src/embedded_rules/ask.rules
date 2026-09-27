@@ -1,200 +1,260 @@
-# File deletion
+# 内置风险询问名单；显式用户规则可以覆盖，未命中命令默认放行。
+
 prefix_rule(
   pattern = ["rm"],
   decision = "prompt",
-  justification = "File deletion",
+  justification = "文件删除或数据破坏：rm",
 )
+
 prefix_rule(
   pattern = ["rmdir"],
   decision = "prompt",
-  justification = "Directory removal",
+  justification = "文件删除或数据破坏：rmdir",
 )
+
 prefix_rule(
   pattern = ["unlink"],
   decision = "prompt",
-  justification = "File unlinking",
+  justification = "文件删除或数据破坏：unlink",
 )
+
 prefix_rule(
   pattern = ["shred"],
   decision = "prompt",
-  justification = "File shredding",
+  justification = "文件删除或数据破坏：shred",
 )
+
 prefix_rule(
   pattern = ["truncate"],
   decision = "prompt",
-  justification = "File truncation",
+  justification = "文件删除或数据破坏：truncate",
 )
+
 prefix_rule(
   pattern = ["dd"],
   decision = "prompt",
-  justification = "Low-level data copy",
+  justification = "文件删除或数据破坏：dd",
 )
 
-# Process management
 prefix_rule(
   pattern = ["kill"],
   decision = "prompt",
-  justification = "Process termination",
+  justification = "进程终止：kill",
 )
+
 prefix_rule(
   pattern = ["pkill"],
   decision = "prompt",
-  justification = "Process termination by name",
+  justification = "进程终止：pkill",
 )
+
 prefix_rule(
   pattern = ["killall"],
   decision = "prompt",
-  justification = "Process termination by name",
+  justification = "进程终止：killall",
 )
 
-# Remote access
 prefix_rule(
   pattern = ["ssh"],
   decision = "prompt",
-  justification = "Remote shell",
+  justification = "远程访问或文件同步：ssh",
 )
+
 prefix_rule(
   pattern = ["scp"],
   decision = "prompt",
-  justification = "Remote file copy",
+  justification = "远程访问或文件同步：scp",
 )
+
 prefix_rule(
   pattern = ["rsync"],
   decision = "prompt",
-  justification = "Remote file sync",
+  justification = "远程访问或文件同步：rsync",
 )
 
-# Permission changes
 prefix_rule(
   pattern = ["chmod"],
   decision = "prompt",
-  justification = "Permission change",
+  justification = "权限或所有权变更：chmod",
 )
+
 prefix_rule(
   pattern = ["chown"],
   decision = "prompt",
-  justification = "Ownership change",
+  justification = "权限或所有权变更：chown",
 )
+
 prefix_rule(
   pattern = ["chgrp"],
   decision = "prompt",
-  justification = "Group change",
+  justification = "权限或所有权变更：chgrp",
 )
 
-# Git mutating operations
 prefix_rule(
-  pattern = ["git", ["commit", "push", "pull", "reset", "rebase", "merge", "checkout", "switch", "clean", "restore"]],
+  pattern = ["sudo"],
   decision = "prompt",
-  justification = "Git mutating operation",
+  justification = "提权或用户切换：sudo",
 )
 
-# JS package managers
 prefix_rule(
-  pattern = [["npm", "pnpm", "yarn"], ["install", "i", "add", "upgrade", "remove", "uninstall"]],
+  pattern = ["su"],
   decision = "prompt",
-  justification = "Package manager mutation",
-)
-prefix_rule(
-  pattern = ["bun", ["add", "install", "remove"]],
-  decision = "prompt",
-  justification = "Package manager mutation",
+  justification = "提权或用户切换：su",
 )
 
-# Rust
 prefix_rule(
-  pattern = ["cargo", ["add", "install"]],
+  pattern = ["doas"],
   decision = "prompt",
-  justification = "Cargo package mutation",
+  justification = "提权或用户切换：doas",
 )
 
-# Python
 prefix_rule(
-  pattern = ["pip", ["install", "add", "remove"]],
+  pattern = ["systemctl"],
   decision = "prompt",
-  justification = "Pip package mutation",
-)
-prefix_rule(
-  pattern = ["uv", ["add", "remove", "sync", "lock", "run", "tool", "python", "venv", "build", "publish"]],
-  decision = "prompt",
-  justification = "Uv mutation",
-)
-prefix_rule(
-  pattern = ["uv", "pip", ["install", "uninstall", "sync", "compile", "tree", "check"]],
-  decision = "prompt",
-  justification = "Uv pip mutation",
+  justification = "系统服务管理：systemctl",
 )
 
-# System package managers
 prefix_rule(
-  pattern = [["apt", "apt-get", "brew", "dnf", "yum", "pacman"]],
+  pattern = ["launchctl"],
   decision = "prompt",
-  justification = "System package manager",
+  justification = "系统服务管理：launchctl",
 )
 
-# Download tools
 prefix_rule(
-  pattern = ["curl"],
+  pattern = ["fdisk"],
   decision = "prompt",
-  justification = "Network download",
-)
-prefix_rule(
-  pattern = ["wget"],
-  decision = "prompt",
-  justification = "Network download",
+  justification = "磁盘分区或格式化：fdisk",
 )
 
-# Docker
 prefix_rule(
-  pattern = ["docker", ["run", "rm"]],
+  pattern = ["parted"],
   decision = "prompt",
-  justification = "Docker container mutation",
+  justification = "磁盘分区或格式化：parted",
 )
+
+prefix_rule(
+  pattern = ["sfdisk"],
+  decision = "prompt",
+  justification = "磁盘分区或格式化：sfdisk",
+)
+
+prefix_rule(
+  pattern = ["gdisk"],
+  decision = "prompt",
+  justification = "磁盘分区或格式化：gdisk",
+)
+
+prefix_rule(
+  pattern = ["sgdisk"],
+  decision = "prompt",
+  justification = "磁盘分区或格式化：sgdisk",
+)
+
+prefix_rule(
+  pattern = ["wipefs"],
+  decision = "prompt",
+  justification = "磁盘分区或格式化：wipefs",
+)
+
+prefix_rule(
+  pattern = ["mkfs"],
+  decision = "prompt",
+  justification = "磁盘分区或格式化：mkfs",
+)
+
+prefix_rule(
+  pattern = ["git", ["push", "reset", "clean", "restore"]],
+  decision = "prompt",
+  justification = "远端写入或破坏性 Git 操作",
+)
+
+prefix_rule(
+  pattern = ["git", "branch", "-D"],
+  decision = "prompt",
+  justification = "强制删除 Git 分支",
+)
+
+prefix_rule(
+  pattern = ["jj", "git", "push"],
+  decision = "prompt",
+  justification = "远端写入",
+)
+
+prefix_rule(
+  pattern = ["jj", ["abandon", "restore", "undo"]],
+  decision = "prompt",
+  justification = "破坏性 Jujutsu 操作",
+)
+
+prefix_rule(
+  pattern = ["jj", ["operation", "op"], "restore"],
+  decision = "prompt",
+  justification = "恢复 Jujutsu 历史操作",
+)
+
+prefix_rule(
+  pattern = ["docker", "rm"],
+  decision = "prompt",
+  justification = "删除容器",
+)
+
 prefix_rule(
   pattern = ["docker", "system", "prune"],
   decision = "prompt",
-  justification = "Docker resource cleanup",
+  justification = "清理 Docker 资源",
 )
 
-# GitHub CLI
 prefix_rule(
   pattern = ["gh", "issue", ["create", "edit", "close", "reopen", "delete", "comment"]],
   decision = "prompt",
-  justification = "GitHub issue mutation",
+  justification = "修改 GitHub Issue",
 )
+
 prefix_rule(
   pattern = ["gh", "pr", ["create", "edit", "merge", "close", "reopen", "comment"]],
   decision = "prompt",
-  justification = "GitHub PR mutation",
+  justification = "修改 GitHub PR",
 )
+
 prefix_rule(
   pattern = ["gh", "release", ["create", "delete", "edit"]],
   decision = "prompt",
-  justification = "GitHub release mutation",
+  justification = "修改 GitHub Release",
 )
+
 prefix_rule(
   pattern = ["gh", "label", ["create", "edit", "delete"]],
   decision = "prompt",
-  justification = "GitHub label mutation",
+  justification = "修改 GitHub Label",
 )
+
 prefix_rule(
   pattern = ["gh", "repo", ["create", "delete"]],
   decision = "prompt",
-  justification = "GitHub repo mutation",
+  justification = "修改 GitHub 仓库",
 )
+
 prefix_rule(
   pattern = ["gh", "workflow", "run"],
   decision = "prompt",
-  justification = "GitHub workflow trigger",
+  justification = "触发 GitHub 工作流",
 )
+
 prefix_rule(
   pattern = ["gh", "run", ["cancel", "rerun"]],
   decision = "prompt",
-  justification = "GitHub run mutation",
+  justification = "取消或重新运行 GitHub 工作流",
 )
 
-# Database migrations
 prefix_rule(
   pattern = [["diesel", "sqlx", "prisma", "sea-orm-cli"], ["migrate", "migration"]],
   decision = "prompt",
-  justification = "Database migration",
+  justification = "数据库迁移",
+)
+
+# 提交创建、描述及内容整理也默认询问；包含 Jujutsu 内置别名。
+prefix_rule(
+  pattern = ["jj", ["commit", "ci", "describe", "desc", "new", "squash", "split", "absorb", "metaedit"]],
+  decision = "prompt",
+  justification = "创建或修改 Jujutsu 提交",
 )

@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, mpsc, oneshot};
 
+#[cfg(test)]
+mod approval_tests;
 pub mod ask_user_tool;
 pub mod bash_tool;
 pub mod cancel_task_tool;

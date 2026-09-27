@@ -1,6 +1,6 @@
 //! 编译时嵌入的 `.rules` 文件 + `LazyLock` 全局预编译策略。
 //!
-//! 三个内嵌规则文件通过 `include_str!` 在编译时嵌入，首次访问时解析一次，
+//! 风险询问规则文件通过 `include_str!` 在编译时嵌入，首次访问时解析一次，
 //! 后续所有 thread 共享 `&EmbeddedBashPolicy` 引用，零 clone。
 
 use std::collections::HashMap;
@@ -9,28 +9,19 @@ use std::sync::LazyLock;
 use crate::bash_parser::{BashRule, parse_bash_rules_with_diagnostics};
 
 // 编译时嵌入，`&'static str`，零 I/O。
-static EMBEDDED_DENY_RAW: &str = include_str!("embedded_rules/deny.rules");
 static EMBEDDED_ASK_RAW: &str = include_str!("embedded_rules/ask.rules");
-static EMBEDDED_ALLOW_RAW: &str = include_str!("embedded_rules/allow.rules");
 
 /// 全局共享的内嵌 bash 策略。首次访问时解析一次，后续所有 thread 共享引用，零 clone。
 pub(crate) struct EmbeddedBashPolicy {
-    pub deny_by_cmd: HashMap<String, Vec<BashRule>>,
     pub ask_by_cmd: HashMap<String, Vec<BashRule>>,
-    pub allow_by_cmd: HashMap<String, Vec<BashRule>>,
 }
 
 pub(crate) static EMBEDDED_BASH_POLICY: LazyLock<EmbeddedBashPolicy> = LazyLock::new(|| {
     // 只解析一次。内嵌规则由我们维护，diagnostics 应该为空。
-    let (deny_rules, _) = parse_bash_rules_with_diagnostics(EMBEDDED_DENY_RAW, "<embedded:deny>");
     let (ask_rules, _) = parse_bash_rules_with_diagnostics(EMBEDDED_ASK_RAW, "<embedded:ask>");
-    let (allow_rules, _) =
-        parse_bash_rules_with_diagnostics(EMBEDDED_ALLOW_RAW, "<embedded:allow>");
 
     EmbeddedBashPolicy {
-        deny_by_cmd: group_by_first_command(deny_rules),
         ask_by_cmd: group_by_first_command(ask_rules),
-        allow_by_cmd: group_by_first_command(allow_rules),
     }
 });
 
@@ -55,18 +46,14 @@ fn group_by_first_command(rules: Vec<BashRule>) -> HashMap<String, Vec<BashRule>
 #[cfg(test)]
 mod tests {
     use crate::bash_parser::parse_bash_rules_with_diagnostics;
-    use crate::embedded::{EMBEDDED_ALLOW_RAW, EMBEDDED_ASK_RAW, EMBEDDED_DENY_RAW};
+    use crate::embedded::EMBEDDED_ASK_RAW;
 
+    /// 内置名单必须能完整加载，避免维护错误静默放行。
     #[test]
-    fn embedded_rule_documents_are_nonempty_and_parse_without_diagnostics() {
-        for (source, content) in [
-            ("<embedded:deny>", EMBEDDED_DENY_RAW),
-            ("<embedded:ask>", EMBEDDED_ASK_RAW),
-            ("<embedded:allow>", EMBEDDED_ALLOW_RAW),
-        ] {
-            let (rules, diagnostics) = parse_bash_rules_with_diagnostics(content, source);
-            assert!(!rules.is_empty(), "{source} must define at least one rule");
-            assert_eq!(diagnostics, Vec::<String>::new(), "{source}");
-        }
+    fn validate_risk_rules() {
+        let (rules, diagnostics) =
+            parse_bash_rules_with_diagnostics(EMBEDDED_ASK_RAW, "<embedded:ask>");
+        assert!(!rules.is_empty());
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
     }
 }

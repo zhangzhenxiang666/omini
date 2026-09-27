@@ -41,7 +41,7 @@ deny = [
 
 | 格式 | 说明 | 示例 |
 |------|------|------|
-| `tool` | 对工具的所有操作生效 | `"read"`、`"bash"` |
+| `tool` | 对工具的所有操作生效 | `"read"`、`"search"` |
 | `tool(path)` | 对特定路径的操作生效 | `"read(./src/**)"`、`"write(/etc/**)"` |
 
 **支持路径限定的工具：**
@@ -101,7 +101,24 @@ deny = ["read(.env)"]
 
 Bash 命令的权限控制需要使用专门的 `.rules` 文件，不能使用 `[permissions]` 段中的规则（在 `[permissions]` 中写 `bash` 规则会被忽略并产生警告）。
 
-复合命令会逐条按实际执行的命令检查权限。对于常见的 `for …; do …; done` 循环，循环控制语法本身不会触发确认，循环体内的每条命令仍按现有规则单独判定。
+Bash 使用黑名单审批模式：**未命中规则或风险名单的命令默认放行**。未知 CLI、构建、测试、普通包安装、`uv run`、脚本文件和普通下载均无需确认。
+
+决策顺序如下：
+
+1. 内置硬拒绝检查，不可覆盖。
+2. 匹配用户和项目 `.rules`，取 `forbidden > prompt > allow`，与文件加载或规则声明顺序无关。
+3. 无显式规则匹配时，检查内置风险询问名单。
+4. 无匹配时放行。
+
+显式 `allow` 可以覆盖内置风险询问，但不能覆盖用户 `prompt`、`forbidden` 或内置硬拒绝。复合命令的每条可见命令分别检查，整次 Bash 调用取最严格结果；不会先执行其中已经允许的部分。外层包装的 `allow` 不取消内层命令的独立检查。已有 `.rules` 无需迁移，原有显式 `prompt` 继续生效。
+
+### 命令分析与执行边界
+
+命令通过 Bash AST 分析，检查管道、条件、循环、后台分隔符 `&`、函数体、命令替换和子 shell 中的可见命令。循环和条件控制字本身不触发确认。字面量 `sh/bash/zsh -c/-lc`、`eval`、`exec`、`trap`、`env`、`command` 及前置环境赋值中的执行命令也会展开检查；包装展开最多 8 层，解析失败或超限时需要确认。`env -S/--split-string` 的静态内容使用独立分词语法，本期无法完整分析时需要确认。
+
+内置风险检查按可执行文件 basename 识别，所以 `/bin/rm` 也会询问。用户前缀规则保持原始可执行路径和参数匹配：`["rm"]` 不自动匹配 `/bin/rm`，需另外配置对应路径。内置子命令检查识别 `git -C`、`jj -R` 等全局选项；用户规则仍匹配完整 argv。动态参数和空字符串保留参数位置，不会因省略它们而错误匹配后续参数。引号、注释与 heredoc 的普通正文不作为执行命令，但其中实际生效的命令替换会检查。
+
+Omini 的 Bash **没有执行沙箱**。审批只分析输入中可见的命令，不检查 `sh script.sh`、`uv run script.py` 等脚本文件的内容，不推断 `$cmd`、动态 `eval` 或解释器代码的实际行为。这些形式默认放行，其中可见的嵌套命令仍按规则检查。黑名单不提供文件系统或网络隔离，Bash 也不继承 `read/write` 工具的路径规则。
 
 ### 文件路径
 
@@ -190,38 +207,13 @@ prefix_rule(
 
 ### 更多示例
 
-**允许常见的只读命令：**
+**显式放行某类内置询问：**
 
 ```bash
-# ~/.omini/rules/safe-commands.rules
-
+# ~/.omini/rules/local-cleanup.rules
+# 放行作用域明确的清理命令，根目录或家目录硬拒绝仍生效。
 prefix_rule(
-  pattern = ["ls"],
-  decision = "allow",
-)
-
-prefix_rule(
-  pattern = ["cat"],
-  decision = "allow",
-)
-
-prefix_rule(
-  pattern = ["head"],
-  decision = "allow",
-)
-
-prefix_rule(
-  pattern = ["tail"],
-  decision = "allow",
-)
-
-prefix_rule(
-  pattern = ["wc"],
-  decision = "allow",
-)
-
-prefix_rule(
-  pattern = ["grep"],
+  pattern = ["rm", "-rf", "/tmp/my-build-cache"],
   decision = "allow",
 )
 ```
@@ -287,19 +279,34 @@ prefix_rule(
 )
 ```
 
-### 内置 Bash 安全策略
+### 内置 Bash 风险策略
 
-除了用户配置的规则外，Omini 还有内置的 Bash 安全策略：
+以下命令默认询问；审批抽屉会显示触发原因。用户显式 `allow` 可覆盖这些询问。
 
-| 命令模式 | 默认决策 | 说明 |
-| ---------- | ---------- | ------ |
-| `sudo ...` | `prompt` | 需要确认 |
-| `su ...` | `prompt` | 需要确认 |
-| `chmod 777 ...` | `prompt` | 需要确认 |
-| `curl ... \| sh` | `forbidden` | 禁止管道执行 |
-| `wget ... \| sh` | `forbidden` | 禁止管道执行 |
+| 命令模式 | 默认行为 |
+| ---------- | ---------- |
+| `rm`、`rmdir`、`unlink`、`shred`、`truncate`、`dd` | 询问删除或数据破坏 |
+| `kill`、`pkill`、`killall` | 询问进程终止 |
+| `ssh`、`scp`、`rsync` | 询问远程访问或同步 |
+| `chmod`、`chown`、`chgrp` | 询问权限或所有权变更 |
+| `git push/reset/clean/restore`、`git branch -D` | 询问远端写入或破坏性版本控制操作 |
+| `jj git push`、`jj abandon/restore/undo`、`jj operation restore`（含 `op` 别名） | 询问远端写入或历史修改 |
+| `jj commit/describe/new/squash/split/absorb/metaedit`（含 `ci/desc` 别名） | 询问提交创建、描述或内容整理 |
+| `gh` 的 Issue、PR、Release、Label、Repo 写操作及工作流触发、取消、重跑 | 询问远端修改 |
+| `diesel/sqlx/prisma/sea-orm-cli migrate/migration` | 询问数据库迁移 |
+| `docker rm`、`docker system prune` | 询问资源删除或清理 |
+| `sudo`、`su`、`doas`、`systemctl`、`launchctl` | 询问提权、用户切换或系统服务管理 |
+| `fdisk`、`parted`、`sfdisk`、`gdisk`、`sgdisk`、`wipefs`、`mkfs`、`mkfs.*` | 询问磁盘分区或格式化 |
 
-这些内置策略无法通过配置覆盖。
+普通 `git commit/pull/merge/rebase/checkout/switch`、`docker run`、包管理器和下载命令默认放行。自定义 CLI 别名和脚本内容不展开推断，可通过 `.rules` 自行增加询问或拒绝。
+
+以下三类保留不可覆盖的硬拒绝，不弹出可批准的询问：
+
+- 递归强制删除根目录、等价根路径或家目录，例如 `rm -rf /`、`rm -rf /tmp/..`、`rm -rf ~`、`rm -rf "$HOME"`。
+- fork bomb，例如 `:(){ :|:& };:`，包括字面量 shell 包装中的该模式。
+- 下载后直接执行，例如 `curl ... | sh`、`wget ...; bash ...`。沿用保守检查：同次分析的可见命令序列中，下载之后出现 shell 执行即拒绝，不追踪下载文件的数据流。
+
+询问时批准仅执行本次调用，不自动记住后续调用；拒绝或取消不会启动命令。
 
 ## 默认行为
 
@@ -312,7 +319,7 @@ prefix_rule(
 | `edit`、`write` | 需确认 | 写入操作需要用户确认 |
 | `todo_write` | 允许 | 创建待办清单直接允许 |
 | `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
-| `bash` | 按规则判断 | 根据 Bash 规则和内置策略决定 |
+| `bash` | 默认放行，风险命令询问，极端命令拒绝 | 显式 `.rules` 优先于内置询问，解析失败或包装超限仍询问 |
 
 ## 相关文档
 

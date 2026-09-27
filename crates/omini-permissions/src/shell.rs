@@ -1,323 +1,396 @@
-//! Shell 命令拆分和分词。
-//!
-//! `split_shell_commands` 负责将复合 shell 命令拆成独立可执行段，支持：
-//! - 顶层分隔符：`;` `|` `||` `&&` `\n`
-//! - `$()` 命令替换（递归）
-//! - `` `...` `` 反引号命令替换（递归）
-//! - `(...)` 括号子 shell（递归）
-//! - `<(...)` `>(...)` 进程替换（递归）
-//! - `eval` / `exec` 的参数会被提取并递归拆分
+//! 基于 Bash AST 的命令分析；只检查可见执行，不推断脚本或动态表达式的实际行为。
 
-/// 将复合 shell 命令拆分为独立可执行段。
-/// 递归提取 `$()`、反引号、括号子 shell、进程替换内的嵌套命令，
-/// 并展开 `eval`/`exec` 的参数。
-pub(crate) fn split_shell_commands(command: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut nested = Vec::new();
-    split_top_level(command, &mut parts, &mut nested);
-    push_part(&mut parts, &mut String::new());
+use tree_sitter::{Node, Parser};
 
-    // 对每条顶层段，提取 eval/exec 参数中的嵌套命令。
-    let mut expanded: Vec<String> = Vec::new();
-    for part in parts {
-        let trimmed = part.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        expanded.push(trimmed.to_string());
-        extract_eval_exec_args(trimmed, &mut nested);
-    }
-
-    // 循环控制字不是可执行命令，只分析循环体，并继续逐条执行原有权限与安全检查。
-    let mut expanded = strip_for_loop_syntax(&expanded);
-
-    // 递归拆分所有收集到的嵌套上下文。
-    for ctx in nested {
-        let ctx_trimmed = ctx.trim().to_string();
-        if !ctx_trimmed.is_empty() {
-            expanded.extend(split_shell_commands(&ctx_trimmed));
-        }
-    }
-
-    expanded
+/// 动态参数仍占一个位置，避免删除它后让后续字面量错误匹配前缀规则。
+#[derive(Debug, Clone)]
+pub(crate) struct ShellWord {
+    pub literal: Option<String>,
+    pub source: String,
 }
 
-/// 从可拆分的命令段中移除完整 `for …; do …; done` 循环的控制字，保留循环体。
-/// 不完整或不符合常见 shell 形式的循环原样保留，使未知语法继续触发询问。
-fn strip_for_loop_syntax(commands: &[String]) -> Vec<String> {
-    let mut result = Vec::new();
-    let mut index = 0;
+#[derive(Debug, Clone)]
+pub(crate) struct ShellCommand {
+    pub words: Vec<ShellWord>,
+}
 
-    while index < commands.len() {
-        if !is_for_header(&commands[index]) {
-            result.push(commands[index].clone());
-            index += 1;
-            continue;
+impl ShellCommand {
+    pub fn name(&self) -> Option<&str> {
+        self.words.first()?.literal.as_deref()
+    }
+
+    pub fn basename(&self) -> Option<&str> {
+        self.name()?.rsplit('/').next()
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ShellAnalysis {
+    pub commands: Vec<ShellCommand>,
+    pub incomplete: bool,
+    pub fork_bomb: bool,
+}
+
+/// 分析所有可见命令及字面量包装；失败与超限只标记不完整，不丢弃已识别的风险。
+pub(crate) fn analyze_shell(source: &str) -> ShellAnalysis {
+    let mut analysis = ShellAnalysis::default();
+    analyze_source(source, 0, &mut analysis);
+    analysis
+}
+
+const MAX_WRAPPER_DEPTH: usize = 8;
+
+fn analyze_source(source: &str, depth: usize, analysis: &mut ShellAnalysis) {
+    if depth > MAX_WRAPPER_DEPTH {
+        analysis.incomplete = true;
+        return;
+    }
+    let mut parser = Parser::new();
+    if parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .is_err()
+    {
+        analysis.incomplete = true;
+        return;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        analysis.incomplete = true;
+        return;
+    };
+    analysis.incomplete |= tree.root_node().has_error();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "function_definition"
+            && node
+                .child_by_field_name("name")
+                .is_some_and(|name| text(name, source) == ":")
+            && let Some(body) = node.child_by_field_name("body")
+        {
+            let compact: String = text(body, source)
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            analysis.fork_bomb |= matches!(compact.as_str(), "{:|:&}" | "{:|:&;}");
         }
+        if node.kind() == "command"
+            && let Some(name) = node.child_by_field_name("name")
+        {
+            let mut words = vec![parse_word(name, source)];
+            let mut cursor = node.walk();
+            words.extend(
+                node.children_by_field_name("argument", &mut cursor)
+                    .map(|arg| parse_word(arg, source)),
+            );
+            analyze_command(ShellCommand { words }, depth, analysis);
+        }
+        // 引用文本、注释和 heredoc 文本没有 command 节点；实际命令替换仍会被遍历。
+        let mut cursor = node.walk();
+        let children: Vec<_> = node.named_children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev());
+    }
+}
 
-        let mut depth = 1usize;
-        let mut do_index = None;
-        let mut done_index = None;
-        for (offset, command) in commands.iter().enumerate().skip(index + 1) {
-            if starts_control_word(command, "do") {
-                if do_index.is_none() {
-                    do_index = Some(offset);
+fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
+    &source[node.byte_range()]
+}
+
+fn parse_word(node: Node<'_>, source: &str) -> ShellWord {
+    ShellWord {
+        literal: literal_word(node, source),
+        source: text(node, source).to_string(),
+    }
+}
+
+/// 只解码无展开的 shell 单词；引号和转义保持 shell 的字面量语义。
+fn literal_word(node: Node<'_>, source: &str) -> Option<String> {
+    match node.kind() {
+        "command_name" => literal_word(node.named_child(0)?, source),
+        "raw_string" => Some(
+            text(node, source)
+                .strip_prefix('\'')?
+                .strip_suffix('\'')?
+                .to_string(),
+        ),
+        "concatenation" => {
+            let mut value = String::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                value.push_str(&literal_word(child, source)?);
+            }
+            Some(value)
+        }
+        "word" | "number" | "string" => {
+            let mut cursor = node.walk();
+            if node
+                .named_children(&mut cursor)
+                .any(|child| child.kind() != "string_content")
+            {
+                return None;
+            }
+            decode_word(text(node, source))
+        }
+        _ => None,
+    }
+}
+
+fn decode_word(source: &str) -> Option<String> {
+    let mut result = String::new();
+    let mut quote = None;
+    let mut chars = source.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match (quote, ch) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) => result.push(ch),
+            (None, '\'' | '"') => quote = Some(ch),
+            (_, '\\') => {
+                let next = chars.next()?;
+                if next == '\n' {
+                    continue;
                 }
-                if is_for_header(strip_control_word(command, "do")) {
-                    depth += 1;
+                if quote == Some('"') && !matches!(next, '$' | '`' | '"' | '\\') {
+                    result.push('\\');
                 }
-            } else if is_for_header(command) {
-                depth += 1;
-            } else if starts_control_word(command, "done") {
-                depth -= 1;
-                if depth == 0 {
-                    done_index = Some(offset);
+                result.push(next);
+            }
+            (_, '$' | '`') => return None,
+            (None, '*' | '?' | '[' | ']' | '{' | '}' | '~') => return None,
+            _ => result.push(ch),
+        }
+    }
+    quote.is_none().then_some(result)
+}
+
+fn analyze_command(command: ShellCommand, depth: usize, analysis: &mut ShellAnalysis) {
+    if depth > MAX_WRAPPER_DEPTH {
+        analysis.incomplete = true;
+        return;
+    }
+    analysis.commands.push(command.clone());
+    let Some(name) = command.basename() else {
+        return;
+    };
+    let words = &command.words;
+    match name {
+        "sh" | "bash" | "zsh" => {
+            for (index, word) in words.iter().enumerate().skip(1) {
+                let Some(flag) = word.literal.as_deref() else {
+                    break;
+                };
+                if flag == "--" || !flag.starts_with('-') {
+                    break;
+                }
+                if !flag.starts_with("--") && flag.contains('c') {
+                    if let Some(script) = words
+                        .get(index + 1)
+                        .and_then(|word| word.literal.as_deref())
+                    {
+                        analyze_source(script, depth + 1, analysis);
+                    }
                     break;
                 }
             }
         }
+        "eval" => {
+            if let Some(parts) = words[1..]
+                .iter()
+                .map(|word| word.literal.as_deref())
+                .collect::<Option<Vec<_>>>()
+            {
+                analyze_source(&parts.join(" "), depth + 1, analysis);
+            }
+        }
+        "trap" => {
+            let index = if words.get(1).and_then(|word| word.literal.as_deref()) == Some("--") {
+                2
+            } else {
+                1
+            };
+            if let Some(action) = words.get(index).and_then(|word| word.literal.as_deref())
+                && !action.starts_with('-')
+            {
+                analyze_source(action, depth + 1, analysis);
+            }
+        }
+        "env" | "command" | "exec" | "sudo" | "doas" => {
+            // env -S 使用独立分词语法；静态内容无法完整分析时询问，动态内容仍不猜测。
+            if name == "env"
+                && let Some(script) = env_split(words)
+            {
+                analysis.incomplete |= script.literal.is_some();
+                return;
+            }
+            if let Some(index) = unwrap_command(name, words) {
+                analyze_command(
+                    ShellCommand {
+                        words: words[index..].to_vec(),
+                    },
+                    depth + 1,
+                    analysis,
+                );
+            }
+        }
+        "su" => {
+            if let Some(index) = words
+                .iter()
+                .position(|word| matches!(word.literal.as_deref(), Some("-c" | "--command")))
+                && let Some(script) = words
+                    .get(index + 1)
+                    .and_then(|word| word.literal.as_deref())
+            {
+                analyze_source(script, depth + 1, analysis);
+            }
+        }
+        _ => {}
+    }
+}
 
-        let (Some(do_index), Some(done_index)) = (do_index, done_index) else {
-            result.push(commands[index].clone());
+/// 只检查包装器选项，避免把实际子命令的 -S 参数误认为 env 分词选项。
+fn env_split(words: &[ShellWord]) -> Option<&ShellWord> {
+    let mut index = 1;
+    while let Some(word) = words.get(index) {
+        if is_assignment(&word.source) {
             index += 1;
             continue;
+        }
+        let arg = word.literal.as_deref()?;
+        if matches!(arg, "-S" | "--split-string") {
+            return words.get(index + 1);
+        }
+        if arg.starts_with("--split-string=") || arg.starts_with("-S") {
+            return Some(word);
+        }
+        if arg == "--" || !arg.starts_with('-') {
+            break;
+        }
+        index += if matches!(arg, "-u" | "--unset" | "-C" | "--chdir") {
+            2
+        } else {
+            1
         };
-
-        let mut body = Vec::new();
-        for (offset, command) in commands.iter().enumerate().take(done_index).skip(do_index) {
-            let command = if offset == do_index {
-                strip_control_word(command, "do")
-            } else {
-                command.as_str()
-            };
-            if !command.trim().is_empty() {
-                body.push(command.trim().to_string());
-            }
-        }
-        let body = strip_for_loop_syntax(&body);
-        result.extend(body);
-
-        let tail = strip_control_word(&commands[done_index], "done");
-        if !tail.trim().is_empty() {
-            result.push(tail.trim().to_string());
-        }
-        index = done_index + 1;
     }
-
-    result
+    None
 }
 
-fn is_for_header(command: &str) -> bool {
-    let words = shell_words(command);
-    words.len() >= 4 && words[0] == "for" && words[2] == "in"
-}
-
-fn starts_control_word(command: &str, word: &str) -> bool {
-    command
-        .strip_prefix(word)
-        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-}
-
-fn strip_control_word<'a>(command: &'a str, word: &str) -> &'a str {
-    command
-        .strip_prefix(word)
-        .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
-        .unwrap_or(command)
-}
-
-/// 顶层拆分：按 `;` `|` `||` `&&` `\n` 分割，同时递归提取 `$()`、反引号、
-/// `(...)` 子 shell、`<(...)` `>(...)` 进程替换。
-fn split_top_level(command: &str, parts: &mut Vec<String>, nested: &mut Vec<String>) {
-    let mut current = String::new();
-    let mut chars = command.chars().peekable();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-
-    while let Some(ch) = chars.next() {
-        if escaped {
-            current.push(ch);
-            escaped = false;
+/// 剥离包装器的选项与环境赋值；查询形式不执行参数，动态形式不猜测命令位置。
+fn unwrap_command(name: &str, words: &[ShellWord]) -> Option<usize> {
+    let mut index = 1;
+    while let Some(word) = words.get(index) {
+        let arg = word.literal.as_deref();
+        if name == "env" && is_assignment(&word.source) {
+            index += 1;
             continue;
         }
-        // 单引号内完全按字面处理；双引号内仍会执行命令替换。
-        if let Some(q) = quote {
-            match ch {
-                '\\' if q == '"' => {
-                    current.push(ch);
-                    escaped = true;
-                }
-                '$' if q == '"' && chars.peek() == Some(&'(') => {
-                    chars.next();
-                    nested.push(consume_balanced_parens(&mut chars));
-                }
-                '`' if q == '"' => nested.push(consume_backticks(&mut chars)),
-                _ => {
-                    current.push(ch);
-                    if ch == q {
-                        quote = None;
-                    }
-                }
-            }
-            continue;
+        let arg = arg?;
+        if arg == "--" {
+            return (index + 1 < words.len()).then_some(index + 1);
         }
-        match ch {
-            '\\' => {
-                current.push(ch);
-                escaped = true;
-            }
-            '"' | '\'' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            '$' if chars.peek() == Some(&'(') => {
-                // $() 命令替换
-                chars.next(); // 消费 '('
-                let inner = consume_balanced_parens(&mut chars);
-                nested.push(inner);
-            }
-            '(' => {
-                // (...) 子 shell
-                let inner = consume_balanced_parens(&mut chars);
-                nested.push(inner);
-            }
-            '<' | '>' if chars.peek() == Some(&'(') => {
-                // <() 或 >() 进程替换
-                chars.next(); // 消费 '('
-                let inner = consume_balanced_parens(&mut chars);
-                nested.push(inner);
-            }
-            '`' => {
-                // 反引号命令替换
-                let inner = consume_backticks(&mut chars);
-                nested.push(inner);
-            }
-            ';' | '|' | '\n' => {
-                push_part(parts, &mut current);
-                if ch == '|' && chars.peek() == Some(&'|') {
-                    chars.next();
-                }
-            }
-            '&' if chars.peek() == Some(&'&') => {
-                chars.next();
-                push_part(parts, &mut current);
-            }
-            _ => {
-                current.push(ch);
-            }
+        if !arg.starts_with('-') || arg == "-" {
+            return Some(index);
         }
+        if name == "command" && matches!(arg, "-v" | "-V") {
+            return None;
+        }
+        let consumes_value = match name {
+            "env" => matches!(
+                arg,
+                "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string"
+            ),
+            "exec" => arg == "-a",
+            "sudo" | "doas" => matches!(
+                arg,
+                "-u" | "-g"
+                    | "-h"
+                    | "-p"
+                    | "-C"
+                    | "-T"
+                    | "-r"
+                    | "-t"
+                    | "-D"
+                    | "--user"
+                    | "--group"
+                    | "--host"
+                    | "--prompt"
+                    | "--chdir"
+            ),
+            _ => false,
+        };
+        // env -S 本身是另一个命令语言，不把其字符串当成普通 argv。
+        if name == "env" && matches!(arg, "-S" | "--split-string") {
+            return None;
+        }
+        index += if consumes_value { 2 } else { 1 };
     }
-    push_part(parts, &mut current);
+    None
 }
 
-/// 从当前光标（已在开括号之后）消费到匹配的闭括号，处理嵌套括号。
-/// 返回括号内的内容（不含外层括号）。
-fn consume_balanced_parens(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
-    let mut depth = 1;
-    let mut inner = String::new();
-    let mut quote: Option<char> = None;
-    let mut escaped = false;
-    for ch in chars.by_ref() {
-        if escaped {
-            inner.push(ch);
-            escaped = false;
-            continue;
-        }
-        if let Some(q) = quote {
-            inner.push(ch);
-            if ch == '\\' && q == '"' {
-                escaped = true;
-            } else if ch == q {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => {
-                quote = Some(ch);
-                inner.push(ch);
-            }
-            '(' => {
-                depth += 1;
-                inner.push(ch);
-            }
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return inner;
-                }
-                inner.push(ch);
-            }
-            _ => inner.push(ch),
-        }
+/// 内置子命令风险匹配忽略已知 CLI 全局选项；显式用户规则仍检查完整原始 argv。
+pub(crate) fn risk_words(command: &ShellCommand) -> Vec<ShellWord> {
+    let words = &command.words;
+    let Some(name) = command.basename() else {
+        return words.clone();
+    };
+    if !matches!(name, "git" | "jj" | "gh" | "docker") {
+        return words.clone();
     }
-    inner
+    let mut index = 1;
+    while let Some(arg) = words.get(index).and_then(|word| word.literal.as_deref()) {
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if !arg.starts_with('-') {
+            break;
+        }
+        let consumes_value = match name {
+            "git" => matches!(
+                arg,
+                "-C" | "-c"
+                    | "--git-dir"
+                    | "--work-tree"
+                    | "--namespace"
+                    | "--config-env"
+                    | "--super-prefix"
+            ),
+            "jj" => matches!(
+                arg,
+                "-R" | "--repository"
+                    | "--at-operation"
+                    | "--at-op"
+                    | "--color"
+                    | "--config"
+                    | "--config-file"
+            ),
+            "gh" => matches!(arg, "-R" | "--repo" | "--hostname"),
+            "docker" => matches!(
+                arg,
+                "-H" | "--host"
+                    | "--context"
+                    | "--config"
+                    | "-l"
+                    | "--log-level"
+                    | "--tlscacert"
+                    | "--tlscert"
+                    | "--tlskey"
+            ),
+            _ => false,
+        };
+        index += if consumes_value { 2 } else { 1 };
+    }
+    std::iter::once(words[0].clone())
+        .chain(words.get(index..).unwrap_or_default().iter().cloned())
+        .collect()
 }
 
-/// 从当前光标（已在开反引号之后）消费到匹配的闭反引号。
-fn consume_backticks(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
-    let mut inner = String::new();
-    let mut escaped = false;
-    for ch in chars.by_ref() {
-        if escaped {
-            inner.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            escaped = true;
-            continue;
-        }
-        if ch == '`' {
-            return inner;
-        }
-        inner.push(ch);
-    }
-    inner
+fn is_assignment(source: &str) -> bool {
+    source.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().enumerate().all(|(index, ch)| {
+                ch == '_' || ch.is_ascii_alphabetic() || index > 0 && ch.is_ascii_digit()
+            })
+    })
 }
 
-/// 提取 `eval` 和 `exec` 命令的参数，作为额外可执行上下文加入 nested。
-/// 只识别独立命令开头的关键字，避免把普通参数中的 `eval` / `exec` 当作执行。
-/// 提取后剥离外层引号（模拟 shell 对 eval 参数的解析行为）。
-fn extract_eval_exec_args(command: &str, nested: &mut Vec<String>) {
-    let command = command.trim_start();
-    for keyword in ["eval", "exec"] {
-        if let Some(after) = command.strip_prefix(keyword)
-            && after.chars().next().is_none_or(char::is_whitespace)
-        {
-            let stripped = strip_outer_quotes(after);
-            if !stripped.is_empty() {
-                nested.push(stripped.to_string());
-            }
-            return;
-        }
-    }
-}
-
-/// 剥离字符串首尾匹配的外层引号（`"..."` 或 `'...'`）。
-/// 模拟 shell 对 eval 参数的引号处理：`eval "sudo rm"` → 提取 `sudo rm`。
-/// 如果不是完整的引号包裹则原样返回。
-fn strip_outer_quotes(s: &str) -> &str {
-    let s = s.trim();
-    if s.len() < 2 {
-        return s;
-    }
-    let bytes = s.as_bytes();
-    let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
-    if (first == b'"' || first == b'\'') && first == last {
-        &s[1..s.len() - 1]
-    } else {
-        s
-    }
-}
-
-fn push_part(parts: &mut Vec<String>, current: &mut String) {
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        parts.push(trimmed.to_string());
-    }
-    current.clear();
-}
-
+/// 仅用于规则 DSL 的 match/not_match 示例分词，不参与执行命令分析。
 /// 将 shell 命令拆分为参数列表，正确处理引号和转义。
 /// 引号字符本身不会出现在结果中（被剥离）。
 pub(crate) fn shell_words(command: &str) -> Vec<String> {
@@ -358,140 +431,4 @@ pub(crate) fn shell_words(command: &str) -> Vec<String> {
         words.push(current);
     }
     words
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::shell::{shell_words, split_shell_commands};
-
-    #[test]
-    fn top_level_separators_produce_complete_trimmed_command_order() {
-        assert_eq!(
-            split_shell_commands("  ls ; pwd || whoami && date | wc -l\ntrue  "),
-            vec!["ls", "pwd", "whoami", "date", "wc -l", "true"]
-        );
-        assert_eq!(split_shell_commands(" ; | || && \n"), Vec::<String>::new());
-    }
-
-    #[test]
-    fn for_loop_control_words_are_removed_but_body_commands_remain() {
-        assert_eq!(
-            split_shell_commands(r#"for d in /workspace/crates/*/; do echo "$d"; ls "$d"; done"#),
-            vec![r#"echo "$d""#, r#"ls "$d""#]
-        );
-        assert_eq!(
-            split_shell_commands("for outer in a; do for inner in b; do ls; done; done"),
-            vec!["ls"]
-        );
-        assert_eq!(
-            split_shell_commands("for d in a; do sudo true; done"),
-            vec!["sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("for d in a; do ls"),
-            vec!["for d in a", "do ls"]
-        );
-    }
-
-    #[test]
-    fn quoted_separators_remain_in_their_original_command() {
-        assert_eq!(
-            split_shell_commands(r#"echo "a;b|c&&d" && printf '%s\n' 'x;y'"#),
-            vec![r#"echo "a;b|c&&d""#, r#"printf '%s\n' 'x;y'"#]
-        );
-        assert_eq!(
-            split_shell_commands(r#"echo a\;b && echo "a\";b""#),
-            vec![r#"echo a\;b"#, r#"echo "a\";b""#]
-        );
-    }
-
-    #[test]
-    fn dollar_substitutions_are_recursively_extracted_in_stable_order() {
-        assert_eq!(
-            split_shell_commands("echo $(sudo true)"),
-            vec!["echo", "sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("echo $(echo $(date))"),
-            vec!["echo", "echo", "date"]
-        );
-        assert_eq!(
-            split_shell_commands(r#"echo "$(sudo true)""#),
-            vec![r#"echo """#, "sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands(r#"echo '$(sudo true)'"#),
-            vec![r#"echo '$(sudo true)'"#]
-        );
-        assert_eq!(
-            split_shell_commands(r#"echo "\$(sudo true)""#),
-            vec![r#"echo "\$(sudo true)""#]
-        );
-    }
-
-    #[test]
-    fn backticks_subshells_and_process_substitutions_expose_nested_commands() {
-        assert_eq!(
-            split_shell_commands("echo `sudo true`"),
-            vec!["echo", "sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("(cd /tmp && pwd)"),
-            vec!["cd /tmp", "pwd"]
-        );
-        assert_eq!(
-            split_shell_commands("diff <(curl a) <(cat b)"),
-            vec!["diff", "curl a", "cat b"]
-        );
-    }
-
-    #[test]
-    fn eval_and_exec_expand_only_when_they_are_the_executed_command() {
-        assert_eq!(
-            split_shell_commands(r#"eval "sudo true""#),
-            vec![r#"eval "sudo true""#, "sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("exec sudo true"),
-            vec!["exec sudo true", "sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("echo exec sudo true"),
-            vec!["echo exec sudo true"]
-        );
-        assert_eq!(
-            split_shell_commands("reevaluate sudo true"),
-            vec!["reevaluate sudo true"]
-        );
-    }
-
-    #[test]
-    fn shell_words_handle_whitespace_quotes_escapes_and_incomplete_quotes() {
-        let cases = [
-            ("", &[][..]),
-            ("  git   status  ", &["git", "status"][..]),
-            (
-                "git commit -m 'hello world'",
-                &["git", "commit", "-m", "hello world"][..],
-            ),
-            (r#"echo hello\ world"#, &["echo", "hello world"][..]),
-            (r#"echo 'hello\ world'"#, &["echo", r#"hello\ world"#][..]),
-            (
-                r#"curl -H "Authorization: Bearer token""#,
-                &["curl", "-H", "Authorization: Bearer token"][..],
-            ),
-            ("echo 'unterminated", &["echo", "unterminated"][..]),
-        ];
-
-        for (command, expected) in cases {
-            assert_eq!(
-                shell_words(command),
-                expected
-                    .iter()
-                    .map(|word| (*word).to_string())
-                    .collect::<Vec<_>>(),
-                "{command:?}"
-            );
-        }
-    }
 }

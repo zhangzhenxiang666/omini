@@ -1,4 +1,4 @@
-use crate::shell::shell_words;
+use crate::shell::{ShellWord, shell_words};
 /// `.rules` DSL 解析器：解析 `prefix_rule(...)` 语法的 bash 权限规则。
 use std::fmt::Display;
 
@@ -39,7 +39,7 @@ impl RuleDecision {
 impl BashRule {
     /// 后缀匹配：跳过 args[0]（已通过 HashMap key 匹配首命令），
     /// 从 args[1..] 开始对比 pattern[0..]（已剥离首命令位置）。
-    pub(crate) fn matches_suffix(&self, args: &[String]) -> bool {
+    pub(crate) fn matches_suffix(&self, args: &[ShellWord]) -> bool {
         let suffix_args = if args.is_empty() { args } else { &args[1..] };
         if suffix_args.len() < self.pattern.len() {
             return false;
@@ -47,7 +47,11 @@ impl BashRule {
         self.pattern
             .iter()
             .zip(suffix_args.iter())
-            .all(|(allowed, arg)| allowed.iter().any(|candidate| candidate == arg))
+            .all(|(allowed, arg)| {
+                arg.literal
+                    .as_ref()
+                    .is_some_and(|arg| allowed.contains(arg))
+            })
     }
 
     /// 完整模式匹配（用于加载时验证 match/not_match 示例）。

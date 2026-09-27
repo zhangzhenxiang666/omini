@@ -9,10 +9,10 @@ use omini_runtime_contract::thread_domain::{
 use serde_json::Value;
 
 use crate::bash_parser::{BashRule, RuleDecision};
-use crate::bash_safety::check_builtin_safety_deny;
+use crate::bash_safety::check_safety;
 use crate::embedded::EMBEDDED_BASH_POLICY;
 use crate::path_matcher;
-use crate::shell::{shell_words, split_shell_commands};
+use crate::shell::{ShellCommand, analyze_shell, risk_words};
 use crate::tool_rules::{self, ToolRule};
 
 /// 权限决策结果。
@@ -312,140 +312,102 @@ impl PermissionEngine {
         }
     }
 
-    /// Bash 决策流程：
-    /// 0. 代码层安全底线检查（不可覆盖）
-    /// 1. 对每个子命令按优先级链查找匹配规则
-    /// 2. 多子命令取 strictest 结果
+    /// Bash 默认放行；硬拒绝优先，显式规则优先于内置询问，复合命令取最严格结果。
     fn decide_bash(&self, preview: &BashPermissionPreview) -> PermissionCheck {
-        // 步骤 0：代码层安全底线 — rm -rf /、curl|sh、fork bomb、mkfs.* 等。
-        if let Some(deny) = check_builtin_safety_deny(&preview.command) {
+        let analysis = analyze_shell(&preview.command);
+        if let Some(deny) = check_safety(&analysis, self.home.as_deref()) {
             return PermissionCheck {
                 decision: deny,
                 source: None,
             };
         }
-
-        let embedded = &*EMBEDDED_BASH_POLICY;
-        let mut result: Option<PermissionCheck> = None;
-
-        for command in split_shell_commands(&preview.command) {
-            let args = shell_words(&command);
-            if args.is_empty() {
-                continue;
-            }
-            let cmd = &args[0];
-            let decision = self.decide_bash_single(cmd, &args, embedded);
-            result = Some(match result {
-                Some(current) => stricter_check(current, decision),
-                None => decision,
-            });
-        }
-
-        result.unwrap_or(PermissionCheck {
-            decision: PermissionDecision::Ask, // 默认行为：未知命令 ask
+        let mut result = PermissionCheck {
+            decision: PermissionDecision::Allow,
             source: None,
-        })
+        };
+        for command in &analysis.commands {
+            let next = self.check_command(command);
+            // 相同等级优先保留可说明来源的结果，默认 Allow 不掩盖显式 Allow。
+            if next.decision.rank() > result.decision.rank()
+                || next.decision.rank() == result.decision.rank() && result.source.is_none()
+            {
+                result = next;
+            }
+        }
+        if analysis.incomplete || preview.command.trim().is_empty() {
+            result = stricter_check(result, risk_prompt("命令解析失败或包装展开超过 8 层"));
+        }
+        result
     }
 
-    /// 单个子命令的决策链：
-    /// a. 内嵌 deny → Deny
-    /// b. 用户 deny → Deny
-    /// c. 用户 allow → Allow（覆盖内嵌 ask）
-    /// d. 用户 ask → Ask
-    /// e. 内嵌 ask → Ask
-    /// f. 内嵌 allow → Allow
-    /// g. 无匹配 → Ask（默认行为）
-    fn decide_bash_single(
-        &self,
-        cmd: &str,
-        args: &[String],
-        embedded: &crate::embedded::EmbeddedBashPolicy,
-    ) -> PermissionCheck {
-        // a. 内嵌 deny
-        if let Some(rules) = embedded.deny_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Deny {
-                            reason: rule
-                                .justification
-                                .clone()
-                                .unwrap_or_else(|| "Permission denied by embedded rule".into()),
-                        },
-                        source: None, // 内嵌规则不暴露 source
-                    };
-                }
-            }
-        }
-
-        // b. 用户 deny
-        if let Some(rules) = self.user_bash.deny_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Deny {
+    /// 规则使用原始可执行路径与参数；内置风险名单单独按 basename 匹配。
+    fn check_command(&self, command: &ShellCommand) -> PermissionCheck {
+        let Some(cmd) = command.name() else {
+            return PermissionCheck {
+                decision: PermissionDecision::Allow,
+                source: None,
+            };
+        };
+        for (rules, decision) in [
+            (&self.user_bash.deny_by_cmd, RuleDecision::Deny),
+            (&self.user_bash.ask_by_cmd, RuleDecision::Ask),
+            (&self.user_bash.allow_by_cmd, RuleDecision::Allow),
+        ] {
+            if let Some(rule) = rules.get(cmd).and_then(|rules| {
+                rules
+                    .iter()
+                    .find(|rule| rule.matches_suffix(&command.words))
+            }) {
+                return PermissionCheck {
+                    decision: match decision {
+                        RuleDecision::Deny => PermissionDecision::Deny {
                             reason: rule
                                 .justification
                                 .clone()
                                 .unwrap_or_else(|| "Permission denied by bash rule".into()),
                         },
-                        source: bash_rule_permission_source(rule),
-                    };
-                }
+                        RuleDecision::Ask => PermissionDecision::Ask,
+                        RuleDecision::Allow => PermissionDecision::Allow,
+                    },
+                    source: bash_rule_permission_source(rule),
+                };
             }
         }
-
-        // c. 用户 allow（覆盖内嵌 ask）
-        if let Some(rules) = self.user_bash.allow_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Allow,
-                        source: bash_rule_permission_source(rule),
-                    };
-                }
-            }
+        let basename = command.basename().unwrap_or(cmd);
+        if basename.starts_with("mkfs.") {
+            return risk_prompt("磁盘格式化");
         }
-
-        // d. 用户 ask
-        if let Some(rules) = self.user_bash.ask_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Ask,
-                        source: bash_rule_permission_source(rule),
-                    };
-                }
-            }
+        let builtin_words = risk_words(command);
+        if basename == "git"
+            && builtin_words
+                .get(1)
+                .and_then(|word| word.literal.as_deref())
+                == Some("branch")
+            && builtin_words
+                .iter()
+                .skip(2)
+                .take_while(|word| word.literal.as_deref() != Some("--"))
+                .any(|word| {
+                    word.literal.as_deref().is_some_and(|arg| {
+                        arg.starts_with('-') && !arg.starts_with("--") && arg.contains('D')
+                    })
+                })
+        {
+            return risk_prompt("强制删除 Git 分支");
         }
-
-        // e. 内嵌 ask
-        if let Some(rules) = embedded.ask_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Ask,
-                        source: None,
-                    };
-                }
-            }
+        if let Some(rule) = EMBEDDED_BASH_POLICY
+            .ask_by_cmd
+            .get(basename)
+            .and_then(|rules| {
+                rules
+                    .iter()
+                    .find(|rule| rule.matches_suffix(&builtin_words))
+            })
+        {
+            return risk_prompt(rule.justification.as_deref().unwrap_or("高风险命令"));
         }
-
-        // f. 内嵌 allow
-        if let Some(rules) = embedded.allow_by_cmd.get(cmd) {
-            for rule in rules {
-                if rule.matches_suffix(args) {
-                    return PermissionCheck {
-                        decision: PermissionDecision::Allow,
-                        source: None,
-                    };
-                }
-            }
-        }
-
-        // g. 无匹配 → Ask（默认行为，从 Allow 改为 Ask）
         PermissionCheck {
-            decision: PermissionDecision::Ask,
+            decision: PermissionDecision::Allow,
             source: None,
         }
     }
@@ -462,6 +424,18 @@ impl PermissionEngine {
         } else {
             self.cwd.join(path)
         }
+    }
+}
+
+/// 沿用审批来源字段，使内置风险和分析失败也能在抽屉中说明询问原因。
+fn risk_prompt(reason: &str) -> PermissionCheck {
+    PermissionCheck {
+        decision: PermissionDecision::Ask,
+        source: Some(PermissionSource {
+            decision: "prompt".to_string(),
+            source: "内置 Bash 风险策略".to_string(),
+            rule: reason.to_string(),
+        }),
     }
 }
 
