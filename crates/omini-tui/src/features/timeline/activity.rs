@@ -34,7 +34,7 @@ pub fn is_activity_boundary_tool(tool_use: &ToolUseBlock) -> bool {
     )
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ActivityGroup {
     thinking_ms: Option<u64>,
     active_thinking_ms: Option<u64>,

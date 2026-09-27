@@ -194,12 +194,17 @@ impl AppState {
     }
 
     pub fn clear_run_dividers(&mut self) {
-        self.sessions.views["main"].messages.retain(|message| {
+        let view = &mut self.sessions.views["main"];
+        let before = view.messages.len();
+        view.messages.retain(|message| {
             !matches!(
                 message,
                 UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. })
             )
         });
+        if view.messages.len() != before {
+            view.render_cache.get_mut().reset();
+        }
     }
 
     pub fn pause_run_timer(&mut self) {
@@ -507,7 +512,10 @@ impl AppState {
         };
         if let Some(session) = session {
             session.total_lines = output.viewport.total_lines;
-            session.selectable_message_lines = output.viewport.selectable_message_lines;
+            if let Some((start, lines)) = output.viewport.selectable_patch {
+                session.selectable_message_lines.truncate(start);
+                session.selectable_message_lines.extend(lines);
+            }
             session.message_scroll_y = output.viewport.message_scroll_y;
             session.scroll_offset = output.viewport.scroll_offset;
             session.auto_scroll = output.viewport.auto_scroll;

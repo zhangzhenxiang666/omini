@@ -3,11 +3,14 @@ use crate::features::sessions::timing::RunTimer;
 use crate::features::timeline::model::UiMessage;
 use omini_domain::task::TaskStatus;
 use omini_model::message::Message;
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct SessionState {
     pub messages: Vec<UiMessage>,
+    /// 时间线派生缓存只属于当前视图，不进入协议、历史或会话快照。
+    pub render_cache: RefCell<crate::features::timeline::view::TimelineRenderCache>,
     /// 本地 optimistic echo 的一次性 runtime 回显关联表；只存在于当前 TUI 进程内。
     pub pending_client_echoes: HashMap<String, Vec<usize>>,
     /// 正在流式构建中的 assistant 消息（SSE 实时显示）
@@ -45,6 +48,7 @@ impl Default for SessionState {
     fn default() -> Self {
         Self {
             messages: Vec::new(),
+            render_cache: RefCell::new(Default::default()),
             pending_client_echoes: HashMap::new(),
             pending_assistant: None,
             pending_proposed_plan: None,

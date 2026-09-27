@@ -41,6 +41,17 @@ fn push_session_message(view: &mut crate::app::state::SessionState, message: UiM
 }
 
 impl AppState {
+    /// 任务元数据只会改变引用它的通知行，其他历史消息继续命中缓存。
+    fn invalidate_task_notice(&mut self, task_id: &str) {
+        let view = &self.sessions.views["main"];
+        if let Some(index) = view.messages.iter().position(|message| {
+            matches!(message, UiMessage::SystemEvent(UiSystemEvent::TaskNotification(notification))
+                if notification.tasks.iter().any(|task| task.task_id == task_id))
+        }) {
+            view.render_cache.borrow_mut().mark_dirty(index);
+        }
+    }
+
     pub fn is_run_active(&self) -> bool {
         matches!(
             self.sessions.views["main"].agent_status,
@@ -346,10 +357,15 @@ impl AppState {
                     .is_none()
                 {
                     if replaces_matching_local_echo {
+                        let index = self.sessions.views["main"].messages.len() - 1;
                         *self.sessions.views["main"]
                             .messages
                             .last_mut()
                             .expect("matching echo is present") = ui_message;
+                        self.sessions.views["main"]
+                            .render_cache
+                            .get_mut()
+                            .mark_dirty(index);
                     } else if self.sessions.views["main"].messages.last() != Some(&ui_message) {
                         self.sessions.views["main"].messages.push(ui_message);
                     }
@@ -486,6 +502,7 @@ impl AppState {
                     }
                     self.prune_terminal_tasks();
                 }
+                self.invalidate_task_notice(&event.task.task_id);
             }
             RuntimeToUiEvent::TaskOutputDelta(_) => {}
             RuntimeToUiEvent::TurnEnded => {
@@ -612,6 +629,7 @@ impl AppState {
                             view.messages.push(prompt);
                             self.sessions.views.insert(task_id.clone(), view);
                         }
+                        self.invalidate_task_notice(&task_id);
                     }
                     AgentTaskEvent::Started { .. } => {}
                     AgentTaskEvent::MessageCommitted { message, .. } => {
@@ -678,6 +696,7 @@ impl AppState {
                         let removed_active = self.remove_tool_pauses_for_source_thread(&thread_id);
                         self.finish_tool_pause_removal(removed_active);
                         self.prune_terminal_tasks();
+                        self.invalidate_task_notice(&task_id);
                     }
                     AgentTaskEvent::TurnStarted => {
                         if let Some(view) = self.sessions.views.get_mut(&task_id) {
@@ -993,6 +1012,8 @@ impl AppState {
                 .to_std()
                 .ok();
         }
+        let task_id = node.task_id.clone();
+        self.invalidate_task_notice(&task_id);
     }
 
     pub fn apply_thread_snapshot(
@@ -1014,6 +1035,7 @@ impl AppState {
             self.project.current_thread_title = None;
         }
         self.sessions.views["main"].messages = UiMessage::from_history_items(messages);
+        self.sessions.views["main"].render_cache.get_mut().reset();
         self.sessions.views["main"].pending_client_echoes.clear();
         self.project.status_bar.current_context_tokens = usage.current_context_tokens;
         self.project.status_bar.total_tokens = usage.total_tokens;

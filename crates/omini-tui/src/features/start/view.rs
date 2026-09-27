@@ -14,7 +14,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 const LOGO: &str = include_str!("../../../assets/omini-logo.txt");
 
 pub fn render_start_screen(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, area: Rect) {
-    state.viewport.selectable_message_lines.clear();
+    state.viewport.selectable_patch = Some((0, Vec::new()));
     state.viewport.message_scroll_y = 0;
     state.viewport.total_lines = 0;
 

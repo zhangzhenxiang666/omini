@@ -20,7 +20,7 @@ pub enum TimelineEntry<'a> {
 
 pub struct TimelineProjection<'a> {
     pub entries: Vec<TimelineEntry<'a>>,
-    pub results: HashMap<String, Cow<'a, ToolResultBlock>>,
+    pub results: HashMap<String, ToolResultBlock>,
     pub tool_ids: HashSet<String>,
 }
 
@@ -29,60 +29,10 @@ impl<'a> TimelineProjection<'a> {
         let mut entries = session
             .messages
             .iter()
-            .map(|message| match message {
-                UiMessage::AssistantMessage(message) => TimelineEntry::Blocks(
-                    message
-                        .blocks
-                        .iter()
-                        .map(|block| match block {
-                            AssistantMessageBlock::Thinking { duration_ms, .. } => {
-                                BlockView::Thinking(*duration_ms)
-                            }
-                            AssistantMessageBlock::Text { text } => BlockView::Text(text),
-                            AssistantMessageBlock::ToolUse { id, name, input } => {
-                                BlockView::ToolUse(Cow::Owned(ToolUseBlock {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    input: input.clone(),
-                                }))
-                            }
-                        })
-                        .collect(),
-                    false,
-                ),
-                UiMessage::SystemEvent(UiSystemEvent::ToolResults { results }) => {
-                    TimelineEntry::Blocks(
-                        results
-                            .iter()
-                            .map(|result| BlockView::Result(Cow::Owned(adapt_result(result))))
-                            .collect(),
-                        false,
-                    )
-                }
-                _ => TimelineEntry::Boundary(message),
-            })
+            .map(project_message)
             .collect::<Vec<_>>();
         if let Some(pending) = &session.pending_assistant {
-            entries.push(TimelineEntry::Blocks(
-                pending
-                    .content
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Thinking(thinking) => {
-                            Some(BlockView::Thinking(thinking.duration_ms))
-                        }
-                        ContentBlock::Text(text) => Some(BlockView::Text(&text.text)),
-                        ContentBlock::ToolUse(tool) => {
-                            Some(BlockView::ToolUse(Cow::Borrowed(tool)))
-                        }
-                        ContentBlock::ToolResult(result) => {
-                            Some(BlockView::Result(Cow::Borrowed(result)))
-                        }
-                        ContentBlock::Image(_) => None,
-                    })
-                    .collect(),
-                true,
-            ));
+            entries.push(project_pending(pending));
         }
         let mut results = HashMap::new();
         let mut tool_ids = HashSet::new();
@@ -96,7 +46,7 @@ impl<'a> TimelineProjection<'a> {
                         BlockView::Result(result) => {
                             results
                                 .entry(result.tool_use_id.clone())
-                                .or_insert_with(|| result.clone());
+                                .or_insert_with(|| result.as_ref().clone());
                         }
                         _ => {}
                     }
@@ -109,6 +59,60 @@ impl<'a> TimelineProjection<'a> {
             tool_ids,
         }
     }
+}
+
+/// 单条消息的投影供全量校验与增量缓存共用，避免两条渲染路径产生不同的分组语义。
+pub fn project_message(message: &UiMessage) -> TimelineEntry<'_> {
+    match message {
+        UiMessage::AssistantMessage(message) => TimelineEntry::Blocks(
+            message
+                .blocks
+                .iter()
+                .map(|block| match block {
+                    AssistantMessageBlock::Thinking { duration_ms, .. } => {
+                        BlockView::Thinking(*duration_ms)
+                    }
+                    AssistantMessageBlock::Text { text } => BlockView::Text(text),
+                    AssistantMessageBlock::ToolUse { id, name, input } => {
+                        BlockView::ToolUse(Cow::Owned(ToolUseBlock {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: input.clone(),
+                        }))
+                    }
+                })
+                .collect(),
+            false,
+        ),
+        UiMessage::SystemEvent(UiSystemEvent::ToolResults { results }) => TimelineEntry::Blocks(
+            results
+                .iter()
+                .map(|result| BlockView::Result(Cow::Owned(adapt_result(result))))
+                .collect(),
+            false,
+        ),
+        _ => TimelineEntry::Boundary(message),
+    }
+}
+
+/// 流式块保持原顺序，供缓存尾部和全量校验使用。
+pub fn project_pending(
+    pending: &crate::features::timeline::model::StreamingMessage,
+) -> TimelineEntry<'_> {
+    TimelineEntry::Blocks(
+        pending
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                ContentBlock::Thinking(thinking) => Some(BlockView::Thinking(thinking.duration_ms)),
+                ContentBlock::Text(text) => Some(BlockView::Text(&text.text)),
+                ContentBlock::ToolUse(tool) => Some(BlockView::ToolUse(Cow::Borrowed(tool))),
+                ContentBlock::ToolResult(result) => Some(BlockView::Result(Cow::Borrowed(result))),
+                ContentBlock::Image(_) => None,
+            })
+            .collect(),
+        true,
+    )
 }
 
 fn adapt_result(result: &ToolResultRecord) -> ToolResultBlock {

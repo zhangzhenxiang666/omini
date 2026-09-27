@@ -15,7 +15,8 @@ pub struct FrameState {
 #[derive(Debug, Default)]
 pub struct Viewport {
     pub total_lines: usize,
-    pub selectable_message_lines: Vec<String>,
+    /// 从首个变化行开始替换选择文本，避免每帧复制整段历史。
+    pub selectable_patch: Option<(usize, Vec<String>)>,
     pub message_scroll_y: usize,
     pub scroll_offset: usize,
     pub auto_scroll: bool,

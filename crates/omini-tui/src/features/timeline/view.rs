@@ -17,8 +17,270 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
+
+#[derive(Debug, Clone)]
+struct MessageCheckpoint {
+    line_count: usize,
+    activity: ActivityGroup,
+}
+
+/// 每个会话保留已结算的历史行和未结算的活动组；流式尾部始终从该状态继续。
+#[derive(Debug, Default)]
+pub struct TimelineRenderCache {
+    width: usize,
+    project_dir: PathBuf,
+    initialized: bool,
+    processed_messages: usize,
+    lines: Vec<Line<'static>>,
+    selectable: Vec<String>,
+    activity: ActivityGroup,
+    checkpoints: Vec<MessageCheckpoint>,
+    results: HashMap<String, omini_model::message::ToolResultBlock>,
+    tool_ids: HashSet<String>,
+    tool_positions: HashMap<String, usize>,
+    result_positions: HashMap<String, usize>,
+    pending_result_ids: HashSet<String>,
+    pending_tool_ids: HashSet<String>,
+    dirty_from: Option<usize>,
+    displayed_suffix: Vec<String>,
+    #[cfg(test)]
+    pub history_passes: usize,
+}
+
+impl Clone for TimelineRenderCache {
+    fn clone(&self) -> Self {
+        // 克隆会话只复制事实状态；派生行由新会话首次绘制时重新建立。
+        Self::default()
+    }
+}
+
+impl TimelineRenderCache {
+    /// 非追加改动从受影响消息回退；历史重排和快照替换直接清空索引。
+    pub fn mark_dirty(&mut self, index: usize) {
+        self.dirty_from = Some(
+            self.dirty_from
+                .map_or(index, |previous| previous.min(index)),
+        );
+    }
+
+    pub fn reset(&mut self) {
+        let width = self.width;
+        let project_dir = self.project_dir.clone();
+        #[cfg(test)]
+        let history_passes = self.history_passes;
+        *self = Self {
+            width,
+            project_dir,
+            #[cfg(test)]
+            history_passes,
+            ..Self::default()
+        };
+    }
+
+    /// 先登记新增消息里的工具关联，随后渲染旧调用时即可看到晚到的结果。
+    fn index_message(&mut self, message: &UiMessage, index: usize) {
+        use crate::features::timeline::projection::{BlockView, TimelineEntry, project_message};
+        let TimelineEntry::Blocks(blocks, _) = project_message(message) else {
+            return;
+        };
+        for block in blocks {
+            match block {
+                BlockView::ToolUse(tool) => {
+                    self.tool_ids.insert(tool.id.clone());
+                    if let std::collections::hash_map::Entry::Vacant(position) =
+                        self.tool_positions.entry(tool.id.clone())
+                    {
+                        position.insert(index);
+                    }
+                    if let Some(previous) = self.result_positions.get(&tool.id)
+                        && *previous < index
+                    {
+                        self.mark_dirty(*previous);
+                    }
+                }
+                BlockView::Result(result) => {
+                    let id = result.tool_use_id.clone();
+                    self.result_positions.entry(id.clone()).or_insert(index);
+                    if let std::collections::hash_map::Entry::Vacant(entry) =
+                        self.results.entry(id.clone())
+                    {
+                        entry.insert(result.into_owned());
+                        if let Some(previous) = self.tool_positions.get(&id) {
+                            self.mark_dirty(*previous);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// 只扫描新增消息；旧依赖变化时回到消息检查点，恢复当时的活动组并重放后缀。
+    fn prepare(
+        &mut self,
+        state: &ViewContext<'_>,
+        width: usize,
+        pending: &PendingLookup<'_>,
+    ) -> Option<usize> {
+        let project_dir = state.project.status_bar.cwd.as_path();
+        if !self.initialized
+            || self.width != width
+            || self.project_dir != project_dir
+            || self.processed_messages > state.session.messages.len()
+        {
+            self.reset();
+            self.width = width;
+            self.project_dir = project_dir.to_path_buf();
+            self.initialized = true;
+            self.mark_dirty(0);
+        }
+
+        for index in self.processed_messages..state.session.messages.len() {
+            self.index_message(&state.session.messages[index], index);
+        }
+
+        // 结果可能在流式尾部先于提交到达，并改变历史里的独立工具行。
+        for id in pending.results.keys() {
+            if !self.pending_result_ids.contains(*id)
+                && !self.results.contains_key(*id)
+                && let Some(index) = self.tool_positions.get(*id)
+            {
+                self.mark_dirty(*index);
+            }
+        }
+        let mut removed_dirty = None;
+        for id in &self.pending_result_ids {
+            if !pending.results.contains_key(id.as_str())
+                && !self.results.contains_key(id)
+                && let Some(index) = self.tool_positions.get(id)
+            {
+                removed_dirty =
+                    Some(removed_dirty.map_or(*index, |previous: usize| previous.min(*index)));
+            }
+        }
+        for id in &pending.tool_ids {
+            if !self.pending_tool_ids.contains(*id)
+                && !self.tool_ids.contains(*id)
+                && let Some(index) = self.result_positions.get(*id)
+            {
+                self.mark_dirty(*index);
+            }
+        }
+        for id in &self.pending_tool_ids {
+            if !pending.tool_ids.contains(id.as_str())
+                && !self.tool_ids.contains(id)
+                && let Some(index) = self.result_positions.get(id)
+            {
+                removed_dirty = Some(removed_dirty.map_or(*index, |previous| previous.min(*index)));
+            }
+        }
+        if let Some(index) = removed_dirty {
+            self.mark_dirty(index);
+        }
+        self.pending_result_ids = pending.results.keys().map(|id| (*id).to_string()).collect();
+        self.pending_tool_ids = pending
+            .tool_ids
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect();
+
+        let start = self
+            .dirty_from
+            .take()
+            .unwrap_or(self.processed_messages)
+            .min(self.processed_messages);
+        if start == state.session.messages.len() && start == self.processed_messages {
+            return None;
+        }
+        let changed_line = if start < self.processed_messages {
+            let checkpoint = self.checkpoints[start].clone();
+            self.lines.truncate(checkpoint.line_count);
+            self.selectable.truncate(checkpoint.line_count);
+            self.activity = checkpoint.activity.clone();
+            self.checkpoints.truncate(start);
+            checkpoint.line_count
+        } else {
+            self.lines.len()
+        };
+
+        let lookup = RenderLookup {
+            results: &self.results,
+            tool_ids: &self.tool_ids,
+            pending,
+        };
+        for index in start..state.session.messages.len() {
+            self.checkpoints.push(MessageCheckpoint {
+                line_count: self.lines.len(),
+                activity: self.activity.clone(),
+            });
+            render_entry(
+                state,
+                &crate::features::timeline::projection::project_message(
+                    &state.session.messages[index],
+                ),
+                &lookup,
+                &mut self.activity,
+                width,
+                &mut self.lines,
+                &mut self.selectable,
+            );
+            #[cfg(test)]
+            {
+                self.history_passes += 1;
+            }
+        }
+        self.processed_messages = state.session.messages.len();
+        Some(changed_line)
+    }
+}
+
+#[derive(Default)]
+struct PendingLookup<'a> {
+    results: HashMap<&'a str, &'a omini_model::message::ToolResultBlock>,
+    tool_ids: HashSet<&'a str>,
+}
+
+impl<'a> PendingLookup<'a> {
+    fn new(pending: Option<&'a crate::features::timeline::model::StreamingMessage>) -> Self {
+        let mut lookup = Self::default();
+        if let Some(pending) = pending {
+            for block in &pending.content {
+                match block {
+                    omini_model::message::ContentBlock::ToolUse(tool) => {
+                        lookup.tool_ids.insert(&tool.id);
+                    }
+                    omini_model::message::ContentBlock::ToolResult(result) => {
+                        lookup.results.entry(&result.tool_use_id).or_insert(result);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        lookup
+    }
+}
+
+struct RenderLookup<'a, 'b> {
+    results: &'a HashMap<String, omini_model::message::ToolResultBlock>,
+    tool_ids: &'a HashSet<String>,
+    pending: &'a PendingLookup<'b>,
+}
+
+impl RenderLookup<'_, '_> {
+    fn result(&self, id: &str) -> Option<&omini_model::message::ToolResultBlock> {
+        self.results
+            .get(id)
+            .or_else(|| self.pending.results.get(id).copied())
+    }
+
+    fn has_tool(&self, id: &str) -> bool {
+        self.tool_ids.contains(id) || self.pending.tool_ids.contains(id)
+    }
+}
 
 fn build_user_draft_lines(draft: &UserDraft, content_width: usize) -> Vec<Line<'static>> {
     let user_bg = USER_MESSAGE_BG;
@@ -134,16 +396,58 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
         && state.session.pending_proposed_plan.is_none()
         && state.session.pending_compact_summary.is_none()
     {
-        state.viewport.selectable_message_lines.clear();
+        let mut cache = state.session.render_cache.borrow_mut();
+        if cache.initialized {
+            cache.reset();
+        }
+        if !state.session.selectable_message_lines.is_empty() {
+            state.viewport.selectable_patch = Some((0, Vec::new()));
+        }
         state.viewport.message_scroll_y = 0;
+        state.viewport.total_lines = 0;
         return;
     }
 
     let content_width = area.width as usize;
     let visible_height = area.height as usize;
-
-    // 历史与流式尾部每帧经同一投影器渲染，避免不同缓存路径改变聚合边界。
-    let timeline_lines = render_message_range(state, content_width);
+    let pending = PendingLookup::new(state.session.pending_assistant.as_ref());
+    let mut cache = state.session.render_cache.borrow_mut();
+    let changed_line = cache.prepare(state, content_width, &pending);
+    let lookup = RenderLookup {
+        results: &cache.results,
+        tool_ids: &cache.tool_ids,
+        pending: &pending,
+    };
+    let mut tail_lines = Vec::new();
+    let mut tail_selectable = Vec::new();
+    let mut activity = cache.activity.clone();
+    if let Some(pending_message) = state.session.pending_assistant.as_ref() {
+        render_entry(
+            state,
+            &crate::features::timeline::projection::project_pending(pending_message),
+            &lookup,
+            &mut activity,
+            content_width,
+            &mut tail_lines,
+            &mut tail_selectable,
+        );
+    }
+    flush_activity_group(
+        &mut activity,
+        content_width,
+        &mut tail_lines,
+        &mut tail_selectable,
+    );
+    if !cache.lines.is_empty()
+        && !tail_lines.is_empty()
+        && !cache
+            .lines
+            .last()
+            .is_some_and(|line| line_to_plain_text(line).is_empty())
+    {
+        tail_lines.insert(0, Line::from(""));
+        tail_selectable.insert(0, String::new());
+    }
 
     let plan_lines = state
         .session
@@ -160,7 +464,9 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
         .map(|text| render_pending_compact_lines(text, content_width))
         .unwrap_or_default();
 
-    let n_timeline = timeline_lines.0.len();
+    let n_stable = cache.lines.len();
+    let n_tail = tail_lines.len();
+    let n_timeline = n_stable + n_tail;
     let n_plan = plan_lines.0.len();
     let n_compact = compact_lines.0.len();
     let has_timeline_plan_separator = n_timeline > 0 && n_plan > 0;
@@ -187,40 +493,35 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
     let scroll_y = max_scroll.saturating_sub(capped_offset);
     state.viewport.message_scroll_y = scroll_y;
 
-    state.viewport.selectable_message_lines.clear();
-    state
-        .viewport
-        .selectable_message_lines
-        .extend_from_slice(&timeline_lines.1);
+    let mut suffix_selectable = tail_selectable;
     if has_timeline_plan_separator {
-        state.viewport.selectable_message_lines.push(String::new());
+        suffix_selectable.push(String::new());
     }
-    state
-        .viewport
-        .selectable_message_lines
-        .extend_from_slice(&plan_lines.1);
+    suffix_selectable.extend_from_slice(&plan_lines.1);
     if has_compact_separator {
-        state.viewport.selectable_message_lines.push(String::new());
+        suffix_selectable.push(String::new());
     }
-    state
-        .viewport
-        .selectable_message_lines
-        .extend_from_slice(&compact_lines.1);
+    suffix_selectable.extend_from_slice(&compact_lines.1);
+    if changed_line.is_some() || cache.displayed_suffix != suffix_selectable {
+        let start = changed_line.unwrap_or(n_stable);
+        let mut patch = cache.selectable[start..].to_vec();
+        patch.extend_from_slice(&suffix_selectable);
+        state.viewport.selectable_patch = Some((start, patch));
+        cache.displayed_suffix = suffix_selectable.clone();
+    }
 
-    let visible_selectable_lines = state
-        .viewport
-        .selectable_message_lines
-        .iter()
-        .skip(scroll_y)
-        .take(visible_height)
-        .cloned()
-        .collect::<Vec<_>>();
-    for (visible_row, text) in visible_selectable_lines.into_iter().enumerate() {
+    for visible_row in 0..visible_height.min(total_lines.saturating_sub(scroll_y)) {
+        let line_index = scroll_y + visible_row;
+        let text = if line_index < n_stable {
+            &cache.selectable[line_index]
+        } else {
+            &suffix_selectable[line_index - n_stable]
+        };
         state.register_selectable_screen_line(
             area.y + visible_row as u16,
             area.x,
             area.width,
-            text,
+            text.clone(),
         );
     }
 
@@ -236,7 +537,8 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
 
     let buf = frame.buffer_mut();
 
-    render_line_section(&timeline_lines.0, 0, &render_ctx, buf);
+    render_line_section(&cache.lines, 0, &render_ctx, buf);
+    render_line_section(&tail_lines, n_stable, &render_ctx, buf);
 
     if has_timeline_plan_separator {
         render_blank_separator(n_timeline, scroll_y, visible_height, area, buf);
@@ -308,6 +610,7 @@ fn render_blank_separator(
 }
 
 /// 按同一条有序时间线扫描已提交历史与流式尾部，并在明确分界处结算活动摘要。
+#[cfg(test)]
 fn render_message_range(
     state: &ViewContext<'_>,
     content_width: usize,
@@ -315,49 +618,23 @@ fn render_message_range(
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
     let projection = crate::features::timeline::projection::TimelineProjection::new(state.session);
+    let pending = PendingLookup::default();
+    let lookup = RenderLookup {
+        results: &projection.results,
+        tool_ids: &projection.tool_ids,
+        pending: &pending,
+    };
     let mut activity = ActivityGroup::default();
     for entry in &projection.entries {
-        match entry {
-            crate::features::timeline::projection::TimelineEntry::Blocks(blocks, pending) => {
-                let active_thinking = blocks.iter().rposition(|block| {
-                    matches!(
-                        block,
-                        crate::features::timeline::projection::BlockView::Thinking(None)
-                    )
-                });
-                for (index, block) in blocks.iter().enumerate() {
-                    render_block(
-                        state,
-                        block,
-                        *pending && Some(index) == active_thinking,
-                        &projection,
-                        &mut activity,
-                        content_width,
-                        &mut all_lines,
-                        &mut selectable_lines,
-                    );
-                }
-            }
-            crate::features::timeline::projection::TimelineEntry::Boundary(message) => {
-                flush_activity_group(
-                    &mut activity,
-                    content_width,
-                    &mut all_lines,
-                    &mut selectable_lines,
-                );
-                if let UiMessage::UserInput(input) = message {
-                    render_user_message(
-                        &crate::features::timeline::model::user_input_draft(input),
-                        content_width,
-                        &mut all_lines,
-                        &mut selectable_lines,
-                    );
-                } else {
-                    let (lines, selectable) = render_ui_boundary(message, state, content_width);
-                    append_message_lines(&mut all_lines, &mut selectable_lines, lines, selectable);
-                }
-            }
-        }
+        render_entry(
+            state,
+            entry,
+            &lookup,
+            &mut activity,
+            content_width,
+            &mut all_lines,
+            &mut selectable_lines,
+        );
     }
 
     flush_activity_group(
@@ -367,6 +644,54 @@ fn render_message_range(
         &mut selectable_lines,
     );
     (all_lines, selectable_lines)
+}
+
+/// 全量校验和缓存重放共用此入口，保持消息边界与流式块的分组规则一致。
+fn render_entry(
+    state: &ViewContext<'_>,
+    entry: &crate::features::timeline::projection::TimelineEntry<'_>,
+    lookup: &RenderLookup<'_, '_>,
+    activity: &mut ActivityGroup,
+    content_width: usize,
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+) {
+    match entry {
+        crate::features::timeline::projection::TimelineEntry::Blocks(blocks, pending) => {
+            let active_thinking = blocks.iter().rposition(|block| {
+                matches!(
+                    block,
+                    crate::features::timeline::projection::BlockView::Thinking(None)
+                )
+            });
+            for (index, block) in blocks.iter().enumerate() {
+                render_block(
+                    state,
+                    block,
+                    *pending && Some(index) == active_thinking,
+                    lookup,
+                    activity,
+                    content_width,
+                    all_lines,
+                    selectable_lines,
+                );
+            }
+        }
+        crate::features::timeline::projection::TimelineEntry::Boundary(message) => {
+            flush_activity_group(activity, content_width, all_lines, selectable_lines);
+            if let UiMessage::UserInput(input) = message {
+                render_user_message(
+                    &crate::features::timeline::model::user_input_draft(input),
+                    content_width,
+                    all_lines,
+                    selectable_lines,
+                );
+            } else {
+                let (lines, selectable) = render_ui_boundary(message, state, content_width);
+                append_message_lines(all_lines, selectable_lines, lines, selectable);
+            }
+        }
+    }
 }
 
 fn render_user_message(
@@ -498,7 +823,7 @@ fn render_block(
     state: &ViewContext<'_>,
     block: &crate::features::timeline::projection::BlockView<'_>,
     active_tail: bool,
-    projection: &crate::features::timeline::projection::TimelineProjection<'_>,
+    lookup: &RenderLookup<'_, '_>,
     activity: &mut ActivityGroup,
     content_width: usize,
     all_lines: &mut Vec<Line<'static>>,
@@ -526,10 +851,7 @@ fn render_block(
                 return;
             }
             flush_activity_group(activity, content_width, all_lines, selectable_lines);
-            let result = projection
-                .results
-                .get(&tool.id)
-                .map(|result| result.as_ref());
+            let result = lookup.result(&tool.id);
             let lines = render_tool(
                 tool,
                 result,
@@ -548,7 +870,7 @@ fn render_block(
                 build_assistant_text_lines(text, content_width),
             );
         }
-        BlockView::Result(result) if !projection.tool_ids.contains(&result.tool_use_id) => {
+        BlockView::Result(result) if !lookup.has_tool(&result.tool_use_id) => {
             activity.orphan_results.push(result.as_ref().clone());
         }
         _ => {}
@@ -1696,5 +2018,384 @@ mod tests {
         );
         assert!(rendered.contains("final answer"));
         assert!(!rendered.contains("hidden continuation"));
+    }
+
+    /// 给定历史已经绘制；当输入、滚动与高度变化时，则旧消息不再投影或解析。
+    #[test]
+    fn verify_cache_hits() {
+        let mut state = AppState::new();
+        for index in 0..60 {
+            state.sessions.views["main"]
+                .messages
+                .push(assistant_item(Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::from_text(format!("**entry {index}**"))],
+                )));
+        }
+
+        assert_cached_reference(&mut state, 80, 24);
+        let first_passes = state.sessions.views["main"]
+            .render_cache
+            .borrow()
+            .history_passes;
+        assert_eq!(first_passes, 60);
+
+        state.composer.input = "draft".into();
+        state.sessions.views["main"].auto_scroll = false;
+        state.sessions.views["main"].scroll_offset = 3;
+        assert_cached_reference(&mut state, 80, 36);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            first_passes
+        );
+
+        state.sessions.views["main"]
+            .messages
+            .push(user_input_item("next"));
+        assert_cached_reference(&mut state, 80, 24);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            first_passes + 1
+        );
+
+        assert_cached_reference(&mut state, 120, 36);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            first_passes + 62
+        );
+    }
+
+    /// 给定工具结果可能晚到或先于调用；当索引变化时，则只回退受影响后缀。
+    #[test]
+    fn verify_result_rewind() {
+        let mut state = AppState::new();
+        for index in 0..20 {
+            state.sessions.views["main"]
+                .messages
+                .push(user_input_item(&format!("prefix {index}")));
+        }
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_tool_use(
+                    "agent-1".into(),
+                    "spawn_agent".into(),
+                    HashMap::from([("title".into(), serde_json::json!("Inspect"))]),
+                )],
+            )));
+        state.sessions.views["main"]
+            .messages
+            .push(user_input_item("after agent"));
+        assert_cached_reference(&mut state, 100, 24);
+        state.sessions.views["main"].pending_assistant = Some(
+            Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_tool_result(
+                    "agent-1".into(),
+                    true,
+                    "temporary failure".into(),
+                )],
+            )
+            .into(),
+        );
+        assert_cached_reference(&mut state, 100, 24);
+        state.sessions.views["main"].pending_assistant = None;
+        assert_cached_reference(&mut state, 100, 24);
+        let before = state.sessions.views["main"]
+            .render_cache
+            .borrow()
+            .history_passes;
+
+        state.sessions.views["main"]
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::ToolResults {
+                results: vec![ToolResultRecord {
+                    tool_use_id: "agent-1".into(),
+                    is_error: true,
+                    content: "agent failed".into(),
+                    metadata: None,
+                }],
+            }));
+        assert_cached_reference(&mut state, 100, 24);
+        let after = state.sessions.views["main"]
+            .render_cache
+            .borrow()
+            .history_passes;
+        assert!(after > before + 1 && after < before + 20);
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("agent failed")
+        );
+
+        state.sessions.views["main"]
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::ToolResults {
+                results: vec![ToolResultRecord {
+                    tool_use_id: "future".into(),
+                    is_error: false,
+                    content: "orphan output".into(),
+                    metadata: None,
+                }],
+            }));
+        assert_cached_reference(&mut state, 100, 24);
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("orphan output")
+        );
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_tool_use(
+                    "future".into(),
+                    "bash".into(),
+                    HashMap::new(),
+                )],
+            )));
+        assert_cached_reference(&mut state, 100, 24);
+        assert!(
+            !state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("orphan output")
+        );
+    }
+
+    /// 给定主会话与子会话都已缓存；当切换视图和替换快照时，则不会复用错误历史。
+    #[test]
+    fn verify_session_isolation() {
+        let mut state = AppState::new();
+        state.sessions.views["main"]
+            .messages
+            .push(user_input_item("main"));
+        assert_cached_reference(&mut state, 80, 24);
+        state.sessions.views.insert(
+            "child".into(),
+            crate::features::sessions::model::SessionState {
+                messages: vec![user_input_item("child")],
+                ..Default::default()
+            },
+        );
+        state.sessions.active_session_task_id = Some("child".into());
+        assert_cached_reference(&mut state, 80, 24);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            1
+        );
+        assert_eq!(
+            state.sessions.views["child"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            1
+        );
+
+        state.sessions.active_session_task_id = None;
+        assert_cached_reference(&mut state, 80, 24);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            1
+        );
+        state.apply_thread_snapshot(
+            Some("replacement".into()),
+            vec![omini_protocol::HistoryItem::UserInput(
+                match user_input_item("new main") {
+                    UiMessage::UserInput(input) => input,
+                    _ => unreachable!(),
+                },
+            )],
+            Vec::new(),
+            ThreadUsageSnapshot::default(),
+        );
+        assert_cached_reference(&mut state, 80, 24);
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("new main")
+        );
+        assert!(!state.sessions.views.contains_key("child"));
+    }
+
+    /// 给定历史已经缓存；当流式尾部增长、提交和分隔线清除时，则逐次保持全量结果。
+    #[test]
+    fn verify_stream_invalidation() {
+        let mut state = AppState::new();
+        state.sessions.views["main"]
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(
+                crate::features::timeline::model::UserDraft::plain("hello".into()),
+            )));
+        assert_cached_reference(&mut state, 80, 24);
+        state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+            item: omini_protocol::HistoryItem::UserInput(match user_input_item("hello") {
+                UiMessage::UserInput(input) => input,
+                _ => unreachable!(),
+            }),
+            client_echo_id: None,
+        });
+        assert_cached_reference(&mut state, 80, 24);
+        let committed = state.sessions.views["main"]
+            .render_cache
+            .borrow()
+            .history_passes;
+        assert_eq!(committed, 2);
+
+        state.apply_event(RuntimeToUiEvent::TextDelta("stream".into()));
+        assert_cached_reference(&mut state, 80, 24);
+        state.apply_event(RuntimeToUiEvent::TextDelta(" continues".into()));
+        assert_cached_reference(&mut state, 80, 24);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            committed
+        );
+
+        state.apply_event(RuntimeToUiEvent::TurnEnded);
+        assert_cached_reference(&mut state, 80, 24);
+        state.start_run_timer();
+        state.apply_event(RuntimeToUiEvent::RunFinished);
+        assert_cached_reference(&mut state, 80, 24);
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("Worked for")
+        );
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        assert_cached_reference(&mut state, 80, 24);
+        assert!(
+            !state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("Worked for")
+        );
+    }
+
+    /// 给定已显示的子任务通知；当运行事实补齐时，则只重建通知及其后缀。
+    #[test]
+    fn verify_notice_rewind() {
+        use omini_domain::task::{
+            TaskChangedEvent, TaskCompletion, TaskInfo, TaskKind, TaskStatus,
+        };
+        let mut state = AppState::new();
+        for index in 0..12 {
+            state.sessions.views["main"]
+                .messages
+                .push(user_input_item(&format!("prefix {index}")));
+        }
+        state.sessions.views["main"]
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::TaskNotification(
+                omini_domain::conversation::TaskNotification {
+                    tasks: vec![TaskCompletion {
+                        task_id: "task-1".into(),
+                        kind: TaskKind::SubAgent,
+                        label: "Explore".into(),
+                        title: "Inspect".into(),
+                        status: TaskStatus::Completed,
+                        summary: None,
+                    }],
+                    created_at: chrono::Utc::now(),
+                },
+            )));
+        assert_cached_reference(&mut state, 80, 24);
+        let before = state.sessions.views["main"]
+            .render_cache
+            .borrow()
+            .history_passes;
+        let now = chrono::Utc::now();
+        state.sessions.subagents.insert(
+            "thread-1".into(),
+            crate::app::state::SubagentNode {
+                task_id: "task-1".into(),
+                thread_id: "thread-1".into(),
+                parent_thread_id: "parent".into(),
+                spawn_tool_use_id: "spawn-1".into(),
+                agent_label: "Explore".into(),
+                title: "Inspect".into(),
+                execution_mode: AgentTaskExecutionMode::Background,
+                status: TaskStatus::Running,
+                duration: None,
+                started_at: now - chrono::Duration::seconds(67),
+                messages: Vec::new(),
+            },
+        );
+        state.sessions.subagent_order.push("task-1".into());
+        state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+            task: TaskInfo {
+                task_id: "task-1".into(),
+                owner_thread_id: "parent".into(),
+                kind: TaskKind::SubAgent,
+                title: "Inspect".into(),
+                status: TaskStatus::Completed,
+                created_at: now - chrono::Duration::seconds(67),
+                updated_at: now,
+                completed_at: Some(now),
+                result_summary: None,
+            },
+        }));
+        assert_cached_reference(&mut state, 80, 24);
+        assert_eq!(
+            state.sessions.views["main"]
+                .render_cache
+                .borrow()
+                .history_passes,
+            before + 1
+        );
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("1m 7s")
+        );
+    }
+
+    fn assert_cached_reference(state: &mut AppState, width: u16, height: u16) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_messages(state, frame, Rect::new(0, 0, width, height)))
+            .unwrap();
+        let (lines, selectable) = render_message_range(state, width as usize);
+        assert_eq!(state.sessions.active().selectable_message_lines, selectable);
+
+        let mut expected = Terminal::new(TestBackend::new(width, height)).unwrap();
+        expected
+            .draw(|frame| {
+                let context = SectionRenderContext {
+                    scroll_y: state.sessions.active().message_scroll_y,
+                    visible_height: height as usize,
+                    area: Rect::new(0, 0, width, height),
+                    user_bg: USER_MESSAGE_BG,
+                    user_line_bg: Style::default()
+                        .fg(crate::ui::theme::TEXT)
+                        .bg(USER_MESSAGE_BG),
+                };
+                render_line_section(&lines, 0, &context, frame.buffer_mut());
+            })
+            .unwrap();
+        assert_eq!(terminal.backend().buffer(), expected.backend().buffer());
     }
 }
