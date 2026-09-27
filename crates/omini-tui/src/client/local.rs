@@ -59,7 +59,8 @@ pub async fn handle_local_request(
                 client_id,
                 &protocol::AgentRunInputRequest {
                     input: input.input,
-                    client_echo_id,
+                    client_echo_id: client_echo_id
+                        .ok_or_else(|| "child input requires client_echo_id".to_string())?,
                 },
             )
             .await?;

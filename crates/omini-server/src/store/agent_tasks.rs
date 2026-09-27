@@ -186,6 +186,23 @@ impl Database {
         .await?;
         rows.into_iter().map(TryInto::try_into).collect()
     }
+
+    /// 按主线程归属查找子任务，避免将子线程 ID 误当作主线程 ID 查询 Run。
+    pub async fn get_owned_task(
+        &self,
+        owner_thread_id: &str,
+        task_id: &str,
+    ) -> Result<Option<AgentTask>, StoreError> {
+        sqlx::query_as::<_, AgentTaskRow>(
+            "SELECT * FROM agent_task WHERE owner_thread_id = ? AND task_id = ?",
+        )
+        .bind(owner_thread_id)
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
+    }
     pub async fn finish_agent_task(
         &self,
         task_id: &str,

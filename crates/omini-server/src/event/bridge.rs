@@ -659,6 +659,7 @@ mod tests {
                     },
                 )],
                 agent_tasks: Vec::new(),
+                projected_delivery_keys: Vec::new(),
                 usage: runtime_contract::thread_domain::ThreadUsageSnapshot {
                     current_context_tokens: 3,
                     total_tokens: 5,

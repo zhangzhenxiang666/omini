@@ -1,4 +1,4 @@
-use crate::engine::{QueryContext, QueryEngine, SharedPendingUserMessages};
+use crate::engine::{PendingUserMessage, QueryContext, QueryEngine, SharedPendingUserMessages};
 use crate::skills::SkillSummary;
 use crate::subagents::{AgentSpec, AgentTaskRequest};
 use crate::tasks::{
@@ -12,7 +12,7 @@ use crate::types::events::EngineToRuntimeEvent;
 use chrono::Utc;
 use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
-use omini_domain::conversation::UserInput;
+use omini_domain::conversation::{AgentMessage, UserInput};
 use omini_domain::input::{InputPart, UserInputIntent};
 use omini_domain::task::{TaskCompletion, TaskInfo, TaskKind, TaskStatus};
 use omini_model::message::{ContentBlock, Message, Role};
@@ -35,6 +35,14 @@ use uuid::Uuid;
 const BACKGROUND_TASK_MEMORY_LIMIT: usize = 30;
 const MAX_SYNCHRONOUS_AGENT_TASKS: usize = 10;
 
+/// 复用任务完成通知报告未注入消息，避免额外的主会话历史类型。
+fn delivery_summary(result: &AgentTaskResult) -> Option<String> {
+    result
+        .undelivered_messages
+        .filter(|count| *count > 0)
+        .map(|count| format!("{count} 条消息未进入子 Agent 模型上下文"))
+}
+
 fn task_info_from_agent(task: &AgentTaskInfo) -> TaskInfo {
     TaskInfo {
         task_id: task.task_id.clone(),
@@ -45,10 +53,13 @@ fn task_info_from_agent(task: &AgentTaskInfo) -> TaskInfo {
         created_at: task.created_at,
         updated_at: task.updated_at,
         completed_at: task.completed_at,
-        result_summary: task
-            .result
-            .as_ref()
-            .and_then(|result| result.output.clone().or_else(|| result.error.clone())),
+        result_summary: task.result.as_ref().and_then(|result| {
+            result
+                .output
+                .clone()
+                .or_else(|| result.error.clone())
+                .or_else(|| delivery_summary(result))
+        }),
     }
 }
 
@@ -91,6 +102,8 @@ impl Drop for TaskSlotReservation {
 
 struct TaskEntry {
     info: AgentTaskInfo,
+    accepting_messages: bool,
+    sent_messages: HashMap<(String, String), String>,
     cancelled: Arc<AtomicBool>,
     cancel_notify: Arc<Notify>,
     inbox: SharedPendingUserMessages,
@@ -183,6 +196,8 @@ impl AgentTaskSupervisor {
                     info.task_id.clone(),
                     TaskEntry {
                         info,
+                        accepting_messages: false,
+                        sent_messages: HashMap::new(),
                         cancelled: Arc::new(AtomicBool::new(false)),
                         cancel_notify: Arc::new(Notify::new()),
                         inbox: Arc::new(Mutex::new(std::collections::VecDeque::new())),
@@ -213,7 +228,7 @@ impl AgentTaskSupervisor {
                 label: task.agent,
                 title: task.title,
                 status: task.status,
-                summary: None,
+                summary: task.result.as_ref().and_then(delivery_summary),
             });
         }
         supervisor
@@ -230,12 +245,14 @@ impl AgentTaskSupervisor {
             .expect("agent parent inbox mutex poisoned") = Some(inbox);
     }
 
-    pub fn send_message(
+    pub async fn send_message(
         &self,
         sender_task_id: Option<&str>,
         sender_depth: u8,
+        sender_run_id: Option<&str>,
+        tool_use_id: &str,
         target: &str,
-        message: Message,
+        text: &str,
     ) -> Result<(), String> {
         if target == "parent" {
             if sender_depth != 1 || sender_task_id.is_none() {
@@ -260,31 +277,110 @@ impl AgentTaskSupervisor {
             inbox
                 .lock()
                 .expect("agent parent inbox queue poisoned")
-                .push_back(message);
+                .push_back(PendingUserMessage::Plain(Message::from_user_text(
+                    text.to_string(),
+                )));
             return Ok(());
         }
 
         if sender_depth != 0 || sender_task_id.is_some() {
             return Err("only the main agent can message a child agent".to_string());
         }
-        let tasks = self.tasks.lock().expect("agent task mutex poisoned");
-        let task = tasks
-            .get(target)
-            .ok_or_else(|| "child agent task was not found".to_string())?;
-        if task.info.depth != 1 || task.info.parent_task_id.is_some() {
-            return Err("messages are only available to direct child agents".to_string());
+        let sender_run_id =
+            sender_run_id.ok_or_else(|| "main agent run is unavailable".to_string())?;
+        let source = AgentMessage {
+            source_run_id: sender_run_id.to_string(),
+            tool_use_id: tool_use_id.to_string(),
+            text: text.to_string(),
+        };
+        let source_key = (source.source_run_id.clone(), source.tool_use_id.clone());
+        let info = {
+            let tasks = self.tasks.lock().expect("agent task mutex poisoned");
+            let task = tasks
+                .get(target)
+                .ok_or_else(|| "child agent task was not found".to_string())?;
+            if task.info.depth != 1 || task.info.parent_task_id.is_some() {
+                return Err("messages are only available to direct child agents".to_string());
+            }
+            if !task.accepting_messages || task.info.status != TaskStatus::Running {
+                return Err("messages cannot be sent to a completed child agent".to_string());
+            }
+            task.info.clone()
+        };
+        let (ack, receipt) = oneshot::channel();
+        self.task_manager
+            .persistence_sender()
+            .send(RuntimePersistenceEvent::EnqueueAgentMessage {
+                task_id: info.task_id.clone(),
+                owner_thread_id: info.owner_thread_id.clone(),
+                agent_thread_id: info.thread_id.clone(),
+                message: source.clone(),
+                ack,
+            })
+            .await
+            .map_err(|_| "agent message persistence channel closed".to_string())?;
+        receipt
+            .await
+            .map_err(|_| "agent message enqueue acknowledgement dropped".to_string())??;
+        let accepted = {
+            let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
+            if let Some(task) = tasks.get_mut(target) {
+                if !task.accepting_messages || task.info.status != TaskStatus::Running {
+                    false
+                } else if let Some(previous) = task.sent_messages.get(&source_key) {
+                    return if previous == text {
+                        Ok(())
+                    } else {
+                        Err("agent message source key was reused with different content"
+                            .to_string())
+                    };
+                } else {
+                    task.sent_messages.insert(source_key, text.to_string());
+                    task.inbox
+                        .lock()
+                        .expect("agent child inbox queue poisoned")
+                        .push_back(PendingUserMessage::MainAgent {
+                            model_message: Message::from_user_text(format!(
+                                "来自主 Agent 的消息：\n{text}"
+                            )),
+                            source: source.clone(),
+                        });
+                    true
+                }
+            } else {
+                false
+            }
+        };
+        if !accepted {
+            self.fail_task_messages(target, "子任务在消息入队前结束")
+                .await?;
+            return Err("child agent finished before message was queued".to_string());
         }
-        if task.info.status.is_terminal() {
-            return Err("messages cannot be sent to a completed child agent".to_string());
-        }
-        task.inbox
-            .lock()
-            .expect("agent child inbox queue poisoned")
-            .push_back(message);
         Ok(())
     }
 
-    pub fn intervene_agent_run(&self, run_id: &str, message: Message) -> Result<(), String> {
+    pub async fn intervene_agent_run(
+        &self,
+        run_id: &str,
+        message: Message,
+        client_source: Option<omini_runtime_contract::persistence::ClientMessage>,
+    ) -> Result<(), String> {
+        let from_client = client_source.is_some();
+        let result = self.queue_agent_input(run_id, message, client_source);
+        if result.is_err() && from_client {
+            self.fail_task_messages(run_id, "子任务已结束，客户端输入未能注入")
+                .await?;
+        }
+        result
+    }
+
+    /// 任务锁内完成终态检查和入队，避免收尾边界漏掉已接受的消息。
+    fn queue_agent_input(
+        &self,
+        run_id: &str,
+        message: Message,
+        client_source: Option<omini_runtime_contract::persistence::ClientMessage>,
+    ) -> Result<(), String> {
         let tasks = self.tasks.lock().expect("agent task mutex poisoned");
         let task = tasks
             .get(run_id)
@@ -292,14 +388,37 @@ impl AgentTaskSupervisor {
         if task.info.depth != 1 || task.info.parent_task_id.is_some() {
             return Err("user intervention is only available for direct child agents".to_string());
         }
-        if task.info.status.is_terminal() {
+        if !task.accepting_messages || task.info.status.is_terminal() {
             return Err("user intervention is unavailable for a completed child agent".to_string());
         }
         task.inbox
             .lock()
             .expect("agent child inbox queue poisoned")
-            .push_back(message);
+            .push_back(match client_source {
+                Some(source) => PendingUserMessage::Client {
+                    model_message: message,
+                    source,
+                },
+                None => PendingUserMessage::Plain(message),
+            });
         Ok(())
+    }
+
+    /// 将已接受但未注入的子任务消息结算为失败，防止任务终止时静默丢弃。
+    async fn fail_task_messages(&self, task_id: &str, reason: &str) -> Result<u32, String> {
+        let (ack, receipt) = oneshot::channel();
+        self.task_manager
+            .persistence_sender()
+            .send(RuntimePersistenceEvent::FailPendingTaskMessages {
+                task_id: task_id.to_string(),
+                reason: reason.to_string(),
+                ack,
+            })
+            .await
+            .map_err(|_| "agent message persistence channel closed".to_string())?;
+        receipt
+            .await
+            .map_err(|_| "agent message failure acknowledgement dropped".to_string())?
     }
 
     pub async fn spawn_background(
@@ -406,6 +525,7 @@ impl AgentTaskSupervisor {
             for id in &ids {
                 if let Some(task) = tasks.get_mut(id) {
                     task.info.status = TaskStatus::Cancelling;
+                    task.accepting_messages = false;
                     task.info.updated_at = Utc::now();
                     task.cancelled.store(true, Ordering::Relaxed);
                     task.cancel_notify.notify_waiters();
@@ -647,6 +767,8 @@ impl AgentTaskSupervisor {
                 task_id,
                 TaskEntry {
                     info: info.clone(),
+                    accepting_messages: true,
+                    sent_messages: HashMap::new(),
                     cancelled: Arc::clone(&cancelled),
                     cancel_notify: Arc::clone(&cancel_notify),
                     inbox: Arc::clone(&inbox),
@@ -775,22 +897,48 @@ impl AgentTaskSupervisor {
             Arc::clone(&cancel_notify),
             inbox,
         );
-        let result = engine
-            .run_query(
-                QueryContext {
-                    messages: &mut messages,
-                    settings: Arc::clone(&settings),
-                    llm_client,
-                    tool_registry,
-                    active_profile: Arc::clone(&self.active_profile),
-                    runtime_context: Some(runtime),
-                    requires_internal_input: false,
-                },
-                child_tx,
-                Arc::clone(&cancelled),
-            )
-            .instrument(task_span)
-            .await;
+        let result = loop {
+            let result = engine
+                .run_query(
+                    QueryContext {
+                        messages: &mut messages,
+                        settings: Arc::clone(&settings),
+                        llm_client: llm_client.clone(),
+                        tool_registry: Arc::clone(&tool_registry),
+                        active_profile: Arc::clone(&self.active_profile),
+                        runtime_context: Some(Arc::clone(&runtime)),
+                        requires_internal_input: false,
+                    },
+                    child_tx.clone(),
+                    Arc::clone(&cancelled),
+                )
+                .instrument(task_span.clone())
+                .await;
+            let continue_for_message = {
+                let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
+                let task = tasks
+                    .get_mut(&info.task_id)
+                    .expect("running agent task must exist");
+                let pending = !task
+                    .inbox
+                    .lock()
+                    .expect("agent child inbox queue poisoned")
+                    .is_empty();
+                if cancelled.load(Ordering::Relaxed)
+                    || matches!(result.finish_reason, FinishReason::Error(_))
+                    || !pending
+                {
+                    task.accepting_messages = false;
+                    false
+                } else {
+                    true
+                }
+            };
+            if !continue_for_message {
+                break result;
+            }
+        };
+        drop(child_tx);
         match bridge.await {
             Ok(bridge_warnings) => warnings.extend(bridge_warnings),
             Err(error) => warnings.push(format!("agent event bridge failed: {error}")),
@@ -809,6 +957,7 @@ impl AgentTaskSupervisor {
                 _ => None,
             },
             warnings,
+            undelivered_messages: None,
         };
         self.finish_task(&info.task_id, status, task_result).await
     }
@@ -930,6 +1079,34 @@ impl AgentTaskSupervisor {
                     {
                         warnings.push(error);
                     }
+                }
+                EngineToRuntimeEvent::TaskMessageProduced {
+                    message,
+                    source,
+                    ack,
+                } => {
+                    let (persistence_ack, receipt) = oneshot::channel();
+                    let result = match self
+                        .task_manager
+                        .persistence_sender()
+                        .send(RuntimePersistenceEvent::InjectTaskMessage {
+                            key: source.delivery_key(&info.task_id),
+                            agent_thread_id: info.thread_id.clone(),
+                            model_message: message,
+                            ack: persistence_ack,
+                        })
+                        .await
+                    {
+                        Ok(()) => receipt
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|value| value),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if let Err(error) = &result {
+                        warnings.push(error.clone());
+                    }
+                    let _ = ack.send(result);
                 }
                 EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
                     let _ = ack.send(Err(
@@ -1158,9 +1335,37 @@ impl AgentTaskSupervisor {
     async fn finish_task(
         &self,
         task_id: &str,
-        status: TaskStatus,
-        result: AgentTaskResult,
+        mut status: TaskStatus,
+        mut result: AgentTaskResult,
     ) -> AgentTaskInfo {
+        if let Some(task) = self
+            .tasks
+            .lock()
+            .expect("agent task mutex poisoned")
+            .get_mut(task_id)
+        {
+            task.accepting_messages = false;
+        }
+        match self
+            .fail_task_messages(task_id, "子任务结束前未能注入消息")
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => {
+                result.undelivered_messages = Some(count);
+                if status == TaskStatus::Completed {
+                    status = TaskStatus::Failed;
+                }
+            }
+            Err(error) => {
+                tracing::error!(task_id, %error, "failed to settle pending agent messages");
+                result
+                    .warnings
+                    .push(format!("消息投递状态未能结算：{error}"));
+                result.error.get_or_insert(error);
+                status = TaskStatus::Failed;
+            }
+        }
         let completed_at = Utc::now();
         let (ack_tx, ack_rx) = oneshot::channel();
         let persistence_result = self
@@ -1225,7 +1430,7 @@ impl AgentTaskSupervisor {
                 label: info.agent.clone(),
                 title: info.title.clone(),
                 status: info.status,
-                summary: None,
+                summary: info.result.as_ref().and_then(delivery_summary),
             });
         }
         self.idle_notify.notify_waiters();
@@ -1248,6 +1453,7 @@ impl AgentTaskSupervisor {
                         output: None,
                         error: Some(error),
                         warnings: Vec::new(),
+                        undelivered_messages: None,
                     },
                 )
                 .await,
@@ -1594,6 +1800,7 @@ mod tests {
                     output: Some("agent output".into()),
                     error: (status == TaskStatus::Failed).then(|| "agent failed".into()),
                     warnings: vec!["model fallback".into()],
+                    undelivered_messages: None,
                 });
             }
             let (supervisor, _events, _persistence, _pauses, _profile) =
@@ -1722,6 +1929,7 @@ mod tests {
             output: Some("done".to_string()),
             error: None,
             warnings: Vec::new(),
+            undelivered_messages: None,
         });
 
         let status: serde_json::Value = serde_json::from_str(&task_status_payload(&info)).unwrap();
@@ -1751,6 +1959,52 @@ mod tests {
         info.result.as_mut().unwrap().warnings = vec!["fallback model used".to_string()];
         let result: serde_json::Value = serde_json::from_str(&task_result_payload(&info)).unwrap();
         assert_eq!(result["result"]["warnings"][0], "fallback model used");
+    }
+
+    #[tokio::test]
+    async fn finish_delivery_count() {
+        // 给定子任务正常结束时仍有一条已入队、未注入的消息。
+        let initial = task_info(1);
+        let task_id = initial.task_id.clone();
+        let (supervisor, _events, mut persistence, _pauses, _profile) =
+            test_supervisor(vec![initial]);
+        let responder = tokio::spawn(async move {
+            let Some(RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. }) =
+                persistence.recv().await
+            else {
+                panic!("expected delivery settlement");
+            };
+            ack.send(Ok(1)).unwrap();
+            let Some(RuntimePersistenceEvent::FinishAgentTask {
+                status,
+                result,
+                ack,
+                ..
+            }) = persistence.recv().await
+            else {
+                panic!("expected task finish");
+            };
+            assert_eq!(status, TaskStatus::Failed);
+            assert_eq!(result.undelivered_messages, Some(1));
+            ack.send(Ok(())).unwrap();
+        });
+
+        // 当终态提交后，结果必须标记失败并携带未送达数量。
+        let finished = supervisor
+            .finish_task(
+                &task_id,
+                TaskStatus::Completed,
+                AgentTaskResult {
+                    output: Some("done".into()),
+                    error: None,
+                    warnings: Vec::new(),
+                    undelivered_messages: None,
+                },
+            )
+            .await;
+        responder.await.unwrap();
+        assert_eq!(finished.status, TaskStatus::Failed);
+        assert_eq!(finished.result.unwrap().undelivered_messages, Some(1));
     }
 
     #[tokio::test]
@@ -1934,6 +2188,7 @@ mod tests {
                 output: (status == TaskStatus::Completed).then(|| "done".to_string()),
                 error: (status == TaskStatus::Failed).then(|| "failed".to_string()),
                 warnings: Vec::new(),
+                undelivered_messages: None,
             });
 
             let response = supervisor
@@ -1952,6 +2207,13 @@ mod tests {
         let (supervisor, _event_rx, mut persistence_rx, _pending_pauses, _active_profile) =
             test_supervisor(vec![initial]);
         let persistence = tokio::spawn(async move {
+            // 给定 panic 收尾会先结算待投递消息，再写入任务终态。
+            let Some(RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. }) =
+                persistence_rx.recv().await
+            else {
+                panic!("expected delivery settlement event");
+            };
+            ack.send(Ok(0)).unwrap();
             let Some(RuntimePersistenceEvent::FinishAgentTask { ack, .. }) =
                 persistence_rx.recv().await
             else {

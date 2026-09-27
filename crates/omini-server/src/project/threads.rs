@@ -439,6 +439,12 @@ async fn load_thread_snapshot(
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
     let messages = crate::history::load_messages(db, thread_id, &thread_dir).await;
     let agent_tasks = crate::history::load_agent_tasks(db, thread_id, project).await;
+    let projected_delivery_keys = db
+        .projected_delivery_keys(thread_id)
+        .await
+        .map_err(|error| {
+            CoreError::persistence("failed to load delivery keys", error.to_string())
+        })?;
     let snapshot = runtime_contract::thread_domain::LoadedThread {
         thread_id: thread.id.clone(),
         provider: thread.provider.clone(),
@@ -448,6 +454,7 @@ async fn load_thread_snapshot(
         title: thread.title.clone(),
         messages,
         agent_tasks,
+        projected_delivery_keys,
         usage: runtime_contract::thread_domain::ThreadUsageSnapshot {
             current_context_tokens: thread.current_context_tokens,
             total_tokens: thread.total_tokens,

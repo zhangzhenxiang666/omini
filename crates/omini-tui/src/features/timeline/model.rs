@@ -138,6 +138,7 @@ pub enum UiMessage {
 /// 持久化系统事件的 TUI 投影，以及只用于当前界面的运行时事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiSystemEvent {
+    AgentMessage(omini_domain::conversation::AgentMessage),
     Plan { text: String },
     Summary { text: String },
     TaskNotification(TaskNotification),
@@ -157,6 +158,7 @@ impl UiMessage {
             HistoryItem::UserInput(input) => Self::UserInput(input),
             HistoryItem::AssistantMessage(message) => Self::AssistantMessage(message),
             HistoryItem::SystemEvent(event) => Self::SystemEvent(match event {
+                SystemEvent::AgentMessage(message) => UiSystemEvent::AgentMessage(message),
                 SystemEvent::Plan(plan) => UiSystemEvent::Plan {
                     text: plan.markdown,
                 },

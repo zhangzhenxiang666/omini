@@ -73,7 +73,7 @@ omini-cli / omini-tui
 
 - `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 8 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 9 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 
@@ -97,6 +97,8 @@ TUI 的状态栏紧跟输入框；存在可切换任务时，会话列表在状�
 派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
 
 `TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；所有类型的完成通知都使用 `TaskCompletion` 并投影为 `SystemEvent::TaskNotification`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
+
+直接子任务的 TUI 输入按主线程归属和 task ID 定位子 Run，必须带 `client_echo_id`。服务端以 task ID、客户端 ID 和回显 ID 登记投递；主 Agent 的 `send_message` 则使用 task ID、发送 Run ID 和 ToolUse ID。来源键相同且正文相同的重试只接受一次，正文不同返回冲突；不同客户端发送相同正文各保留一条。两种来源的子会话展示历史都在入队时写入并广播，模型上下文在子 Agent 到达安全输入边界后另行追加，因此两种历史可以有不同顺序。主 Agent 工具在投递记录落盘后返回“已入队”；其消息在子会话显示为 `SystemEvent::AgentMessage`，模型收到带“来自主 Agent”标注的 User 角色消息。两种来源在安全边界使用同一个投递键注入操作。子任务结束或服务重启时，未注入的记录转为失败，数量记入任务结果并随已有任务完成通知呈现。重连 replay 根据已投影到 UI 的来源键裁剪事件。
 
 只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task` 和 `cancel_task` 可操作不同类型的后台任务，不提供等待工具或兼容别名。`read_task` 立即返回；未结束任务的结果附带 `guidance`，说明完成后自动通知，无需轮询，可继续其他工作或结束当前回合。主 Agent 空闲时收到完成通知会自动开始后续运行；运行中则在安全边界处理通知。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
 

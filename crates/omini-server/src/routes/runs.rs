@@ -161,8 +161,30 @@ pub async fn submit_agent_input(
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     client_id.take_control(&thread).await?;
     let project = require_project(&manager, &project_id).await?;
+    let task = project
+        .get_owned_task(&thread_id, &run_id)
+        .await
+        .map_err(core_error)?
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "run_not_found",
+                "AgentRun does not exist",
+            )
+        })?;
+    if task.depth != 1
+        || task.parent_task_id.is_some()
+        || task.parent_thread_id != thread_id
+        || task.execution_mode != protocol::AgentTaskExecutionMode::Background
+    {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "run_not_direct_child",
+            "User input is only available for direct background child AgentRuns",
+        ));
+    }
     let detail = project
-        .get_agent_run_detail(&thread_id, &run_id)
+        .get_agent_run_detail(&task.agent_thread_id, &run_id)
         .await
         .map_err(core_error)?
         .ok_or_else(|| {
@@ -197,6 +219,22 @@ pub async fn submit_agent_input(
             "User input is only available for direct child AgentRuns",
         ));
     }
+    let command = submit_run_command_from_protocol_request_for_thread(
+        protocol::SubmitRunRequest::InterveneMessage {
+            input: request.input,
+            client_echo_id: Some(request.client_echo_id),
+        },
+        &thread,
+    )
+    .await
+    .map_err(core_error)?;
+    if thread
+        .task_input_replayed(&run_id, client_id.as_str(), &command)
+        .await
+        .map_err(core_error)?
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     if is_terminal_run(detail.run.status) {
         return Err(api_error(
             StatusCode::CONFLICT,
@@ -204,17 +242,8 @@ pub async fn submit_agent_input(
             "Completed child AgentRuns cannot receive messages",
         ));
     }
-    let command = submit_run_command_from_protocol_request_for_thread(
-        protocol::SubmitRunRequest::InterveneMessage {
-            input: request.input,
-            client_echo_id: request.client_echo_id,
-        },
-        &thread,
-    )
-    .await
-    .map_err(core_error)?;
     thread
-        .send_task_input(run_id, detail.run.thread_id, command)
+        .send_task_input(run_id, detail.run.thread_id, client_id.0, command)
         .await
         .map_err(core_error)?;
     Ok(StatusCode::NO_CONTENT)
@@ -338,18 +367,39 @@ pub async fn cancel_run(
             .map_err(core_error);
     }
     let project = require_project(&manager, &project_id).await?;
-    let run = project
-        .get_agent_run_detail(&thread_id, &run_id)
+    let run = if let Some(task) = project
+        .get_owned_task(&thread_id, &run_id)
         .await
         .map_err(core_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "run_not_found",
-                "AgentRun does not exist",
-            )
-        })?;
+    {
+        if task.depth != 1 || task.parent_task_id.is_some() || task.parent_thread_id != thread_id {
+            return Err(api_error(
+                StatusCode::CONFLICT,
+                "run_not_direct_child",
+                "Only direct child AgentRuns can be cancelled from the parent thread",
+            ));
+        }
+        project
+            .get_agent_run_detail(&task.agent_thread_id, &run_id)
+            .await
+            .map_err(core_error)?
+    } else {
+        project
+            .get_agent_run_detail(&thread_id, &run_id)
+            .await
+            .map_err(core_error)?
+    }
+    .ok_or_else(|| {
+        api_error(
+            StatusCode::NOT_FOUND,
+            "run_not_found",
+            "AgentRun does not exist",
+        )
+    })?;
     if run.run.parent_run_id.is_some() {
+        if is_terminal_run(run.run.status) {
+            return Ok(StatusCode::NO_CONTENT);
+        }
         thread.cancel_agent_run(run_id).await.map_err(core_error)?;
         return Ok(StatusCode::NO_CONTENT);
     }

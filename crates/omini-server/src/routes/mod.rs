@@ -57,6 +57,10 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
             code: "attachment_not_found",
             ..
         } => StatusCode::NOT_FOUND,
+        omini_core::CoreError::InvalidInput {
+            code: "delivery_key_conflict" | "delivery_failed",
+            ..
+        } => StatusCode::CONFLICT,
         omini_core::CoreError::InvalidModelSelection { .. }
         | omini_core::CoreError::InvalidInput { .. } => StatusCode::BAD_REQUEST,
         omini_core::CoreError::Internal { .. }

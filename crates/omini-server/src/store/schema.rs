@@ -141,6 +141,25 @@ impl Database {
         .execute(&mut *tx)
         .await?;
 
+        // 来源键由发送 Run/工具调用或客户端/回显 ID 组成；相同内容不是去重条件。
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_task_delivery (
+                task_id         TEXT NOT NULL REFERENCES agent_task(task_id) ON DELETE CASCADE,
+                source_kind     TEXT NOT NULL CHECK (source_kind IN ('agent', 'client')),
+                source_key      TEXT NOT NULL,
+                owner_thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                agent_thread_id TEXT NOT NULL REFERENCES thread(id) ON DELETE CASCADE,
+                payload         TEXT NOT NULL,
+                status          TEXT NOT NULL CHECK (status IN ('pending', 'injected', 'failed')),
+                failure_reason  TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (task_id, source_kind, source_key)
+            )",
+        )
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS background_task (
                 task_id          TEXT PRIMARY KEY,
@@ -311,6 +330,7 @@ impl Database {
         .await?;
 
         tx.commit().await?;
+        self.fail_pending_deliveries("子任务因服务重启中断").await?;
         Ok(())
     }
 }

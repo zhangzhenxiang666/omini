@@ -17,17 +17,21 @@ pub fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUi
             item,
             client_echo_id,
         },
-        protocol::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+        protocol::TypedRuntimeEvent::AgentTaskUserMessageQueued {
             task_id,
             thread_id,
             item,
             client_echo_id,
-        } => RuntimeToUiEvent::AgentTaskUserMessageInjected {
+            ..
+        } => RuntimeToUiEvent::AgentTaskUserMessageQueued {
             task_id,
             thread_id,
             item,
             client_echo_id,
         },
+        protocol::TypedRuntimeEvent::AgentTaskMessageQueued { task_id, item, .. } => {
+            RuntimeToUiEvent::AgentTaskMessageQueued { task_id, item }
+        }
         protocol::TypedRuntimeEvent::RunFinished => RuntimeToUiEvent::RunFinished,
         protocol::TypedRuntimeEvent::Notification(event) => {
             RuntimeToUiEvent::Notification(Notification {

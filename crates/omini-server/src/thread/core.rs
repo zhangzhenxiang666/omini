@@ -4,6 +4,7 @@ use omini_config::project::ThreadDir;
 use omini_core::CoreError;
 use omini_domain::conversation::UserInput as ConversationUserInput;
 use omini_domain::input::{AttachmentMetadata, UserInputIntent};
+use omini_runtime_contract::persistence::ClientMessage;
 use omini_runtime_contract::{self as runtime_contract, thread::ResolvedAttachment};
 
 impl ThreadRuntime {
@@ -240,49 +241,93 @@ impl ThreadRuntime {
         self.core.cancel_agent_run(run_id).await
     }
 
-    /// 将结构化用户输入写入子任务历史并投递到对应消息队列。
+    /// 先持久化子会话展示消息，再将结构化输入投递到子任务队列。
     pub async fn send_task_input(
         &self,
         run_id: String,
         child_thread_id: String,
+        client_id: String,
         command: runtime_contract::thread::SubmitRunCommand,
     ) -> Result<(), CoreError> {
         let prepared = self.core.prepare_run(command)?;
-        let mut attachment_metadata = prepared
-            .input
-            .attachments
-            .iter()
-            .map(|attachment| attachment.metadata.clone())
-            .collect::<Vec<_>>();
-        attachment_metadata.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
-        let conversation_input = ConversationUserInput {
-            intent: UserInputIntent::Message,
-            parts: prepared.input.parts.clone(),
-            attachments: attachment_metadata,
-        };
-        let child_thread_dir = self.project.thread(&child_thread_id);
-        self.db
-            .insert_user_input(
-                &child_thread_id,
-                &conversation_input,
-                Utc::now(),
-                &child_thread_dir,
-            )
+        let source = client_message(&client_id, &prepared)?;
+        let fresh = self
+            .db
+            .enqueue_client_message(&run_id, &self.thread_id, &child_thread_id, &source)
             .await
-            .map_err(|error| {
-                CoreError::persistence("failed to persist child user input", error.to_string())
+            .map_err(|error| match error {
+                store::StoreError::InvalidData(message) => {
+                    CoreError::invalid_input("delivery_key_conflict", message)
+                }
+                other => {
+                    CoreError::persistence("failed to enqueue child user input", other.to_string())
+                }
             })?;
+        if !fresh {
+            return Ok(());
+        }
         self.broadcast_server_local_event(omini_protocol::RuntimeEvent::new(
-            omini_protocol::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+            omini_protocol::TypedRuntimeEvent::AgentTaskUserMessageQueued {
                 task_id: run_id.clone(),
                 thread_id: child_thread_id,
-                item: omini_protocol::HistoryItem::UserInput(conversation_input),
-                client_echo_id: prepared.client_echo_id.clone(),
+                item: omini_protocol::HistoryItem::UserInput(source.input.clone()),
+                client_id: Some(source.client_id.clone()),
+                client_echo_id: Some(source.client_echo_id.clone()),
             },
         ));
-        self.core
-            .intervene_agent_run(run_id, prepared.message)
+        if let Err(error) = self
+            .core
+            .intervene_client_run(run_id.clone(), prepared.message, source.clone())
             .await
+        {
+            self.db
+                .fail_client_message(&run_id, &source, "运行时未接收消息")
+                .await
+                .map_err(|store_error| {
+                    CoreError::persistence(
+                        "failed to settle child user input",
+                        store_error.to_string(),
+                    )
+                })?;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// 终态之后仍允许相同来源键的重试得到幂等成功。
+    pub async fn task_input_replayed(
+        &self,
+        task_id: &str,
+        client_id: &str,
+        command: &runtime_contract::thread::SubmitRunCommand,
+    ) -> Result<bool, CoreError> {
+        let prepared = self.core.prepare_run(command.clone())?;
+        let source = client_message(client_id, &prepared)?;
+        let existing = self
+            .db
+            .client_delivery(task_id, &source)
+            .await
+            .map_err(|error| {
+                CoreError::persistence("failed to inspect child user input", error.to_string())
+            })?;
+        let Some((payload, status)) = existing else {
+            return Ok(false);
+        };
+        if payload
+            != serde_json::to_string(&source.input).expect("user input serialization cannot fail")
+        {
+            return Err(CoreError::invalid_input(
+                "delivery_key_conflict",
+                "client echo ID was reused with different content",
+            ));
+        }
+        if status == "failed" {
+            return Err(CoreError::invalid_input(
+                "delivery_failed",
+                "previous child user input was not delivered",
+            ));
+        }
+        Ok(true)
     }
 
     pub async fn resolve_tool_pause(
@@ -309,4 +354,36 @@ impl ThreadRuntime {
     ) -> Result<(), CoreError> {
         self.core.set_thinking_effort(command).await
     }
+}
+
+fn client_message(
+    client_id: &str,
+    prepared: &runtime_contract::thread::PreparedRunCommand,
+) -> Result<ClientMessage, CoreError> {
+    let client_echo_id = prepared
+        .client_echo_id
+        .clone()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            CoreError::invalid_input(
+                "missing_client_echo_id",
+                "child AgentRun input requires client_echo_id",
+            )
+        })?;
+    let mut attachments = prepared
+        .input
+        .attachments
+        .iter()
+        .map(|attachment| attachment.metadata.clone())
+        .collect::<Vec<_>>();
+    attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    Ok(ClientMessage {
+        client_id: client_id.to_string(),
+        client_echo_id,
+        input: ConversationUserInput {
+            intent: UserInputIntent::Message,
+            parts: prepared.input.parts.clone(),
+            attachments,
+        },
+    })
 }

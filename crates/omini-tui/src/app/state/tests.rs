@@ -1202,7 +1202,7 @@ fn task_delta_isolation() {
 fn task_input_history() {
     let mut state = AppState::new();
     start_subagent(&mut state);
-    state.apply_event(RuntimeToUiEvent::AgentTaskUserMessageInjected {
+    state.apply_event(RuntimeToUiEvent::AgentTaskUserMessageQueued {
         task_id: "task_1".to_string(),
         thread_id: "sub_1".to_string(),
         item: protocol::HistoryItem::UserInput(omini_domain::conversation::UserInput {
@@ -1222,6 +1222,57 @@ fn task_input_history() {
             if matches!(input.parts.as_slice(), [omini_domain::input::InputPart::Text { text }] if text == "follow up")
     ));
     assert!(state.sessions.views["main"].messages.is_empty());
+}
+
+#[test]
+fn duplicate_child_input() {
+    // 给定两个客户端已将相同正文分别提交到同一个子会话。
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+    let item = protocol::HistoryItem::UserInput(omini_domain::conversation::UserInput {
+        intent: omini_domain::input::UserInputIntent::Message,
+        parts: vec![omini_domain::input::InputPart::Text {
+            text: "same".into(),
+        }],
+        attachments: Vec::new(),
+    });
+    for client_echo_id in ["client-a", "client-b"] {
+        state.apply_event(RuntimeToUiEvent::AgentTaskUserMessageQueued {
+            task_id: "task_1".into(),
+            thread_id: "sub_1".into(),
+            item: item.clone(),
+            client_echo_id: Some(client_echo_id.into()),
+        });
+    }
+
+    // 则子会话保留两条输入，主会话仍没有这些内容。
+    assert_eq!(state.sessions.views["task_1"].messages.len(), 3);
+    assert!(state.sessions.views["main"].messages.is_empty());
+}
+
+#[test]
+fn agent_message_child_only() {
+    // 给定主 Agent 的消息已持久化入队并广播到子会话。
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+    let source = omini_domain::conversation::AgentMessage {
+        source_run_id: "main-run".into(),
+        tool_use_id: "tool-1".into(),
+        text: "check again".into(),
+    };
+    state.apply_event(RuntimeToUiEvent::AgentTaskMessageQueued {
+        task_id: "task_1".into(),
+        item: protocol::HistoryItem::SystemEvent(
+            omini_domain::conversation::SystemEvent::AgentMessage(source.clone()),
+        ),
+    });
+
+    // 则主会话没有编排内容，子会话保留带来源的独立系统事件。
+    assert!(state.sessions.views["main"].messages.is_empty());
+    assert!(matches!(
+        state.sessions.views["task_1"].messages.last(),
+        Some(UiMessage::SystemEvent(UiSystemEvent::AgentMessage(message))) if message == &source
+    ));
 }
 
 #[test]

@@ -22,12 +22,16 @@ pub enum RuntimeToUiEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
     },
-    AgentTaskUserMessageInjected {
+    AgentTaskUserMessageQueued {
         task_id: String,
         thread_id: String,
         item: HistoryItem,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
+    },
+    AgentTaskMessageQueued {
+        task_id: String,
+        item: HistoryItem,
     },
     /// 所有轮次完成，运行结束
     RunFinished,

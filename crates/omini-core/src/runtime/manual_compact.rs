@@ -97,8 +97,9 @@ impl AgentRuntime {
                         ServerToRuntimeEvent::InterveneMessage {
                             run_id: Some(run_id),
                             message,
+                            client_source,
                         } => {
-                            if let Err(error) = self.task_supervisor.intervene_agent_run(&run_id, message) {
+                            if let Err(error) = self.task_supervisor.intervene_agent_run(&run_id, message, client_source).await {
                                 let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
                             }
                         }

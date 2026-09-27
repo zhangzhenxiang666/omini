@@ -99,6 +99,9 @@ pub struct AgentTaskResult {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// 已入队但任务终止前未进入模型上下文的消息数。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered_messages: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -354,7 +357,39 @@ pub struct LoadedThread {
     pub title: Option<String>,
     pub messages: Vec<ConversationEntry>,
     pub agent_tasks: Vec<AgentTaskSnapshot>,
+    /// 仅供 server replay 裁剪使用，不进入对客户端的快照协议。
+    #[serde(skip)]
+    pub projected_delivery_keys: Vec<DeliveryKey>,
     pub usage: ThreadUsageSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveryKey {
+    pub task_id: String,
+    pub source_kind: String,
+    pub source_key: String,
+}
+
+impl DeliveryKey {
+    /// 以发送 Run 和 ToolUse 标识主 Agent 的一次投递。
+    pub fn from_agent(task_id: &str, source_run_id: &str, tool_use_id: &str) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            source_kind: "agent".to_string(),
+            source_key: serde_json::to_string(&(source_run_id, tool_use_id))
+                .expect("string tuple serialization cannot fail"),
+        }
+    }
+
+    /// 以客户端和回显 ID 标识一次 TUI 投递，允许不同客户端发送相同正文。
+    pub fn from_client(task_id: &str, client_id: &str, client_echo_id: &str) -> Self {
+        Self {
+            task_id: task_id.to_string(),
+            source_kind: "client".to_string(),
+            source_key: serde_json::to_string(&(client_id, client_echo_id))
+                .expect("string tuple serialization cannot fail"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

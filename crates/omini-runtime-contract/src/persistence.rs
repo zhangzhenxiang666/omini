@@ -4,11 +4,21 @@ use omini_domain::agent_run::{
     AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
     ToolUseStatus,
 };
-use omini_domain::conversation::{CompactionSummary, ProposedPlan, TaskNotification};
+use omini_domain::conversation::{
+    AgentMessage, CompactionSummary, ProposedPlan, TaskNotification, UserInput,
+};
 use omini_domain::task::{TaskInfo, TaskStatus};
 use omini_domain::usage::Usage;
 use omini_model::message::Message;
 use tokio::sync::oneshot;
+
+/// TUI 输入的稳定来源；不同客户端允许提交相同正文。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientMessage {
+    pub client_id: String,
+    pub client_echo_id: String,
+    pub input: UserInput,
+}
 
 #[derive(Debug, Clone)]
 pub struct ThreadRecord {
@@ -80,6 +90,27 @@ pub enum RuntimePersistenceEvent {
         persist_llm_history: bool,
         display_in_ui: bool,
         ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// 主 Agent 的消息先持久化为待投递记录；重试复用发送 Run 和 ToolUse 来源键。
+    EnqueueAgentMessage {
+        task_id: String,
+        owner_thread_id: String,
+        agent_thread_id: String,
+        message: AgentMessage,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// 在安全边界按来源键追加模型历史并结算投递；展示历史已在入队时提交。
+    InjectTaskMessage {
+        key: crate::thread_domain::DeliveryKey,
+        agent_thread_id: String,
+        model_message: Message,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
+    /// 任务终止时明确结算仍未注入的消息。
+    FailPendingTaskMessages {
+        task_id: String,
+        reason: String,
+        ack: oneshot::Sender<Result<u32, String>>,
     },
     /// 持久化通道严格有序，因此只有全部子线程消息处理完后才会提交终态。
     FinishAgentTask {

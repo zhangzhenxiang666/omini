@@ -34,8 +34,8 @@ pub struct SubmitRunCommand {
 
 /// 校验与 LLM 消息构建完成、待派发给 runtime 的运行命令。
 ///
-/// `input` 与 `client_echo_id` 是调用方提交数据的原样回传：展示行入库与
-/// echo 广播由 server 在派发前完成，core 不承载用户级展示数据。
+/// `input` 与 `client_echo_id` 保留调用方提交内容。主线程展示行由 server
+/// 派发前处理；子任务输入在安全边界完成持久化后才广播。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRunCommand {
     pub message: Message,

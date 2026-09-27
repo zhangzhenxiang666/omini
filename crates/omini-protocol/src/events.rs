@@ -29,12 +29,19 @@ pub enum TypedRuntimeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
     },
-    AgentTaskUserMessageInjected {
+    AgentTaskUserMessageQueued {
         task_id: String,
         thread_id: String,
         item: HistoryItem,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         client_echo_id: Option<String>,
+    },
+    AgentTaskMessageQueued {
+        task_id: String,
+        thread_id: String,
+        item: HistoryItem,
     },
     RunFinished,
     Notification(NotificationEvent),
@@ -77,7 +84,8 @@ impl TypedRuntimeEvent {
             Self::AgentRunChanged(_) => "agent_run_changed",
             Self::RunStarted => "run_started",
             Self::UserMessageInjected { .. } => "user_message_injected",
-            Self::AgentTaskUserMessageInjected { .. } => "agent_task_user_message_injected",
+            Self::AgentTaskUserMessageQueued { .. } => "agent_task_user_message_queued",
+            Self::AgentTaskMessageQueued { .. } => "agent_task_message_queued",
             Self::RunFinished => "run_finished",
             Self::Notification(_) => "notification",
             Self::ModelChanged(_) => "model_changed",

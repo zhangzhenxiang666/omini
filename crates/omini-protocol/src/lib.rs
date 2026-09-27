@@ -20,7 +20,7 @@ pub use omini_runtime_contract::thread_domain::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_REVISION: u32 = 8;
+pub const PROTOCOL_REVISION: u32 = 9;
 
 /// 用户时间线快照中的一个条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

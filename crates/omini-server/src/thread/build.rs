@@ -95,13 +95,44 @@ impl ThreadRuntime {
         let persistence_handle = tokio::spawn(
             async move {
                 while let Some(event) = persistence_rx.recv().await {
-                    let result = persistence_db
-                        .apply_persistence_event(
-                            &event,
-                            &persistence_project_id,
-                            &persistence_project,
-                        )
-                        .await;
+                    let mut failed_count = 0;
+                    let mut fresh_agent_message = false;
+                    let result = if let runtime_contract::RuntimePersistenceEvent::FailPendingTaskMessages {
+                        task_id, reason, ..
+                    } = &event {
+                        match persistence_db.fail_task_messages(task_id, reason).await {
+                            Ok(count) => {
+                                failed_count = count;
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else if let runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
+                        task_id,
+                        owner_thread_id,
+                        agent_thread_id,
+                        message,
+                        ..
+                    } = &event {
+                        match persistence_db
+                            .enqueue_agent_message(task_id, owner_thread_id, agent_thread_id, message)
+                            .await
+                        {
+                            Ok(fresh) => {
+                                fresh_agent_message = fresh;
+                                Ok(())
+                            }
+                            Err(error) => Err(error),
+                        }
+                    } else {
+                        persistence_db
+                            .apply_persistence_event(
+                                &event,
+                                &persistence_project_id,
+                                &persistence_project,
+                            )
+                            .await
+                    };
                     if result.is_ok() {
                         persisted_replay_buffer
                             .lock()
@@ -123,6 +154,23 @@ impl ThreadRuntime {
                                         client_echo_id: None,
                                     },
                                 ));
+                        }
+                        if let runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
+                            task_id,
+                            agent_thread_id,
+                            message,
+                            ..
+                        } = &event && fresh_agent_message
+                        {
+                            let _ = persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
+                                client_proto::TypedRuntimeEvent::AgentTaskMessageQueued {
+                                    task_id: task_id.clone(),
+                                    thread_id: agent_thread_id.clone(),
+                                    item: client_proto::HistoryItem::SystemEvent(
+                                        domain::conversation::SystemEvent::AgentMessage(message.clone()),
+                                    ),
+                                },
+                            ));
                         }
                     } else if let Err(error) = &result {
                         tracing::error!(error = %error, "runtime persistence event failed");
@@ -146,6 +194,14 @@ impl ThreadRuntime {
                             ack,
                             ..
                         }
+                        | runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
+                            ack,
+                            ..
+                        }
+                        | runtime_contract::RuntimePersistenceEvent::InjectTaskMessage {
+                            ack,
+                            ..
+                        }
                         | runtime_contract::RuntimePersistenceEvent::FinishAgentTask {
                             ack, ..
                         }
@@ -154,6 +210,9 @@ impl ThreadRuntime {
                             ..
                         } => {
                             let _ = ack.send(result.map_err(|error| error.to_string()));
+                        }
+                        runtime_contract::RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. } => {
+                            let _ = ack.send(result.map(|_| failed_count).map_err(|error| error.to_string()));
                         }
                         _ => {}
                     }

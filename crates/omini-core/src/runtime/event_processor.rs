@@ -44,6 +44,11 @@ impl AgentRuntime {
                             )
                             .await;
                         }
+                        EngineToRuntimeEvent::TaskMessageProduced { ack, .. } => {
+                            let _ = ack.send(Err(
+                                "agent-to-agent message reached the main runtime".to_string(),
+                            ));
+                        }
                         EngineToRuntimeEvent::TaskNotificationsProduced {
                             notification,
                             llm_message,

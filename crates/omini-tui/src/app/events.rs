@@ -350,12 +350,15 @@ impl AppState {
                     self.sessions.views["main"].scroll_offset = 0;
                 }
             }
-            RuntimeToUiEvent::AgentTaskUserMessageInjected { task_id, item, .. } => {
+            RuntimeToUiEvent::AgentTaskUserMessageQueued { task_id, item, .. } => {
                 if let Some(view) = self.sessions.views.get_mut(&task_id) {
                     let message = map_history_item(item);
-                    if view.messages.last() != Some(&message) {
-                        push_session_message(view, message);
-                    }
+                    push_session_message(view, message);
+                }
+            }
+            RuntimeToUiEvent::AgentTaskMessageQueued { task_id, item } => {
+                if let Some(view) = self.sessions.views.get_mut(&task_id) {
+                    push_session_message(view, map_history_item(item));
                 }
             }
             RuntimeToUiEvent::TurnStarted => {

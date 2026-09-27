@@ -54,10 +54,11 @@ impl AgentRuntime {
                             ServerToRuntimeEvent::InterveneMessage {
                                 run_id: Some(run_id),
                                 message,
+                                client_source,
                             } => {
                                 if let Err(error) = self
                                     .task_supervisor
-                                    .intervene_agent_run(&run_id, message)
+                                    .intervene_agent_run(&run_id, message, client_source).await
                                 {
                                     let _ = self.send_event(RuntimeToServerEvent::error(error)).await;
                                 }
@@ -377,6 +378,7 @@ impl AgentRuntime {
                             ServerToRuntimeEvent::InterveneMessage {
                                 run_id: None,
                                 message,
+                                ..
                             } => {
                                 tracing::debug!(request_kind = "intervene_message", "active run intervention received");
                                 self.query_engine.enqueue_user_message(message);
@@ -384,10 +386,11 @@ impl AgentRuntime {
                             ServerToRuntimeEvent::InterveneMessage {
                                 run_id: Some(run_id),
                                 message,
+                                client_source,
                             } => {
                                 if let Err(error) = self
                                     .task_supervisor
-                                    .intervene_agent_run(&run_id, message)
+                                    .intervene_agent_run(&run_id, message, client_source).await
                                 {
                                     let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
                                 }

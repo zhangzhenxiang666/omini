@@ -1,13 +1,14 @@
 use crate::error::RuntimeError;
 use crate::runtime::compact::AutoCompactState;
 use crate::tools::{PendingToolPauses, ToolRegistry, ToolRuntimeContext};
-use crate::types::events::EngineToRuntimeEvent;
+use crate::types::events::{EngineToRuntimeEvent, TaskMessageSource};
 use omini_config::Settings;
-use omini_domain::conversation::TaskNotification;
+use omini_domain::conversation::{AgentMessage, TaskNotification};
 use omini_domain::task::TaskCompletion;
 use omini_model::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
+use omini_runtime_contract::persistence::ClientMessage;
 use omini_runtime_contract::thread_domain::{ActiveProfile, ToolPauseResponse};
 use state::{FinalizationReason, QueryState, REPEAT_LIMIT, RepeatGuard, TurnOutcome};
 use std::collections::VecDeque;
@@ -52,12 +53,27 @@ pub struct QueryEngine {
     cancel_notify: Arc<Notify>,
     drain_pauses_on_start: bool,
     pending_user_messages: SharedPendingUserMessages,
+    preserve_pending_on_run_boundary: bool,
     // Task completion 还需要原子持久化、失败重排队和 delivered 标记，
     // 生命周期不同于一次性的用户干预消息。
     pending_task_completions: Mutex<VecDeque<TaskCompletion>>,
 }
 
-pub type SharedPendingUserMessages = Arc<Mutex<VecDeque<Message>>>;
+/// 用户插话和 Agent 间消息共用安全边界，但展示来源必须保持独立。
+#[derive(Debug, Clone)]
+pub enum PendingUserMessage {
+    Plain(Message),
+    MainAgent {
+        model_message: Message,
+        source: AgentMessage,
+    },
+    Client {
+        model_message: Message,
+        source: ClientMessage,
+    },
+}
+
+pub type SharedPendingUserMessages = Arc<Mutex<VecDeque<PendingUserMessage>>>;
 
 impl QueryEngine {
     pub fn new(permission_engine: Arc<PermissionEngine>) -> Self {
@@ -69,6 +85,7 @@ impl QueryEngine {
             cancel_notify: Arc::new(Notify::new()),
             drain_pauses_on_start: true,
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
+            preserve_pending_on_run_boundary: false,
             pending_task_completions: Mutex::new(VecDeque::new()),
         }
     }
@@ -84,6 +101,7 @@ impl QueryEngine {
             cancel_notify,
             drain_pauses_on_start: false,
             pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
+            preserve_pending_on_run_boundary: false,
             pending_task_completions: Mutex::new(VecDeque::new()),
         }
     }
@@ -97,6 +115,7 @@ impl QueryEngine {
         let mut engine =
             Self::with_shared_tool_controls(pending_tool_pauses, permission_engine, cancel_notify);
         engine.pending_user_messages = pending_user_messages;
+        engine.preserve_pending_on_run_boundary = true;
         engine
     }
 
@@ -109,7 +128,7 @@ impl QueryEngine {
         self.pending_user_messages
             .lock()
             .expect("pending user messages mutex poisoned")
-            .push_back(message);
+            .push_back(PendingUserMessage::Plain(message));
     }
 
     pub fn enqueue_task_completion(&self, completion: TaskCompletion) {
@@ -159,7 +178,9 @@ impl QueryEngine {
         cancelled: Arc<AtomicBool>,
     ) -> QueryResult {
         self.tool_pause_resolver.drain_pending_tool_pauses();
-        self.clear_pending_user_messages();
+        if !self.preserve_pending_on_run_boundary {
+            self.clear_pending_user_messages();
+        }
 
         let tool_definitions = ctx.tool_registry.definitions();
         let tool_executor = ToolExecutor::new(
@@ -193,6 +214,13 @@ impl QueryEngine {
                     return result;
                 }
             }
+        }
+
+        // 子任务可能在第一次 Provider 调用前收到消息；先完成持久化确认，
+        // 避免初始调用结束时队列消息才进入上下文。
+        if self.preserve_pending_on_run_boundary {
+            self.drain_pending_user_messages(ctx.messages, &event_tx)
+                .await;
         }
 
         loop {
@@ -273,7 +301,9 @@ impl QueryEngine {
 
         debug_assert!(tool_tasks.is_empty(), "Query ended with live tool tasks");
         self.tool_pause_resolver.drain_pending_tool_pauses();
-        self.clear_pending_user_messages();
+        if !self.preserve_pending_on_run_boundary {
+            self.clear_pending_user_messages();
+        }
         let has_pending_notification = !self
             .pending_task_completions
             .lock()
@@ -309,12 +339,67 @@ impl QueryEngine {
             .drain(..)
             .collect::<Vec<_>>();
 
-        let injected = !pending.is_empty();
+        let mut injected = false;
         for pending in pending {
-            messages.push(pending.clone());
-            let _ = event_tx
-                .send(EngineToRuntimeEvent::UserMessageProduced(pending))
-                .await;
+            match pending {
+                PendingUserMessage::Plain(message) => {
+                    injected = true;
+                    messages.push(message.clone());
+                    let _ = event_tx
+                        .send(EngineToRuntimeEvent::UserMessageProduced(message))
+                        .await;
+                }
+                PendingUserMessage::MainAgent {
+                    model_message,
+                    source,
+                } => {
+                    let (ack, receipt) = tokio::sync::oneshot::channel();
+                    if event_tx
+                        .send(EngineToRuntimeEvent::TaskMessageProduced {
+                            message: model_message.clone(),
+                            source: TaskMessageSource::Agent(source),
+                            ack,
+                        })
+                        .await
+                        .is_ok()
+                        && matches!(receipt.await, Ok(Ok(())))
+                    {
+                        messages.push(model_message);
+                        injected = true;
+                    } else {
+                        let _ = event_tx
+                            .send(EngineToRuntimeEvent::Warning(
+                                "主 Agent 消息未能持久化，未注入子 Agent 上下文".to_string(),
+                            ))
+                            .await;
+                    }
+                }
+                PendingUserMessage::Client {
+                    model_message,
+                    source,
+                } => {
+                    let (ack, receipt) = tokio::sync::oneshot::channel();
+                    if event_tx
+                        .send(EngineToRuntimeEvent::TaskMessageProduced {
+                            message: model_message.clone(),
+                            source: TaskMessageSource::Client(source),
+                            ack,
+                        })
+                        .await
+                        .is_ok()
+                        && matches!(receipt.await, Ok(Ok(())))
+                    {
+                        messages.push(model_message);
+                        injected = true;
+                    } else {
+                        let _ = event_tx
+                            .send(EngineToRuntimeEvent::Warning(
+                                "客户端消息未能持久化，未注入子 Agent 上下文".to_string(),
+                            ))
+                            .await;
+                    }
+                }
+            }
         }
         injected
     }
@@ -748,6 +833,65 @@ pub(crate) mod tests {
         let notifications = observer.await.unwrap();
         server.join().expect("test server should exit");
         (result, messages, notifications)
+    }
+
+    #[tokio::test]
+    async fn queued_message_start() {
+        // 给定子任务启动前已接受的主 Agent 消息。
+        let (base_url, server) = spawn_stop_server(1);
+        let mut engine = QueryEngine::default();
+        engine.preserve_pending_on_run_boundary = true;
+        let source = AgentMessage {
+            source_run_id: "run-1".into(),
+            tool_use_id: "tool-1".into(),
+            text: "follow up".into(),
+        };
+        let model_message = Message::from_user_text("来自主 Agent 的消息：\nfollow up".into());
+        engine
+            .shared_user_messages()
+            .lock()
+            .unwrap()
+            .push_back(PendingUserMessage::MainAgent {
+                model_message: model_message.clone(),
+                source: source.clone(),
+            });
+        let (event_tx, mut event_rx) = mpsc::channel(32);
+        let observer = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(event) = event_rx.recv().await {
+                if let EngineToRuntimeEvent::TaskMessageProduced {
+                    source: TaskMessageSource::Agent(source),
+                    ack,
+                    ..
+                } = event
+                {
+                    seen.push(source);
+                    ack.send(Ok(())).unwrap();
+                }
+            }
+            seen
+        });
+        let mut messages = vec![Message::from_user_text("start".into())];
+
+        // 当运行从首次安全边界启动时，先确认持久化，再把消息交给模型。
+        engine
+            .run_query(
+                QueryContext {
+                    messages: &mut messages,
+                    settings: Arc::new(test_settings()),
+                    llm_client: test_llm_client(base_url),
+                    tool_registry: Arc::new(ToolRegistry::new()),
+                    active_profile: Arc::new(RwLock::new(ActiveProfile::Main)),
+                    runtime_context: None,
+                    requires_internal_input: false,
+                },
+                event_tx,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .await;
+        assert_eq!(observer.await.unwrap(), vec![source]);
+        assert!(messages.contains(&model_message));
+        server.join().unwrap();
     }
 
     #[tokio::test]

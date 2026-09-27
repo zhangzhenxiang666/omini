@@ -95,8 +95,7 @@ pub struct ArchiveAgentRunRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AgentRunInputRequest {
     pub input: UserInput,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_echo_id: Option<String>,
+    pub client_echo_id: String,
 }
 
 /// 向线程提交用户输入或运行中插入输入的请求。

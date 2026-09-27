@@ -129,6 +129,9 @@ impl RuntimeReplayBuffer {
                     self.pending_prefix.push(event);
                 }
             }
+            "agent_task_user_message_queued" | "agent_task_message_queued" => {
+                self.pending_prefix.push(event);
+            }
             "run_started" => {
                 self.run_started = Some(event);
                 self.current_tail.clear();
@@ -514,13 +517,43 @@ fn injection_is_in_snapshot(
             let item = crate::conversation::domain_entry(item.clone());
             snapshot.messages.iter().any(|message| message == &item)
         }
-        client_proto::TypedRuntimeEvent::AgentTaskUserMessageInjected { task_id, item, .. } => {
+        client_proto::TypedRuntimeEvent::AgentTaskUserMessageQueued {
+            task_id,
+            item,
+            client_id,
+            client_echo_id,
+            ..
+        } => {
+            if let (Some(client_id), Some(client_echo_id)) = (client_id, client_echo_id) {
+                let source_key = serde_json::to_string(&(client_id, client_echo_id))
+                    .expect("string tuple serialization cannot fail");
+                return snapshot.projected_delivery_keys.iter().any(|key| {
+                    key.task_id == *task_id
+                        && key.source_kind == "client"
+                        && key.source_key == source_key
+                });
+            }
             let item = crate::conversation::domain_entry(item.clone());
             snapshot
                 .agent_tasks
                 .iter()
                 .find(|task| task.task.task_id.as_str() == task_id)
                 .is_some_and(|task| task.history.iter().any(|entry| entry == &item))
+        }
+        client_proto::TypedRuntimeEvent::AgentTaskMessageQueued { task_id, item, .. } => {
+            let client_proto::HistoryItem::SystemEvent(
+                domain::conversation::SystemEvent::AgentMessage(message),
+            ) = item
+            else {
+                return false;
+            };
+            let source_key = serde_json::to_string(&(&message.source_run_id, &message.tool_use_id))
+                .expect("string tuple serialization cannot fail");
+            snapshot.projected_delivery_keys.iter().any(|key| {
+                key.task_id == *task_id
+                    && key.source_kind == "agent"
+                    && key.source_key == source_key
+            })
         }
         _ => false,
     }
@@ -896,6 +929,7 @@ mod tests {
             title,
             messages,
             agent_tasks: Vec::new(),
+            projected_delivery_keys: Vec::new(),
             usage: runtime_contract::thread_domain::ThreadUsageSnapshot::default(),
         }
     }
@@ -1220,10 +1254,11 @@ mod tests {
             attachments: Vec::new(),
         };
         let event = client_proto::RuntimeEvent::new(
-            client_proto::TypedRuntimeEvent::AgentTaskUserMessageInjected {
+            client_proto::TypedRuntimeEvent::AgentTaskUserMessageQueued {
                 task_id: "task_1".to_string(),
                 thread_id: "thread_task_1".to_string(),
                 item: client_proto::HistoryItem::UserInput(input.clone()),
+                client_id: None,
                 client_echo_id: Some("echo-1".to_string()),
             },
         );
@@ -1239,6 +1274,90 @@ mod tests {
         );
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started"]);
+    }
+
+    #[test]
+    fn task_source_dedup() {
+        // 给定两个客户端提交相同正文，快照只包含第一个来源键。
+        let mut buffer = RuntimeReplayBuffer::default();
+        let input = domain::conversation::UserInput {
+            intent: domain::input::UserInputIntent::Message,
+            parts: vec![domain::input::InputPart::Text {
+                text: "same".into(),
+            }],
+            attachments: Vec::new(),
+        };
+        for (seq, client_id) in [(1, "client-a"), (2, "client-b")] {
+            buffer.record(SequencedRuntimeEvent {
+                seq,
+                event: client_proto::RuntimeEvent::new(
+                    client_proto::TypedRuntimeEvent::AgentTaskUserMessageQueued {
+                        task_id: "task_1".into(),
+                        thread_id: "thread_task_1".into(),
+                        item: client_proto::HistoryItem::UserInput(input.clone()),
+                        client_id: Some(client_id.into()),
+                        client_echo_id: Some("echo-1".into()),
+                    },
+                ),
+            });
+        }
+        let mut snapshot = agent_history_snapshot(
+            "task_1",
+            vec![domain::conversation::ConversationEntry::UserInput(input)],
+        );
+        snapshot
+            .projected_delivery_keys
+            .push(runtime_contract::thread_domain::DeliveryKey {
+                task_id: "task_1".into(),
+                source_kind: "client".into(),
+                source_key: serde_json::to_string(&("client-a", "echo-1")).unwrap(),
+            });
+
+        // 当按来源键裁剪时，第二个客户端的事件仍需要补发。
+        buffer.record_snapshot(&snapshot, &[]);
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].seq, 2);
+    }
+
+    #[test]
+    fn agent_source_dedup() {
+        // 给定主 Agent 两次工具调用发送相同正文，快照只覆盖第一条来源键。
+        let mut buffer = RuntimeReplayBuffer::default();
+        for (seq, tool_use_id) in [(1, "tool-a"), (2, "tool-b")] {
+            buffer.record(SequencedRuntimeEvent {
+                seq,
+                event: client_proto::RuntimeEvent::new(
+                    client_proto::TypedRuntimeEvent::AgentTaskMessageQueued {
+                        task_id: "task_1".into(),
+                        thread_id: "thread_task_1".into(),
+                        item: client_proto::HistoryItem::SystemEvent(
+                            domain::conversation::SystemEvent::AgentMessage(
+                                domain::conversation::AgentMessage {
+                                    source_run_id: "run-1".into(),
+                                    tool_use_id: tool_use_id.into(),
+                                    text: "same".into(),
+                                },
+                            ),
+                        ),
+                    },
+                ),
+            });
+        }
+        let mut snapshot = agent_history_snapshot("task_1", Vec::new());
+        snapshot
+            .projected_delivery_keys
+            .push(runtime_contract::thread_domain::DeliveryKey {
+                task_id: "task_1".into(),
+                source_kind: "agent".into(),
+                source_key: serde_json::to_string(&("run-1", "tool-a")).unwrap(),
+            });
+
+        // 则只补发尚未包含在快照中的第二条消息。
+        buffer.record_snapshot(&snapshot, &[]);
+        let replay = buffer.replay();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].seq, 2);
     }
 
     #[test]

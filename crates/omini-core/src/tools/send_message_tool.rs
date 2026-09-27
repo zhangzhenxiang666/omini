@@ -27,8 +27,7 @@ impl Tool for SendMessageTool {
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
         let target = input.target.trim();
-        let text = input.message.trim();
-        if target.is_empty() || text.is_empty() {
+        if target.is_empty() || input.message.trim().is_empty() {
             return ToolResult::error("target and message must not be empty");
         }
         let Some(runtime) = ctx.runtime else {
@@ -37,13 +36,17 @@ impl Tool for SendMessageTool {
         let Some(supervisor) = &runtime.task_supervisor else {
             return ToolResult::error("agent task supervisor is not available");
         };
-        let message = omini_model::message::Message::from_user_text(text.to_string());
-        match supervisor.send_message(
-            runtime.task_id.as_deref(),
-            runtime.agent_depth,
-            target,
-            message,
-        ) {
+        match supervisor
+            .send_message(
+                runtime.task_id.as_deref(),
+                runtime.agent_depth,
+                runtime.run_id.as_deref(),
+                &ctx.tool_use_id,
+                target,
+                &input.message,
+            )
+            .await
+        {
             Ok(()) => ToolResult::ok("Message queued for the recipient's next safe boundary."),
             Err(error) => ToolResult::error(error),
         }

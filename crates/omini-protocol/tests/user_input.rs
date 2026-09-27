@@ -122,7 +122,7 @@ fn unknown_variants_and_legacy_shape_are_rejected() {
 
 #[test]
 fn protocol_rev_eight() {
-    assert_eq!(omini_protocol::PROTOCOL_REVISION, 8);
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 9);
 }
 
 #[test]
@@ -140,7 +140,7 @@ fn task_input_event_scope() {
             ],
             attachment_ids: vec!["image-1".to_string()],
         },
-        client_echo_id: Some("echo-1".to_string()),
+        client_echo_id: "echo-1".to_string(),
     };
     let value = serde_json::to_value(request).unwrap();
     assert_eq!(value["input"]["parts"][0]["type"], "skill");
@@ -148,7 +148,7 @@ fn task_input_event_scope() {
     assert_eq!(value["input"]["attachment_ids"], json!(["image-1"]));
     assert_eq!(value["client_echo_id"], "echo-1");
 
-    let event = RuntimeEvent::new(TypedRuntimeEvent::AgentTaskUserMessageInjected {
+    let event = RuntimeEvent::new(TypedRuntimeEvent::AgentTaskUserMessageQueued {
         task_id: "task-1".to_string(),
         thread_id: "child-1".to_string(),
         item: HistoryItem::UserInput(omini_domain::conversation::UserInput {
@@ -159,10 +159,12 @@ fn task_input_event_scope() {
             attachments: Vec::new(),
         }),
         client_echo_id: Some("echo-1".to_string()),
+        client_id: Some("client-1".to_string()),
     });
-    assert_eq!(event.kind(), "agent_task_user_message_injected");
+    assert_eq!(event.kind(), "agent_task_user_message_queued");
     let value = serde_json::to_value(event).unwrap();
     assert_eq!(value["event"]["task_id"], "task-1");
+    assert_eq!(value["event"]["client_id"], "client-1");
     assert_eq!(value["event"]["thread_id"], "child-1");
     assert_eq!(value["event"]["item"]["type"], "user_input");
 }

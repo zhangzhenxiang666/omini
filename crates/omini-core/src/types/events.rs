@@ -1,11 +1,33 @@
-use omini_domain::conversation::TaskNotification;
+use omini_domain::conversation::{AgentMessage, TaskNotification};
 use omini_domain::usage::Usage;
 use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::DeliveryKey;
 use omini_runtime_contract::thread_domain::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, ToolPauseRequest,
 };
 use tokio::sync::oneshot;
+
+#[derive(Debug)]
+pub enum TaskMessageSource {
+    Agent(AgentMessage),
+    Client(ClientMessage),
+}
+
+impl TaskMessageSource {
+    /// 将不同发送方的稳定来源转换为同一投递键。
+    pub fn delivery_key(&self, task_id: &str) -> DeliveryKey {
+        match self {
+            Self::Agent(source) => {
+                DeliveryKey::from_agent(task_id, &source.source_run_id, &source.tool_use_id)
+            }
+            Self::Client(source) => {
+                DeliveryKey::from_client(task_id, &source.client_id, &source.client_echo_id)
+            }
+        }
+    }
+}
 
 /// engine 发往 runtime 的 core 内部事件。
 ///
@@ -13,9 +35,15 @@ use tokio::sync::oneshot;
 /// `omini_runtime_contract::RuntimeToServerEvent`。
 #[derive(Debug)]
 pub enum EngineToRuntimeEvent {
-    /// 一条用户消息在安全输入边界提交进 LLM 上下文。展示行与 echo 不随行：
-    /// 它们由 server 在接收输入时直接落库与广播，两条数据流各自独立。
+    /// 一条主线程用户消息在安全输入边界提交进 LLM 上下文。
+    /// 主线程展示行与 echo 由 server 在接收输入时处理。
     UserMessageProduced(Message),
+    /// 已入队消息到达子 Agent 安全边界后写入模型历史；UI 历史先前已提交。
+    TaskMessageProduced {
+        message: Message,
+        source: TaskMessageSource,
+        ack: oneshot::Sender<Result<(), String>>,
+    },
 
     /// 后台任务完成通知已到达安全输入边界，等待原子持久化后进入内存历史。
     TaskNotificationsProduced {

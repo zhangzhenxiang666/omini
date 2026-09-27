@@ -42,6 +42,13 @@ impl ThreadRuntime {
         let messages = crate::history::load_messages(&self.db, &self.thread_id, &thread_dir).await;
         let agent_tasks =
             crate::history::load_agent_tasks(&self.db, &self.thread_id, &self.project).await;
+        let projected_delivery_keys = self
+            .db
+            .projected_delivery_keys(&self.thread_id)
+            .await
+            .map_err(|error| {
+                CoreError::persistence("failed to load delivery keys", error.to_string())
+            })?;
         let active_profile = self
             .status_projection
             .lock()
@@ -69,6 +76,7 @@ impl ThreadRuntime {
             title: thread.title,
             messages,
             agent_tasks,
+            projected_delivery_keys,
             usage: client_proto::ThreadUsageSnapshot {
                 current_context_tokens: thread.current_context_tokens,
                 total_tokens: thread.total_tokens,

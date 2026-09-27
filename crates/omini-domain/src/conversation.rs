@@ -14,6 +14,14 @@ pub struct UserInput {
     pub attachments: Vec<AttachmentMetadata>,
 }
 
+/// 主 Agent 已入队的子会话消息；来源键用于跨客户端幂等投影。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct AgentMessage {
+    pub source_run_id: String,
+    pub tool_use_id: String,
+    pub text: String,
+}
+
 /// 面向会话时间线的助手输出块，不携带模型消息的角色或 Provider 传输结构。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -77,6 +85,7 @@ pub enum SystemEvent {
     Plan(ProposedPlan),
     Summary(CompactionSummary),
     TaskNotification(TaskNotification),
+    AgentMessage(AgentMessage),
     ToolResults { results: Vec<ToolResultRecord> },
 }
 

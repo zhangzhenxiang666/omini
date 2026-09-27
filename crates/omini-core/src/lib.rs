@@ -363,6 +363,7 @@ impl AgentCoreThread {
             thread_types::RunIntent::InterveneMessage => ServerToRuntimeEvent::InterveneMessage {
                 run_id: None,
                 message: command.message,
+                client_source: None,
             },
         };
         self.send_to_runtime(event).await?;
@@ -391,6 +392,22 @@ impl AgentCoreThread {
         self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
             run_id: Some(run_id),
             message,
+            client_source: None,
+        })
+        .await
+    }
+
+    /// 向子 Run 投递已登记来源键的客户端输入，实际注入由安全边界确认。
+    pub async fn intervene_client_run(
+        &self,
+        run_id: String,
+        message: omini_model::message::Message,
+        source: omini_runtime_contract::persistence::ClientMessage,
+    ) -> Result<(), CoreError> {
+        self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
+            run_id: Some(run_id),
+            message,
+            client_source: Some(source),
         })
         .await
     }

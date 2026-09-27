@@ -1,3 +1,4 @@
+use crate::persistence::ClientMessage;
 use crate::thread_domain::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
@@ -33,11 +34,13 @@ pub enum ServerToRuntimeEvent {
     ToggleActiveProfile,
     SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
     /// 运行中插话的 LLM 上下文行。`None` 指当前主 Run，`Some` 指定子 Run；消息在安全输入边界提交。
-    /// 展示行与 echo 同样由 server 处理。
+    /// 直接子 Run 的客户端来源用于在注入时原子写入展示与模型历史。
     InterveneMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         message: Message,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_source: Option<ClientMessage>,
     },
     ModelSelected {
         provider: String,

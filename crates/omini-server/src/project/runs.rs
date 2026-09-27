@@ -4,6 +4,19 @@ use omini_core::CoreError;
 use omini_protocol as client_proto;
 
 impl ProjectManager {
+    /// 查询属于主线程的子任务，供主线程控制入口解析子 Run 的真实线程。
+    pub async fn get_owned_task(
+        &self,
+        owner_thread_id: &str,
+        task_id: &str,
+    ) -> Result<Option<crate::store::AgentTask>, CoreError> {
+        self.require_project_thread(owner_thread_id).await?;
+        self.db
+            .get_owned_task(owner_thread_id, task_id)
+            .await
+            .map_err(|error| CoreError::persistence("failed to load agent task", error.to_string()))
+    }
+
     pub async fn list_agent_runs(
         &self,
         thread_id: &str,

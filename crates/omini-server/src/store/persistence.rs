@@ -115,6 +115,28 @@ impl Database {
                 })
                 .await
             }
+            RuntimePersistenceEvent::EnqueueAgentMessage {
+                task_id,
+                owner_thread_id,
+                agent_thread_id,
+                message,
+                ..
+            } => self
+                .enqueue_agent_message(task_id, owner_thread_id, agent_thread_id, message)
+                .await
+                .map(|_| ()),
+            RuntimePersistenceEvent::InjectTaskMessage {
+                key,
+                agent_thread_id,
+                model_message,
+                ..
+            } => {
+                self.inject_task_message(agent_thread_id, key, model_message)
+                    .await
+            }
+            RuntimePersistenceEvent::FailPendingTaskMessages {
+                task_id, reason, ..
+            } => self.fail_task_messages(task_id, reason).await.map(|_| ()),
             RuntimePersistenceEvent::FinishAgentTask {
                 task_id,
                 status,

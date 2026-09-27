@@ -44,6 +44,7 @@ fn server_to_runtime_event_all_variants_keep_their_tagged_contract() {
             ServerToRuntimeEvent::InterveneMessage {
                 run_id: None,
                 message: user_message("补充说明"),
+                client_source: None,
             },
             json!({
                 "type": "intervene_message",

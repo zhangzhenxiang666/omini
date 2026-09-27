@@ -1,12 +1,17 @@
 mod support;
+use support::store::{fixed_time, test_agent_task, test_agent_thread};
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
+use omini_domain::agent_run::{AgentRunSnapshot as DomainRun, AgentRunStatus as DomainRunStatus};
+use omini_model::message::Message as ModelMessage;
 use omini_protocol::{
     AttachmentUploadResponse, ClientThreadRole, ControllerLease, CreateProjectRequest,
     CreateThreadRequest, InputPart, ProtocolError, RegisterClientResponse, RenameThreadRequest,
     RunSubmittedResponse, ServerEnvelope, SubmitRunRequest, ThreadRuntimeStatus,
     ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent, UserInput,
 };
+use omini_runtime_contract::persistence::ClientMessage;
+use omini_server::store::Database;
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -76,6 +81,340 @@ where
     })
     .await
     .expect("WebSocket should finish closing");
+}
+
+/// 跳过连接初始化帧，读取下一条子任务输入入队事件。
+async fn next_child_input<S>(socket: &mut S) -> String
+where
+    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("WebSocket should remain open")
+                .unwrap();
+            let envelope: ServerEnvelope =
+                serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            if let ServerEnvelope::Event {
+                event:
+                    omini_protocol::RuntimeEvent {
+                        event:
+                            TypedRuntimeEvent::AgentTaskUserMessageQueued {
+                                client_id: Some(client_id),
+                                ..
+                            },
+                    },
+            } = envelope
+            {
+                return client_id;
+            }
+        }
+    })
+    .await
+    .expect("child input event should arrive")
+}
+
+/// 读取重连快照，以核对投递事件和持久化历史的合并结果。
+async fn next_thread_snapshot<S>(socket: &mut S) -> omini_protocol::ThreadSnapshotEvent
+where
+    S: Stream<Item = Result<Message, WebSocketError>> + Unpin,
+{
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let frame = socket
+                .next()
+                .await
+                .expect("WebSocket should remain open")
+                .unwrap();
+            let envelope: ServerEnvelope =
+                serde_json::from_str(&frame.into_text().unwrap()).unwrap();
+            if let ServerEnvelope::Event {
+                event:
+                    omini_protocol::RuntimeEvent {
+                        event: TypedRuntimeEvent::ThreadSnapshot(snapshot),
+                    },
+            } = envelope
+            {
+                return snapshot;
+            }
+        }
+    })
+    .await
+    .expect("thread snapshot should arrive")
+}
+
+#[tokio::test]
+/// 验证子任务输入按主线程归属定位，同时跨客户端保留独立投递。
+async fn child_input_ownership() {
+    // 给定父线程与子 Run 分别落在不同的 thread_id，另有一个无权访问的线程。
+    let mut daemon = support::TestDaemon::start("child-input-owner").await;
+    let (project_id, thread_id) = project_and_thread(&daemon).await;
+    let (status, other): (_, omini_protocol::CreateThreadResponse) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads"),
+            None,
+            &CreateThreadRequest::default(),
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED);
+    let db = Database::open(&daemon.root().path().join(".omini/omini.db"))
+        .await
+        .unwrap();
+    db.create_agent_run(&DomainRun {
+        id: "parent-run".into(),
+        thread_id: thread_id.clone(),
+        parent_run_id: None,
+        status: DomainRunStatus::Running,
+        created_at: fixed_time(),
+        started_at: Some(fixed_time()),
+        finished_at: None,
+        total_tokens: 0,
+        archived_at: None,
+    })
+    .await
+    .unwrap();
+    let mut task = test_agent_task("child-run", "child-thread", &thread_id);
+    task.parent_run_id = Some("parent-run".into());
+    db.create_agent_task(
+        &project_id,
+        &task,
+        &test_agent_thread("child-thread", &thread_id),
+        &ModelMessage::from_user_text("start".into()),
+    )
+    .await
+    .unwrap();
+    let client_id = register_client(&daemon).await;
+    let mut request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&client_id).unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    // 当父线程投递时，路由能定位子线程的 Run；其他主线程不能复用该 task ID。
+    let input = omini_protocol::AgentRunInputRequest {
+        input: UserInput::plain("follow up"),
+        client_echo_id: "echo-1".into(),
+    };
+    let response = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/runs/child-run/input"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(next_child_input(&mut socket).await, client_id);
+    let changed = omini_protocol::AgentRunInputRequest {
+        input: UserInput::plain("different"),
+        client_echo_id: "echo-1".into(),
+    };
+    let response = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/runs/child-run/input"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .json(&changed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+
+    // 第二个客户端使用相同回显 ID 和正文，仍有独立的投递键。
+    let domain_input = omini_domain::conversation::UserInput {
+        intent: omini_domain::input::UserInputIntent::Message,
+        parts: vec![omini_domain::input::InputPart::Text {
+            text: "follow up".into(),
+        }],
+        attachments: Vec::new(),
+    };
+    let peer_id = register_client(&daemon).await;
+    let mut peer_request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .unwrap();
+    peer_request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&peer_id).unwrap(),
+    );
+    let (mut peer_socket, _) = connect_async(peer_request).await.unwrap();
+    let peer_snapshot = next_thread_snapshot(&mut peer_socket).await;
+    assert_eq!(
+        peer_snapshot
+            .agent_tasks
+            .iter()
+            .find(|task| task.task.task_id == "child-run")
+            .unwrap()
+            .history
+            .iter()
+            .filter(|entry| **entry
+                == omini_domain::conversation::ConversationEntry::UserInput(domain_input.clone()))
+            .count(),
+        1
+    );
+    let response = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/runs/child-run/input"
+        )))
+        .header("x-omini-client-id", &peer_id)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(next_child_input(&mut socket).await, peer_id);
+    assert_eq!(next_child_input(&mut peer_socket).await, peer_id);
+    for client in [&client_id, &peer_id] {
+        let source = ClientMessage {
+            client_id: client.clone(),
+            client_echo_id: "echo-1".into(),
+            input: domain_input.clone(),
+        };
+        assert!(
+            db.client_delivery("child-run", &source)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    // 两个客户端重连时都应从快照得到两条相同正文的独立 UI 消息。
+    close_socket(&mut socket).await;
+    let mut reconnect_request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .unwrap();
+    reconnect_request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&client_id).unwrap(),
+    );
+    let (mut socket, _) = connect_async(reconnect_request).await.unwrap();
+    let reconnected_snapshot = next_thread_snapshot(&mut socket).await;
+    assert_eq!(
+        reconnected_snapshot
+            .agent_tasks
+            .iter()
+            .find(|task| task.task.task_id == "child-run")
+            .unwrap()
+            .history
+            .iter()
+            .filter(|entry| **entry
+                == omini_domain::conversation::ConversationEntry::UserInput(domain_input.clone()))
+            .count(),
+        2
+    );
+    close_socket(&mut peer_socket).await;
+    let mut peer_request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .unwrap();
+    peer_request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&peer_id).unwrap(),
+    );
+    let (mut peer_socket, _) = connect_async(peer_request).await.unwrap();
+    let peer_snapshot = next_thread_snapshot(&mut peer_socket).await;
+    assert_eq!(
+        peer_snapshot
+            .agent_tasks
+            .iter()
+            .find(|task| task.task.task_id == "child-run")
+            .unwrap()
+            .history
+            .iter()
+            .filter(|entry| **entry
+                == omini_domain::conversation::ConversationEntry::UserInput(domain_input.clone()))
+            .count(),
+        2
+    );
+    let cancel = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/runs/child-run/cancel"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let other_client = register_client(&daemon).await;
+    let mut other_request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{}/events",
+            other.thread_id
+        ))
+        .into_client_request()
+        .unwrap();
+    other_request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&other_client).unwrap(),
+    );
+    let (mut other_socket, _) = connect_async(other_request).await.unwrap();
+    let response = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{}/runs/child-run/input",
+            other.thread_id
+        )))
+        .header("x-omini-client-id", &other_client)
+        .json(&input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // 则终态的新来源键被拒绝，已接受的来源键由投递状态决定。
+    db.finish_agent_task(
+        "child-run",
+        omini_domain::task::TaskStatus::Completed,
+        &omini_runtime_contract::thread_domain::AgentTaskResult {
+            output: None,
+            error: None,
+            warnings: Vec::new(),
+            undelivered_messages: None,
+        },
+        fixed_time(),
+    )
+    .await
+    .unwrap();
+    let terminal_input = omini_protocol::AgentRunInputRequest {
+        client_echo_id: "echo-2".into(),
+        ..input
+    };
+    let response = daemon
+        .client()
+        .post(daemon.url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/runs/child-run/input"
+        )))
+        .header("x-omini-client-id", &client_id)
+        .json(&terminal_input)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    close_socket(&mut socket).await;
+    close_socket(&mut peer_socket).await;
+    close_socket(&mut other_socket).await;
+    daemon.shutdown().await;
 }
 
 #[tokio::test]

@@ -732,6 +732,26 @@ fn render_ui_boundary(
         UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft)) => {
             build_user_draft_lines(draft, content_width)
         }
+        UiMessage::SystemEvent(UiSystemEvent::AgentMessage(message)) => {
+            let mut lines = vec![Line::from(Span::styled(
+                "↳ 主 Agent",
+                Style::default()
+                    .fg(crate::ui::theme::ACCENT)
+                    .add_modifier(Modifier::BOLD),
+            ))];
+            for paragraph in message.text.lines() {
+                for line in crate::ui::drawer::wrap_preserving_display_width(
+                    paragraph,
+                    content_width.saturating_sub(2).max(1),
+                ) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {line}"),
+                        Style::default().fg(crate::ui::theme::MUTED),
+                    )));
+                }
+            }
+            lines
+        }
         UiMessage::SystemEvent(UiSystemEvent::TaskNotification(notification)) => notification
             .tasks
             .iter()
@@ -807,11 +827,22 @@ fn render_ui_boundary(
                         Style::default().fg(crate::ui::theme::MUTED),
                     ))
                 };
-                if is_completed_agent {
-                    vec![line, Line::from("")]
-                } else {
-                    vec![line]
+                let mut lines = vec![line];
+                if task.kind == omini_domain::task::TaskKind::SubAgent
+                    && let Some(summary) = &task.summary
+                {
+                    lines.push(Line::from(Span::styled(
+                        format!(
+                            "  {}",
+                            truncate_display_width(summary, content_width.saturating_sub(2))
+                        ),
+                        Style::default().fg(crate::ui::theme::MUTED),
+                    )));
                 }
+                if is_completed_agent {
+                    lines.push(Line::from(""));
+                }
+                lines
             })
             .collect(),
         UiMessage::SystemEvent(UiSystemEvent::ToolResults { .. })
@@ -1147,6 +1178,34 @@ mod tests {
         let lines = build_notification_lines(&Notification::error("failed"), 80);
 
         assert_eq!(lines[0].spans[0].style.fg, Some(crate::ui::theme::ERROR));
+    }
+
+    #[test]
+    fn task_delivery_summary() {
+        // 给定子任务完成通知携带未注入消息的摘要。
+        let mut state = AppState::new();
+        state.sessions.views["main"]
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::TaskNotification(
+                omini_domain::conversation::TaskNotification {
+                    tasks: vec![omini_domain::task::TaskCompletion {
+                        task_id: "task-1".into(),
+                        kind: omini_domain::task::TaskKind::SubAgent,
+                        label: "Explore".into(),
+                        title: "Inspect".into(),
+                        status: omini_domain::task::TaskStatus::Cancelled,
+                        summary: Some("1 条消息未进入子 Agent 模型上下文".into()),
+                    }],
+                    created_at: chrono::Utc::now(),
+                },
+            )));
+
+        // 当主时间线渲染任务完成通知时，摘要应可见。
+        let rendered = rendered_timeline(&state);
+        assert!(
+            rendered.contains("1 条消息未进入子 Agent 模型上下文"),
+            "{rendered}"
+        );
     }
 
     #[test]
