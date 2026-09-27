@@ -396,6 +396,8 @@ fn normalize_path_field(raw_input: &mut Value, field: &str, cwd: &Path, default_
     }
 }
 
+/// 解析工具输入中的路径:绝对路径原样返回,相对路径按线程 cwd 拼接。
+/// 不展开 `~`、不钳制 `..`;越出 cwd 的访问由权限层按词法折叠后的路径匹配兜底。
 fn resolve_thread_path(cwd: &Path, raw: &str) -> PathBuf {
     let path = Path::new(raw);
     if path.is_absolute() {
@@ -1237,7 +1239,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_tools_apply_and_reject_paths() {
+    async fn file_tools_apply_and_resolve_relative_paths() {
         let temp = crate::test_support::TestTempDir::new("file-tools");
         let file = temp.write("nested/note.txt", "first\nsecond\n");
         let path = file.display().to_string();
@@ -1300,40 +1302,81 @@ mod tests {
             "replacement\n"
         );
 
+        // 直调(未经过归一化管线)时传入相对路径:各工具按线程 cwd 解析后正常工作。
+        let read_result = read_tool::ReadTool
+            .call(
+                read_tool::ReadInput {
+                    file_path: "nested/note.txt".into(),
+                    offset: None,
+                    limit: None,
+                },
+                crate::test_support::tool_context(temp.path(), "read", false),
+            )
+            .await;
+        assert!(!read_result.is_error, "{}", read_result.output);
+        assert_eq!(read_result.output, "1: replacement");
+
+        let write_result = write_tool::WriteTool
+            .call(
+                write_tool::WriteInput {
+                    file_path: "relative.txt".into(),
+                    content: "x".into(),
+                },
+                crate::test_support::tool_context(temp.path(), "write", false),
+            )
+            .await;
+        assert!(!write_result.is_error, "{}", write_result.output);
+
+        let edit_result = edit_tool::EditTool
+            .call(
+                edit_tool::EditInput {
+                    file_path: "relative.txt".into(),
+                    old_string: "x".into(),
+                    new_string: "y".into(),
+                    replace_all: None,
+                },
+                crate::test_support::tool_context(temp.path(), "edit", false),
+            )
+            .await;
+        assert!(!edit_result.is_error, "{}", edit_result.output);
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("relative.txt"))
+                .expect("resolved file should read"),
+            "y"
+        );
+
+        temp.write("icon.png", b"png-bytes");
+        let view_result = view_image_tool::ViewImageTool
+            .call(
+                view_image_tool::ViewImageInput {
+                    path: "icon.png".into(),
+                },
+                crate::test_support::tool_context(temp.path(), "view_image", true),
+            )
+            .await;
+        assert!(!view_result.is_error, "{}", view_result.output);
+        assert!(view_result.output.contains("icon.png"));
+
+        // 空串不解析成 cwd,而是在访问文件系统前直接拒绝。
         for result in [
             read_tool::ReadTool
                 .call(
                     read_tool::ReadInput {
-                        file_path: "relative.txt".into(),
+                        file_path: "  ".into(),
                         offset: None,
                         limit: None,
                     },
                     crate::test_support::tool_context(temp.path(), "read", false),
                 )
                 .await,
-            write_tool::WriteTool
+            view_image_tool::ViewImageTool
                 .call(
-                    write_tool::WriteInput {
-                        file_path: "relative.txt".into(),
-                        content: "x".into(),
-                    },
-                    crate::test_support::tool_context(temp.path(), "write", false),
-                )
-                .await,
-            edit_tool::EditTool
-                .call(
-                    edit_tool::EditInput {
-                        file_path: "relative.txt".into(),
-                        old_string: "x".into(),
-                        new_string: "y".into(),
-                        replace_all: None,
-                    },
-                    crate::test_support::tool_context(temp.path(), "edit", false),
+                    view_image_tool::ViewImageInput { path: " ".into() },
+                    crate::test_support::tool_context(temp.path(), "view_image", true),
                 )
                 .await,
         ] {
-            assert!(result.is_error, "relative path should reject");
-            assert_eq!(result.output, "file_path must be absolute: relative.txt");
+            assert!(result.is_error, "empty path should reject");
         }
     }
 

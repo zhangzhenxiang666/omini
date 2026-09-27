@@ -12,7 +12,7 @@ use tokio::fs;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct WriteInput {
-    /// The absolute path to the file to write.
+    /// Path to the file to write. Relative paths resolve against the current working directory.
     pub file_path: String,
     /// Complete UTF-8 text content to write to the file.
     pub content: String,
@@ -63,18 +63,25 @@ impl Tool for WriteTool {
             "Use this to create a new file or fully overwrite an existing file.\n",
             "\n",
             "Input:\n",
-            "  file_path  Absolute path to the file.\n",
+            "  file_path  Path to the file to write. Relative paths resolve against the current working directory.\n",
             "  content    Complete file content to write.\n",
             "\n",
             "Rules:\n",
-            "  - file_path must be absolute; relative paths are rejected.\n",
             "  - Missing parent directories are created automatically after permission approval.\n",
             "  - The target path must not be a directory.\n",
             "  - The tool validates the path before permission approval and validates it again before writing."
         )
     }
 
-    async fn call(&self, input: WriteInput, _ctx: ToolExecutionContext) -> ToolResult {
+    async fn call(&self, input: WriteInput, ctx: ToolExecutionContext) -> ToolResult {
+        let mut input = input;
+        if !input.file_path.trim().is_empty() {
+            // 生产管线已在反序列化前完成路径归一化;这里兜底处理绕过管线的相对路径。
+            input.file_path = super::resolve_thread_path(&ctx.settings.cwd, input.file_path.trim())
+                .display()
+                .to_string();
+        }
+
         let existed = match validate_target(&input) {
             Ok(existed) => existed,
             Err(e) => return ToolResult::error(e),
@@ -159,10 +166,6 @@ fn validate_target(input: &WriteInput) -> Result<bool, String> {
     }
 
     let path = Path::new(&input.file_path);
-    if !path.is_absolute() {
-        return Err(format!("file_path must be absolute: {}", input.file_path));
-    }
-
     let parent = path
         .parent()
         .ok_or_else(|| format!("Path has no parent directory: {}", input.file_path))?;

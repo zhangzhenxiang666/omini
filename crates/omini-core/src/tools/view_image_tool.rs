@@ -11,7 +11,7 @@ use tokio::fs;
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct ViewImageInput {
-    /// The absolute path to a PNG, JPEG, WebP, or GIF image file.
+    /// Path to a PNG, JPEG, WebP, or GIF image file. Relative paths resolve against the current working directory.
     pub path: String,
 }
 
@@ -36,16 +36,20 @@ impl Tool for ViewImageTool {
             "Read a local image file and include it in the next model request.\n",
             "\n",
             "Input:\n",
-            "  path  Absolute path to a png, jpg, jpeg, webp, or gif image file.\n",
+            "  path  Path to the image file (png, jpg, jpeg, webp, or gif). Relative paths resolve against the current working directory.\n",
             "\n",
             "Rules:\n",
-            "  - path must be absolute; relative paths are rejected.\n",
             "  - Use this only when the current model supports image input."
         )
     }
 
     async fn call(&self, input: ViewImageInput, ctx: ToolExecutionContext) -> ToolResult {
-        let path = PathBuf::from(input.path);
+        if input.path.trim().is_empty() {
+            return ToolResult::error("path must not be empty".to_string());
+        }
+
+        // 生产管线已在反序列化前完成路径归一化;这里兜底处理绕过管线的相对路径。
+        let path = super::resolve_thread_path(&ctx.settings.cwd, input.path.trim());
         let media_type = match validate_path(&path) {
             Ok(media_type) => media_type,
             Err(error) => return ToolResult::error(error),
@@ -81,9 +85,6 @@ impl Tool for ViewImageTool {
 }
 
 fn validate_path(path: &Path) -> Result<String, String> {
-    if !path.is_absolute() {
-        return Err(format!("path must be absolute: {}", path.display()));
-    }
     if !path.exists() {
         return Err(format!("Path does not exist: {}", path.display()));
     }

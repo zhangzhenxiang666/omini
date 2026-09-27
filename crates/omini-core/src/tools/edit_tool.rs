@@ -12,7 +12,7 @@ use tokio::fs;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct EditInput {
-    /// The absolute path to the file to edit.
+    /// Path to the file to edit. Relative paths resolve against the current working directory.
     pub file_path: String,
     /// Exact text to replace. Must match the file content exactly.
     pub old_string: String,
@@ -102,13 +102,12 @@ impl Tool for EditTool {
             "Use this for normal file edits when replacing a specific block of text.\n",
             "\n",
             "Input:\n",
-            "  file_path    Absolute path to the file.\n",
+            "  file_path    Path to the file to edit. Relative paths resolve against the current working directory.\n",
             "  old_string   Exact text to replace, copied from `read` output without line numbers.\n",
             "  new_string   Replacement text.\n",
             "  replace_all  Optional bool. Defaults to false.\n",
             "\n",
             "Rules:\n",
-            "  - file_path must be absolute; do not pass relative paths.\n",
             "  - The file must already exist and be valid UTF-8 text.\n",
             "  - old_string must not be empty and must differ from new_string.\n",
             "  - When replace_all is false, old_string must match exactly once.\n",
@@ -117,7 +116,15 @@ impl Tool for EditTool {
         )
     }
 
-    async fn call(&self, input: EditInput, _ctx: ToolExecutionContext) -> ToolResult {
+    async fn call(&self, input: EditInput, ctx: ToolExecutionContext) -> ToolResult {
+        let mut input = input;
+        if !input.file_path.trim().is_empty() {
+            // 生产管线已在反序列化前完成路径归一化;这里兜底处理绕过管线的相对路径。
+            input.file_path = super::resolve_thread_path(&ctx.settings.cwd, input.file_path.trim())
+                .display()
+                .to_string();
+        }
+
         let plan = match plan_edit(&input).await {
             Ok(plan) => plan,
             Err(e) => return ToolResult::error(e),
@@ -285,9 +292,6 @@ async fn plan_edit(input: &EditInput) -> Result<EditPlan, String> {
 fn validate_input(input: &EditInput) -> Result<(), String> {
     if input.file_path.trim().is_empty() {
         return Err("file_path must not be empty".to_string());
-    }
-    if !Path::new(&input.file_path).is_absolute() {
-        return Err(format!("file_path must be absolute: {}", input.file_path));
     }
     if input.old_string.is_empty() {
         return Err("old_string must not be empty".to_string());

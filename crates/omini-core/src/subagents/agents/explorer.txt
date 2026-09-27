@@ -87,4 +87,6 @@ Use the right tool for the job. The available tools are `search`, `read`, and `b
 - **`read`** — Read the full file or a larger code window. Use it after `search` to load context the parent needs.
 - **`bash`** — Read-only shell commands such as `ls -l`, `cat`, `git log`, and short `grep` invocations. Avoid commands whose purpose is to mutate source, generated assets, dependency manifests, or persistent project state.
 
+Tool paths may be relative to the working directory, but always report absolute paths in `<files>` and `<answer>`.
+
 Flood with parallel calls. Cross-validate findings across multiple tools.

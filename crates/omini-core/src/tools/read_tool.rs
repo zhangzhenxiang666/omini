@@ -6,7 +6,7 @@ use tokio::fs;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadInput {
-    /// The absolute path to the file or directory to read
+    /// Path to the file or directory to read. Relative paths resolve against the current working directory.
     pub file_path: String,
     /// The line number to start reading from (1-indexed, default: 1)
     pub offset: Option<usize>,
@@ -29,12 +29,9 @@ impl Tool for ReadTool {
             "Read a file or directory from the local filesystem.\n",
             "\n",
             "Usage:\n",
-            "  file_path  Absolute path to the file or directory. Relative paths are rejected.\n",
+            "  file_path  Path to the file or directory to read. Relative paths resolve against the current working directory.\n",
             "  offset     Line number to start from (1-indexed, default: 1).\n",
             "  limit      Max lines to return (default: 2000).\n",
-            "\n",
-            "Rules:\n",
-            "  - file_path must be absolute; do not pass relative paths.\n",
             "\n",
             "Text files: each line is returned as `<line>: <content>`.\n",
             "Directories: entries listed with `/` suffix for subdirectories.\n",
@@ -42,25 +39,26 @@ impl Tool for ReadTool {
         )
     }
 
-    async fn call(&self, input: ReadInput, _ctx: ToolExecutionContext) -> ToolResult {
-        let path = std::path::Path::new(&input.file_path);
-
-        if !path.is_absolute() {
-            return ToolResult::error(format!("file_path must be absolute: {}", input.file_path));
+    async fn call(&self, input: ReadInput, ctx: ToolExecutionContext) -> ToolResult {
+        if input.file_path.trim().is_empty() {
+            return ToolResult::error("file_path must not be empty".to_string());
         }
+
+        // 生产管线已在反序列化前完成路径归一化;这里兜底处理绕过管线的相对路径。
+        let path = super::resolve_thread_path(&ctx.settings.cwd, input.file_path.trim());
 
         // 确认目标路径存在。
         if !path.exists() {
-            return ToolResult::error(format!("Path does not exist: {}", input.file_path));
+            return ToolResult::error(format!("Path does not exist: {}", path.display()));
         }
 
         // 读取目录条目。
         if path.is_dir() {
-            return read_directory(path).await;
+            return read_directory(&path).await;
         }
 
         // 读取文件内容。
-        read_file(path, input.offset, input.limit).await
+        read_file(&path, input.offset, input.limit).await
     }
 }
 
