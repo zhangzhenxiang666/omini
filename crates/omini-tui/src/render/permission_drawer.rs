@@ -235,7 +235,7 @@ fn build_permission_drawer_lines_for_state(
     let content_width = area_width.saturating_sub(6) as usize;
     build_permission_drawer_lines(PermissionDrawerLinesInput {
         request,
-        tool_use,
+        tool_use: tool_use.as_ref(),
         content_width,
         project_dir: Some(state.status_bar.cwd.as_path()),
         question_index: state.user_input_question_index,
@@ -1052,28 +1052,44 @@ fn permission_preview_title(preview: &PermissionPreview) -> &'static str {
     }
 }
 
-fn find_tool_use<'a>(state: &'a UiState, tool_use_id: &str) -> Option<&'a ToolUseBlock> {
+fn find_tool_use(state: &UiState, tool_use_id: &str) -> Option<ToolUseBlock> {
+    let find_in_model_message = |message: &omini_model::message::Message| {
+        message.content.iter().find_map(|block| match block {
+            ContentBlock::ToolUse(tool_use) if tool_use.id == tool_use_id => Some(tool_use.clone()),
+            _ => None,
+        })
+    };
+    let find_in_history_message = |message: &omini_domain::conversation::AssistantMessage| {
+        message.blocks.iter().find_map(|block| match block {
+            omini_domain::conversation::AssistantMessageBlock::ToolUse { id, name, input }
+                if id == tool_use_id =>
+            {
+                Some(ToolUseBlock {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                })
+            }
+            _ => None,
+        })
+    };
+
     state
         .pending_assistant
-        .iter()
-        .flat_map(|m| m.content.iter())
-        .chain(
-            state
-                .messages
-                .iter()
-                .filter_map(UiMessage::as_message)
-                .flat_map(|m| m.content.iter()),
-        )
-        .chain(
+        .as_ref()
+        .and_then(find_in_model_message)
+        .or_else(|| {
+            state.messages.iter().find_map(|message| match message {
+                UiMessage::AssistantMessage(message) => find_in_history_message(message),
+                UiMessage::UserInput(_) | UiMessage::SystemEvent(_) => None,
+            })
+        })
+        .or_else(|| {
             state
                 .subagents
                 .values()
                 .flat_map(|node| node.messages.iter())
-                .flat_map(|m| m.content.iter()),
-        )
-        .find_map(|block| match block {
-            ContentBlock::ToolUse(tu) if tu.id == tool_use_id => Some(tu),
-            _ => None,
+                .find_map(find_in_model_message)
         })
 }
 

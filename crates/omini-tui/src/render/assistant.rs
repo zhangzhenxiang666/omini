@@ -4,8 +4,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-// assistant 文本只走普通 markdown 渲染;plan 标签不再被解析或特殊展示。
-// plan 样式只通过 `UiMessage::ProposedPlan` (由 plan mode SSE 流填充) 走独立路径。
+// Assistant 正文只走普通 Markdown 渲染；计划内容作为系统事件进入独立路径。
 pub(super) fn build_assistant_text_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
     if text.is_empty() {
         return Vec::new();
@@ -405,7 +404,7 @@ mod tests {
     #[test]
     fn assistant_text_does_not_special_case_plan_tags() {
         // assistant 文本不再被 plan parser 扫一遍;`<proposed_plan>` 字符串保持原样,
-        // 不会被提升为 `• Proposed Plan` 面板。plan 样式只走 `UiMessage::ProposedPlan`。
+        // 不会被提升为 `• Proposed Plan` 面板；计划面板只由独立的系统事件触发。
         let lines = build_assistant_text_lines(
             "Intro\n<proposed_plan>\n# Plan\n\n- Run **tests**\n---\n</proposed_plan>\nOutro",
             80,

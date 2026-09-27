@@ -875,7 +875,9 @@ pub(super) async fn flush_queued_user_inputs(
     let ui_messages = state
         .queued_user_inputs
         .iter()
-        .map(|draft| UiMessage::Display(draft.display_message()))
+        .map(|draft| {
+            UiMessage::SystemEvent(crate::state::UiSystemEvent::UserInputEcho(draft.clone()))
+        })
         .collect::<Vec<_>>();
     let Some(draft) = state.take_queued_user_draft() else {
         return;

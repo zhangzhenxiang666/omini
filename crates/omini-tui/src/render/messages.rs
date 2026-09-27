@@ -1,38 +1,33 @@
 use super::activity::{
-    activity_group_end, render_activity_summary, render_pending_activity_group, tool_result_index,
-    trailing_activity_group_start,
+    ActivityGroup, AssistantBlockKind, classify_assistant_block, tool_result_index,
 };
 use super::{
     INPUT_BG, build_assistant_text_lines, build_llm_summary_lines, build_proposed_plan_lines,
-    line_to_plain_text, line_width, render_subagent_tool, styled_wrapped_display,
-    styled_wrapped_text, truncate_str,
+    line_to_plain_text, line_width, styled_wrapped_draft, truncate_str,
 };
-use crate::display::DisplayMessage;
-use crate::state::{UiMessage, UiState, format_run_duration};
+use crate::display::UserDraft;
+use crate::state::{UiMessage, UiState, UiSystemEvent, format_run_duration};
 use crate::types::events::{Notification, NotificationKind};
 use crate::widgets::{
-    build_bordered_lines, format_thinking_duration, hide_orchestration_tool, is_special_tool,
-    render_read_task, render_tool, render_tool_compact, render_wait_tasks, thinking_duration_line,
-    tool_error_display_text, truncate_display_width,
+    build_bordered_lines, format_thinking_duration, render_tool, tool_error_display_text,
+    truncate_display_width,
 };
-use omini_model::message::{ContentBlock, ToolUseBlock};
+use omini_domain::task::TaskStatus;
+use omini_model::message::{ContentBlock, Message, ToolResultBlock, ToolUseBlock};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
-fn build_display_message_lines(
-    display: &DisplayMessage,
-    content_width: usize,
-) -> Vec<Line<'static>> {
+fn build_user_draft_lines(draft: &UserDraft, content_width: usize) -> Vec<Line<'static>> {
     let user_bg = INPUT_BG;
     let bg_style = Style::default().bg(user_bg);
     let mut lines = Vec::new();
 
-    let wrapped = styled_wrapped_display(display, content_width.saturating_sub(2), bg_style);
+    let wrapped = styled_wrapped_draft(draft, content_width.saturating_sub(2), bg_style);
     if wrapped.is_empty() {
         let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
         lines.push(Line::from(Span::styled(text, bg_style)).style(bg_style));
@@ -149,76 +144,8 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     let content_width = area.width as usize;
     let visible_height = area.height as usize;
 
-    // 1. completed 段：缓存仅覆盖 live_message_start 之前的消息。
-    //    含未完成工具（pending tool use）的消息不进入缓存，而是作为 live 段每帧重渲染。
-
-    let active_group_start = trailing_activity_group_start(&state.messages);
-    let live_start = state
-        .live_message_start
-        .min(active_group_start.unwrap_or(usize::MAX))
-        .min(state.messages.len());
-    let dims_match = state.render_cache.completed_content_width == content_width;
-
-    if state.render_cache.completed_message_count == 0
-        || !dims_match
-        || state.render_cache.completed_message_count > live_start
-    {
-        // 缓存完全失效、维度变化或 live 边界回退时，全量重建到 live 边界。
-        let (lines, sel) = render_message_range(state, content_width, 0, Some(live_start), None);
-        state.render_cache.completed_lines = lines;
-        state.render_cache.completed_selectable = sel;
-        state.render_cache.completed_message_count = live_start;
-        state.render_cache.completed_content_width = content_width;
-    } else if state.render_cache.completed_message_count < live_start {
-        // 增量追加到 live 边界
-        let start_idx = state.render_cache.completed_message_count;
-        let (new_lines, new_sel) =
-            render_message_range(state, content_width, start_idx, Some(live_start), None);
-        if !new_lines.is_empty() && !state.render_cache.completed_lines.is_empty() {
-            state.render_cache.completed_lines.push(Line::from(""));
-            state.render_cache.completed_selectable.push(String::new());
-        }
-        state.render_cache.completed_lines.extend(new_lines);
-        state.render_cache.completed_selectable.extend(new_sel);
-        state.render_cache.completed_message_count = live_start;
-    }
-    // else: 缓存命中到 live 边界，无需操作
-
-    // live 段：含运行中 subagent 的消息，每帧重渲染（呼吸灯动画 + 子工具实时更新）
-    let pending_activity_prefix_len = state
-        .pending_assistant
-        .as_ref()
-        .map(|pending| activity_prefix_len(state, pending));
-    let suppress_open_group = active_group_start
-        .filter(|_| pending_activity_prefix_len.is_some_and(|prefix_len| prefix_len > 0));
-    let live_lines = if live_start < state.messages.len() {
-        render_message_range(state, content_width, live_start, None, suppress_open_group)
-    } else {
-        (Vec::new(), Vec::new())
-    };
-
-    // 2. pending / plan 段：每帧直接重算（量小，不值得缓存）
-
-    let pending_lines = state
-        .pending_assistant
-        .as_ref()
-        .map(|_| {
-            let prefix_len = pending_activity_prefix_len.unwrap_or_default();
-            if prefix_len > 0 {
-                let mut group = render_pending_activity_group(
-                    state,
-                    suppress_open_group.unwrap_or(state.messages.len()),
-                    prefix_len,
-                    content_width,
-                );
-                let pending_body = render_pending_assistant_lines(state, content_width, prefix_len);
-                append_message_lines(&mut group.0, &mut group.1, pending_body.0, pending_body.1);
-                group
-            } else {
-                render_pending_assistant_lines(state, content_width, 0)
-            }
-        })
-        .unwrap_or_default();
+    // 历史与流式尾部每帧经同一投影器渲染，避免不同缓存路径改变聚合边界。
+    let timeline_lines = render_message_range(state, content_width);
 
     let plan_lines = state
         .pending_proposed_plan
@@ -233,25 +160,15 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         .map(|text| render_pending_compact_lines(text, content_width))
         .unwrap_or_default();
 
-    // 3. 计算分段布局
-    // 布局顺序：completed(缓存) → live(每帧) → pending → plan → compact
-
-    let n_completed = state.render_cache.completed_lines.len();
-    let n_live = live_lines.0.len();
-    let n_pending = pending_lines.0.len();
+    let n_timeline = timeline_lines.0.len();
     let n_plan = plan_lines.0.len();
     let n_compact = compact_lines.0.len();
-    let has_sep1 = n_live > 0 && n_completed > 0;
-    let has_sep2 = n_pending > 0 && (n_completed > 0 || n_live > 0);
-    let has_sep3 = n_plan > 0 && (n_completed > 0 || n_live > 0 || n_pending > 0);
-    let has_sep4 = n_compact > 0 && (n_completed > 0 || n_live > 0 || n_pending > 0 || n_plan > 0);
-    let live_offset = n_completed + has_sep1 as usize;
-    let pending_offset = live_offset + n_live + has_sep2 as usize;
-    let plan_offset = pending_offset + n_pending + has_sep3 as usize;
-    let compact_offset = plan_offset + n_plan + has_sep4 as usize;
+    let has_timeline_plan_separator = n_timeline > 0 && n_plan > 0;
+    let plan_offset = n_timeline + has_timeline_plan_separator as usize;
+    let has_content_before_compact = n_timeline > 0 || n_plan > 0;
+    let has_compact_separator = n_compact > 0 && has_content_before_compact;
+    let compact_offset = plan_offset + n_plan + has_compact_separator as usize;
     let total_lines = compact_offset + n_compact;
-
-    // 4. 滚动计算
 
     let prev_total_lines = state.total_lines;
     state.total_lines = total_lines;
@@ -270,38 +187,22 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
     let scroll_y = max_scroll.saturating_sub(capped_offset);
     state.message_scroll_y = scroll_y;
 
-    // 5. 构建 selectable_message_lines
-
     state.selectable_message_lines.clear();
     state
         .selectable_message_lines
-        .extend_from_slice(&state.render_cache.completed_selectable);
-    if has_sep1 {
-        state.selectable_message_lines.push(String::new());
-    }
-    state
-        .selectable_message_lines
-        .extend_from_slice(&live_lines.1);
-    if has_sep2 {
-        state.selectable_message_lines.push(String::new());
-    }
-    state
-        .selectable_message_lines
-        .extend_from_slice(&pending_lines.1);
-    if has_sep3 {
+        .extend_from_slice(&timeline_lines.1);
+    if has_timeline_plan_separator {
         state.selectable_message_lines.push(String::new());
     }
     state
         .selectable_message_lines
         .extend_from_slice(&plan_lines.1);
-    if has_sep4 {
+    if has_compact_separator {
         state.selectable_message_lines.push(String::new());
     }
     state
         .selectable_message_lines
         .extend_from_slice(&compact_lines.1);
-
-    // 6. 注册可选中文本行（用于鼠标拖选反查）
 
     let visible_selectable_lines = state
         .selectable_message_lines
@@ -319,8 +220,6 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
         );
     }
 
-    // 7. 逐段直接渲染到 buffer（零拷贝）
-
     let render_ctx = SectionRenderContext {
         scroll_y,
         visible_height,
@@ -331,57 +230,22 @@ pub(super) fn render_messages(state: &mut UiState, frame: &mut ratatui::Frame, a
 
     let buf = frame.buffer_mut();
 
-    render_cached_section(&state.render_cache.completed_lines, 0, &render_ctx, buf);
+    render_line_section(&timeline_lines.0, 0, &render_ctx, buf);
 
-    if has_sep1 {
-        render_blank_separator(n_completed, scroll_y, visible_height, area, buf);
+    if has_timeline_plan_separator {
+        render_blank_separator(n_timeline, scroll_y, visible_height, area, buf);
     }
 
-    render_cached_section(&live_lines.0, live_offset, &render_ctx, buf);
+    render_line_section(&plan_lines.0, plan_offset, &render_ctx, buf);
 
-    if has_sep2 {
-        render_blank_separator(live_offset + n_live, scroll_y, visible_height, area, buf);
-    }
-
-    render_cached_section(&pending_lines.0, pending_offset, &render_ctx, buf);
-
-    if has_sep3 {
-        render_blank_separator(
-            pending_offset + n_pending,
-            scroll_y,
-            visible_height,
-            area,
-            buf,
-        );
-    }
-
-    render_cached_section(&plan_lines.0, plan_offset, &render_ctx, buf);
-
-    if has_sep4 {
+    if has_compact_separator {
         render_blank_separator(plan_offset + n_plan, scroll_y, visible_height, area, buf);
     }
 
-    render_cached_section(&compact_lines.0, compact_offset, &render_ctx, buf);
+    render_line_section(&compact_lines.0, compact_offset, &render_ctx, buf);
 }
 
-fn activity_prefix_len(state: &UiState, message: &omini_model::message::Message) -> usize {
-    message
-        .content
-        .iter()
-        .take_while(|block| match block {
-            ContentBlock::Thinking(_) | ContentBlock::ToolResult(_) | ContentBlock::Image(_) => {
-                true
-            }
-            ContentBlock::ToolUse(tool_use) => {
-                !is_special_tool(tool_use) && state.tool_pause_for_tool_use(&tool_use.id).is_none()
-            }
-            ContentBlock::Text(text) if text.text.trim().is_empty() => true,
-            ContentBlock::Text(_) => false,
-        })
-        .count()
-}
-
-/// 渲染缓存段所需的上下文参数。
+/// 渲染时间线段所需的上下文参数。
 struct SectionRenderContext {
     scroll_y: usize,
     visible_height: usize,
@@ -390,8 +254,8 @@ struct SectionRenderContext {
     user_line_bg: Style,
 }
 
-/// 将一个缓存段直接渲染到 buffer，不拷贝 `Line`。
-fn render_cached_section(
+/// 将一段消息直接渲染到 buffer，不拷贝 `Line`。
+fn render_line_section(
     lines: &[Line<'static>],
     section_start: usize,
     ctx: &SectionRenderContext,
@@ -437,127 +301,494 @@ fn render_blank_separator(
     Line::from("").render(row_area, buf);
 }
 
-/// 渲染 `messages[start_idx..end_idx]`，返回该范围的渲染结果（不含前导分隔符）。
-///
-/// `end_idx` 为 `None` 时渲染到末尾；为 `Some(n)` 时只渲染到 `messages[n]`（不含）。
-/// 用于增量追加缓存：当只有新消息追加时，只渲染 `start_idx` 之后的部分，
-/// 然后将结果追加到已有缓存。
+/// 按同一条有序时间线扫描已提交历史与流式尾部，并在明确分界处结算活动摘要。
 fn render_message_range(
     state: &UiState,
     content_width: usize,
-    start_idx: usize,
-    end_idx: Option<usize>,
-    suppress_activity_from: Option<usize>,
 ) -> (Vec<Line<'static>>, Vec<String>) {
-    let end_idx = end_idx.unwrap_or(state.messages.len());
     let mut all_lines: Vec<Line> = Vec::new();
     let mut selectable_lines: Vec<String> = Vec::new();
-
-    // 全量扫描构建 tool_result_map（成本低，O(n)）
-    let rendered_messages: Vec<&omini_model::message::Message> = state
+    let mut rendered_messages = Vec::new();
+    let message_indices = state
         .messages
         .iter()
-        .filter_map(UiMessage::as_message)
-        .collect();
-
-    let tool_result_map = tool_result_index(&rendered_messages);
-    let render_context = MessageRenderContext {
-        rendered_messages: &rendered_messages,
-        tool_result_map: &tool_result_map,
-        state,
-        content_width,
-    };
-
-    let mut consumed: HashSet<(usize, usize)> = HashSet::new();
-
-    // 计算 rendered_msg_offset：messages[..start_idx] 中 UiMessage::Message 变体的数量
-    let rendered_msg_offset = state.messages[..start_idx]
-        .iter()
-        .filter(|m| matches!(m, UiMessage::Message(_)))
-        .count();
-
-    // 预填充 consumed：扫描 messages[..start_idx] 中的 ToolUse block，
-    // 将其对应的 ToolResult 位置加入 consumed（避免跨消息引用导致重复渲染）
-    let mut pre_rendered_idx = 0;
-    for ui_message in &state.messages[..start_idx] {
-        if let UiMessage::Message(message) = ui_message {
-            let msg_idx = pre_rendered_idx;
-            pre_rendered_idx += 1;
-            for (block_idx, block) in message.content.iter().enumerate() {
-                if let ContentBlock::ToolUse(tu) = block
-                    && let Some(positions) = tool_result_map.get(&tu.id)
-                {
-                    for pos in positions {
-                        consumed.insert(*pos);
-                    }
-                }
-                // 同时标记本消息内已被引用的 ToolResult
-                if let ContentBlock::ToolResult(_) = block {
-                    consumed.insert((msg_idx, block_idx));
-                }
+        .map(|ui_message| match ui_message {
+            UiMessage::AssistantMessage(message) => {
+                let index = rendered_messages.len();
+                rendered_messages.push(crate::display::assistant_message(message));
+                Some(index)
             }
-        }
-    }
+            UiMessage::SystemEvent(UiSystemEvent::ToolResults { results }) => {
+                let index = rendered_messages.len();
+                rendered_messages.push(crate::display::tool_results_message(results));
+                Some(index)
+            }
+            UiMessage::UserInput(_) | UiMessage::SystemEvent(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let pending_message_index = state.pending_assistant.as_ref().map(|message| {
+        let index = rendered_messages.len();
+        rendered_messages.push(message.clone());
+        index
+    });
+    let rendered_message_refs = rendered_messages.iter().collect::<Vec<_>>();
+    let tool_result_map = tool_result_index(&rendered_message_refs);
+    let tool_use_ids = rendered_messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse(tool_use) => Some(tool_use.id.clone()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut consumed: HashSet<(usize, usize)> = HashSet::new();
+    let mut activity = ActivityGroup::default();
+    let active_thinking_ms = state
+        .thinking_started_at
+        .map(|started| u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+    let active_thinking_block = state.pending_assistant.as_ref().and_then(|pending| {
+        pending
+            .content
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, block)| match block {
+                ContentBlock::Thinking(thinking) if thinking.duration_ms.is_none() => Some(index),
+                _ => None,
+            })
+    });
 
-    // 合并仅包含隐藏推理和普通工具活动的相邻 assistant 消息；出现可见答案或交互工具时结束分组。
-    let mut rendered_msg_idx = rendered_msg_offset;
-    let mut ui_idx = start_idx;
-    while ui_idx < end_idx {
-        if let Some(group_end) = activity_group_end(&state.messages, ui_idx, end_idx) {
-            let group = state.messages[ui_idx..group_end]
-                .iter()
-                .filter_map(UiMessage::as_message)
-                .collect::<Vec<_>>();
-            let summary = render_activity_summary(
-                &group,
-                &tool_result_map,
-                &mut consumed,
-                content_width,
-                None,
-            );
-            if !suppress_activity_from.is_some_and(|from| ui_idx >= from) {
-                let summary_selectable = summary.iter().map(line_to_plain_text).collect();
-                append_message_lines(
+    for (ui_index, ui_message) in state.messages.iter().enumerate() {
+        match ui_message {
+            UiMessage::AssistantMessage(message) => {
+                let message = crate::display::assistant_message(message);
+                render_assistant_message(
+                    state,
+                    &message,
+                    message_indices[ui_index].expect("assistant message index"),
+                    false,
+                    None,
+                    None,
+                    &rendered_message_refs,
+                    &tool_result_map,
+                    &tool_use_ids,
+                    &mut consumed,
+                    &mut activity,
+                    content_width,
                     &mut all_lines,
                     &mut selectable_lines,
-                    summary,
-                    summary_selectable,
                 );
             }
-
-            for ui_message in &state.messages[ui_idx..group_end] {
-                let (msg_lines, msg_sel) = render_single_ui_message(
-                    ui_message,
-                    &mut rendered_msg_idx,
-                    &render_context,
-                    &mut consumed,
-                    false,
+            UiMessage::SystemEvent(UiSystemEvent::ToolResults { .. }) => {
+                let message = &rendered_messages
+                    [message_indices[ui_index].expect("tool-result event message index")];
+                collect_tool_results(
+                    message,
+                    message_indices[ui_index].expect("tool result message index"),
+                    &tool_use_ids,
+                    &consumed,
+                    &mut activity,
                 );
-                append_message_lines(&mut all_lines, &mut selectable_lines, msg_lines, msg_sel);
             }
-            ui_idx = group_end;
-            continue;
+            UiMessage::UserInput(input) => {
+                flush_activity_group(
+                    &mut activity,
+                    content_width,
+                    &mut all_lines,
+                    &mut selectable_lines,
+                );
+                render_user_message(
+                    &crate::display::user_input_draft(input),
+                    content_width,
+                    &mut all_lines,
+                    &mut selectable_lines,
+                );
+            }
+            UiMessage::SystemEvent(_) => {
+                flush_activity_group(
+                    &mut activity,
+                    content_width,
+                    &mut all_lines,
+                    &mut selectable_lines,
+                );
+                let (lines, selectable) = render_ui_boundary(ui_message, state, content_width);
+                append_message_lines(&mut all_lines, &mut selectable_lines, lines, selectable);
+            }
         }
-
-        let (msg_lines, msg_sel) = render_single_ui_message(
-            &state.messages[ui_idx],
-            &mut rendered_msg_idx,
-            &render_context,
-            &mut consumed,
-            true,
-        );
-        append_message_lines(&mut all_lines, &mut selectable_lines, msg_lines, msg_sel);
-        ui_idx += 1;
     }
 
+    if let (Some(pending), Some(message_index)) = (&state.pending_assistant, pending_message_index)
+    {
+        render_assistant_message(
+            state,
+            pending,
+            message_index,
+            true,
+            active_thinking_block,
+            active_thinking_ms,
+            &rendered_message_refs,
+            &tool_result_map,
+            &tool_use_ids,
+            &mut consumed,
+            &mut activity,
+            content_width,
+            &mut all_lines,
+            &mut selectable_lines,
+        );
+    }
+    flush_activity_group(
+        &mut activity,
+        content_width,
+        &mut all_lines,
+        &mut selectable_lines,
+    );
     (all_lines, selectable_lines)
 }
 
-struct MessageRenderContext<'a> {
-    rendered_messages: &'a [&'a omini_model::message::Message],
-    tool_result_map: &'a HashMap<String, Vec<(usize, usize)>>,
-    state: &'a UiState,
+fn render_user_message(
+    draft: &UserDraft,
     content_width: usize,
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+) {
+    append_rendered_lines(
+        all_lines,
+        selectable_lines,
+        build_user_draft_lines(draft, content_width),
+    );
+}
+
+fn render_ui_boundary(
+    ui_message: &UiMessage,
+    state: &UiState,
+    content_width: usize,
+) -> (Vec<Line<'static>>, Vec<String>) {
+    let lines = match ui_message {
+        UiMessage::SystemEvent(UiSystemEvent::RunDivider { elapsed }) => {
+            build_run_divider_line(*elapsed, content_width)
+        }
+        UiMessage::SystemEvent(UiSystemEvent::Plan { text }) => {
+            build_proposed_plan_lines(text, content_width)
+        }
+        UiMessage::SystemEvent(UiSystemEvent::Summary { text }) => {
+            build_llm_summary_lines(text, content_width)
+        }
+        UiMessage::SystemEvent(UiSystemEvent::Notification(notification)) => {
+            build_notification_lines(notification, content_width)
+        }
+        UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft)) => {
+            build_user_draft_lines(draft, content_width)
+        }
+        UiMessage::SystemEvent(UiSystemEvent::TaskNotification(notification)) => notification
+            .tasks
+            .iter()
+            .flat_map(|task| {
+                let is_completed_agent = task.kind == omini_domain::task::TaskKind::SubAgent
+                    && task.status == TaskStatus::Completed;
+                let node = (task.kind == omini_domain::task::TaskKind::SubAgent)
+                    .then(|| {
+                        state
+                            .subagents
+                            .values()
+                            .find(|node| node.task_id == task.task_id)
+                    })
+                    .flatten();
+                let line = if task.kind == omini_domain::task::TaskKind::SubAgent {
+                    let title = node.map_or(task.title.as_str(), |node| node.title.as_str());
+                    let status = match task.status {
+                        TaskStatus::Completed => "finished",
+                        TaskStatus::Failed => "failed",
+                        TaskStatus::Cancelled => "cancelled",
+                        TaskStatus::Interrupted => "interrupted",
+                        TaskStatus::Running => "running",
+                        TaskStatus::Cancelling => "cancelling",
+                    };
+                    let duration = node
+                        .and_then(|node| node.duration)
+                        .or_else(|| {
+                            state
+                                .subagent_completion_durations
+                                .get(&task.task_id)
+                                .copied()
+                        })
+                        .map(|duration| {
+                            let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+                            format!(" · {}", format_thinking_duration(millis))
+                        })
+                        .unwrap_or_default();
+                    let text = truncate_display_width(
+                        &format!("● Agent \"{title}\" {status}{duration}"),
+                        content_width,
+                    );
+                    let (indicator, body) = if let Some(body) = text.strip_prefix('●') {
+                        ("●", body)
+                    } else {
+                        ("", text.as_str())
+                    };
+                    Line::from(vec![
+                        Span::styled(
+                            indicator.to_string(),
+                            Style::default()
+                                .fg(Color::Rgb(100, 200, 130))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            body.to_string(),
+                            Style::default()
+                                .fg(Color::Rgb(140, 145, 155))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ])
+                } else {
+                    let text = format!(
+                        "background task · {} · {} · {} · {}",
+                        task.kind.as_str(),
+                        task.label,
+                        task.title,
+                        task.status.as_str()
+                    );
+                    Line::from(Span::styled(
+                        truncate_str(&text, content_width),
+                        Style::default().fg(Color::Rgb(140, 145, 155)),
+                    ))
+                };
+                if is_completed_agent {
+                    vec![line, Line::from("")]
+                } else {
+                    vec![line]
+                }
+            })
+            .collect(),
+        UiMessage::SystemEvent(UiSystemEvent::ToolResults { .. })
+        | UiMessage::UserInput(_)
+        | UiMessage::AssistantMessage(_) => Vec::new(),
+    };
+    let selectable = lines.iter().map(line_to_plain_text).collect();
+    (lines, selectable)
+}
+
+fn collect_tool_results(
+    message: &Message,
+    message_index: usize,
+    tool_use_ids: &HashSet<String>,
+    consumed: &HashSet<(usize, usize)>,
+    activity: &mut ActivityGroup,
+) {
+    for (block_index, block) in message.content.iter().enumerate() {
+        let ContentBlock::ToolResult(result) = block else {
+            continue;
+        };
+        if !consumed.contains(&(message_index, block_index))
+            && !tool_use_ids.contains(&result.tool_use_id)
+        {
+            activity.orphan_results.push(result.clone());
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_assistant_message(
+    state: &UiState,
+    message: &Message,
+    message_index: usize,
+    is_pending: bool,
+    active_thinking_block: Option<usize>,
+    active_thinking_ms: Option<u64>,
+    rendered_messages: &[&Message],
+    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    tool_use_ids: &HashSet<String>,
+    consumed: &mut HashSet<(usize, usize)>,
+    activity: &mut ActivityGroup,
+    content_width: usize,
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+) {
+    for (block_index, block) in message.content.iter().enumerate() {
+        match classify_assistant_block(block) {
+            AssistantBlockKind::Thinking => {
+                let ContentBlock::Thinking(thinking) = block else {
+                    unreachable!("thinking classifier returned a non-thinking block")
+                };
+                activity.add_thinking(thinking.duration_ms);
+                if is_pending
+                    && active_thinking_block == Some(block_index)
+                    && let Some(active_thinking_ms) = active_thinking_ms
+                {
+                    activity.set_active_thinking(active_thinking_ms);
+                }
+            }
+            AssistantBlockKind::AggregatedTool => {
+                let ContentBlock::ToolUse(tool_use) = block else {
+                    unreachable!("tool classifier returned a non-tool block")
+                };
+                activity.add_tool(tool_use);
+                consume_tool_results(tool_use, tool_result_map, consumed);
+            }
+            AssistantBlockKind::BoundaryTool => {
+                let ContentBlock::ToolUse(tool_use) = block else {
+                    unreachable!("boundary classifier returned a non-tool block")
+                };
+                flush_activity_group(activity, content_width, all_lines, selectable_lines);
+                let tool_result = tool_result_for(tool_use, tool_result_map, rendered_messages);
+                consume_tool_results(tool_use, tool_result_map, consumed);
+                let lines = if tool_use.name == "spawn_agent" {
+                    render_spawn_agent(tool_use, tool_result, state, content_width)
+                } else {
+                    // 只在权限抽屉呈现等待状态和预览；消息区的边界行不依赖队列状态。
+                    render_tool(
+                        tool_use,
+                        tool_result,
+                        None,
+                        None,
+                        content_width,
+                        Some(state.status_bar.cwd.as_path()),
+                    )
+                };
+                append_rendered_lines(all_lines, selectable_lines, lines);
+            }
+            AssistantBlockKind::VisibleText => {
+                let ContentBlock::Text(text) = block else {
+                    unreachable!("text classifier returned a non-text block")
+                };
+                flush_activity_group(activity, content_width, all_lines, selectable_lines);
+                append_rendered_lines(
+                    all_lines,
+                    selectable_lines,
+                    build_assistant_text_lines(&text.text, content_width),
+                );
+            }
+            AssistantBlockKind::ToolResult => {
+                let ContentBlock::ToolResult(result) = block else {
+                    unreachable!("result classifier returned a non-result block")
+                };
+                if !consumed.contains(&(message_index, block_index))
+                    && !tool_use_ids.contains(&result.tool_use_id)
+                {
+                    activity.orphan_results.push(result.clone());
+                }
+            }
+            AssistantBlockKind::Ignored => {}
+        }
+    }
+}
+
+fn consume_tool_results(
+    tool_use: &ToolUseBlock,
+    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    consumed: &mut HashSet<(usize, usize)>,
+) {
+    if let Some(positions) = tool_result_map.get(&tool_use.id) {
+        consumed.extend(positions.iter().copied());
+    }
+}
+
+fn tool_result_for<'a>(
+    tool_use: &ToolUseBlock,
+    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
+    rendered_messages: &[&'a Message],
+) -> Option<&'a ToolResultBlock> {
+    let position = tool_result_map.get(&tool_use.id)?.first()?;
+    rendered_messages
+        .get(position.0)?
+        .content
+        .get(position.1)
+        .and_then(|block| match block {
+            ContentBlock::ToolResult(result) => Some(result),
+            _ => None,
+        })
+}
+
+fn render_spawn_agent(
+    tool_use: &ToolUseBlock,
+    result: Option<&ToolResultBlock>,
+    state: &UiState,
+    content_width: usize,
+) -> Vec<Line<'static>> {
+    let node = state
+        .subagents_by_tool_use
+        .get(&tool_use.id)
+        .and_then(|thread_id| state.subagents.get(thread_id));
+    let label = node
+        .map(|node| node.agent_label.as_str())
+        .or_else(|| tool_use.input.get("name").and_then(|value| value.as_str()))
+        .unwrap_or("Subagent");
+    let title = node
+        .map(|node| node.title.as_str())
+        .or_else(|| tool_use.input.get("title").and_then(|value| value.as_str()))
+        .unwrap_or("Background task");
+    let title_line = truncate_display_width(&format!("● {label} · {title}"), content_width);
+    let (indicator, title_text) = if let Some(title_text) = title_line.strip_prefix('●') {
+        ("●", title_text)
+    } else {
+        ("", title_line.as_str())
+    };
+    let status_line = truncate_display_width("  └ Backgrounded agent", content_width);
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                indicator.to_string(),
+                Style::default()
+                    .fg(Color::Rgb(100, 200, 130))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                title_text.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            status_line,
+            Style::default().fg(Color::Rgb(140, 145, 155)),
+        )),
+    ];
+    if let Some(result) = result.filter(|result| result.is_error) {
+        let error = tool_error_display_text(&result.content);
+        let error_line = truncate_display_width(&format!("  └ {error}"), content_width);
+        lines.push(Line::from(Span::styled(
+            error_line,
+            Style::default().fg(Color::Rgb(255, 100, 100)),
+        )));
+    }
+    lines
+}
+
+fn flush_activity_group(
+    activity: &mut ActivityGroup,
+    content_width: usize,
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+) {
+    if activity.is_empty() {
+        return;
+    }
+    let group = std::mem::take(activity);
+    append_rendered_lines(all_lines, selectable_lines, group.summary(content_width));
+    for result in group.orphan_results {
+        let color = if result.is_error {
+            Color::Rgb(255, 100, 100)
+        } else {
+            Color::Rgb(100, 200, 130)
+        };
+        let content = if result.is_error {
+            tool_error_display_text(&result.content)
+        } else {
+            result.content
+        };
+        append_rendered_lines(
+            all_lines,
+            selectable_lines,
+            build_bordered_lines(&content, content_width, color, false, None),
+        );
+    }
+}
+
+fn append_rendered_lines(
+    all_lines: &mut Vec<Line<'static>>,
+    selectable_lines: &mut Vec<String>,
+    lines: Vec<Line<'static>>,
+) {
+    let selectable = lines.iter().map(line_to_plain_text).collect();
+    append_message_lines(all_lines, selectable_lines, lines, selectable);
 }
 
 fn append_message_lines(
@@ -569,7 +800,11 @@ fn append_message_lines(
     if lines.is_empty() {
         return;
     }
-    if !all_lines.is_empty() {
+    if !all_lines.is_empty()
+        && !all_lines
+            .last()
+            .is_some_and(|line| line_to_plain_text(line).is_empty())
+    {
         all_lines.push(Line::from(""));
         selectable_lines.push(String::new());
     }
@@ -577,461 +812,6 @@ fn append_message_lines(
     selectable_lines.append(&mut selectable);
 }
 
-/// 渲染单条 `UiMessage`，返回 `(lines, selectable)`。
-///
-/// 不负责消息间分隔符（由 `render_message_range` 负责），
-/// 只返回该消息自身产出的行（内部 block 间有分隔空行）。
-fn render_single_ui_message(
-    ui_message: &UiMessage,
-    rendered_msg_idx: &mut usize,
-    context: &MessageRenderContext<'_>,
-    consumed: &mut HashSet<(usize, usize)>,
-    include_activity_summary: bool,
-) -> (Vec<Line<'static>>, Vec<String>) {
-    let MessageRenderContext {
-        rendered_messages,
-        tool_result_map,
-        state,
-        content_width: _,
-    } = context;
-    let content_width = context.content_width;
-    let mut all_lines: Vec<Line> = Vec::new();
-    let mut selectable_lines: Vec<String> = Vec::new();
-
-    match ui_message {
-        UiMessage::RunDivider { elapsed } => {
-            let block_lines = build_run_divider_line(*elapsed, content_width);
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
-        }
-        UiMessage::Display(display) => {
-            let block_lines = build_display_message_lines(display, content_width);
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
-        }
-        UiMessage::ProposedPlan { text } => {
-            let block_lines = build_proposed_plan_lines(text, content_width);
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
-        }
-        UiMessage::CompactSummary { text } => {
-            let block_lines = build_llm_summary_lines(text, content_width);
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
-        }
-        UiMessage::Notification(notification) => {
-            let block_lines = build_notification_lines(notification, content_width);
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.extend(block_lines);
-        }
-        UiMessage::TaskNotification(notification) => {
-            let dim = Style::default().fg(Color::Rgb(140, 145, 155));
-            for task in &notification.tasks {
-                let text = format!(
-                    "background task · {} · {} · {} · {}",
-                    task.kind.as_str(),
-                    task.label,
-                    task.title,
-                    task.status.as_str()
-                );
-                let text = truncate_str(&text, content_width);
-                selectable_lines.push(text.clone());
-                all_lines.push(Line::from(Span::styled(text, dim)));
-            }
-        }
-        UiMessage::Message(message) => {
-            let msg_idx = *rendered_msg_idx;
-            *rendered_msg_idx += 1;
-
-            // Claude Code 式活动收缩：assistant 消息的 thinking 时长与常规工具
-            // 聚合为一行摘要（`⏺ Thought for 12s, ran 1 shell command`），
-            // 常规工具按类别计数；特殊交互工具与正文保持独立渲染。
-            if include_activity_summary && message.role == omini_model::message::Role::Assistant {
-                let summary_lines = render_activity_summary(
-                    &[message],
-                    tool_result_map,
-                    consumed,
-                    content_width,
-                    None,
-                );
-                if !summary_lines.is_empty() {
-                    selectable_lines.extend(summary_lines.iter().map(line_to_plain_text));
-                    all_lines.extend(summary_lines);
-                }
-            }
-
-            for (block_idx, block) in message.content.iter().enumerate() {
-                if let ContentBlock::ToolResult(_) = block
-                    && consumed.contains(&(msg_idx, block_idx))
-                {
-                    continue;
-                }
-
-                let mut block_lines: Vec<Line> = Vec::new();
-                match block {
-                    ContentBlock::Text(tb) if message.role == omini_model::message::Role::User => {
-                        let user_bg = INPUT_BG;
-                        let bg_style = Style::default().bg(user_bg);
-                        let wrapped = styled_wrapped_text(
-                            tb,
-                            content_width.saturating_sub(2),
-                            Style::default().bg(user_bg),
-                        );
-                        if wrapped.is_empty() {
-                            let text = format!("❯ {}", " ".repeat(content_width.saturating_sub(2)));
-                            block_lines
-                                .push(Line::from(Span::styled(text, bg_style)).style(bg_style));
-                        } else {
-                            for (idx, wl) in wrapped.into_iter().enumerate() {
-                                let prefix = if idx == 0 { "❯ " } else { "  " };
-                                let text_width = UnicodeWidthStr::width(prefix) + line_width(&wl);
-                                let remaining = content_width.saturating_sub(text_width);
-                                let mut spans = vec![Span::styled(prefix, bg_style)];
-                                spans.extend(wl.spans);
-                                spans.push(Span::styled(" ".repeat(remaining), bg_style));
-                                block_lines.push(Line::from(spans).style(bg_style));
-                            }
-                        }
-                    }
-                    ContentBlock::Text(tb) => {
-                        let mut lines = build_assistant_text_lines(&tb.text, content_width);
-                        block_lines.append(&mut lines);
-                    }
-                    ContentBlock::Image(_) => {}
-                    // thinking 块已并入活动聚合摘要；思考内容文本不再展示
-                    ContentBlock::Thinking(_) => continue,
-                    ContentBlock::ToolUse(tu) => {
-                        if state.active_session_task_id.is_none() && hide_orchestration_tool(tu) {
-                            if let Some(positions) = tool_result_map.get(&tu.id) {
-                                consumed.extend(positions.iter().copied());
-                            }
-                            continue;
-                        }
-                        // 常规工具已由活动聚合摘要按类别计数。
-                        if !is_special_tool(tu) {
-                            continue;
-                        }
-                        let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                        let tool_pause_active =
-                            tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                        if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
-                            let node = state
-                                .subagents_by_tool_use
-                                .get(&tu.id)
-                                .and_then(|thread_id| state.subagents.get(thread_id));
-                            let tool_result = tool_result_map.get(&tu.id).and_then(|positions| {
-                                positions.first().and_then(|(mi, bi)| {
-                                    if let ContentBlock::ToolResult(tr) =
-                                        &rendered_messages[*mi].content[*bi]
-                                    {
-                                        Some(tr.clone())
-                                    } else {
-                                        None
-                                    }
-                                })
-                            });
-                            block_lines.extend(render_subagent_tool(
-                                tu,
-                                tool_result.as_ref(),
-                                node,
-                                &state.pending_tool_pauses,
-                                content_width,
-                                Some(state.status_bar.cwd.as_path()),
-                            ));
-                            if let Some(positions) = tool_result_map.get(&tu.id) {
-                                for pos in positions {
-                                    consumed.insert(*pos);
-                                }
-                            }
-                        } else if tu.name == "read_task" {
-                            block_lines.extend(render_read_task(
-                                tu,
-                                read_task_label(state, tu),
-                                false,
-                            ));
-                            if let Some(positions) = tool_result_map.get(&tu.id) {
-                                for pos in positions {
-                                    consumed.insert(*pos);
-                                }
-                            }
-                        } else if tu.name == "wait_tasks" {
-                            block_lines.extend(render_wait_tasks(tu, false));
-                            if let Some(positions) = tool_result_map.get(&tu.id) {
-                                for pos in positions {
-                                    consumed.insert(*pos);
-                                }
-                            }
-                        } else if let Some(positions) = tool_result_map.get(&tu.id) {
-                            let tool_result = positions.first().and_then(|(mi, bi)| {
-                                if let ContentBlock::ToolResult(tr) =
-                                    &rendered_messages[*mi].content[*bi]
-                                {
-                                    Some(tr.clone())
-                                } else {
-                                    None
-                                }
-                            });
-
-                            let tool_lines = render_tool(
-                                tu,
-                                tool_result.as_ref(),
-                                tool_pause,
-                                tool_pause_active,
-                                content_width,
-                                Some(state.status_bar.cwd.as_path()),
-                            );
-                            block_lines.extend(tool_lines);
-
-                            for pos in positions {
-                                consumed.insert(*pos);
-                            }
-                        } else {
-                            // 工具结果尚未返回
-                            let tool_lines = render_tool(
-                                tu,
-                                None,
-                                tool_pause,
-                                tool_pause_active,
-                                content_width,
-                                Some(state.status_bar.cwd.as_path()),
-                            );
-                            block_lines.extend(tool_lines);
-                        }
-                    }
-                    ContentBlock::ToolResult(tr) => {
-                        let color = if tr.is_error {
-                            Color::Rgb(255, 100, 100)
-                        } else {
-                            Color::Rgb(100, 200, 130)
-                        };
-                        let error_content;
-                        let content_ref = if tr.is_error {
-                            error_content = tool_error_display_text(&tr.content);
-                            &error_content
-                        } else {
-                            &tr.content
-                        };
-                        let mut lines =
-                            build_bordered_lines(content_ref, content_width, color, false, None);
-                        block_lines.append(&mut lines);
-                    }
-                }
-
-                if !block_lines.is_empty() {
-                    if !all_lines.is_empty() {
-                        all_lines.push(Line::from(""));
-                        selectable_lines.push(String::new());
-                    }
-                    selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-                    all_lines.append(&mut block_lines);
-                }
-            }
-        }
-    }
-
-    (all_lines, selectable_lines)
-}
-
-/// 渲染 pending_assistant（流式增量内容）。
-fn render_pending_assistant_lines(
-    state: &UiState,
-    content_width: usize,
-    skip_prefix: usize,
-) -> (Vec<Line<'static>>, Vec<String>) {
-    let mut all_lines: Vec<Line> = Vec::new();
-    let mut selectable_lines: Vec<String> = Vec::new();
-
-    let Some(pending) = &state.pending_assistant else {
-        return (all_lines, selectable_lines);
-    };
-
-    // 先构建 pending_assistant 内部的 tool_result_map
-    let mut tr_indices: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (bi, block) in pending.content.iter().enumerate() {
-        if let ContentBlock::ToolResult(tr) = block {
-            tr_indices.entry(tr.tool_use_id.clone()).or_insert(bi);
-        }
-    }
-    let mut consumed_tr: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-    for (block_idx, block) in pending.content.iter().enumerate() {
-        if block_idx < skip_prefix {
-            continue;
-        }
-        if let ContentBlock::ToolResult(_) = block
-            && consumed_tr.contains(&block_idx)
-        {
-            continue;
-        }
-
-        let mut block_lines: Vec<Line> = Vec::new();
-        match block {
-            ContentBlock::Text(tb) => {
-                let mut lines = build_assistant_text_lines(&tb.text, content_width);
-                block_lines.append(&mut lines);
-            }
-            ContentBlock::Image(_) => {}
-            ContentBlock::Thinking(tb) => {
-                // 思考内容不再展示；进行中的段显示动态计时，已结算的段显示静态时长
-                let label = if let Some(ms) = tb.duration_ms {
-                    format!("  Thought for {}", format_thinking_duration(ms))
-                } else if let Some(started_at) = state.thinking_started_at {
-                    let secs = started_at.elapsed().as_secs();
-                    if secs >= 1 {
-                        format!("  Thinking for {secs}s...")
-                    } else {
-                        "  Thinking...".to_string()
-                    }
-                } else {
-                    "  Thinking...".to_string()
-                };
-                block_lines.push(thinking_duration_line(&label));
-            }
-            ContentBlock::ToolUse(tu) => {
-                if state.active_session_task_id.is_none() && hide_orchestration_tool(tu) {
-                    if let Some(&bi) = tr_indices.get(&tu.id) {
-                        consumed_tr.insert(bi);
-                    }
-                    continue;
-                }
-                if matches!(tu.name.as_str(), "spawn_agent" | "run_agent") {
-                    let node = state
-                        .subagents_by_tool_use
-                        .get(&tu.id)
-                        .and_then(|thread_id| state.subagents.get(thread_id));
-                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
-                            Some(tr.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    block_lines.extend(render_subagent_tool(
-                        tu,
-                        tr.as_ref(),
-                        node,
-                        &state.pending_tool_pauses,
-                        content_width,
-                        Some(state.status_bar.cwd.as_path()),
-                    ));
-                    if let Some(&bi) = tr_indices.get(&tu.id) {
-                        consumed_tr.insert(bi);
-                    }
-                } else if tu.name == "read_task" {
-                    block_lines.extend(render_read_task(tu, read_task_label(state, tu), false));
-                    if let Some(&bi) = tr_indices.get(&tu.id) {
-                        consumed_tr.insert(bi);
-                    }
-                } else if tu.name == "wait_tasks" {
-                    block_lines.extend(render_wait_tasks(tu, false));
-                    if let Some(&bi) = tr_indices.get(&tu.id) {
-                        consumed_tr.insert(bi);
-                    }
-                } else if is_special_tool(tu) {
-                    // 特殊交互工具（ask_user/todo_write/view_image）保持详细渲染
-                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                    let tool_pause_active =
-                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
-                            consumed_tr.insert(bi);
-                            Some(tr.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    let tool_lines = render_tool(
-                        tu,
-                        tr.as_ref(),
-                        tool_pause,
-                        tool_pause_active,
-                        content_width,
-                        Some(state.status_bar.cwd.as_path()),
-                    );
-                    block_lines.extend(tool_lines);
-                } else {
-                    let tool_pause = state.tool_pause_for_tool_use(&tu.id);
-                    let tool_pause_active =
-                        tool_pause.map(|pause| state.is_active_tool_pause(pause));
-                    // 检查是否有对应的 ToolResult
-                    let tr = tr_indices.get(&tu.id).and_then(|&bi| {
-                        if let ContentBlock::ToolResult(tr) = &pending.content[bi] {
-                            consumed_tr.insert(bi);
-                            Some(tr.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    if tr.is_none() && tool_pause.is_some() {
-                        // 权限确认等待期间保持带确认预览的等待渲染
-                        block_lines.extend(render_tool(
-                            tu,
-                            None,
-                            tool_pause,
-                            tool_pause_active,
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        ));
-                    } else {
-                        // 常规工具紧凑形态：主行 + 结果首行。
-                        block_lines.extend(render_tool_compact(
-                            tu,
-                            tr.as_ref(),
-                            content_width,
-                            Some(state.status_bar.cwd.as_path()),
-                        ));
-                    }
-                }
-            }
-            ContentBlock::ToolResult(tr) => {
-                // 如果没有对应的 ToolUse 来消费它，单独渲染
-                let color = if tr.is_error {
-                    Color::Rgb(255, 100, 100)
-                } else {
-                    Color::Rgb(100, 200, 130)
-                };
-                let error_content;
-                let content_ref = if tr.is_error {
-                    error_content = tool_error_display_text(&tr.content);
-                    &error_content
-                } else {
-                    &tr.content
-                };
-                let mut lines =
-                    build_bordered_lines(content_ref, content_width, color, false, None);
-                block_lines.append(&mut lines);
-            }
-        }
-
-        if !block_lines.is_empty() {
-            if !all_lines.is_empty() {
-                all_lines.push(Line::from(""));
-                selectable_lines.push(String::new());
-            }
-            selectable_lines.extend(block_lines.iter().map(line_to_plain_text));
-            all_lines.append(&mut block_lines);
-        }
-    }
-
-    (all_lines, selectable_lines)
-}
-
-fn read_task_label<'a>(state: &'a UiState, tool_use: &ToolUseBlock) -> Option<(&'a str, &'a str)> {
-    let task_id = tool_use.input.get("task_id")?.as_str()?;
-    state
-        .subagents
-        .values()
-        .find(|node| node.task_id == task_id)
-        .map(|node| (node.agent_label.as_str(), node.title.as_str()))
-}
-
-/// 渲染 assistant 消息的活动聚合摘要块：`⏺ Thought for 12s, ran 1 shell command`
-/// 常规工具计数合并在摘要主行中；配对结果不额外显示错误预览。
-///
-/// thinking 时长取消息内所有已测量 Thinking 块之和（旧记录无数据则不计）；
-/// 常规工具按类别统计，其配对的 ToolResult 位置标记进 `consumed` 防止重复渲染。
-/// 无思考数据且无常规工具时返回空（如纯文本回复或仅特殊工具）。
-/// 渲染 pending_proposed_plan。
 fn render_pending_plan_lines(
     plan_text: &str,
     content_width: usize,
@@ -1065,8 +845,9 @@ fn render_pending_compact_lines(
 mod tests {
     use super::*;
     use omini_domain::conversation::{
-        AssistantMessage, AssistantMessageBlock, SystemEvent, ToolResultRecord,
+        AssistantMessage, AssistantMessageBlock, SystemEvent, ToolResultRecord, UserInput,
     };
+    use omini_domain::input::{InputPart, UserInputIntent};
     use omini_model::message::ThinkingBlock;
     use omini_model::message::{ContentBlock, Message, Role};
     use ratatui::Terminal;
@@ -1130,6 +911,32 @@ mod tests {
         )
     }
 
+    fn rendered_timeline(state: &UiState) -> String {
+        render_message_range(state, 100)
+            .0
+            .iter()
+            .map(line_to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn assistant_item(message: Message) -> UiMessage {
+        UiMessage::from_model_message(message)
+            .into_iter()
+            .find(|item| matches!(item, UiMessage::AssistantMessage(_)))
+            .expect("assistant model message should produce a history item")
+    }
+
+    fn user_input_item(text: &str) -> UiMessage {
+        UiMessage::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: text.to_string(),
+            }],
+            attachments: Vec::new(),
+        })
+    }
+
     #[test]
     fn run_divider_renders_elapsed_duration() {
         let lines = build_run_divider_line(Duration::from_secs(67), 24);
@@ -1184,7 +991,7 @@ mod tests {
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state.messages.push(UiMessage::Message(Message::new(
+        state.messages.push(assistant_item(Message::new(
             Role::Assistant,
             vec![
                 ContentBlock::Thinking(ThinkingBlock {
@@ -1212,7 +1019,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         // 旧持久化记录：无 duration_ms，也没有工具活动 → 不渲染任何思考行
-        state.messages.push(UiMessage::Message(Message::new(
+        state.messages.push(assistant_item(Message::new(
             Role::Assistant,
             vec![
                 ContentBlock::from_thinking("checking context".to_string()),
@@ -1236,7 +1043,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         let bash_input = HashMap::from([("command".to_string(), serde_json::json!("git status"))]);
-        state.messages.push(UiMessage::Message(Message::new(
+        state.messages.push(assistant_item(Message::new(
             Role::Assistant,
             vec![
                 ContentBlock::Thinking(ThinkingBlock {
@@ -1269,75 +1076,261 @@ mod tests {
     }
 
     #[test]
-    fn main_timeline_hides_agent_orchestration_calls_and_results_but_keeps_task_notifications() {
-        let backend = TestBackend::new(100, 16);
-        let mut terminal = Terminal::new(backend).unwrap();
+    fn spawn_agent_is_a_timeline_boundary_while_other_orchestration_tools_are_summarized() {
         let mut state = UiState::new();
-        let names = [
-            "spawn_agent",
-            "run_agent",
-            "read_task",
-            "wait_tasks",
-            "cancel_task",
-        ];
-        let tool_uses = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| {
-                ContentBlock::from_tool_use(
-                    format!("orchestration-{index}"),
-                    (*name).to_string(),
-                    HashMap::new(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let results = names
-            .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                ContentBlock::from_tool_result(
-                    format!("orchestration-{index}"),
-                    false,
-                    "hidden orchestration result".to_string(),
-                )
-            })
-            .collect::<Vec<_>>();
-        state.messages.extend([
-            UiMessage::Message(Message::new(
-                Role::Assistant,
-                std::iter::once(ContentBlock::Thinking(ThinkingBlock {
-                    thinking: "hidden reasoning".to_string(),
-                    duration_ms: Some(2_000),
-                }))
-                .chain(tool_uses)
-                .collect(),
-            )),
-            UiMessage::Message(Message::new(Role::User, results)),
-            UiMessage::TaskNotification(omini_domain::conversation::TaskNotification {
-                tasks: vec![omini_domain::task::TaskCompletion {
-                    task_id: "task-1".to_string(),
-                    kind: omini_domain::task::TaskKind::SubAgent,
-                    label: "Explore".to_string(),
-                    title: "Search architecture".to_string(),
-                    status: omini_domain::task::TaskStatus::Completed,
-                    summary: None,
-                }],
-                created_at: chrono::Utc::now(),
+        let blocks = vec![
+            ContentBlock::Thinking(ThinkingBlock {
+                thinking: "hidden reasoning".to_string(),
+                duration_ms: Some(2_000),
             }),
-        ]);
-
-        terminal
-            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
-            .unwrap();
-
-        let rendered = state.selectable_message_lines.join("\n");
-        for name in names {
-            assert!(!rendered.contains(name), "unexpected {name} in {rendered}");
-        }
-        assert!(!rendered.contains("hidden orchestration result"));
-        assert!(!rendered.contains("ran 1"));
-        assert!(rendered.contains("background task"));
+            ContentBlock::from_tool_use("run-1".into(), "run_agent".into(), HashMap::new()),
+            ContentBlock::from_tool_use("read-1".into(), "read_task".into(), HashMap::new()),
+            ContentBlock::from_tool_use("wait-1".into(), "wait_tasks".into(), HashMap::new()),
+            ContentBlock::from_tool_use("cancel-1".into(), "cancel_task".into(), HashMap::new()),
+            ContentBlock::from_tool_use(
+                "spawn-1".into(),
+                "spawn_agent".into(),
+                HashMap::from([
+                    ("name".into(), serde_json::json!("Explore")),
+                    ("title".into(), serde_json::json!("Search architecture")),
+                ]),
+            ),
+            ContentBlock::from_tool_use("run-2".into(), "run_agent".into(), HashMap::new()),
+        ];
+        let results = ["run-1", "read-1", "wait-1", "cancel-1", "spawn-1", "run-2"]
+            .into_iter()
+            .map(|id| ContentBlock::from_tool_result(id.into(), false, "hidden result".into()))
+            .collect::<Vec<_>>();
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::Assistant,
+                blocks,
+            )));
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::User,
+                results,
+            )));
+        state
+            .subagents_by_tool_use
+            .insert("spawn-1".into(), "thread-1".into());
+        state.subagents.insert(
+            "thread-1".into(),
+            crate::state::SubagentNode {
+                task_id: "task-1".into(),
+                thread_id: "thread-1".into(),
+                parent_thread_id: "main-thread".into(),
+                spawn_tool_use_id: "spawn-1".into(),
+                agent_label: "Explore".into(),
+                title: "Search architecture".into(),
+                execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
+                status: omini_domain::task::TaskStatus::Completed,
+                duration: Some(Duration::from_secs(591)),
+                started_at: chrono::Utc::now(),
+                messages: Vec::new(),
+            },
+        );
+        state.subagent_order.push("task-1".into());
+        state.prune_terminal_tasks();
+        state
+            .messages
+            .push(UiMessage::SystemEvent(UiSystemEvent::TaskNotification(
+                omini_domain::conversation::TaskNotification {
+                    tasks: vec![omini_domain::task::TaskCompletion {
+                        task_id: "task-1".into(),
+                        kind: omini_domain::task::TaskKind::SubAgent,
+                        label: "Explore".into(),
+                        title: "Search architecture".into(),
+                        status: omini_domain::task::TaskStatus::Completed,
+                        summary: None,
+                    }],
+                    created_at: chrono::Utc::now(),
+                },
+            )));
+        let rendered = rendered_timeline(&state);
+        assert!(
+            rendered.contains("Thought for 2s, used run_agent ×1"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("used read_task ×1"), "{rendered}");
+        assert!(rendered.contains("used wait_tasks ×1"), "{rendered}");
+        assert!(rendered.contains("used cancel_task ×1"), "{rendered}");
+        assert!(rendered.contains("Used run_agent ×1"), "{rendered}");
+        assert_eq!(
+            rendered.matches("used run_agent ×1").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(!rendered.contains("hidden result"));
+        assert!(rendered.contains("● Agent \"Search architecture\" finished · 9m 51s"));
+        assert!(rendered.contains("● Explore · Search architecture"));
+        assert!(rendered.contains("└ Backgrounded agent"));
+        assert!(!rendered.contains("Backgrounded agent ·"));
+        assert!(!rendered.contains("completed"));
+        assert!(!rendered.to_lowercase().contains("ctrl+"));
+        assert!(!rendered.contains("to expand"));
         assert!(rendered.contains("Search architecture"));
+    }
+
+    #[test]
+    fn every_explicit_boundary_splits_groups_inside_one_assistant_message() {
+        let mut state = UiState::new();
+        let mut blocks = vec![
+            ContentBlock::Thinking(ThinkingBlock {
+                thinking: "hidden".into(),
+                duration_ms: Some(5_000),
+            }),
+            ContentBlock::from_tool_use("bash-1".into(), "bash".into(), HashMap::new()),
+            ContentBlock::from_text("visible narration".into()),
+            ContentBlock::from_tool_use("read-1".into(), "read".into(), HashMap::new()),
+            ContentBlock::from_tool_use(
+                "edit-1".into(),
+                "edit".into(),
+                HashMap::from([("file_path".into(), serde_json::json!("src/lib.rs"))]),
+            ),
+            ContentBlock::from_tool_use("bash-2".into(), "bash".into(), HashMap::new()),
+            ContentBlock::from_tool_use(
+                "write-1".into(),
+                "write".into(),
+                HashMap::from([("file_path".into(), serde_json::json!("out.txt"))]),
+            ),
+            ContentBlock::from_tool_use("search-1".into(), "search".into(), HashMap::new()),
+            ContentBlock::from_tool_use("ask-1".into(), "ask_user".into(), HashMap::new()),
+            ContentBlock::from_tool_use("read-2".into(), "read".into(), HashMap::new()),
+            ContentBlock::from_tool_use("todo-1".into(), "todo_write".into(), HashMap::new()),
+            ContentBlock::from_tool_use("bash-3".into(), "bash".into(), HashMap::new()),
+            ContentBlock::from_tool_use(
+                "spawn-1".into(),
+                "spawn_agent".into(),
+                HashMap::from([
+                    ("name".into(), serde_json::json!("Explore")),
+                    ("title".into(), serde_json::json!("Find entrypoints")),
+                ]),
+            ),
+            ContentBlock::from_tool_use("search-2".into(), "search".into(), HashMap::new()),
+        ];
+        blocks.extend(
+            [
+                "bash-1", "read-1", "edit-1", "bash-2", "write-1", "search-1", "ask-1", "read-2",
+                "todo-1", "bash-3", "spawn-1", "search-2",
+            ]
+            .into_iter()
+            .map(|id| ContentBlock::from_tool_result(id.into(), false, "hidden result".into())),
+        );
+        state
+            .messages
+            .push(assistant_item(Message::new(Role::Assistant, blocks)));
+
+        let rendered = rendered_timeline(&state);
+        let ordered_markers = [
+            "Thought for 5s, ran 1 shell command",
+            "visible narration",
+            "Read 1 file",
+            "⏺ Edit",
+            "Ran 1 shell command",
+            "⏺ Write",
+            "Ran 1 search",
+            "⏺ Ask User",
+            "Read 1 file",
+            "⏺ Todo List",
+            "Ran 1 shell command",
+            "Explore · Find entrypoints",
+            "Ran 1 search",
+        ];
+        let mut remaining = rendered.as_str();
+        for marker in ordered_markers {
+            let Some(position) = remaining.find(marker) else {
+                panic!("missing or out-of-order marker {marker:?} in {rendered}");
+            };
+            remaining = &remaining[position + marker.len()..];
+        }
+        assert_eq!(
+            rendered.matches("Ran 1 shell command").count(),
+            2,
+            "{rendered}"
+        );
+        assert_eq!(rendered.matches("Ran 1 search").count(), 2, "{rendered}");
+        assert!(!rendered.contains("hidden result"));
+    }
+
+    #[test]
+    fn all_non_tool_result_ui_events_split_activity_groups() {
+        let events = vec![
+            UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(
+                crate::display::UserDraft::plain("user input".into()),
+            )),
+            UiMessage::SystemEvent(UiSystemEvent::Plan {
+                text: "# Proposed plan".into(),
+            }),
+            UiMessage::SystemEvent(UiSystemEvent::RunDivider {
+                elapsed: Duration::from_secs(1),
+            }),
+            UiMessage::SystemEvent(UiSystemEvent::Notification(Notification::info(
+                "system notice",
+            ))),
+            UiMessage::SystemEvent(UiSystemEvent::Summary {
+                text: "compacted context".into(),
+            }),
+            UiMessage::SystemEvent(UiSystemEvent::TaskNotification(
+                omini_domain::conversation::TaskNotification {
+                    tasks: vec![omini_domain::task::TaskCompletion {
+                        task_id: "task-1".into(),
+                        kind: omini_domain::task::TaskKind::SubAgent,
+                        label: "Explore".into(),
+                        title: "Search architecture".into(),
+                        status: omini_domain::task::TaskStatus::Completed,
+                        summary: None,
+                    }],
+                    created_at: chrono::Utc::now(),
+                },
+            )),
+        ];
+
+        for event in events {
+            let is_task_notification = matches!(
+                &event,
+                UiMessage::SystemEvent(UiSystemEvent::TaskNotification(_))
+            );
+            let mut state = UiState::new();
+            state.messages.extend([
+                assistant_item(Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::from_tool_use(
+                        "read-1".into(),
+                        "read".into(),
+                        HashMap::new(),
+                    )],
+                )),
+                event,
+                assistant_item(Message::new(
+                    Role::Assistant,
+                    vec![ContentBlock::from_tool_use(
+                        "search-1".into(),
+                        "search".into(),
+                        HashMap::new(),
+                    )],
+                )),
+            ]);
+
+            let rendered = rendered_timeline(&state);
+            let read = rendered.find("Read 1 file").expect("read summary");
+            let search = rendered.find("Ran 1 search").expect("search summary");
+            assert!(read < search, "event failed to split activity: {rendered}");
+            assert_eq!(rendered.matches("Read 1 file").count(), 1, "{rendered}");
+            assert_eq!(rendered.matches("Ran 1 search").count(), 1, "{rendered}");
+            if is_task_notification {
+                assert!(
+                    rendered.contains("● Agent \"Search architecture\" finished"),
+                    "{rendered}"
+                );
+                assert!(
+                    !rendered.contains("background task · sub_agent"),
+                    "{rendered}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1346,8 +1339,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.messages.extend([
-            UiMessage::Message(thought_and_shell_call(5_300, "t1", "first output")),
-            UiMessage::Message(thought_and_shell_call(6_700, "t2", "second output")),
+            assistant_item(thought_and_shell_call(5_300, "t1", "first output")),
+            assistant_item(thought_and_shell_call(6_700, "t2", "second output")),
         ]);
 
         terminal
@@ -1367,24 +1360,21 @@ mod tests {
     }
 
     #[test]
-    fn incrementally_appended_activity_stays_one_uncached_group() {
+    fn appended_activity_stays_in_the_same_open_group() {
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
-        state
-            .messages
-            .push(UiMessage::Message(thought_and_shell_call(
-                5_000,
-                "t1",
-                "first output",
-            )));
+        state.messages.push(assistant_item(thought_and_shell_call(
+            5_000,
+            "t1",
+            "first output",
+        )));
 
         terminal
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
             .unwrap();
-        assert_eq!(state.render_cache.completed_message_count, 0);
 
-        state.messages.push(UiMessage::Message(Message::new(
+        state.messages.push(assistant_item(Message::new(
             Role::Assistant,
             vec![
                 ContentBlock::from_tool_use("t2".into(), "bash".into(), HashMap::new()),
@@ -1394,15 +1384,12 @@ mod tests {
         terminal
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
             .unwrap();
-        assert_eq!(state.render_cache.completed_message_count, 0);
 
-        state
-            .messages
-            .push(UiMessage::Message(thought_and_shell_call(
-                7_000,
-                "t3",
-                "second output",
-            )));
+        state.messages.push(assistant_item(thought_and_shell_call(
+            7_000,
+            "t3",
+            "second output",
+        )));
         terminal
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
             .unwrap();
@@ -1415,7 +1402,6 @@ mod tests {
         );
         assert!(!rendered.contains("first output"), "{rendered}");
         assert!(!rendered.contains("second output"), "{rendered}");
-        assert_eq!(state.render_cache.completed_message_count, 0);
     }
 
     #[test]
@@ -1476,9 +1462,10 @@ mod tests {
         let rendered = state.selectable_message_lines.join("\n");
         assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
         assert!(
-            rendered.contains("Thought for 12s, read 3 files"),
+            rendered.contains("Thought for 12s, read 2 files"),
             "{rendered}"
         );
+        assert!(rendered.contains("Read 1 file"), "{rendered}");
         assert!(!rendered.contains("text,"), "{rendered}");
         assert!(!rendered.contains("if hours > 0"), "{rendered}");
         assert!(rendered.contains("检查剩余的状态逻辑。"), "{rendered}");
@@ -1571,10 +1558,10 @@ mod tests {
             )
         };
         state.messages.extend([
-            UiMessage::Message(search_call("s1", "Found 4 matches")),
-            UiMessage::Message(blank_message),
-            UiMessage::Message(search_only("s2", "Found 9 matches")),
-            UiMessage::Message(search_call("s3", "Found 3 matches")),
+            assistant_item(search_call("s1", "Found 4 matches")),
+            assistant_item(blank_message),
+            assistant_item(search_only("s2", "Found 9 matches")),
+            assistant_item(search_call("s3", "Found 3 matches")),
         ]);
 
         terminal
@@ -1592,17 +1579,118 @@ mod tests {
     }
 
     #[test]
+    fn success_and_error_tool_results_do_not_break_or_duplicate_activity() {
+        let mut state = UiState::new();
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking(ThinkingBlock {
+                        thinking: "hidden".into(),
+                        duration_ms: Some(12_000),
+                    }),
+                    ContentBlock::from_tool_use("bash-1".into(), "bash".into(), HashMap::new()),
+                    ContentBlock::from_tool_use("search-1".into(), "search".into(), HashMap::new()),
+                ],
+            )));
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::User,
+                vec![
+                    ContentBlock::from_tool_result("search-1".into(), true, "search failed".into()),
+                    ContentBlock::from_tool_result("bash-1".into(), false, "command output".into()),
+                ],
+            )));
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_tool_use(
+                    "read-1".into(),
+                    "read".into(),
+                    HashMap::new(),
+                )],
+            )));
+
+        let rendered = rendered_timeline(&state);
+
+        assert_eq!(rendered.matches("Thought for").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("Thought for 12s, ran 1 shell command, ran 1 search, read 1 file"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("search failed"));
+        assert!(!rendered.contains("command output"));
+        assert!(!rendered.contains("\n⏺ "));
+    }
+
+    #[test]
+    fn streaming_tail_and_restored_history_have_identical_groups() {
+        let first_turn = Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "hidden".into(),
+                    duration_ms: Some(4_000),
+                }),
+                ContentBlock::from_tool_use("bash-1".into(), "bash".into(), HashMap::new()),
+            ],
+        );
+        let results = Message::new(
+            Role::User,
+            vec![ContentBlock::from_tool_result(
+                "bash-1".into(),
+                false,
+                "command output".into(),
+            )],
+        );
+        let streaming_tail = Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "still hidden".into(),
+                    duration_ms: Some(2_000),
+                }),
+                ContentBlock::from_tool_use("read-1".into(), "read".into(), HashMap::new()),
+                ContentBlock::from_tool_use("search-1".into(), "search".into(), HashMap::new()),
+            ],
+        );
+
+        let mut live = UiState::new();
+        live.messages.push(assistant_item(first_turn.clone()));
+        live.messages
+            .extend(UiMessage::from_model_message(results.clone()));
+        live.pending_assistant = Some(streaming_tail.clone());
+
+        let mut restored = UiState::new();
+        restored.apply_thread_snapshot(
+            Some("restored-thread".into()),
+            vec![
+                history_item_from_model_message(first_turn),
+                history_item_from_model_message(results),
+                history_item_from_model_message(streaming_tail),
+            ],
+            Vec::new(),
+            crate::types::events::ThreadUsageSnapshot::default(),
+        );
+
+        assert_eq!(rendered_timeline(&live), rendered_timeline(&restored));
+    }
+
+    #[test]
     fn visible_assistant_text_closes_thought_activity_group() {
         let backend = TestBackend::new(80, 16);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.messages.extend([
-            UiMessage::Message(thought_and_shell_call(5_000, "t1", "first output")),
-            UiMessage::Message(Message::new(
+            assistant_item(thought_and_shell_call(5_000, "t1", "first output")),
+            assistant_item(Message::new(
                 Role::Assistant,
                 vec![ContentBlock::from_text("intermediate answer".to_string())],
             )),
-            UiMessage::Message(thought_and_shell_call(7_000, "t2", "second output")),
+            assistant_item(thought_and_shell_call(7_000, "t2", "second output")),
         ]);
 
         terminal
@@ -1622,12 +1710,9 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.messages.extend([
-            UiMessage::Message(thought_and_shell_call(5_000, "t1", "first output")),
-            UiMessage::Message(Message::new(
-                Role::User,
-                vec![ContentBlock::from_text("follow-up".to_string())],
-            )),
-            UiMessage::Message(thought_and_shell_call(7_000, "t2", "second output")),
+            assistant_item(thought_and_shell_call(5_000, "t1", "first output")),
+            user_input_item("follow-up"),
+            assistant_item(thought_and_shell_call(7_000, "t2", "second output")),
         ]);
 
         terminal
@@ -1645,21 +1730,23 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         let input = HashMap::from([("command".to_string(), serde_json::json!("false"))]);
-        state.messages.push(UiMessage::Message(Message::new(
-            Role::Assistant,
-            vec![
-                ContentBlock::Thinking(ThinkingBlock {
-                    thinking: "hidden".to_string(),
-                    duration_ms: Some(2_000),
-                }),
-                ContentBlock::from_tool_use("t1".to_string(), "bash".to_string(), input),
-                ContentBlock::from_tool_result(
-                    "t1".to_string(),
-                    true,
-                    "command failed".to_string(),
-                ),
-            ],
-        )));
+        state
+            .messages
+            .extend(UiMessage::from_model_message(Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking(ThinkingBlock {
+                        thinking: "hidden".to_string(),
+                        duration_ms: Some(2_000),
+                    }),
+                    ContentBlock::from_tool_use("t1".to_string(), "bash".to_string(), input),
+                    ContentBlock::from_tool_result(
+                        "t1".to_string(),
+                        true,
+                        "command failed".to_string(),
+                    ),
+                ],
+            )));
 
         terminal
             .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 12)))
@@ -1681,13 +1768,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.main_query_active = true;
-        state
-            .messages
-            .push(UiMessage::Message(thought_and_shell_call(
-                5_000,
-                "t1",
-                "first output",
-            )));
+        state.messages.push(assistant_item(thought_and_shell_call(
+            5_000,
+            "t1",
+            "first output",
+        )));
         state.pending_assistant = Some(Message::new(
             Role::Assistant,
             vec![
@@ -1721,13 +1806,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = UiState::new();
         state.main_query_active = true;
-        state
-            .messages
-            .push(UiMessage::Message(thought_and_shell_call(
-                5_000,
-                "t1",
-                "first output",
-            )));
+        state.messages.push(assistant_item(thought_and_shell_call(
+            5_000,
+            "t1",
+            "first output",
+        )));
         state.pending_assistant = Some(Message::new(
             Role::Assistant,
             vec![

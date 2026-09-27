@@ -1,17 +1,19 @@
-use crate::display::{DisplayImageAttachment, DisplayMessage, UserDraft};
+use crate::display::{DisplayImageAttachment, UserDraft};
 use crate::types::config::ThinkingEffort;
 use crate::types::events::{
     ActiveProfile, AgentTaskExecutionMode, AgentTaskInfo, AgentTaskSnapshot, CommandSummary,
     InteractionRequest, Notification, SubmittedPlan, ThreadSummary, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
-use omini_domain::conversation::{SystemEvent, TaskNotification};
+use omini_domain::conversation::{
+    AssistantMessage, AssistantMessageBlock, SystemEvent, TaskNotification, ToolResultRecord,
+    UserInput,
+};
 use omini_domain::task::TaskStatus;
 use omini_model::message::Message;
 use omini_protocol::HistoryItem;
 use rand::Rng;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -147,22 +149,23 @@ impl std::fmt::Display for AgentStatus {
     }
 }
 
-pub(crate) fn pause_preview_tool_use_id(pause: &ToolPauseRequest) -> &str {
-    pause
-        .preview_tool_use_id
-        .as_deref()
-        .unwrap_or(&pause.tool_use_id)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UiMessage {
-    Message(Message),
-    Display(DisplayMessage),
-    ProposedPlan { text: String },
-    RunDivider { elapsed: Duration },
-    Notification(Notification),
-    CompactSummary { text: String },
+    UserInput(UserInput),
+    AssistantMessage(AssistantMessage),
+    SystemEvent(UiSystemEvent),
+}
+
+/// 持久化系统事件的 TUI 投影，以及只用于当前界面的运行时事件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiSystemEvent {
+    Plan { text: String },
+    Summary { text: String },
     TaskNotification(TaskNotification),
+    ToolResults { results: Vec<ToolResultRecord> },
+    UserInputEcho(UserDraft),
+    Notification(Notification),
+    RunDivider { elapsed: Duration },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +178,10 @@ pub struct SubagentNode {
     pub title: String,
     pub execution_mode: AgentTaskExecutionMode,
     pub status: TaskStatus,
+    /// Agent 结束后显示的实际运行时长。
+    pub duration: Option<std::time::Duration>,
+    /// 运行时事件缺少完成时间时，用于计算终态耗时。
+    pub started_at: chrono::DateTime<chrono::Utc>,
     pub messages: Vec<Message>,
 }
 
@@ -186,6 +193,10 @@ impl From<AgentTaskSnapshot> for SubagentNode {
 
 impl From<AgentTaskInfo> for SubagentNode {
     fn from(task: AgentTaskInfo) -> Self {
+        let started_at = task.created_at;
+        let duration = task
+            .completed_at
+            .and_then(|completed_at| (completed_at - started_at).to_std().ok());
         Self {
             task_id: task.task_id,
             thread_id: task.thread_id,
@@ -195,6 +206,8 @@ impl From<AgentTaskInfo> for SubagentNode {
             title: task.title,
             execution_mode: task.execution_mode,
             status: task.status,
+            duration,
+            started_at,
             messages: Vec::new(),
         }
     }
@@ -212,65 +225,96 @@ pub struct SessionViewState {
     pub message_scroll_y: usize,
     pub scroll_offset: usize,
     pub auto_scroll: bool,
-    pub live_message_start: usize,
-    pub pending_tool_message_map: HashMap<String, usize>,
     pub running_tools: HashSet<String>,
     pub agent_status: AgentStatus,
     pub run_timer: Option<RunTimer>,
-    pub render_cache: RenderCache,
 }
 
 impl UiMessage {
     pub fn from_history_items(items: Vec<HistoryItem>) -> Vec<Self> {
-        items
-            .into_iter()
-            .map(|item| match item {
-                HistoryItem::UserInput(input) => {
-                    Self::Display(crate::display::user_input_message(&input))
-                }
-                HistoryItem::AssistantMessage(output) => {
-                    Self::Message(crate::display::assistant_message(&output))
-                }
-                HistoryItem::SystemEvent(output) => match output {
-                    SystemEvent::Plan(plan) => Self::ProposedPlan {
-                        text: plan.markdown,
-                    },
-                    SystemEvent::Summary(summary) => Self::CompactSummary {
-                        text: summary.markdown,
-                    },
-                    SystemEvent::TaskNotification(notification) => {
-                        Self::TaskNotification(notification)
-                    }
-                    SystemEvent::ToolResults { results } => {
-                        Self::Message(crate::display::tool_results_message(&results))
-                    }
+        items.into_iter().map(Self::from_history_item).collect()
+    }
+
+    pub fn from_history_item(item: HistoryItem) -> Self {
+        match item {
+            HistoryItem::UserInput(input) => Self::UserInput(input),
+            HistoryItem::AssistantMessage(message) => Self::AssistantMessage(message),
+            HistoryItem::SystemEvent(event) => Self::SystemEvent(match event {
+                SystemEvent::Plan(plan) => UiSystemEvent::Plan {
+                    text: plan.markdown,
                 },
-            })
-            .collect()
-    }
-
-    pub fn as_message(&self) -> Option<&Message> {
-        match self {
-            Self::Message(message) => Some(message),
-            Self::Display(_)
-            | Self::ProposedPlan { .. }
-            | Self::RunDivider { .. }
-            | Self::Notification(_)
-            | Self::CompactSummary { .. }
-            | Self::TaskNotification(_) => None,
+                SystemEvent::Summary(summary) => UiSystemEvent::Summary {
+                    text: summary.markdown,
+                },
+                SystemEvent::TaskNotification(notification) => {
+                    UiSystemEvent::TaskNotification(notification)
+                }
+                SystemEvent::ToolResults { results } => UiSystemEvent::ToolResults { results },
+            }),
         }
     }
 
-    pub fn as_message_mut(&mut self) -> Option<&mut Message> {
-        match self {
-            Self::Message(message) => Some(message),
-            Self::Display(_)
-            | Self::ProposedPlan { .. }
-            | Self::RunDivider { .. }
-            | Self::Notification(_)
-            | Self::CompactSummary { .. }
-            | Self::TaskNotification(_) => None,
+    /// 将一次运行中提交的模型消息投影到持久化时间线形状。
+    pub fn from_model_message(message: Message) -> Vec<Self> {
+        let mut tool_results = Vec::new();
+        let item = match message.role {
+            omini_model::message::Role::Assistant => {
+                let blocks = message
+                    .content
+                    .into_iter()
+                    .filter_map(|block| match block {
+                        omini_model::message::ContentBlock::Thinking(block) => {
+                            Some(AssistantMessageBlock::Thinking {
+                                thinking: block.thinking,
+                                duration_ms: block.duration_ms,
+                            })
+                        }
+                        omini_model::message::ContentBlock::Text(block) => {
+                            Some(AssistantMessageBlock::Text { text: block.text })
+                        }
+                        omini_model::message::ContentBlock::ToolUse(block) => {
+                            Some(AssistantMessageBlock::ToolUse {
+                                id: block.id,
+                                name: block.name,
+                                input: block.input,
+                            })
+                        }
+                        omini_model::message::ContentBlock::ToolResult(result) => {
+                            tool_results.push(ToolResultRecord {
+                                tool_use_id: result.tool_use_id,
+                                is_error: result.is_error,
+                                content: result.content,
+                                metadata: result.metadata,
+                            });
+                            None
+                        }
+                        omini_model::message::ContentBlock::Image(_) => None,
+                    })
+                    .collect::<Vec<_>>();
+                (!blocks.is_empty()).then_some(Self::AssistantMessage(AssistantMessage { blocks }))
+            }
+            omini_model::message::Role::User => {
+                for block in message.content {
+                    if let omini_model::message::ContentBlock::ToolResult(result) = block {
+                        tool_results.push(ToolResultRecord {
+                            tool_use_id: result.tool_use_id,
+                            is_error: result.is_error,
+                            content: result.content,
+                            metadata: result.metadata,
+                        });
+                    }
+                }
+                None
+            }
+        };
+
+        let mut items = item.into_iter().collect::<Vec<_>>();
+        if !tool_results.is_empty() {
+            items.push(Self::SystemEvent(UiSystemEvent::ToolResults {
+                results: tool_results,
+            }));
         }
+        items
     }
 }
 
@@ -343,16 +387,6 @@ impl HelpDrawerState {
             skill_selected: 0,
         }
     }
-}
-
-/// 渲染管线缓存，避免每帧全量重建。
-#[derive(Debug, Default, Clone)]
-pub struct RenderCache {
-    // 已完成消息缓存
-    pub completed_lines: Vec<Line<'static>>,
-    pub completed_selectable: Vec<String>,
-    pub completed_message_count: usize,
-    pub completed_content_width: usize,
 }
 
 #[derive(Debug)]
@@ -433,6 +467,8 @@ pub struct UiState {
     pub agent_runs: HashMap<String, AgentRunSnapshot>,
     /// 子 agent 视图模型，按 thread id 存储完整消息。
     pub subagents: HashMap<String, SubagentNode>,
+    /// 子 agent 节点回收后仍用于完成通知的运行时长。
+    pub subagent_completion_durations: HashMap<String, Duration>,
     /// 父 tool_use_id 到子 agent thread id 的映射。
     pub subagents_by_tool_use: HashMap<String, String>,
     /// 当前主线程直接异步子任务的显示顺序；索引 0 始终保留给 main。
@@ -441,18 +477,6 @@ pub struct UiState {
     pub active_session_task_id: Option<String>,
     pub session_selector_focused: bool,
     pub session_selection_index: usize,
-    /// `messages` 中包含未完成工具（pending tool use）的第一条消息索引；
-    /// 该索引及之后的消息不进缓存，每帧重新渲染（与 pending_assistant 同级），
-    /// 保证呼吸灯动画实时更新。未完成工具包括：运行中的 subagent、
-    /// 尚未收到 ToolResult 的普通工具（bash / read / edit 等）。
-    /// `usize::MAX` 表示无未完成工具，所有已完成消息均可缓存。
-    pub live_message_start: usize,
-    /// 尚未完成的 tool_use_id → 所在消息索引的映射。
-    /// ToolUse 事件到达时暂存于 `pending_assistant`（未入 messages），不在此 map 中；
-    /// 当 `pending_assistant` 在 TurnEnded/RunFinished 提交到 messages 时才写入。
-    /// ToolResult 到达时从 map 中移除。用于 O(1) 定位 pending tool 所在消息，
-    /// 避免每次更新 live 边界时全量扫描消息列表。
-    pub pending_tool_message_map: std::collections::HashMap<String, usize>,
     /// 权限抽屉当前选中的操作：0 = Yes, 1 = No。
     pub permission_selected: usize,
     /// 用户问题抽屉当前题目索引。
@@ -491,8 +515,6 @@ pub struct UiState {
     pub interaction_step: Option<InteractionStep>,
     /// /help 底部抽屉状态。
     pub help_drawer: Option<HelpDrawerState>,
-    /// 渲染管线缓存，避免流式期间每帧全量重建。
-    pub render_cache: RenderCache,
     /// 待审批的计划。
     pub plan_approval: Option<SubmittedPlan>,
     /// 计划审批抽屉当前选中的操作。
@@ -552,14 +574,13 @@ impl UiState {
             pending_tool_pauses: VecDeque::new(),
             agent_runs: HashMap::new(),
             subagents: HashMap::new(),
+            subagent_completion_durations: HashMap::new(),
             subagents_by_tool_use: HashMap::new(),
             subagent_order: Vec::new(),
             subagent_views: HashMap::new(),
             active_session_task_id: None,
             session_selector_focused: false,
             session_selection_index: 0,
-            live_message_start: usize::MAX,
-            pending_tool_message_map: std::collections::HashMap::new(),
             permission_selected: 0,
             user_input_question_index: 0,
             user_input_selected: Vec::new(),
@@ -582,7 +603,6 @@ impl UiState {
             interaction_request: None,
             interaction_step: None,
             help_drawer: None,
-            render_cache: RenderCache::default(),
             plan_approval: None,
             plan_approval_selected: 0,
             plan_approval_auto: false,
@@ -628,17 +648,6 @@ impl UiState {
         self.pending_tool_pauses
             .retain(|pause| pause.source_thread_id.as_deref() != Some(source_thread_id));
         removed_active
-    }
-
-    pub fn tool_pause_for_tool_use(&self, tool_use_id: &str) -> Option<&ToolPauseRequest> {
-        self.pending_tool_pauses.iter().find(|pause| {
-            pause.source_agent_label.is_none() && pause_preview_tool_use_id(pause) == tool_use_id
-        })
-    }
-
-    pub fn is_active_tool_pause(&self, pause: &ToolPauseRequest) -> bool {
-        self.active_tool_pause()
-            .is_some_and(|active| active.tool_use_id == pause.tool_use_id)
     }
 
     pub fn finish_tool_pause_removal(&mut self, removed_active: bool) {
@@ -721,14 +730,12 @@ impl UiState {
     }
 
     pub fn clear_run_dividers(&mut self) {
-        let before = self.messages.len();
-        self.messages
-            .retain(|message| !matches!(message, UiMessage::RunDivider { .. }));
-        if self.messages.len() != before {
-            self.invalidate_completed_cache();
-            // RunDivider 被移除后消息索引发生偏移，需要重建 map 和边界
-            self.rebuild_pending_tool_map();
-        }
+        self.messages.retain(|message| {
+            !matches!(
+                message,
+                UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. })
+            )
+        });
     }
 
     pub fn pause_run_timer(&mut self) {
@@ -863,11 +870,6 @@ impl UiState {
         });
     }
 
-    /// 使已完成消息的渲染缓存失效（消息列表变更、resize 时调用）。
-    pub fn invalidate_completed_cache(&mut self) {
-        self.render_cache.completed_message_count = 0;
-    }
-
     /// 结算当前思考计时段：把起点至今的耗时写入 `pending_assistant` 中
     /// 最后一个未计时的 Thinking 块，并关闭计时。
     /// 在首个非思考内容（text/tool/plan）到达或回合结束时调用；
@@ -889,175 +891,6 @@ impl UiState {
                 }
             }
         }
-    }
-
-    /// 扫描指定消息，将其中的 ToolUse 块注册到 `pending_tool_message_map`。
-    /// 在 `pending_assistant` 提交到 `messages` 时（TurnEnded / RunFinished）调用。
-    fn populate_pending_tool_map_from_message(&mut self, msg_idx: usize) {
-        let Some(message) = self.messages[msg_idx].as_message() else {
-            return;
-        };
-        // 收集该消息中已有的 ToolResult id（同一消息内可能 Text → ToolUse → ToolResult）
-        let mut resolved_ids = std::collections::HashSet::new();
-        for block in &message.content {
-            if let omini_model::message::ContentBlock::ToolResult(tr) = block {
-                resolved_ids.insert(&tr.tool_use_id);
-            }
-        }
-        for block in &message.content {
-            if let omini_model::message::ContentBlock::ToolUse(tu) = block
-                && !resolved_ids.contains(&tu.id)
-            {
-                self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
-            }
-        }
-        if self.message_has_pending_tools(msg_idx) {
-            self.set_live_message_start(self.live_message_start.min(msg_idx));
-        }
-    }
-
-    /// 全量重建 `pending_tool_message_map` 并重算 `live_message_start`。
-    /// 仅在 `apply_thread_snapshot`（中途连接 / 切换线程）时调用，O(n)。
-    fn rebuild_pending_tool_map(&mut self) {
-        self.pending_tool_message_map.clear();
-        // 先收集所有已解析的 ToolResult id（跨消息匹配）。
-        let mut all_resolved_ids = std::collections::HashSet::new();
-        for ui_msg in &self.messages {
-            let Some(message) = ui_msg.as_message() else {
-                continue;
-            };
-            for block in &message.content {
-                if let omini_model::message::ContentBlock::ToolResult(tr) = block {
-                    all_resolved_ids.insert(&tr.tool_use_id);
-                }
-            }
-        }
-        // 只有全局无对应 ToolResult 的 ToolUse 才是真正 pending。
-        for (msg_idx, ui_msg) in self.messages.iter().enumerate() {
-            let Some(message) = ui_msg.as_message() else {
-                continue;
-            };
-            for block in &message.content {
-                if let omini_model::message::ContentBlock::ToolUse(tu) = block
-                    && !all_resolved_ids.contains(&tu.id)
-                {
-                    self.pending_tool_message_map.insert(tu.id.clone(), msg_idx);
-                }
-            }
-        }
-        // 重算边界：map 中最小 msg_idx 与首个 running subagent 的较小值
-        let map_min = self
-            .pending_tool_message_map
-            .values()
-            .copied()
-            .min()
-            .unwrap_or(usize::MAX);
-        let subagent_min = self.find_earliest_running_subagent_from(0);
-        self.live_message_start = map_min.min(subagent_min);
-    }
-
-    /// 工具结果到达时的增量更新。
-    ///
-    /// 若该 tool_use 在 map 中（即已提交到 messages），移除后检查该消息是否还有
-    /// 其他 pending tool；若没有，从 `live_message_start` 向后扫到下一个含 pending
-    /// 工具的消息。正常流程中 pending tool 总在尾部，扫描距离 k 极小，O(k)。
-    pub fn on_tool_result(&mut self, tool_use_id: &str) {
-        let Some(msg_idx) = self.pending_tool_message_map.remove(tool_use_id) else {
-            return;
-        };
-        let still_has_pending = self.message_has_pending_tools(msg_idx);
-        if !still_has_pending && msg_idx == self.live_message_start {
-            // 当前边界消息已无 pending tool，向后扫描
-            let mut new_start = usize::MAX;
-            for i in (msg_idx + 1)..self.messages.len() {
-                if self.message_has_pending_tools(i) || self.message_has_running_subagent(i) {
-                    new_start = i;
-                    break;
-                }
-            }
-            // 也检查后面是否有 running subagent（它们不在 map 中）
-            let sub_min = self.find_earliest_running_subagent_from(msg_idx + 1);
-            new_start = new_start.min(sub_min);
-            self.set_live_message_start(new_start);
-        }
-        // 若该消息仍有 pending tool 或不在边界，边界不变
-    }
-
-    /// 检查指定消息是否仍有 pending tool（在 map 中或有 running subagent）。
-    fn message_has_pending_tools(&self, msg_idx: usize) -> bool {
-        let Some(message) = self.messages[msg_idx].as_message() else {
-            return false;
-        };
-        for block in &message.content {
-            if let omini_model::message::ContentBlock::ToolUse(tu) = block {
-                if self.pending_tool_message_map.contains_key(&tu.id) {
-                    return true;
-                }
-                if matches!(tu.name.as_str(), "spawn_agent" | "run_agent")
-                    && self
-                        .subagents_by_tool_use
-                        .get(&tu.id)
-                        .and_then(|sid| self.subagents.get(sid))
-                        .is_some_and(|node| node.status_keeps_message_live())
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    /// 检查指定消息是否包含运行中的 subagent。
-    fn message_has_running_subagent(&self, msg_idx: usize) -> bool {
-        let Some(message) = self.messages[msg_idx].as_message() else {
-            return false;
-        };
-        for block in &message.content {
-            if let omini_model::message::ContentBlock::ToolUse(tu) = block
-                && matches!(tu.name.as_str(), "spawn_agent" | "run_agent")
-                && self
-                    .subagents_by_tool_use
-                    .get(&tu.id)
-                    .and_then(|sid| self.subagents.get(sid))
-                    .is_some_and(SubagentNode::status_keeps_message_live)
-            {
-                return true;
-            }
-        }
-        false
-    }
-
-    /// 从 `start_idx` 开始找第一个含 running subagent 的消息索引。
-    fn find_earliest_running_subagent_from(&self, start_idx: usize) -> usize {
-        let has_running = self
-            .subagents
-            .values()
-            .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling));
-        if !has_running {
-            return usize::MAX;
-        }
-        for i in start_idx..self.messages.len() {
-            if self.message_has_running_subagent(i) {
-                return i;
-            }
-        }
-        usize::MAX
-    }
-
-    /// 刷新 live 边界，确保缓存尾部不超过新边界。
-    ///
-    /// 主要用于 subagent 状态变化（`SubagentStarted` / `SubagentFinished`）等
-    /// 不影响 `pending_tool_message_map` 的事件；普通工具完成请优先使用 `on_tool_result`。
-    pub fn update_live_boundary(&mut self) {
-        let map_min = self
-            .pending_tool_message_map
-            .values()
-            .copied()
-            .min()
-            .unwrap_or(usize::MAX);
-        let sub_min = self.find_earliest_running_subagent_from(0);
-        let new_start = map_min.min(sub_min);
-        self.set_live_message_start(new_start);
     }
 
     pub fn has_active_agent_tasks(&self) -> bool {
@@ -1115,6 +948,16 @@ impl UiState {
             .filter(|node| removed.contains(&node.task_id))
             .map(|node| node.thread_id.clone())
             .collect::<HashSet<_>>();
+        for node in self
+            .subagents
+            .values()
+            .filter(|node| removed.contains(&node.task_id))
+        {
+            if let Some(duration) = node.duration {
+                self.subagent_completion_durations
+                    .insert(node.task_id.clone(), duration);
+            }
+        }
         self.subagent_order
             .retain(|task_id| !removed.contains(task_id));
         self.subagent_views
@@ -1126,7 +969,6 @@ impl UiState {
         self.session_selection_index = self
             .session_selection_index
             .min(self.session_count().saturating_sub(1));
-        self.update_live_boundary();
     }
 
     pub fn swap_session_view(&mut self, view: &mut SessionViewState) {
@@ -1149,34 +991,9 @@ impl UiState {
         std::mem::swap(&mut self.message_scroll_y, &mut view.message_scroll_y);
         std::mem::swap(&mut self.scroll_offset, &mut view.scroll_offset);
         std::mem::swap(&mut self.auto_scroll, &mut view.auto_scroll);
-        std::mem::swap(&mut self.live_message_start, &mut view.live_message_start);
-        std::mem::swap(
-            &mut self.pending_tool_message_map,
-            &mut view.pending_tool_message_map,
-        );
         std::mem::swap(&mut self.running_tools, &mut view.running_tools);
         std::mem::swap(&mut self.agent_status, &mut view.agent_status);
         std::mem::swap(&mut self.run_timer, &mut view.run_timer);
-        std::mem::swap(&mut self.render_cache, &mut view.render_cache);
-    }
-}
-
-impl SubagentNode {
-    fn status_keeps_message_live(&self) -> bool {
-        matches!(self.status, TaskStatus::Running | TaskStatus::Cancelling)
-    }
-}
-
-impl UiState {
-    fn set_live_message_start(&mut self, new_start: usize) {
-        if new_start == self.live_message_start {
-            return;
-        }
-        self.live_message_start = new_start;
-        let cached = self.render_cache.completed_message_count;
-        if cached > new_start {
-            self.render_cache.completed_message_count = new_start;
-        }
     }
 }
 

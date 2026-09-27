@@ -1,151 +1,98 @@
-use super::{build_assistant_text_lines, line_to_plain_text};
-use crate::state::{UiMessage, UiState};
-use crate::widgets::{ToolCategory, activity_summary_line, is_special_tool, tool_category};
-use omini_model::message::{ContentBlock, Message, Role};
+use crate::widgets::{ToolCategory, activity_summary_line, tool_category};
+use omini_model::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::text::Line;
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::HashMap;
 
-pub(super) fn trailing_activity_group_start(messages: &[UiMessage]) -> Option<usize> {
-    let mut start = messages.len();
-    let mut has_assistant_activity = false;
-    for (index, ui_message) in messages.iter().enumerate().rev() {
-        let UiMessage::Message(message) = ui_message else {
-            break;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssistantBlockKind {
+    Thinking,
+    AggregatedTool,
+    BoundaryTool,
+    VisibleText,
+    ToolResult,
+    Ignored,
+}
+
+/// 将助手块按时间线语义分类；权限状态不参与分类，保证审批队列不会改变消息分组。
+pub(super) fn classify_assistant_block(block: &ContentBlock) -> AssistantBlockKind {
+    match block {
+        ContentBlock::Thinking(_) => AssistantBlockKind::Thinking,
+        ContentBlock::Text(text) if !text.text.trim().is_empty() => AssistantBlockKind::VisibleText,
+        ContentBlock::Text(_) => AssistantBlockKind::Ignored,
+        ContentBlock::ToolUse(tool_use) if is_activity_boundary_tool(tool_use) => {
+            AssistantBlockKind::BoundaryTool
+        }
+        ContentBlock::ToolUse(_) => AssistantBlockKind::AggregatedTool,
+        ContentBlock::ToolResult(_) => AssistantBlockKind::ToolResult,
+        ContentBlock::Image(_) => AssistantBlockKind::Ignored,
+    }
+}
+
+pub(super) fn is_activity_boundary_tool(tool_use: &ToolUseBlock) -> bool {
+    matches!(
+        tool_use.name.as_str(),
+        "spawn_agent" | "edit" | "ask_user" | "write" | "todo_write"
+    )
+}
+
+#[derive(Debug, Default)]
+pub(super) struct ActivityGroup {
+    thinking_ms: Option<u64>,
+    active_thinking_ms: Option<u64>,
+    tool_counts: Vec<(ToolCategory, usize)>,
+    pub orphan_results: Vec<ToolResultBlock>,
+}
+
+impl ActivityGroup {
+    pub fn is_empty(&self) -> bool {
+        self.thinking_ms.is_none()
+            && self.active_thinking_ms.is_none()
+            && self.tool_counts.is_empty()
+            && self.orphan_results.is_empty()
+    }
+
+    pub fn add_thinking(&mut self, duration_ms: Option<u64>) {
+        if let Some(duration_ms) = duration_ms {
+            self.thinking_ms = Some(
+                self.thinking_ms
+                    .unwrap_or_default()
+                    .saturating_add(duration_ms),
+            );
+        }
+    }
+
+    pub fn set_active_thinking(&mut self, duration_ms: u64) {
+        self.active_thinking_ms = Some(duration_ms);
+    }
+
+    pub fn add_tool(&mut self, tool_use: &ToolUseBlock) {
+        let category = tool_category(tool_use);
+        if let Some((_, count)) = self
+            .tool_counts
+            .iter_mut()
+            .find(|(existing, _)| *existing == category)
+        {
+            *count = count.saturating_add(1);
+        } else {
+            self.tool_counts.push((category, 1));
+        }
+    }
+
+    pub fn summary(&self, content_width: usize) -> Vec<Line<'static>> {
+        let thinking_ms = match (self.thinking_ms, self.active_thinking_ms) {
+            (Some(measured), Some(active)) => Some(measured.saturating_add(active)),
+            (Some(measured), None) => Some(measured),
+            (None, active) => active,
         };
-        if !is_activity_message(messages, index, message) {
-            break;
-        }
-        has_assistant_activity |= message.role == Role::Assistant;
-        start = index;
-    }
-    (start < messages.len() && has_assistant_activity).then_some(start)
-}
-
-pub(super) fn activity_group_end(
-    messages: &[UiMessage],
-    start: usize,
-    end: usize,
-) -> Option<usize> {
-    let UiMessage::Message(first) = messages.get(start)? else {
-        return None;
-    };
-    if first.role != Role::Assistant || !is_assistant_activity_message(first) {
-        return None;
-    }
-
-    let mut group_end = start + 1;
-    while group_end < end {
-        let UiMessage::Message(next) = &messages[group_end] else {
-            break;
-        };
-        if !is_activity_message(messages, group_end, next) {
-            break;
-        }
-        group_end += 1;
-        if is_ask_user_message(next) {
-            break;
-        }
-    }
-    Some(group_end)
-}
-
-fn is_activity_message(messages: &[UiMessage], index: usize, message: &Message) -> bool {
-    match message.role {
-        Role::Assistant => is_assistant_activity_message(message),
-        // 已持久化的工具结果使用 user 角色。只有调用属于普通工具时才延续当前活动，ask_user 回复除外。
-        Role::User => message.content.iter().all(|block| {
-            let ContentBlock::ToolResult(result) = block else {
-                return false;
-            };
-            messages[..index]
-                .iter()
-                .filter_map(UiMessage::as_message)
-                .flat_map(|prior| &prior.content)
-                .any(|prior_block| {
-                    matches!(prior_block, ContentBlock::ToolUse(tool_use)
-                        if tool_use.id == result.tool_use_id && !is_special_tool(tool_use))
-                })
-        }),
+        activity_summary_line(thinking_ms, &self.tool_counts, content_width)
+            .into_iter()
+            .collect()
     }
 }
 
-fn is_assistant_activity_message(message: &Message) -> bool {
-    if message.content.is_empty() {
-        return false;
-    }
-
-    let has_regular_tool_use = message.content.iter().any(
-        |block| matches!(block, ContentBlock::ToolUse(tool_use) if !is_special_tool(tool_use)),
-    );
-    let has_visible_text = message.content.iter().any(|block| {
-        matches!(block, ContentBlock::Text(text)
-            // 这里只检查文本是否可见；Markdown 排版会按给定宽度分配行，使用无界宽度可能导致溢出。
-            if build_assistant_text_lines(&text.text, 80)
-                .iter()
-                .any(|line| !line_to_plain_text(line).trim().is_empty()))
-    });
-
-    // 工具说明和待处理的 ask_user 提示可能与 Thought 共处于一条 assistant 消息中；保留其文本和工具界面，
-    // 同时将 Thought 合并到周围的活动摘要中。
-    (!has_visible_text || has_regular_tool_use || is_ask_user_message(message))
-        && message.content.iter().all(|block| match block {
-            ContentBlock::Thinking(_) | ContentBlock::ToolResult(_) | ContentBlock::Image(_) => {
-                true
-            }
-            ContentBlock::ToolUse(tool_use) => {
-                !is_special_tool(tool_use) || tool_use.name == "ask_user"
-            }
-            ContentBlock::Text(_) => true,
-        })
-}
-
-fn is_ask_user_message(message: &Message) -> bool {
-    message.role == Role::Assistant
-        && message.content.iter().any(
-            |block| matches!(block, ContentBlock::ToolUse(tool_use) if tool_use.name == "ask_user"),
-        )
-}
-
-pub(super) fn render_pending_activity_group(
-    state: &UiState,
-    group_start: usize,
-    pending_prefix_len: usize,
-    content_width: usize,
-) -> (Vec<Line<'static>>, Vec<String>) {
-    let Some(pending) = state.pending_assistant.as_ref() else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut rendered_messages: Vec<&Message> = state
-        .messages
-        .iter()
-        .filter_map(UiMessage::as_message)
-        .collect();
-    rendered_messages.push(pending);
-
-    let tool_result_map = tool_result_index(&rendered_messages);
-    let pending_prefix = Message::new(
-        omini_model::message::Role::Assistant,
-        pending.content[..pending_prefix_len].to_vec(),
-    );
-    let mut activity_messages = state.messages[group_start..]
-        .iter()
-        .filter_map(UiMessage::as_message)
-        .collect::<Vec<_>>();
-    activity_messages.push(&pending_prefix);
-    let mut consumed = HashSet::new();
-    let lines = render_activity_summary(
-        &activity_messages,
-        &tool_result_map,
-        &mut consumed,
-        content_width,
-        state.thinking_started_at.map(|started| started.elapsed()),
-    );
-    let selectable = lines.iter().map(line_to_plain_text).collect();
-    (lines, selectable)
-}
-
-pub(super) fn tool_result_index(messages: &[&Message]) -> HashMap<String, Vec<(usize, usize)>> {
+pub(super) fn tool_result_index(
+    messages: &[&omini_model::message::Message],
+) -> HashMap<String, Vec<(usize, usize)>> {
     let mut index = HashMap::new();
     for (message_idx, message) in messages.iter().enumerate() {
         for (block_idx, block) in message.content.iter().enumerate() {
@@ -160,52 +107,56 @@ pub(super) fn tool_result_index(messages: &[&Message]) -> HashMap<String, Vec<(u
     index
 }
 
-pub(super) fn render_activity_summary(
-    messages: &[&Message],
-    tool_result_map: &HashMap<String, Vec<(usize, usize)>>,
-    consumed: &mut HashSet<(usize, usize)>,
-    content_width: usize,
-    active_thinking: Option<Duration>,
-) -> Vec<Line<'static>> {
-    let mut thinking_ms: Option<u64> = None;
-    for message in messages {
-        for block in &message.content {
-            if let ContentBlock::Thinking(thinking) = block
-                && let Some(ms) = thinking.duration_ms
-            {
-                thinking_ms = Some(thinking_ms.unwrap_or(0).saturating_add(ms));
-            }
-        }
-    }
-    if let Some(duration) = active_thinking {
-        let elapsed = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
-        thinking_ms = Some(thinking_ms.unwrap_or(0).saturating_add(elapsed));
-    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
 
-    let mut tool_counts: Vec<(ToolCategory, usize)> = Vec::new();
-    for message in messages {
-        for block in &message.content {
-            let ContentBlock::ToolUse(tool_use) = block else {
-                continue;
-            };
-            if is_special_tool(tool_use) {
-                continue;
-            }
-            let category = tool_category(tool_use);
-            if let Some((_, count)) = tool_counts.iter_mut().find(|(item, _)| *item == category) {
-                *count += 1;
-            } else {
-                tool_counts.push((category.clone(), 1));
-            }
+    #[test]
+    fn visible_text_and_named_tools_are_boundaries() {
+        let text = ContentBlock::from_text("answer".to_string());
+        assert_eq!(
+            classify_assistant_block(&text),
+            AssistantBlockKind::VisibleText
+        );
 
-            if let Some(positions) = tool_result_map.get(&tool_use.id) {
-                consumed.extend(positions.iter().copied());
-            }
+        for name in ["spawn_agent", "edit", "ask_user", "write", "todo_write"] {
+            let tool =
+                ContentBlock::from_tool_use(name.to_string(), name.to_string(), HashMap::new());
+            assert_eq!(
+                classify_assistant_block(&tool),
+                AssistantBlockKind::BoundaryTool,
+                "{name} must split activity groups"
+            );
         }
     }
 
-    let Some(summary) = activity_summary_line(thinking_ms, &tool_counts, content_width) else {
-        return Vec::new();
-    };
-    vec![summary]
+    #[test]
+    fn blank_text_results_and_other_tools_do_not_create_boundaries() {
+        let blank_text = ContentBlock::from_text(" \n ".to_string());
+        assert_eq!(
+            classify_assistant_block(&blank_text),
+            AssistantBlockKind::Ignored
+        );
+        assert_eq!(
+            classify_assistant_block(&ContentBlock::from_tool_use(
+                "read-1".to_string(),
+                "read".to_string(),
+                HashMap::new(),
+            )),
+            AssistantBlockKind::AggregatedTool
+        );
+        assert_eq!(
+            classify_assistant_block(&ContentBlock::from_tool_result(
+                "read-1".to_string(),
+                false,
+                "contents".to_string(),
+            )),
+            AssistantBlockKind::ToolResult
+        );
+        assert_eq!(
+            classify_assistant_block(&ContentBlock::from_thinking("hidden".to_string())),
+            AssistantBlockKind::Thinking
+        );
+    }
 }

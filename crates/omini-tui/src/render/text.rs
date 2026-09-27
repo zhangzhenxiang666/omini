@@ -1,6 +1,5 @@
-use crate::display::{DisplayMention, DisplayMessage, MentionKind};
+use crate::display::{DisplayMention, MentionKind, UserDraft};
 use crate::state::UiState;
-use omini_model::message::TextBlock;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -40,20 +39,12 @@ pub(super) fn pad_display_width(s: &str, width: usize) -> String {
     }
 }
 
-pub(super) fn styled_wrapped_text(
-    text_block: &TextBlock,
+pub(super) fn styled_wrapped_draft(
+    draft: &UserDraft,
     content_width: usize,
     base_style: Style,
 ) -> Vec<Line<'static>> {
-    styled_wrapped_ranges(&text_block.text, &[], content_width, base_style)
-}
-
-pub(super) fn styled_wrapped_display(
-    display: &DisplayMessage,
-    content_width: usize,
-    base_style: Style,
-) -> Vec<Line<'static>> {
-    styled_wrapped_ranges(&display.text, &display.mentions, content_width, base_style)
+    styled_wrapped_ranges(&draft.text, &draft.mentions, content_width, base_style)
 }
 
 fn styled_wrapped_ranges(

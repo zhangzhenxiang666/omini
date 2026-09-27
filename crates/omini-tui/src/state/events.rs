@@ -1,7 +1,7 @@
 use super::input::combined_user_draft;
 use super::{
     AgentManagerState, AgentManagerView, AgentStatus, InteractionStep, ModelSelectionEntry,
-    SubagentNode, UiMessage, UiState, agent_summaries_to_mention_candidates,
+    SubagentNode, UiMessage, UiState, UiSystemEvent, agent_summaries_to_mention_candidates,
 };
 use crate::display::UserDraft;
 use crate::types::config::ThinkingEffort;
@@ -9,8 +9,7 @@ use crate::types::events::{
     AgentTaskEvent, AgentTaskExecutionMode, AgentTaskSnapshot, CommandKind, CommandSummary,
     CompactTrigger, InteractionRequest, Notification, NotificationKind, RuntimeToUiEvent,
 };
-use omini_domain::conversation::SystemEvent;
-use omini_domain::conversation::{AssistantMessage, AssistantMessageBlock, ToolResultRecord};
+use omini_domain::conversation::ToolResultRecord;
 use omini_domain::subagents::AgentSummary;
 use omini_domain::task::TaskStatus;
 use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock};
@@ -21,79 +20,20 @@ const GENERAL_HELP_SELECTABLE_COUNT: usize = 9;
 
 /// 将持久化历史条目转换为 TUI 消息。
 fn map_history_item(item: HistoryItem) -> UiMessage {
-    match item {
-        HistoryItem::UserInput(input) => {
-            UiMessage::Display(crate::display::user_input_message(&input))
-        }
-        HistoryItem::AssistantMessage(output) => {
-            UiMessage::Message(crate::display::assistant_message(&output))
-        }
-        HistoryItem::SystemEvent(output) => match output {
-            SystemEvent::Plan(plan) => UiMessage::ProposedPlan {
-                text: plan.markdown,
-            },
-            SystemEvent::Summary(summary) => UiMessage::CompactSummary {
-                text: summary.markdown,
-            },
-            SystemEvent::TaskNotification(notification) => {
-                UiMessage::TaskNotification(notification)
-            }
-            SystemEvent::ToolResults { results } => {
-                UiMessage::Message(crate::display::tool_results_message(&results))
-            }
-        },
-    }
+    UiMessage::from_history_item(item)
 }
 
-/// 将子任务的模型消息转换为可见时间线条目。
-fn map_agent_message(message: &Message) -> Option<UiMessage> {
-    if message.role == Role::Assistant {
-        let blocks = message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Thinking(block) => Some(AssistantMessageBlock::Thinking {
-                    thinking: block.thinking.clone(),
-                    duration_ms: block.duration_ms,
-                }),
-                ContentBlock::Text(block) => Some(AssistantMessageBlock::Text {
-                    text: block.text.clone(),
-                }),
-                ContentBlock::ToolUse(block) => Some(AssistantMessageBlock::ToolUse {
-                    id: block.id.clone(),
-                    name: block.name.clone(),
-                    input: block.input.clone(),
-                }),
-                ContentBlock::Image(_) | ContentBlock::ToolResult(_) => None,
-            })
-            .collect::<Vec<_>>();
-        return (!blocks.is_empty())
-            .then(|| map_history_item(HistoryItem::AssistantMessage(AssistantMessage { blocks })));
+fn tool_result_record(result: ToolResultBlock) -> ToolResultRecord {
+    ToolResultRecord {
+        tool_use_id: result.tool_use_id,
+        is_error: result.is_error,
+        content: result.content,
+        metadata: result.metadata,
     }
-
-    let results = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::ToolResult(result) => Some(ToolResultRecord {
-                tool_use_id: result.tool_use_id.clone(),
-                is_error: result.is_error,
-                content: result.content.clone(),
-                metadata: result.metadata.clone(),
-            }),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    (!results.is_empty()).then(|| {
-        map_history_item(HistoryItem::SystemEvent(SystemEvent::ToolResults {
-            results,
-        }))
-    })
 }
 
 fn push_session_message(view: &mut super::SessionViewState, message: UiMessage) {
     view.messages.push(message);
-    view.render_cache = Default::default();
     if view.auto_scroll {
         view.scroll_offset = 0;
     }
@@ -139,7 +79,7 @@ impl UiState {
         let messages = self
             .pending_intervention_inputs
             .drain(..)
-            .map(|draft| UiMessage::Display(draft.display_message()))
+            .map(|draft| UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft)))
             .collect();
         (messages, self.pending_intervention_client_echo_id.take())
     }
@@ -372,12 +312,22 @@ impl UiState {
             } => {
                 self.show_start_screen = false;
                 let ui_message = map_history_item(item);
+                let replaces_matching_local_echo = matches!(
+                    (self.messages.last(), &ui_message),
+                    (
+                        Some(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft))),
+                        UiMessage::UserInput(input)
+                    ) if draft == &crate::display::user_input_draft(input)
+                );
                 if self
                     .take_client_echo_positions(client_echo_id.as_deref())
                     .is_none()
-                    && self.messages.last() != Some(&ui_message)
                 {
-                    self.messages.push(ui_message);
+                    if replaces_matching_local_echo {
+                        *self.messages.last_mut().expect("matching echo is present") = ui_message;
+                    } else if self.messages.last() != Some(&ui_message) {
+                        self.messages.push(ui_message);
+                    }
                 }
                 if self.auto_scroll {
                     self.scroll_offset = 0;
@@ -398,7 +348,7 @@ impl UiState {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    self.messages.push(UiMessage::Message(msg));
+                    self.messages.extend(UiMessage::from_model_message(msg));
                 }
                 self.agent_status = AgentStatus::Thinking;
             }
@@ -446,7 +396,6 @@ impl UiState {
                 self.agent_status = AgentStatus::Working;
             }
             RuntimeToUiEvent::ToolResult(tr) => {
-                let tool_use_id = tr.tool_use_id.clone();
                 self.settle_active_thinking_segment();
                 self.finish_subagent_for_tool_result(&tr);
                 self.running_tools.remove(&tr.tool_use_id);
@@ -455,20 +404,12 @@ impl UiState {
                 // 工具结果异步返回，追加到 pending_assistant 或最后一条消息中
                 if let Some(pending) = &mut self.pending_assistant {
                     pending.content.push(ContentBlock::ToolResult(tr));
-                } else if let Some(last) = self
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find_map(UiMessage::as_message_mut)
-                {
-                    last.content.push(ContentBlock::ToolResult(tr));
-                    self.invalidate_completed_cache();
                 } else {
-                    let mut msg = Message::new(Role::Assistant, Vec::new());
-                    msg.content.push(ContentBlock::ToolResult(tr));
-                    self.messages.push(UiMessage::Message(msg));
+                    self.messages
+                        .push(UiMessage::SystemEvent(UiSystemEvent::ToolResults {
+                            results: vec![tool_result_record(tr)],
+                        }));
                 }
-                self.on_tool_result(&tool_use_id);
             }
             RuntimeToUiEvent::TaskChanged(event) => {
                 if event.task.kind == omini_domain::task::TaskKind::SubAgent
@@ -478,6 +419,15 @@ impl UiState {
                         .find(|node| node.task_id == event.task.task_id)
                 {
                     node.status = event.task.status;
+                    node.started_at = event.task.created_at;
+                    node.duration = event
+                        .task
+                        .status
+                        .is_terminal()
+                        .then_some(event.task.completed_at.unwrap_or(event.task.updated_at))
+                        .and_then(|finished_at| {
+                            (finished_at - event.task.created_at).to_std().ok()
+                        });
                     if let Some(view) = self.subagent_views.get_mut(&node.task_id)
                         && !matches!(
                             event.task.status,
@@ -487,7 +437,6 @@ impl UiState {
                         view.agent_status = AgentStatus::Idle;
                         view.run_timer = None;
                     }
-                    self.update_live_boundary();
                     self.prune_terminal_tasks();
                 }
             }
@@ -497,9 +446,7 @@ impl UiState {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    let msg_idx = self.messages.len();
-                    self.messages.push(UiMessage::Message(msg));
-                    self.populate_pending_tool_map_from_message(msg_idx);
+                    self.messages.extend(UiMessage::from_model_message(msg));
                 }
                 let (pending_inputs, client_echo_id) = self.take_pending_intervention_ui_messages();
                 if let Some(client_echo_id) = client_echo_id {
@@ -511,7 +458,6 @@ impl UiState {
                     self.scroll_offset = 0;
                 }
                 self.agent_status = AgentStatus::Working;
-                self.update_live_boundary();
             }
             RuntimeToUiEvent::GitBranchChanged { branch } => {
                 self.status_bar.git_branch = branch;
@@ -522,17 +468,19 @@ impl UiState {
                 if let Some(msg) = self.pending_assistant.take()
                     && !msg.content.is_empty()
                 {
-                    let msg_idx = self.messages.len();
-                    self.messages.push(UiMessage::Message(msg));
-                    self.populate_pending_tool_map_from_message(msg_idx);
+                    self.messages.extend(UiMessage::from_model_message(msg));
                 }
                 if let Some(plan) = self.pending_proposed_plan.take()
                     && !plan.trim().is_empty()
                 {
-                    self.messages.push(UiMessage::ProposedPlan { text: plan });
+                    self.messages
+                        .push(UiMessage::SystemEvent(UiSystemEvent::Plan { text: plan }));
                 }
                 if let Some(elapsed) = self.finish_run_timer() {
-                    self.messages.push(UiMessage::RunDivider { elapsed });
+                    self.messages
+                        .push(UiMessage::SystemEvent(UiSystemEvent::RunDivider {
+                            elapsed,
+                        }));
                 }
                 self.pending_intervention_inputs.clear();
                 self.pending_intervention_client_echo_id = None;
@@ -542,7 +490,6 @@ impl UiState {
                 }
                 self.refresh_input_placeholder();
                 self.agent_status = AgentStatus::Idle;
-                self.update_live_boundary();
             }
             RuntimeToUiEvent::ToolPauseRequested(req) => {
                 let should_prepare = self.push_tool_pause(req);
@@ -587,6 +534,8 @@ impl UiState {
                                 title,
                                 execution_mode,
                                 status: TaskStatus::Running,
+                                duration: None,
+                                started_at: chrono::Utc::now(),
                                 messages: Vec::new(),
                             },
                         );
@@ -604,18 +553,20 @@ impl UiState {
                             view.messages.push(prompt);
                             self.subagent_views.insert(task_id.clone(), view);
                         }
-                        self.update_live_boundary();
                     }
                     AgentTaskEvent::Started { .. } => {}
                     AgentTaskEvent::MessageCommitted { message, .. } => {
-                        if let Some(ui_message) = map_agent_message(&message) {
+                        let ui_messages = UiMessage::from_model_message(message.clone());
+                        if !ui_messages.is_empty() {
                             if let Some(node) = self.subagents.get_mut(&thread_id) {
                                 node.messages.push(message);
                             }
                             if let Some(view) = self.subagent_views.get_mut(&task_id) {
                                 view.pending_assistant = None;
                                 view.thinking_started_at = None;
-                                push_session_message(view, ui_message);
+                                for ui_message in ui_messages {
+                                    push_session_message(view, ui_message);
+                                }
                             }
                         }
                     }
@@ -647,19 +598,26 @@ impl UiState {
                             && let Some(node) = self.subagents.get_mut(&thread_id)
                         {
                             node.status = status;
+                            if status.is_terminal() && node.duration.is_none() {
+                                node.duration = chrono::Utc::now()
+                                    .signed_duration_since(node.started_at)
+                                    .to_std()
+                                    .ok();
+                            }
                         }
                         if let Some(view) = self.subagent_views.get_mut(&task_id) {
                             if let Some(pending) = view.pending_assistant.take()
                                 && !pending.content.is_empty()
                             {
-                                push_session_message(view, UiMessage::Message(pending));
+                                for message in UiMessage::from_model_message(pending) {
+                                    push_session_message(view, message);
+                                }
                             }
                             view.agent_status = AgentStatus::Idle;
                             view.run_timer = None;
                         }
                         let removed_active = self.remove_tool_pauses_for_source_thread(&thread_id);
                         self.finish_tool_pause_removal(removed_active);
-                        self.update_live_boundary();
                         self.prune_terminal_tasks();
                     }
                     AgentTaskEvent::TurnStarted => {
@@ -667,7 +625,9 @@ impl UiState {
                             if let Some(pending) = view.pending_assistant.take()
                                 && !pending.content.is_empty()
                             {
-                                push_session_message(view, UiMessage::Message(pending));
+                                for message in UiMessage::from_model_message(pending) {
+                                    push_session_message(view, message);
+                                }
                             }
                             view.agent_status = AgentStatus::Thinking;
                             view.run_timer.get_or_insert_with(|| {
@@ -731,7 +691,10 @@ impl UiState {
                         }
                     }
                 }
-                self.messages.push(UiMessage::Notification(notification));
+                self.messages
+                    .push(UiMessage::SystemEvent(UiSystemEvent::Notification(
+                        notification,
+                    )));
                 if self.auto_scroll {
                     self.scroll_offset = 0;
                 }
@@ -805,8 +768,9 @@ impl UiState {
                 self.pending_compact_summary = None;
                 if !final_text.trim().is_empty() {
                     self.messages
-                        .push(UiMessage::CompactSummary { text: final_text });
-                    self.invalidate_completed_cache();
+                        .push(UiMessage::SystemEvent(UiSystemEvent::Summary {
+                            text: final_text,
+                        }));
                 }
                 self.status_bar.current_context_tokens = event.after_tokens as i64;
                 if trigger == CompactTrigger::Manual {
@@ -819,12 +783,12 @@ impl UiState {
             RuntimeToUiEvent::CompactSummaryFailed(event) => {
                 self.clear_pending_compact_summary();
                 self.messages
-                    .push(UiMessage::Notification(Notification::warning(
-                        compact_summary_failed_text(
+                    .push(UiMessage::SystemEvent(UiSystemEvent::Notification(
+                        Notification::warning(compact_summary_failed_text(
                             event.trigger,
                             event.agent_label.as_deref(),
                             &event.message,
-                        ),
+                        )),
                     )));
                 if event.trigger == CompactTrigger::Manual {
                     self.finish_manual_compact();
@@ -920,7 +884,9 @@ impl UiState {
                     manager.fail_generation(message);
                 } else {
                     self.messages
-                        .push(UiMessage::Notification(Notification::info(message)));
+                        .push(UiMessage::SystemEvent(UiSystemEvent::Notification(
+                            Notification::info(message),
+                        )));
                 }
             }
             // ThreadSnapshot 由 TUI 主循环直接处理，此处无需匹配
@@ -952,6 +918,12 @@ impl UiState {
         } else {
             TaskStatus::Completed
         };
+        if node.duration.is_none() {
+            node.duration = chrono::Utc::now()
+                .signed_duration_since(node.started_at)
+                .to_std()
+                .ok();
+        }
     }
 
     pub fn apply_thread_snapshot(
@@ -974,7 +946,6 @@ impl UiState {
         }
         self.messages = UiMessage::from_history_items(messages);
         self.pending_client_echoes.clear();
-        self.invalidate_completed_cache();
         self.status_bar.current_context_tokens = usage.current_context_tokens;
         self.status_bar.total_tokens = usage.total_tokens;
         self.status_bar.total_cached_tokens = usage.total_cached_tokens;
@@ -1038,7 +1009,6 @@ impl UiState {
         self.help_drawer = None;
         self.clear_plan_approval();
         self.scroll_to_bottom();
-        self.rebuild_pending_tool_map();
     }
 }
 

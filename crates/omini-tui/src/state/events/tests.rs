@@ -1,12 +1,12 @@
 use super::*;
-use crate::display::{DisplayMention, DisplayMessage, MentionKind};
+use crate::display::{DisplayMention, MentionKind, UserDraft};
 use crate::types::config::{ModelConfig, ProviderProfile, ProviderType};
 use crate::types::events::{
     CompactEvent, CompactSummaryDeltaEvent, CompactSummaryFailedEvent, CompactSummaryFinishedEvent,
     CompactTrigger, ThreadSummary,
 };
 use chrono::{Duration, Utc};
-use omini_domain::conversation::UserInput;
+use omini_domain::conversation::{AssistantMessageBlock, UserInput};
 use omini_domain::input::{InputPart, UserInputIntent};
 use std::collections::HashMap;
 
@@ -46,9 +46,8 @@ fn thread_summary(id: &str, updated_at: chrono::DateTime<Utc>) -> ThreadSummary 
     }
 }
 
-fn subagent_display_message(description: &str) -> DisplayMessage {
-    DisplayMessage {
-        role: Role::User,
+fn subagent_user_draft(description: &str) -> UserDraft {
+    UserDraft {
         text: "@code-reviewer review this".to_string(),
         mentions: vec![DisplayMention {
             start_char: 0,
@@ -58,6 +57,7 @@ fn subagent_display_message(description: &str) -> DisplayMessage {
             target: "code-reviewer".to_string(),
             description: description.to_string(),
         }],
+        images: Vec::new(),
     }
 }
 
@@ -166,11 +166,11 @@ fn usage_totals_changed_preserves_current_context_usage() {
 #[test]
 fn user_message_injected_does_not_duplicate_optimistic_echo() {
     let mut state = UiState::new();
-    state.messages.push(UiMessage::Display(DisplayMessage {
-        role: Role::User,
-        text: "hello".to_string(),
-        mentions: Vec::new(),
-    }));
+    state
+        .messages
+        .push(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(
+            UserDraft::plain("hello".to_string()),
+        )));
 
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
         item: HistoryItem::UserInput(UserInput {
@@ -189,24 +189,27 @@ fn user_message_injected_does_not_duplicate_optimistic_echo() {
 #[test]
 fn user_message_injected_uses_client_echo_id_for_display_metadata_differences() {
     let mut state = UiState::new();
-    let local = subagent_display_message("Review code changes");
+    let local = subagent_user_draft("Review code changes");
 
-    state.push_optimistic_echo(UiMessage::Display(local.clone()), "echo-1".to_string());
+    let local_echo = UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(local.clone()));
+    state.push_optimistic_echo(local_echo.clone(), "echo-1".to_string());
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
         item: history_item_for_subagent("subagent"),
         client_echo_id: Some("echo-1".to_string()),
     });
 
-    assert_eq!(state.messages, vec![UiMessage::Display(local)]);
+    assert_eq!(state.messages, vec![local_echo]);
     assert!(state.pending_client_echoes.is_empty());
 }
 
 #[test]
 fn user_message_injected_without_client_echo_id_appends_different_message() {
     let mut state = UiState::new();
-    let local = subagent_display_message("Review code changes");
+    let local = subagent_user_draft("Review code changes");
 
-    state.messages.push(UiMessage::Display(local));
+    state
+        .messages
+        .push(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(local)));
     state.apply_event(RuntimeToUiEvent::UserMessageInjected {
         item: history_item_for_subagent("subagent"),
         client_echo_id: None,
@@ -226,21 +229,19 @@ fn user_message_injected_with_unmatched_client_echo_id_appends_for_observers() {
 
     assert_eq!(
         state.messages,
-        vec![UiMessage::Display(crate::display::user_input_message(
-            &UserInput {
-                intent: UserInputIntent::Message,
-                parts: vec![
-                    InputPart::Subagent {
-                        name: "code-reviewer".to_string(),
-                        label: Some("subagent".to_string()),
-                    },
-                    InputPart::Text {
-                        text: " review this".to_string(),
-                    },
-                ],
-                attachments: Vec::new(),
-            }
-        ))]
+        vec![UiMessage::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![
+                InputPart::Subagent {
+                    name: "code-reviewer".to_string(),
+                    label: Some("subagent".to_string()),
+                },
+                InputPart::Text {
+                    text: " review this".to_string(),
+                },
+            ],
+            attachments: Vec::new(),
+        })]
     );
 }
 
@@ -279,11 +280,14 @@ fn settle_writes_only_the_latest_unmeasured_thinking_block() {
     };
     state.apply_event(RuntimeToUiEvent::TurnEnded);
 
-    let blocks = &state.messages.last().unwrap().as_message().unwrap().content;
+    let UiMessage::AssistantMessage(message) = state.messages.last().unwrap() else {
+        panic!("turn end should commit an assistant timeline message");
+    };
+    let blocks = &message.blocks;
     let durations: Vec<Option<u64>> = blocks
         .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Thinking(tb) => Some(tb.duration_ms),
+        .filter_map(|block| match block {
+            AssistantMessageBlock::Thinking { duration_ms, .. } => Some(*duration_ms),
             _ => None,
         })
         .collect();
@@ -333,9 +337,11 @@ fn compact_summary_delta_streams_into_single_ui_message() {
 #[test]
 fn compact_summary_started_creates_new_summary_message() {
     let mut state = UiState::new();
-    state.messages.push(UiMessage::CompactSummary {
-        text: "previous".to_string(),
-    });
+    state
+        .messages
+        .push(UiMessage::SystemEvent(UiSystemEvent::Summary {
+            text: "previous".to_string(),
+        }));
 
     state.apply_event(RuntimeToUiEvent::CompactSummaryStarted(CompactEvent {
         trigger: CompactTrigger::Manual,
@@ -372,7 +378,8 @@ fn compact_summary_finished_replaces_streamed_text_and_updates_context_tokens() 
     ));
 
     assert_eq!(state.status_bar.current_context_tokens, 250);
-    let Some(UiMessage::CompactSummary { text }) = state.messages.last() else {
+    let Some(UiMessage::SystemEvent(UiSystemEvent::Summary { text })) = state.messages.last()
+    else {
         panic!("expected compact summary message");
     };
     assert_eq!(text, "final summary");
@@ -469,7 +476,7 @@ fn manual_compact_summary_failed_clears_empty_placeholder_and_status() {
     assert!(state.run_timer.is_none());
     assert!(matches!(
         state.messages.as_slice(),
-        [UiMessage::Notification(notification)]
+        [UiMessage::SystemEvent(UiSystemEvent::Notification(notification))]
             if notification.kind == NotificationKind::Warn
     ));
 }
@@ -488,7 +495,7 @@ fn manual_compact_warning_returns_status_to_idle() {
     assert!(state.run_timer.is_none());
     assert!(matches!(
         state.messages.as_slice(),
-        [UiMessage::Notification(notification)]
+        [UiMessage::SystemEvent(UiSystemEvent::Notification(notification))]
             if notification.kind == NotificationKind::Warn
     ));
 }
@@ -507,7 +514,7 @@ fn manual_compact_error_returns_status_to_idle() {
     assert!(state.run_timer.is_none());
     assert!(matches!(
         state.messages.as_slice(),
-        [UiMessage::Notification(notification)]
+        [UiMessage::SystemEvent(UiSystemEvent::Notification(notification))]
             if notification.kind == NotificationKind::Error
     ));
 }
@@ -528,6 +535,8 @@ fn error_notification_does_not_fail_running_subagents() {
             title: "Work".to_string(),
             execution_mode: AgentTaskExecutionMode::Background,
             status: TaskStatus::Running,
+            duration: None,
+            started_at: chrono::Utc::now(),
             messages: Vec::new(),
         },
     );

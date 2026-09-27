@@ -371,7 +371,7 @@ fn run_finished_appends_elapsed_divider_and_clears_timer() {
     assert!(state.run_timer.is_none());
     assert!(matches!(
         state.messages.last(),
-        Some(UiMessage::RunDivider { .. })
+        Some(UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. }))
     ));
 }
 
@@ -663,7 +663,8 @@ fn run_finished_divider_uses_synced_elapsed() {
     });
     state.apply_event(RuntimeToUiEvent::RunFinished);
 
-    let Some(UiMessage::RunDivider { elapsed }) = state.messages.last() else {
+    let Some(UiMessage::SystemEvent(UiSystemEvent::RunDivider { elapsed })) = state.messages.last()
+    else {
         panic!("expected run divider");
     };
     assert!(*elapsed >= Duration::from_secs(3));
@@ -683,18 +684,20 @@ fn run_finished_refreshes_input_placeholder() {
 #[test]
 fn run_started_removes_previous_elapsed_divider() {
     let mut state = UiState::new();
-    state.messages.push(UiMessage::RunDivider {
-        elapsed: Duration::from_secs(67),
-    });
+    state
+        .messages
+        .push(UiMessage::SystemEvent(UiSystemEvent::RunDivider {
+            elapsed: Duration::from_secs(67),
+        }));
 
     state.apply_event(RuntimeToUiEvent::RunStarted);
 
-    assert!(
-        !state
-            .messages
-            .iter()
-            .any(|message| matches!(message, UiMessage::RunDivider { .. }))
-    );
+    assert!(!state.messages.iter().any(|message| {
+        matches!(
+            message,
+            UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. })
+        )
+    }));
 }
 
 #[test]
@@ -804,9 +807,6 @@ fn background_spawn_tool_result_keeps_running_subagent_live() {
 
     let node = state.subagents.get("sub_1").unwrap();
     assert_eq!(node.status, TaskStatus::Running);
-    assert!(state.pending_tool_message_map.is_empty());
-    assert_eq!(state.live_message_start, 0);
-    assert_eq!(state.render_cache.completed_message_count, 0);
 }
 
 #[test]
@@ -1000,7 +1000,8 @@ fn task_input_history() {
     assert_eq!(state.subagent_views["task_1"].messages.len(), 2);
     assert!(matches!(
         &state.subagent_views["task_1"].messages[1],
-        UiMessage::Display(message) if message.text == "follow up"
+        UiMessage::UserInput(input)
+            if matches!(input.parts.as_slice(), [omini_domain::input::InputPart::Text { text }] if text == "follow up")
     ));
     assert!(state.messages.is_empty());
 }

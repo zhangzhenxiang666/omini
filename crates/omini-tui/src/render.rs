@@ -26,7 +26,6 @@ mod plan_approval_drawer;
 mod scroll;
 mod start_screen;
 mod status;
-mod subagent_tool;
 mod text;
 mod theme;
 mod thread_list;
@@ -35,10 +34,9 @@ use assistant::{build_assistant_text_lines, build_llm_summary_lines, build_propo
 use messages::render_messages;
 use scroll::{ScrollableLine, scrollable_lines};
 use start_screen::render_start_screen;
-use subagent_tool::render_subagent_tool;
 use text::{
     line_to_plain_text, line_width, pad_display_width, register_selectable_lines,
-    styled_wrapped_display, styled_wrapped_text, truncate_str,
+    styled_wrapped_draft, truncate_str,
 };
 use theme::INPUT_BG;
 use thread_list::render_thread_list;
@@ -341,6 +339,8 @@ mod tests {
                 title: "Inspect project".to_string(),
                 execution_mode: crate::types::events::AgentTaskExecutionMode::Background,
                 status: omini_domain::task::TaskStatus::Running,
+                duration: None,
+                started_at: Utc::now(),
                 messages: Vec::new(),
             },
         );
@@ -590,8 +590,86 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Read File"));
         assert!(rendered.contains("Cargo.toml"));
-        assert!(rendered.contains("Waiting for permission"));
-        assert!(rendered.contains("•"));
+        assert!(rendered.contains("1. Yes"));
+    }
+
+    #[test]
+    fn permission_queue_only_changes_drawer_not_timeline_order() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = UiState::new();
+        state.pending_assistant = Some(Message::new(
+            Role::Assistant,
+            vec![
+                ContentBlock::from_tool_use(
+                    "read-1".to_string(),
+                    "read".to_string(),
+                    std::collections::HashMap::from([(
+                        "file_path".to_string(),
+                        serde_json::json!("first.txt"),
+                    )]),
+                ),
+                ContentBlock::from_tool_use(
+                    "read-2".to_string(),
+                    "read".to_string(),
+                    std::collections::HashMap::from([(
+                        "file_path".to_string(),
+                        serde_json::json!("second.txt"),
+                    )]),
+                ),
+            ],
+        ));
+        let request = |tool_use_id: &str, file_path: &str| ToolPauseRequest {
+            tool_use_id: tool_use_id.to_string(),
+            preview_tool_use_id: None,
+            tool_name: "read".to_string(),
+            permission_source: None,
+            source_thread_id: None,
+            source_agent_label: None,
+            kind: ToolPauseKind::Permission(PermissionPreview::Read(ReadPermissionPreview {
+                file_path: file_path.to_string(),
+            })),
+        };
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(request(
+            "read-1",
+            "first.txt",
+        )));
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(request(
+            "read-2",
+            "second.txt",
+        )));
+
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+        let timeline_before = state.selectable_message_lines.clone();
+        let first_drawer = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            timeline_before
+                .iter()
+                .any(|line| line.contains("Read 2 files"))
+        );
+        assert!(first_drawer.contains("first.txt"));
+        assert!(!first_drawer.contains("second.txt"));
+
+        let removed_active = state.remove_tool_pause("read-1");
+        state.finish_tool_pause_removal(removed_active);
+        terminal.draw(|frame| render(&mut state, frame)).unwrap();
+
+        let second_drawer = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(state.selectable_message_lines, timeline_before);
+        assert!(second_drawer.contains("second.txt"));
+        assert!(!second_drawer.contains("first.txt"));
     }
 
     #[test]

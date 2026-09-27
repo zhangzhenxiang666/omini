@@ -21,8 +21,3 @@
 - 文档改动无需构建或测试，除非包含生成内容或需要验证的示例。
 - 代码改动优先运行受影响 crate 的检查；非简单 Rust 改动最终运行 `cargo fmt --all --check` 和 `cargo clippy --workspace`。
 - 验证范围应与改动相称；不要为测试而堆叠重复用例。
-
-## 环境约定
-
-- Python 命令使用 `uv run`，不要直接运行 `python` 或 `python3`。
-- 版本控制使用 Jujutsu（`jj`）；只有明确要求时才使用 Git。

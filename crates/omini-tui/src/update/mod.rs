@@ -761,12 +761,14 @@ async fn handle_composer_key(
                 } else {
                     state.clear_run_dividers();
                     state.show_start_screen = false;
-                    let ui_message = UiMessage::Display(draft.display_message());
+                    let input = protocol::user_input_from_draft(draft.clone());
+                    let ui_message =
+                        UiMessage::SystemEvent(crate::state::UiSystemEvent::UserInputEcho(draft));
                     let client_echo_id = uuid::Uuid::new_v4().to_string();
                     state.push_optimistic_echo(ui_message, client_echo_id.clone());
                     let _ = request_tx
                         .send(ClientRequest::RunSubmitUserInput {
-                            input: protocol::user_input_from_draft(draft),
+                            input,
                             client_echo_id: Some(client_echo_id),
                         })
                         .await;

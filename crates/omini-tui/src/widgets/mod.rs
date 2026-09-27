@@ -239,149 +239,6 @@ pub fn format_thinking_duration(duration_ms: u64) -> String {
     }
 }
 
-/// 思考时长行：完成后为静态 "Thought for 5s"，流式期间由调用方传入动态已耗时。
-pub fn thinking_duration_line(label: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        label.to_string(),
-        Style::default()
-            .fg(Color::Rgb(0x7a, 0x82, 0x8e))
-            .add_modifier(Modifier::ITALIC),
-    ))
-}
-
-/// 常规工具（bash/read/edit/write/search/mcp/skill 等）的紧凑渲染：
-/// 主行 `⏺ ToolName(args)` + 结果首行 `  └ ...`。
-/// 特殊交互工具（ask_user/todo_write/view_image/subagent/task controls）不走此路径。
-pub fn render_tool_compact(
-    tool_use: &ToolUseBlock,
-    tool_result: Option<&ToolResultBlock>,
-    content_width: usize,
-    project_dir: Option<&Path>,
-) -> Vec<Line<'static>> {
-    let accent = Color::Rgb(0x42, 0xb3, 0xc2);
-    let title_style = tool_title_style(accent, tool_result.is_none());
-    let mut lines = if mcp::is_mcp_tool(tool_use) {
-        vec![mcp::title_line(
-            tool_use,
-            title_style,
-            content_width,
-            tool_result.is_none(),
-        )]
-    } else {
-        vec![compact_tool_title_line(
-            tool_use,
-            title_style,
-            content_width,
-            project_dir,
-        )]
-    };
-
-    if let Some(tr) = tool_result
-        && let Some(first) = tool_result_first_line(tr)
-    {
-        let style = if tr.is_error {
-            Style::default().fg(Color::Rgb(255, 100, 100))
-        } else {
-            Style::default().fg(Color::Rgb(140, 145, 155))
-        };
-        let width = content_width.saturating_sub(UnicodeWidthStr::width("  └ "));
-        lines.push(Line::from(vec![
-            Span::raw("  └ "),
-            Span::styled(truncate_display_width(&first, width), style),
-        ]));
-    }
-
-    lines
-}
-
-/// 生成紧凑工具主行 `⏺ ToolName(args)`；未覆盖的工具退化为 `⏺ {name}`。
-fn compact_tool_title_line(
-    tool_use: &ToolUseBlock,
-    title_style: Style,
-    content_width: usize,
-    project_dir: Option<&Path>,
-) -> Line<'static> {
-    let mut spans = vec![Span::raw("⏺ ")];
-    match tool_use.name.as_str() {
-        "read" | "edit" | "write" => {
-            let title = match tool_use.name.as_str() {
-                "read" => "Read",
-                "edit" => "Edit",
-                _ => "Write",
-            };
-            spans.push(Span::styled(title, title_style));
-            spans.push(Span::raw(format!(
-                " {}",
-                compact_tool_path(tool_use, project_dir)
-            )));
-        }
-        "bash" => {
-            spans.push(Span::styled("Bash", title_style));
-            let command = tool_use
-                .input
-                .get("command")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .trim();
-            let used_width: usize = spans.iter().map(|span| span.width()).sum();
-            let command_width = content_width
-                .saturating_sub(used_width)
-                .saturating_sub(UnicodeWidthStr::width("()"));
-            spans.push(Span::raw("("));
-            spans.extend(bash_highlight::truncated_command_spans(
-                command,
-                command_width,
-                Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
-            ));
-            spans.push(Span::raw(")"));
-        }
-        "search" => {
-            spans.push(Span::styled("Search", title_style));
-            let query = tool_use
-                .input
-                .get("query")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let used_width: usize = spans.iter().map(|span| span.width()).sum();
-            let width = content_width.saturating_sub(used_width + 1);
-            spans.push(Span::raw(format!(
-                " {}",
-                truncate_display_width(query, width)
-            )));
-        }
-        "skill" => {
-            let name = tool_use
-                .input
-                .get("name")
-                .and_then(|value| value.as_str())
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or("<unknown>");
-            spans.push(Span::styled("Skill", title_style));
-            spans.push(Span::raw(format!(" {name}")));
-        }
-        other => {
-            spans.push(Span::styled(other.to_string(), title_style));
-        }
-    }
-
-    Line::from(spans)
-}
-
-/// 工具结果的首个非空行，用于 `└` 摘要挂接；错误结果先转换为用户可读文案。
-fn tool_result_first_line(tool_result: &ToolResultBlock) -> Option<String> {
-    let content = if tool_result.is_error {
-        tool_error_display_text(&tool_result.content)
-    } else {
-        tool_result.content.trim().to_string()
-    };
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(str::to_string)
-}
-
 /// 参与回合活动聚合的工具类别；决定摘要行里的统计短语。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToolCategory {
@@ -393,29 +250,6 @@ pub enum ToolCategory {
     Skill,
     McpTool,
     Other(String),
-}
-
-/// 特殊交互工具不走紧凑聚合路径，保持独立的详细渲染。
-pub fn is_special_tool(tool_use: &ToolUseBlock) -> bool {
-    matches!(
-        tool_use.name.as_str(),
-        "ask_user"
-            | "todo_write"
-            | "view_image"
-            | "spawn_agent"
-            | "run_agent"
-            | "read_task"
-            | "wait_tasks"
-            | "cancel_task"
-    )
-}
-
-/// 判断主会话中需要从消息区隐藏的编排工具。
-pub fn hide_orchestration_tool(tool_use: &ToolUseBlock) -> bool {
-    matches!(
-        tool_use.name.as_str(),
-        "spawn_agent" | "run_agent" | "read_task" | "wait_tasks" | "cancel_task"
-    )
 }
 
 pub fn tool_category(tool_use: &ToolUseBlock) -> ToolCategory {
@@ -572,49 +406,6 @@ pub fn render_tool(
     }
 
     lines
-}
-
-pub fn render_read_task(
-    tool_use: &ToolUseBlock,
-    task: Option<(&str, &str)>,
-    pending: bool,
-) -> Vec<Line<'static>> {
-    let task_label = task
-        .map(|(agent, title)| format!("{agent} · {title}"))
-        .unwrap_or_else(|| {
-            tool_use
-                .input
-                .get("task_id")
-                .and_then(|value| value.as_str())
-                .unwrap_or("<unknown>")
-                .to_string()
-        });
-
-    let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
-    vec![Line::from(vec![
-        Span::raw("⏺ "),
-        Span::styled("ReadTask", title_style),
-        Span::raw("("),
-        Span::raw(task_label),
-        Span::raw(")"),
-    ])]
-}
-
-pub fn render_wait_tasks(tool_use: &ToolUseBlock, pending: bool) -> Vec<Line<'static>> {
-    let target = tool_use
-        .input
-        .get("task_ids")
-        .and_then(|value| value.as_array())
-        .map(|task_ids| format!("{} task(s)", task_ids.len()))
-        .unwrap_or_else(|| "all active agents".to_string());
-    let title_style = tool_title_style(Color::Rgb(0x42, 0xb3, 0xc2), pending);
-    vec![Line::from(vec![
-        Span::raw("⏺ "),
-        Span::styled("WaitTasks", title_style),
-        Span::raw("("),
-        Span::raw(target),
-        Span::raw(")"),
-    ])]
 }
 
 fn compact_waiting_tool_lines(
@@ -853,44 +644,6 @@ mod tests {
         let counts = vec![(ToolCategory::Shell, 1)];
         let line = activity_summary_line(Some(999), &counts, 80).expect("tool summary");
         assert_eq!(plain(&line), "  Thought for <1s, ran 1 shell command");
-    }
-
-    #[test]
-    fn render_tool_compact_shows_title_and_result_first_line() {
-        let mut input = std::collections::HashMap::new();
-        input.insert("command".to_string(), serde_json::json!("git status"));
-        let tool_use = ToolUseBlock {
-            id: "toolu_1".to_string(),
-            name: "bash".to_string(),
-            input,
-        };
-        let tool_result = ToolResultBlock {
-            tool_use_id: "toolu_1".to_string(),
-            is_error: false,
-            content: "On branch main\n\nnothing to commit".to_string(),
-            metadata: None,
-        };
-
-        let lines = render_tool_compact(&tool_use, Some(&tool_result), 80, None);
-
-        assert_eq!(plain(&lines[0]), "⏺ Bash(git status)");
-        assert_eq!(plain(&lines[1]), "  └ On branch main");
-    }
-
-    #[test]
-    fn render_tool_compact_running_tool_has_no_detail_line() {
-        let mut input = std::collections::HashMap::new();
-        input.insert("file_path".to_string(), serde_json::json!("src/main.rs"));
-        let tool_use = ToolUseBlock {
-            id: "toolu_1".to_string(),
-            name: "read".to_string(),
-            input,
-        };
-
-        let lines = render_tool_compact(&tool_use, None, 80, None);
-
-        assert_eq!(lines.len(), 1);
-        assert_eq!(plain(&lines[0]), "⏺ Read src/main.rs");
     }
 
     #[test]
@@ -1175,45 +928,5 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::CROSSED_OUT)
         );
-    }
-
-    #[test]
-    fn read_task_renders_agent_and_title() {
-        let tool_use = ToolUseBlock {
-            id: "toolu_1".to_string(),
-            name: "read_task".to_string(),
-            input: std::collections::HashMap::from([(
-                "task_id".to_string(),
-                serde_json::json!("task_1"),
-            )]),
-        };
-
-        let lines = render_read_task(&tool_use, Some(("explorer", "Find entrypoints")), false);
-
-        assert_eq!(plain(&lines[0]), "⏺ ReadTask(explorer · Find entrypoints)");
-        assert!(lines[0].spans[1].style.fg.is_some());
-        assert_eq!(lines[0].spans[2].style, Style::default());
-        assert_eq!(lines[0].spans[3].style, Style::default());
-        assert_eq!(lines[0].spans[4].style, Style::default());
-
-        let pending_lines =
-            render_read_task(&tool_use, Some(("explorer", "Find entrypoints")), true);
-        assert!(pending_lines[0].spans[1].style.fg.is_some());
-        assert_eq!(pending_lines[0].spans[2].style, Style::default());
-        assert_eq!(pending_lines[0].spans[3].style, Style::default());
-        assert_eq!(pending_lines[0].spans[4].style, Style::default());
-    }
-
-    #[test]
-    fn wait_tasks_renders_selected_task_count() {
-        let tool_use = ToolUseBlock {
-            id: "toolu_wait".to_string(),
-            name: "wait_tasks".to_string(),
-            input: serde_json::from_value(serde_json::json!({"task_ids": ["task-a", "task-b"]}))
-                .unwrap(),
-        };
-
-        let lines = render_wait_tasks(&tool_use, false);
-        assert_eq!(plain(&lines[0]), "⏺ WaitTasks(2 task(s))");
     }
 }

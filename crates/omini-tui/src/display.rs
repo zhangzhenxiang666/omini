@@ -6,14 +6,6 @@ use omini_model::message::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-pub struct DisplayMessage {
-    pub role: Role,
-    pub text: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mentions: Vec<DisplayMention>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DisplayMention {
     pub start_char: usize,
     pub end_char: usize,
@@ -58,17 +50,9 @@ impl UserDraft {
             images: Vec::new(),
         }
     }
-
-    pub fn display_message(&self) -> DisplayMessage {
-        DisplayMessage {
-            role: Role::User,
-            text: self.text.clone(),
-            mentions: self.mentions.clone(),
-        }
-    }
 }
 
-pub fn user_input_message(input: &UserInput) -> DisplayMessage {
+pub fn user_input_draft(input: &UserInput) -> UserDraft {
     let mut text = String::new();
     let mut mentions = Vec::new();
     if let UserInputIntent::Command {
@@ -112,10 +96,10 @@ pub fn user_input_message(input: &UserInput) -> DisplayMessage {
         text.push_str(&attachment.name);
         text.push(']');
     }
-    DisplayMessage {
-        role: Role::User,
+    UserDraft {
         text,
         mentions,
+        images: Vec::new(),
     }
 }
 

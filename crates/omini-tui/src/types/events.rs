@@ -1,4 +1,4 @@
-use crate::display::{DisplayMessage, UserDraft};
+use crate::display::UserDraft;
 use crate::types::config::ProviderProfile;
 use crate::types::config::ThinkingEffort;
 use omini_domain::agent_run::AgentRunSnapshot;
@@ -545,10 +545,10 @@ pub enum CommandEffect {
     ShowInteraction(InteractionRequest),
     /// 注入一条用户消息并立即启动 query。
     InjectUserMessage(Message),
-    /// 注入一条 LLM 消息并用另一条消息作为 UI/数据库回显。
+    /// 注入一条 LLM 消息并保留对应的用户输入回显。
     InjectUserQuery {
         llm_message: Message,
-        display_message: DisplayMessage,
+        user_input_echo: UserDraft,
     },
     /// 不新增用户消息，直接基于当前历史继续启动 query。
     ContinueQuery,
@@ -569,10 +569,10 @@ impl CommandEffect {
         Self::Emit(Box::new(event))
     }
 
-    pub fn inject_user_query(llm_message: Message, display_message: DisplayMessage) -> Self {
+    pub fn inject_user_query(llm_message: Message, user_input_echo: UserDraft) -> Self {
         Self::InjectUserQuery {
             llm_message,
-            display_message,
+            user_input_echo,
         }
     }
 }
