@@ -1,0 +1,1666 @@
+use super::*;
+use crate::app::event::AgentTaskSnapshot;
+use crate::app::event::{
+    AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
+    PermissionPreview, RuntimeToUiEvent, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
+};
+use crate::features::timeline::model::MentionKind;
+use chrono::Utc;
+use omini_domain::conversation::{AssistantMessage, AssistantMessageBlock, ConversationEntry};
+use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
+use omini_domain::task::{TaskChangedEvent, TaskInfo, TaskKind};
+use omini_model::message::{ContentBlock, Message, Role, ToolResultBlock, ToolUseBlock};
+use omini_protocol as protocol;
+use std::time::Duration;
+use tokio::time::Instant;
+
+fn state_with_mention(cursor_char: usize) -> AppState {
+    let mut state = AppState::new();
+    state.composer.input = "see @src now".to_string();
+    state.composer.cursor_char = cursor_char;
+    state.composer.input_mentions.push(InputMention {
+        start_char: 4,
+        end_char: 9,
+        kind: MentionKind::Directory,
+        label: "src".to_string(),
+        target: "src".to_string(),
+        description: "directory".to_string(),
+    });
+    state
+}
+
+fn long_paste_text() -> String {
+    "x".repeat(PASTE_MARKER_THRESHOLD_CHARS + 1)
+}
+
+fn temp_image_path(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("omini_image_input_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, b"image").unwrap();
+    path
+}
+
+fn start_subagent(state: &mut AppState) {
+    start_subagent_with_execution_mode(state, AgentTaskExecutionMode::Background);
+}
+
+fn start_subagent_with_execution_mode(
+    state: &mut AppState,
+    execution_mode: AgentTaskExecutionMode,
+) {
+    state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        parent_task_id: None,
+        owner_thread_id: "parent".to_string(),
+        truncated: false,
+        payload: AgentTaskEvent::Started {
+            parent_thread_id: "parent".to_string(),
+            spawn_tool_use_id: "tool_1".to_string(),
+            agent: "explorer".to_string(),
+            title: "Explore".to_string(),
+            initial_prompt: omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "Explore the repository".to_string(),
+                }],
+                attachments: Vec::new(),
+            },
+            depth: 1,
+            execution_mode,
+        },
+    }));
+}
+
+/// 通过通用事件更新任务，模拟实时事件与重连重放共用的输入路径。
+fn change_task(state: &mut AppState, task_id: &str, kind: TaskKind, status: TaskStatus) {
+    let now = Utc::now();
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: task_id.into(),
+            owner_thread_id: "parent".into(),
+            kind,
+            title: "Background work".into(),
+            status,
+            created_at: now,
+            updated_at: now,
+            completed_at: status.is_terminal().then_some(now),
+            result_summary: None,
+        },
+    }));
+}
+
+/// 主回合结束只显示后台状态，不阻塞输入；任务事件去重并随终态收敛。
+#[test]
+fn background_wait_lifecycle() {
+    let mut state = AppState::new();
+    state.project.current_thread_id = Some("parent".into());
+    state.composer.input = "new request".into();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    start_subagent(&mut state);
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Running,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Cancelling);
+    assert_eq!(state.sessions.background_tasks.len(), 2);
+    assert_eq!(state.background_wait_count(), 0);
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+    assert_eq!(state.background_wait_count(), 2);
+    assert!(!state.is_main_query_active());
+    assert!(state.sessions.views["main"].run_timer.is_none());
+    assert_eq!(state.composer.input, "new request");
+
+    state.sessions.active_session_task_id = Some("task_1".into());
+    assert_eq!(state.background_wait_count(), 0);
+    state.sessions.active_session_task_id = None;
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    assert_eq!(state.background_wait_count(), 0);
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+    assert_eq!(state.background_wait_count(), 2);
+
+    change_task(&mut state, "task_1", TaskKind::SubAgent, TaskStatus::Failed);
+    assert_eq!(state.background_wait_count(), 1);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Cancelled);
+    change_task(
+        &mut state,
+        "bash_1",
+        TaskKind::Bash,
+        TaskStatus::Interrupted,
+    );
+    assert_eq!(state.background_wait_count(), 0);
+
+    // 同步 Agent 与其他线程的后台任务均不进入主会话计数。
+    start_subagent_with_execution_mode(&mut state, AgentTaskExecutionMode::Synchronous);
+    assert!(state.sessions.background_tasks.is_empty());
+    state.project.current_thread_id = Some("other".into());
+    change_task(&mut state, "foreign", TaskKind::Bash, TaskStatus::Running);
+    assert!(state.sessions.background_tasks.is_empty());
+}
+
+/// 快照先清除旧计数，再恢复直接后台 Agent；Bash 从重放恢复且不会重复计数。
+#[test]
+fn background_wait_recovery() {
+    let mut state = AppState::new();
+    change_task(&mut state, "old_bash", TaskKind::Bash, TaskStatus::Running);
+    let mut background = subagent_snapshot(Vec::new());
+    background.task.status = TaskStatus::Running;
+    background.task.completed_at = None;
+    let mut synchronous = background.clone();
+    synchronous.task.task_id = "sync".into();
+    synchronous.task.execution_mode = AgentTaskExecutionMode::Synchronous;
+    state.apply_thread_snapshot(
+        Some("parent".into()),
+        Vec::new(),
+        vec![background, synchronous],
+        ThreadUsageSnapshot::default(),
+    );
+    assert_eq!(state.background_wait_count(), 1);
+    assert!(!state.sessions.background_tasks.contains_key("old_bash"));
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Running,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Running);
+    assert_eq!(state.background_wait_count(), 2);
+    change_task(
+        &mut state,
+        "task_1",
+        TaskKind::SubAgent,
+        TaskStatus::Completed,
+    );
+    change_task(&mut state, "bash_1", TaskKind::Bash, TaskStatus::Completed);
+    assert_eq!(state.background_wait_count(), 0);
+
+    change_task(&mut state, "remaining", TaskKind::Bash, TaskStatus::Running);
+    state.apply_thread_snapshot(
+        Some("other".into()),
+        Vec::new(),
+        Vec::new(),
+        ThreadUsageSnapshot::default(),
+    );
+    assert!(state.sessions.background_tasks.is_empty());
+}
+
+#[test]
+fn task_completion_prunes() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+    let now = Utc::now();
+
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: "task_1".to_string(),
+            owner_thread_id: "parent".to_string(),
+            kind: TaskKind::SubAgent,
+            title: "Explore".to_string(),
+            status: TaskStatus::Completed,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            result_summary: None,
+        },
+    }));
+
+    assert!(state.sessions.subagents.is_empty());
+    assert!(state.sessions.subagent_order.is_empty());
+    assert_eq!(state.sessions.views.len(), 1);
+}
+
+#[test]
+fn active_terminal_lifecycle() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+    state.sessions.active_session_task_id = Some("task_1".to_string());
+    let now = Utc::now();
+
+    state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
+        task: TaskInfo {
+            task_id: "task_1".to_string(),
+            owner_thread_id: "parent".to_string(),
+            kind: TaskKind::SubAgent,
+            title: "Explore".to_string(),
+            status: TaskStatus::Completed,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            result_summary: None,
+        },
+    }));
+
+    assert_eq!(state.sessions.subagent_order, ["task_1"]);
+    assert!(state.session_is_terminal());
+
+    state.sessions.active_session_task_id = None;
+    state.prune_terminal_tasks();
+
+    assert!(state.sessions.subagent_order.is_empty());
+    assert!(state.sessions.subagents.is_empty());
+}
+
+fn subagent_snapshot(history: Vec<ConversationEntry>) -> AgentTaskSnapshot {
+    let now = Utc::now();
+    AgentTaskSnapshot {
+        task: AgentTaskInfo {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_run_id: None,
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            parent_thread_id: "parent".to_string(),
+            spawn_tool_use_id: "tool_1".to_string(),
+            agent: "explorer".to_string(),
+            title: "Explore".to_string(),
+            depth: 1,
+            execution_mode: AgentTaskExecutionMode::Background,
+            status: TaskStatus::Completed,
+            result: None,
+            created_at: now,
+            updated_at: now,
+            completed_at: Some(now),
+            notification_delivered: true,
+        },
+        history,
+    }
+}
+
+fn permission_pause(tool_use_id: &str) -> ToolPauseRequest {
+    ToolPauseRequest {
+        tool_use_id: tool_use_id.to_string(),
+        preview_tool_use_id: None,
+        tool_name: "bash".to_string(),
+        permission_source: None,
+        source_thread_id: None,
+        source_agent_label: None,
+        kind: ToolPauseKind::Permission(PermissionPreview::Custom {
+            tool_name: "bash".to_string(),
+            payload: serde_json::Map::new(),
+        }),
+    }
+}
+
+fn query_runtime_status(
+    state: protocol::ThreadRuntimeState,
+    elapsed_ms: u64,
+    pending_pause_ids: &[&str],
+) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
+        state,
+        active_profile: protocol::ActiveProfile::Main,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: Some(protocol::ThreadRuntimeActivity {
+            kind: protocol::ThreadRuntimeActivityKind::Query,
+            started_at: Utc::now(),
+            elapsed_ms,
+        }),
+        pending_pauses: pending_pause_ids
+            .iter()
+            .map(|tool_use_id| permission_pause(tool_use_id))
+            .collect(),
+        pending_plan_approval: None,
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagent_threads: Vec::new(),
+        git_branch: None,
+    }
+}
+
+fn compact_runtime_status(elapsed_ms: u64) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
+        state: protocol::ThreadRuntimeState::Compacting,
+        active_profile: protocol::ActiveProfile::Main,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: Some(protocol::ThreadRuntimeActivity {
+            kind: protocol::ThreadRuntimeActivityKind::Compact,
+            started_at: Utc::now(),
+            elapsed_ms,
+        }),
+        pending_pauses: Vec::new(),
+        pending_plan_approval: None,
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagent_threads: Vec::new(),
+        git_branch: None,
+    }
+}
+
+fn pending_plan_runtime_status(plan_id: &str) -> protocol::ThreadRuntimeStatus {
+    protocol::ThreadRuntimeStatus {
+        thread_id: "thread_1".to_string(),
+        state: protocol::ThreadRuntimeState::Idle,
+        active_profile: protocol::ActiveProfile::Main,
+        loaded: true,
+        controller_id: Some("client_1".to_string()),
+        connected_client_count: 1,
+        activity: None,
+        pending_pauses: Vec::new(),
+        pending_plan_approval: Some(protocol::PlanSubmittedEvent {
+            plan_id: plan_id.to_string(),
+            title: "Plan".to_string(),
+            markdown: "# Plan".to_string(),
+        }),
+        active_tools: Vec::new(),
+        skills: Vec::new(),
+        mcp_servers: Vec::new(),
+        subagent_threads: Vec::new(),
+        git_branch: None,
+    }
+}
+
+fn submitted_plan(plan_id: &str) -> SubmittedPlan {
+    SubmittedPlan {
+        id: plan_id.to_string(),
+        title: "Plan".to_string(),
+        markdown: "# Plan".to_string(),
+        path: PathBuf::new(),
+        created_at: Utc::now(),
+    }
+}
+
+#[test]
+fn tool_pause_queue_uses_arrival_order() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_z",
+    )));
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_a",
+    )));
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_z");
+    assert_eq!(state.dialogs.pending_tool_pauses.len(), 2);
+}
+
+#[test]
+fn queued_tool_pause_does_not_reset_active_drawer_state() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+    state.dialogs.permission.permission_selected = 1;
+    state.dialogs.permission.note.text = "not now".to_string();
+    state.dialogs.permission.note.end();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_2",
+    )));
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_1");
+    assert_eq!(state.dialogs.permission.permission_selected, 1);
+    assert_eq!(state.current_user_input_note(), "not now");
+}
+
+#[test]
+fn removing_active_tool_pause_prepares_next_request() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_2",
+    )));
+    state.dialogs.permission.permission_selected = 1;
+    state.dialogs.permission.note.text = "deny first".to_string();
+    let removed_active = state.remove_tool_pause("tool_1");
+    state.finish_tool_pause_removal(removed_active);
+
+    assert_eq!(state.active_tool_pause().unwrap().tool_use_id, "tool_2");
+    assert_eq!(state.dialogs.permission.permission_selected, 0);
+    assert_eq!(state.current_user_input_note(), "");
+    assert_eq!(
+        state.sessions.views["main"].agent_status,
+        AgentStatus::AwaitingInput
+    );
+}
+
+#[test]
+fn formats_run_duration() {
+    assert_eq!(format_run_duration(Duration::from_secs(0)), "0s");
+    assert_eq!(format_run_duration(Duration::from_secs(7)), "7s");
+    assert_eq!(format_run_duration(Duration::from_secs(67)), "1m07s");
+    assert_eq!(format_run_duration(Duration::from_secs(3723)), "1h02m03s");
+}
+
+#[test]
+fn run_timer_excludes_paused_duration() {
+    let started_at = Instant::now();
+    let mut timer = RunTimer::started_at(started_at);
+
+    timer.pause_at(started_at + Duration::from_secs(10));
+    assert_eq!(
+        timer.elapsed_at(started_at + Duration::from_secs(30)),
+        Duration::from_secs(10)
+    );
+
+    timer.resume_at(started_at + Duration::from_secs(30));
+    assert_eq!(
+        timer.elapsed_at(started_at + Duration::from_secs(35)),
+        Duration::from_secs(15)
+    );
+
+    timer.pause_at(started_at + Duration::from_secs(40));
+    assert_eq!(
+        timer.finish_at(started_at + Duration::from_secs(50)),
+        Duration::from_secs(20)
+    );
+}
+
+#[test]
+fn run_timer_starts_from_synced_elapsed_and_preserves_pause() {
+    let now = Instant::now();
+    let elapsed = Duration::from_secs(5);
+    let running = RunTimer::started_with_elapsed_at(now, elapsed, false);
+
+    assert_eq!(running.elapsed_at(now), elapsed);
+    assert_eq!(
+        running.elapsed_at(now + Duration::from_secs(2)),
+        Duration::from_secs(7)
+    );
+
+    let paused = RunTimer::started_with_elapsed_at(now, elapsed, true);
+
+    assert_eq!(paused.elapsed_at(now), elapsed);
+    assert_eq!(paused.elapsed_at(now + Duration::from_secs(2)), elapsed);
+    assert!(paused.is_paused());
+}
+
+#[test]
+fn run_finished_appends_elapsed_divider_and_clears_timer() {
+    let mut state = AppState::new();
+    state.composer.input_placeholder = "旧提示".into();
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    assert!(state.sessions.views["main"].run_timer.is_some());
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    assert!(state.sessions.views["main"].run_timer.is_none());
+    assert_ne!(state.composer.input_placeholder, "旧提示");
+    assert!(matches!(
+        state.sessions.views["main"].messages.last(),
+        Some(UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. }))
+    ));
+}
+
+#[test]
+fn runtime_status_sync_calibrates_elapsed_and_pause_state() {
+    let mut state = AppState::new();
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 2_500, &["tool_1"]);
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(
+        state.sessions.views["main"].agent_status,
+        AgentStatus::AwaitingInput
+    );
+    assert!(state.is_run_timer_paused());
+
+    let timer = state.sessions.views["main"]
+        .run_timer
+        .as_ref()
+        .expect("timer should be synced");
+    let now = Instant::now();
+    let elapsed = timer.elapsed_at(now);
+    assert!(elapsed >= Duration::from_millis(2_500));
+    assert!(elapsed < Duration::from_millis(2_600));
+    assert_eq!(timer.elapsed_at(now + Duration::from_secs(5)), elapsed);
+}
+
+#[test]
+fn initial_runtime_status_restores_full_background_pause_without_activity() {
+    let mut state = AppState::new();
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 0, &[]);
+    status.activity = None;
+    let mut pause = permission_pause("agent_1:tool_1");
+    pause.preview_tool_use_id = Some("tool_1".to_string());
+    pause.source_thread_id = Some("agent_1".to_string());
+    pause.source_agent_label = Some("explorer".to_string());
+    status.pending_pauses = vec![pause.clone()];
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(state.active_tool_pause(), Some(&pause));
+    assert_eq!(
+        state.sessions.views["main"].agent_status,
+        AgentStatus::AwaitingInput
+    );
+}
+
+#[test]
+fn calibration_status_does_not_restore_stale_pause() {
+    let mut state = AppState::new();
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Waiting, 0, &["tool_1"]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: false,
+    });
+
+    assert!(state.active_tool_pause().is_none());
+}
+
+#[test]
+fn finished_subagent_removes_its_pending_pause() {
+    let mut state = AppState::new();
+    let mut pause = permission_pause("sub_1:tool_1");
+    pause.source_thread_id = Some("sub_1".to_string());
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(pause));
+
+    state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        parent_task_id: None,
+        owner_thread_id: "parent".to_string(),
+        truncated: false,
+        payload: AgentTaskEvent::Finished {
+            status: Some(TaskStatus::Cancelled),
+            result: None,
+        },
+    }));
+
+    assert!(state.active_tool_pause().is_none());
+}
+
+#[test]
+fn runtime_status_sync_applies_thinking_state() {
+    let mut state = AppState::new();
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Thinking, 2_500, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(
+        state.sessions.views["main"].agent_status,
+        AgentStatus::Thinking
+    );
+    assert!(!state.is_run_timer_paused());
+}
+
+#[test]
+fn idle_runtime_status_clears_main_query_while_background_task_remains_active() {
+    let mut state = AppState::new();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    start_subagent(&mut state);
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Idle, 0, &[]);
+    status.activity = None;
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(state.sessions.views["main"].agent_status, AgentStatus::Idle);
+    assert!(!state.is_main_query_active());
+    assert!(state.sessions.views["main"].run_timer.is_none());
+    assert!(state.has_active_agent_tasks());
+}
+
+#[test]
+fn replayed_run_started_keeps_synced_elapsed_timer() {
+    let mut state = AppState::new();
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Working, 2_500, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+
+    let timer = state.sessions.views["main"]
+        .run_timer
+        .as_ref()
+        .expect("timer should stay synced");
+    let elapsed = timer.elapsed_at(Instant::now());
+    assert!(elapsed >= Duration::from_millis(2_500));
+    assert!(elapsed < Duration::from_millis(2_600));
+}
+
+#[test]
+fn runtime_status_sync_calibrates_compact_activity() {
+    let mut state = AppState::new();
+    let status = compact_runtime_status(1_200);
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(
+        state.sessions.views["main"].agent_status,
+        AgentStatus::Working
+    );
+    assert!(!state.sessions.views["main"].manual_compact_running);
+    assert!(!state.is_run_timer_paused());
+
+    let timer = state.sessions.views["main"]
+        .run_timer
+        .as_ref()
+        .expect("timer should be synced");
+    let elapsed = timer.elapsed_at(Instant::now());
+    assert!(elapsed >= Duration::from_millis(1_200));
+    assert!(elapsed < Duration::from_millis(1_300));
+}
+
+#[test]
+fn runtime_status_sync_restores_pending_plan_approval_without_activity() {
+    let mut state = AppState::new();
+    let status = pending_plan_runtime_status("plan");
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert_eq!(
+        state
+            .dialogs
+            .plan
+            .plan_approval
+            .as_ref()
+            .map(|plan| plan.id.as_str()),
+        Some("plan")
+    );
+    assert!(state.sessions.views["main"].run_timer.is_none());
+}
+
+#[test]
+fn runtime_status_sync_updates_subagent_mention_candidates() {
+    let mut state = AppState::new();
+    state.composer.input = "@wo".to_string();
+    state.composer.cursor_char = 3;
+    let mut status = query_runtime_status(protocol::ThreadRuntimeState::Working, 2_500, &[]);
+    status.subagent_threads = vec![
+        AgentSummary {
+            name: "explorer".to_string(),
+            description: "Read-only codebase exploration agent.".to_string(),
+            short_description: None,
+            location: "<built-in>".to_string(),
+        },
+        AgentSummary {
+            name: "general".to_string(),
+            description: "General purpose isolated coding agent.".to_string(),
+            short_description: None,
+            location: "<built-in>".to_string(),
+        },
+    ];
+
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+
+    assert!(state.composer.mention_autocomplete.visible);
+    let candidates: Vec<_> = state
+        .composer
+        .mention_autocomplete
+        .filtered
+        .iter()
+        .map(|candidate| {
+            (
+                candidate.kind,
+                candidate.label.as_str(),
+                candidate.target.as_str(),
+                candidate.description.as_str(),
+            )
+        })
+        .collect();
+    // 过滤条件 "@wo" 命中 "general" 之外不存在的旧名 worker,只剩 explorer / general 都不匹配
+    assert_eq!(candidates, Vec::new());
+}
+
+#[test]
+fn agent_management_update_refreshes_subagent_mention_candidates() {
+    let mut state = AppState::new();
+    state.composer.input = "@wo".to_string();
+    state.composer.cursor_char = 3;
+
+    state.apply_event(RuntimeToUiEvent::AgentManagementUpdated {
+        records: vec![
+            AgentRecord {
+                name: "explorer".to_string(),
+                description: "Read-only codebase exploration agent.".to_string(),
+                short_description: None,
+                instructions: "Explore.".to_string(),
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+                source_kind: AgentSourceKind::BuiltIn,
+                path: None,
+                editable: false,
+            },
+            AgentRecord {
+                name: "worker".to_string(),
+                description: "Implementation agent for focused coding tasks.".to_string(),
+                short_description: None,
+                instructions: "Work.".to_string(),
+                tools: Vec::new(),
+                disallow_tools: Vec::new(),
+                model: None,
+                source_kind: AgentSourceKind::Project,
+                path: None,
+                editable: true,
+            },
+        ],
+    });
+
+    assert!(state.composer.mention_autocomplete.visible);
+    let candidates: Vec<_> = state
+        .composer
+        .mention_autocomplete
+        .filtered
+        .iter()
+        .map(|candidate| candidate.label.as_str())
+        .collect();
+    assert_eq!(candidates, vec!["worker"]);
+}
+
+#[test]
+fn plan_approval_resolved_closes_only_matching_plan() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::PlanSubmitted(submitted_plan("plan")));
+    state.dialogs.plan.plan_approval_selected = 1;
+    state.dialogs.plan.plan_approval_auto = true;
+    state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
+        plan_id: "other_plan".to_string(),
+        action: protocol::PlanApprovalAction::ContinueDiscussing,
+    });
+    assert!(state.dialogs.plan.plan_approval.is_some());
+
+    state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
+        plan_id: "plan".to_string(),
+        action: protocol::PlanApprovalAction::ContinueDiscussing,
+    });
+
+    assert!(state.dialogs.plan.plan_approval.is_none());
+    assert_eq!(state.dialogs.plan.plan_approval_selected, 0);
+    assert!(!state.dialogs.plan.plan_approval_auto);
+}
+
+#[test]
+fn run_finished_divider_uses_synced_elapsed() {
+    let mut state = AppState::new();
+    let status = query_runtime_status(protocol::ThreadRuntimeState::Working, 3_000, &[]);
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
+        status,
+        restore_pending_pauses: true,
+    });
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    let Some(UiMessage::SystemEvent(UiSystemEvent::RunDivider { elapsed })) =
+        state.sessions.views["main"].messages.last()
+    else {
+        panic!("expected run divider");
+    };
+    assert!(*elapsed >= Duration::from_secs(3));
+    assert!(*elapsed < Duration::from_secs(4));
+}
+
+#[test]
+fn run_started_removes_previous_elapsed_divider() {
+    let mut state = AppState::new();
+    state.sessions.views["main"]
+        .messages
+        .push(UiMessage::SystemEvent(UiSystemEvent::RunDivider {
+            elapsed: Duration::from_secs(67),
+        }));
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+
+    assert!(
+        !state.sessions.views["main"].messages.iter().any(|message| {
+            matches!(
+                message,
+                UiMessage::SystemEvent(UiSystemEvent::RunDivider { .. })
+            )
+        })
+    );
+}
+
+#[test]
+fn tool_pause_pauses_timer_until_result_removes_last_preview() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+
+    assert!(state.is_run_timer_paused());
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: String::new(),
+        metadata: None,
+    }));
+
+    assert!(!state.is_run_timer_paused());
+}
+
+#[test]
+fn permission_pause_prepares_single_note_slot() {
+    let mut state = AppState::new();
+
+    state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+        "tool_1",
+    )));
+
+    assert!(state.dialogs.ask.user_input_notes.is_empty());
+    assert!(state.dialogs.permission.note.text.is_empty());
+    assert!(state.dialogs.ask.user_input_note_cursors.is_empty());
+    assert_eq!(state.dialogs.permission.note.cursor, 0);
+    assert!(!state.note_mode());
+    assert_eq!(state.dialogs.permission.permission_selected, 0);
+}
+
+#[test]
+fn subagent_spawn_tool_error_finishes_running_state() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: true,
+        content: "Stream error: Stream ended unexpectedly".to_string(),
+        metadata: None,
+    }));
+
+    let node = state.sessions.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, TaskStatus::Failed);
+}
+
+#[test]
+fn runtime_error_does_not_fail_running_subagent_state() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::error(
+        "Cannot handle this request while a run is active".to_string(),
+    ));
+
+    let node = state.sessions.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, TaskStatus::Running);
+}
+
+#[test]
+fn parent_run_finished_does_not_finish_running_agent_task() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    assert_eq!(
+        state.sessions.subagents.get("sub_1").unwrap().status,
+        TaskStatus::Running
+    );
+}
+
+#[test]
+fn background_spawn_tool_result_keeps_running_subagent_live() {
+    let mut state = AppState::new();
+    state.apply_event(RuntimeToUiEvent::RunStarted);
+    state.apply_event(RuntimeToUiEvent::ToolUse(ToolUseBlock {
+        id: "tool_1".to_string(),
+        name: "spawn_agent".to_string(),
+        input: std::collections::HashMap::from([
+            (
+                "name".to_string(),
+                serde_json::Value::String("explorer".to_string()),
+            ),
+            (
+                "title".to_string(),
+                serde_json::Value::String("Explore".to_string()),
+            ),
+        ]),
+    }));
+    start_subagent(&mut state);
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: r#"{"task_id":"task_1","status":"running"}"#.to_string(),
+        metadata: None,
+    }));
+    state.apply_event(RuntimeToUiEvent::RunFinished);
+
+    let node = state.sessions.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, TaskStatus::Running);
+}
+
+#[test]
+fn synchronous_agent_tool_result_finishes_subagent_state() {
+    let mut state = AppState::new();
+    start_subagent_with_execution_mode(&mut state, AgentTaskExecutionMode::Synchronous);
+
+    state.apply_event(RuntimeToUiEvent::ToolResult(ToolResultBlock {
+        tool_use_id: "tool_1".to_string(),
+        is_error: false,
+        content: r#"{"task_id":"task_1","status":"completed"}"#.to_string(),
+        metadata: None,
+    }));
+
+    let node = state.sessions.subagents.get("sub_1").unwrap();
+    assert_eq!(node.status, TaskStatus::Completed);
+}
+
+#[test]
+fn task_history_snapshot() {
+    let mut state = AppState::new();
+    state.project.current_thread_id = Some("parent".to_string());
+    state.sessions.active_session_task_id = Some("task_1".to_string());
+    state.apply_thread_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![subagent_snapshot(vec![
+            ConversationEntry::UserInput(omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "initial prompt".to_string(),
+                }],
+                attachments: Vec::new(),
+            }),
+            ConversationEntry::AssistantMessage(AssistantMessage {
+                blocks: vec![AssistantMessageBlock::Text {
+                    text: "child answer".to_string(),
+                }],
+            }),
+            ConversationEntry::UserInput(omini_domain::conversation::UserInput {
+                intent: omini_domain::input::UserInputIntent::Message,
+                parts: vec![omini_domain::input::InputPart::Text {
+                    text: "follow up".to_string(),
+                }],
+                attachments: Vec::new(),
+            }),
+            ConversationEntry::SystemEvent(omini_domain::conversation::SystemEvent::ToolResults {
+                results: vec![omini_domain::conversation::ToolResultRecord {
+                    tool_use_id: "read-1".to_string(),
+                    is_error: false,
+                    content: "file contents".to_string(),
+                    metadata: None,
+                }],
+            }),
+        ])],
+        ThreadUsageSnapshot::default(),
+    );
+
+    assert!(
+        state
+            .sessions
+            .subagents
+            .get("sub_1")
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert_eq!(state.sessions.views["task_1"].messages.len(), 4);
+}
+
+#[test]
+fn snapshot_omits_old_terminal() {
+    let mut state = AppState::new();
+    state.project.current_thread_id = Some("old-thread".to_string());
+    state.sessions.active_session_task_id = Some("task_1".to_string());
+
+    state.apply_thread_snapshot(
+        Some("parent".to_string()),
+        Vec::new(),
+        vec![subagent_snapshot(Vec::new())],
+        ThreadUsageSnapshot::default(),
+    );
+
+    assert!(state.sessions.subagent_order.is_empty());
+    assert!(state.sessions.active_session_task_id.is_none());
+}
+
+#[test]
+fn task_message_isolation() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+
+    for payload in [
+        AgentTaskEvent::MessageCommitted {
+            message: Message::from_user_text("child prompt".to_string()),
+            persist_llm_history: true,
+        },
+        AgentTaskEvent::ToolUse {
+            tool_use: ToolUseBlock {
+                id: "child_tool".to_string(),
+                name: "read".to_string(),
+                input: std::collections::HashMap::new(),
+            },
+        },
+        AgentTaskEvent::ToolResult {
+            tool_result: ToolResultBlock {
+                tool_use_id: "child_tool".to_string(),
+                is_error: false,
+                content: "done".to_string(),
+                metadata: None,
+            },
+        },
+        AgentTaskEvent::MessageCommitted {
+            message: Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_text("child answer".to_string())],
+            ),
+            persist_llm_history: true,
+        },
+        AgentTaskEvent::MessageCommitted {
+            message: Message::new(
+                Role::User,
+                vec![ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "child_tool".to_string(),
+                    is_error: false,
+                    content: "done".to_string(),
+                    metadata: None,
+                })],
+            ),
+            persist_llm_history: true,
+        },
+    ] {
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            truncated: false,
+            payload,
+        }));
+    }
+
+    assert_eq!(
+        state
+            .sessions
+            .subagents
+            .get("sub_1")
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    let view = &state.sessions.views["task_1"];
+    assert_eq!(view.messages.len(), 3);
+    assert!(state.sessions.views["main"].messages.is_empty());
+}
+
+#[test]
+fn task_delta_isolation() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+
+    for payload in [
+        AgentTaskEvent::TurnStarted,
+        AgentTaskEvent::ThinkingDelta {
+            delta: "private reasoning".to_string(),
+        },
+        AgentTaskEvent::TextDelta {
+            delta: "partial child answer".to_string(),
+        },
+        AgentTaskEvent::TurnEnded,
+    ] {
+        state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
+            task_id: "task_1".to_string(),
+            thread_id: "sub_1".to_string(),
+            parent_task_id: None,
+            owner_thread_id: "parent".to_string(),
+            truncated: false,
+            payload,
+        }));
+    }
+
+    assert!(state.sessions.views["main"].pending_assistant.is_none());
+    assert!(
+        state
+            .sessions
+            .subagents
+            .get("sub_1")
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert!(matches!(
+        state.sessions.views["task_1"].pending_assistant.as_ref().unwrap().content.last(),
+        Some(ContentBlock::Text(text)) if text.text == "partial child answer"
+    ));
+}
+
+#[test]
+fn task_input_history() {
+    let mut state = AppState::new();
+    start_subagent(&mut state);
+    state.apply_event(RuntimeToUiEvent::AgentTaskUserMessageInjected {
+        task_id: "task_1".to_string(),
+        thread_id: "sub_1".to_string(),
+        item: protocol::HistoryItem::UserInput(omini_domain::conversation::UserInput {
+            intent: omini_domain::input::UserInputIntent::Message,
+            parts: vec![omini_domain::input::InputPart::Text {
+                text: "follow up".to_string(),
+            }],
+            attachments: Vec::new(),
+        }),
+        client_echo_id: Some("echo-1".to_string()),
+    });
+
+    assert_eq!(state.sessions.views["task_1"].messages.len(), 2);
+    assert!(matches!(
+        &state.sessions.views["task_1"].messages[1],
+        UiMessage::UserInput(input)
+            if matches!(input.parts.as_slice(), [omini_domain::input::InputPart::Text { text }] if text == "follow up")
+    ));
+    assert!(state.sessions.views["main"].messages.is_empty());
+}
+
+#[test]
+fn backspace_deletes_whole_mention_at_end() {
+    let mut state = state_with_mention(9);
+    state.composer.delete_before();
+    assert_eq!(state.composer.input, "see now");
+    assert_eq!(state.composer.cursor_char, 4);
+    assert!(state.composer.input_mentions.is_empty());
+}
+
+#[test]
+fn backspace_deletes_whole_mention_from_inside() {
+    let mut state = state_with_mention(6);
+    state.composer.delete_before();
+    assert_eq!(state.composer.input, "see now");
+    assert_eq!(state.composer.cursor_char, 4);
+    assert!(state.composer.input_mentions.is_empty());
+}
+
+#[test]
+fn delete_deletes_whole_mention_at_start() {
+    let mut state = state_with_mention(4);
+    state.composer.delete_after();
+    assert_eq!(state.composer.input, "see now");
+    assert_eq!(state.composer.cursor_char, 4);
+    assert!(state.composer.input_mentions.is_empty());
+}
+
+#[test]
+fn delete_deletes_whole_mention_from_inside() {
+    let mut state = state_with_mention(6);
+    state.composer.delete_after();
+    assert_eq!(state.composer.input, "see now");
+    assert_eq!(state.composer.cursor_char, 4);
+    assert!(state.composer.input_mentions.is_empty());
+}
+
+#[test]
+fn cursor_left_skips_whole_mention_at_end() {
+    let mut state = state_with_mention(9);
+    state.composer.cursor_left();
+    assert_eq!(state.composer.cursor_char, 4);
+}
+
+#[test]
+fn cursor_left_skips_whole_mention_from_inside() {
+    let mut state = state_with_mention(6);
+    state.composer.cursor_left();
+    assert_eq!(state.composer.cursor_char, 4);
+}
+
+#[test]
+fn cursor_right_skips_whole_mention_at_start() {
+    let mut state = state_with_mention(4);
+    state.composer.cursor_right();
+    assert_eq!(state.composer.cursor_char, 9);
+}
+
+#[test]
+fn cursor_right_skips_whole_mention_from_inside() {
+    let mut state = state_with_mention(6);
+    state.composer.cursor_right();
+    assert_eq!(state.composer.cursor_char, 9);
+}
+
+#[test]
+fn cursor_movement_in_plain_text_stays_character_based() {
+    let mut state = state_with_mention(3);
+    state.composer.cursor_left();
+    assert_eq!(state.composer.cursor_char, 2);
+
+    state.composer.cursor_char = 9;
+    state.composer.cursor_right();
+    assert_eq!(state.composer.cursor_char, 10);
+}
+
+#[test]
+fn inserted_mention_range_excludes_trailing_space() {
+    let mut state = AppState::new();
+    state.composer.input = "@sr".to_string();
+    state.composer.cursor_char = 3;
+    state.composer.mention_autocomplete.visible = true;
+    state.composer.mention_autocomplete.active_start = 0;
+    state.composer.mention_autocomplete.active_end = 3;
+    state
+        .composer
+        .mention_autocomplete
+        .filtered
+        .push(MentionCandidate {
+            kind: MentionKind::Directory,
+            label: "src".to_string(),
+            target: "src".to_string(),
+            description: "directory".to_string(),
+        });
+
+    assert!(state.composer.insert_selected_mention());
+    assert_eq!(state.composer.input, "@src ");
+    assert_eq!(state.composer.cursor_char, 5);
+    assert_eq!(state.composer.input_mentions[0].start_char, 0);
+    assert_eq!(state.composer.input_mentions[0].end_char, 4);
+}
+
+#[test]
+fn selected_image_mention_inserts_image_marker() {
+    let image = temp_image_path("image.png");
+    let cwd = image.parent().unwrap().to_path_buf();
+    let mut state = AppState::new();
+    state.composer.cwd = cwd.clone();
+    state.project.status_bar.cwd = cwd;
+    state.composer.input = "@ima".to_string();
+    state.composer.cursor_char = 4;
+    state.composer.mention_autocomplete.visible = true;
+    state.composer.mention_autocomplete.active_start = 0;
+    state.composer.mention_autocomplete.active_end = 4;
+    state
+        .composer
+        .mention_autocomplete
+        .filtered
+        .push(MentionCandidate {
+            kind: MentionKind::File,
+            label: "image.png".to_string(),
+            target: "image.png".to_string(),
+            description: "file".to_string(),
+        });
+
+    assert!(state.composer.insert_selected_mention());
+    assert_eq!(state.composer.input, "[Image#1] ");
+    assert!(state.composer.input_mentions.is_empty());
+    assert_eq!(state.composer.input_images.len(), 1);
+    assert_eq!(
+        state.composer.input_images[0].source_path,
+        image.to_string_lossy()
+    );
+}
+
+#[test]
+fn quoted_existing_image_path_paste_inserts_image_marker() {
+    let image = temp_image_path("dragged.jpg");
+    let mut state = AppState::new();
+
+    state
+        .composer
+        .insert_paste(format!("'{}'", image.display()));
+    settle_files(&mut state.composer);
+
+    assert_eq!(state.composer.input, "[Image#1] ");
+    assert_eq!(state.composer.input_images.len(), 1);
+    assert_eq!(
+        state.composer.input_images[0].source_path,
+        image.to_string_lossy()
+    );
+}
+
+#[test]
+fn nonexistent_image_path_paste_remains_text() {
+    let mut state = AppState::new();
+    let path = "/tmp/omini_missing_image.png";
+
+    state.composer.insert_paste(format!("'{path}'"));
+
+    assert_eq!(state.composer.input, format!("'{path}'"));
+    assert!(state.composer.input_images.is_empty());
+}
+
+#[test]
+fn typed_quoted_existing_absolute_image_path_inserts_image_marker() {
+    let image = temp_image_path("typed.png");
+    let mut state = AppState::new();
+
+    for ch in format!("'{}'", image.display()).chars() {
+        state.composer.insert_char(ch);
+    }
+
+    settle_files(&mut state.composer);
+    assert_eq!(state.composer.input, "[Image#1] ");
+    assert_eq!(state.composer.input_images.len(), 1);
+    assert_eq!(
+        state.composer.input_images[0].source_path,
+        image.to_string_lossy()
+    );
+}
+
+#[test]
+fn typed_quoted_image_path_with_spaces_inserts_image_marker() {
+    let image = temp_image_path("typed image.png");
+    let mut state = AppState::new();
+
+    for ch in format!("\"{}\"", image.display()).chars() {
+        state.composer.insert_char(ch);
+    }
+
+    settle_files(&mut state.composer);
+    assert_eq!(state.composer.input, "[Image#1] ");
+    assert_eq!(state.composer.input_images.len(), 1);
+    assert_eq!(
+        state.composer.input_images[0].source_path,
+        image.to_string_lossy()
+    );
+}
+
+#[test]
+fn typed_quoted_nonexistent_image_path_remains_text() {
+    let mut state = AppState::new();
+    let text = "'/tmp/omini_missing_typed_image.png'";
+
+    for ch in text.chars() {
+        state.composer.insert_char(ch);
+    }
+
+    assert_eq!(state.composer.input, text);
+    assert!(state.composer.input_images.is_empty());
+}
+
+#[test]
+fn typed_quoted_non_image_path_remains_text() {
+    let file = temp_image_path("not-image.txt");
+    let mut state = AppState::new();
+    let text = format!("'{}'", file.display());
+
+    for ch in text.chars() {
+        state.composer.insert_char(ch);
+    }
+
+    assert_eq!(state.composer.input, text);
+    assert!(state.composer.input_images.is_empty());
+}
+
+#[test]
+fn typed_at_text_without_selection_remains_plain_text() {
+    let mut state = AppState::new();
+    for c in "@src ".chars() {
+        state.composer.insert_char(c);
+        state.composer.update_input_autocomplete();
+    }
+
+    assert_eq!(state.composer.input, "@src ");
+    assert!(state.composer.input_mentions.is_empty());
+
+    state.composer.cursor_left();
+    assert_eq!(state.composer.cursor_char, 4);
+    state.composer.delete_before();
+    assert_eq!(state.composer.input, "@sr ");
+}
+
+#[test]
+fn short_paste_inserts_literal_newlines() {
+    let mut state = AppState::new();
+    state.composer.insert_paste("one\ntwo".to_string());
+
+    assert_eq!(state.composer.input, "one\ntwo");
+    assert!(state.composer.input_paste_markers.is_empty());
+    assert_eq!(state.composer.input_line_count(), 2);
+}
+
+#[test]
+fn paste_over_two_lines_inserts_marker_even_when_short() {
+    let mut state = AppState::new();
+    let pasted = "a\nb\nc".to_string();
+    state.composer.insert_paste(pasted.clone());
+
+    assert_eq!(
+        state.composer.input,
+        format!("[Pasted Content {} chars]", 5)
+    );
+    assert_eq!(state.composer.input_paste_markers.len(), 1);
+
+    let draft = state.composer.take_input_draft().unwrap();
+    assert_eq!(draft.text, pasted);
+}
+
+#[test]
+fn long_paste_inserts_marker_and_submit_expands_original_text() {
+    let mut state = AppState::new();
+    let pasted = long_paste_text();
+    state.composer.insert_paste(pasted.clone());
+
+    assert_eq!(state.composer.input_paste_markers.len(), 1);
+    assert_eq!(
+        state.composer.input,
+        format!(
+            "[Pasted Content {} chars]",
+            PASTE_MARKER_THRESHOLD_CHARS + 1
+        )
+    );
+
+    let draft = state.composer.take_input_draft().unwrap();
+    assert_eq!(draft.text, pasted);
+    assert!(draft.mentions.is_empty());
+    assert!(state.composer.input.is_empty());
+    assert!(state.composer.input_paste_markers.is_empty());
+}
+
+#[test]
+fn cursor_skips_whole_paste_marker() {
+    let mut state = AppState::new();
+    state.composer.insert_paste(long_paste_text());
+    let marker_len = state.composer.input.chars().count();
+
+    state.composer.cursor_left();
+    assert_eq!(state.composer.cursor_char, 0);
+
+    state.composer.cursor_right();
+    assert_eq!(state.composer.cursor_char, marker_len);
+}
+
+#[test]
+fn delete_removes_whole_paste_marker() {
+    let mut state = AppState::new();
+    state.composer.insert_paste(long_paste_text());
+    state.composer.cursor_home();
+    state.composer.delete_after();
+
+    assert!(state.composer.input.is_empty());
+    assert!(state.composer.input_paste_markers.is_empty());
+}
+
+#[test]
+fn backspace_removes_whole_paste_marker() {
+    let mut state = AppState::new();
+    state.composer.insert_paste(long_paste_text());
+    state.composer.delete_before();
+
+    assert!(state.composer.input.is_empty());
+    assert!(state.composer.input_paste_markers.is_empty());
+    assert_eq!(state.composer.cursor_char, 0);
+}
+
+#[test]
+fn clear_input_resets_text_and_attachment_state() {
+    let image = temp_image_path("clear.png");
+    let mut state = AppState::new();
+    state.project.status_bar.cwd = image.parent().unwrap().to_path_buf();
+    state.composer.insert_paste(long_paste_text());
+    state.composer.insert_char(' ');
+    let mention_start = state.composer.cursor_char;
+    state.composer.insert_text("@src ");
+    state.composer.input_mentions.push(InputMention {
+        start_char: mention_start,
+        end_char: mention_start + 5,
+        kind: MentionKind::Directory,
+        label: "src".to_string(),
+        target: "src".to_string(),
+        description: "directory".to_string(),
+    });
+    state.composer.insert_image_attachment(image);
+    state.composer.autocomplete.visible = true;
+    state.composer.mention_autocomplete.visible = true;
+    state.composer.input_scroll_line = 1;
+
+    assert!(state.composer.clear_input());
+
+    assert!(state.composer.input.is_empty());
+    assert!(state.composer.input_mentions.is_empty());
+    assert!(state.composer.input_images.is_empty());
+    assert!(state.composer.input_paste_markers.is_empty());
+    assert_eq!(state.composer.cursor_char, 0);
+    assert_eq!(state.composer.input_scroll_line, 0);
+    assert!(!state.composer.autocomplete.visible);
+    assert!(!state.composer.mention_autocomplete.visible);
+}
+
+#[test]
+fn clear_input_returns_false_when_input_is_empty() {
+    let mut state = AppState::new();
+
+    assert!(!state.composer.clear_input());
+}
+
+#[test]
+fn mention_offsets_shift_after_paste_marker_expansion() {
+    let mut state = AppState::new();
+    let pasted = long_paste_text();
+    state.composer.insert_paste(pasted.clone());
+    state.composer.insert_char(' ');
+    let mention_start = state.composer.cursor_char;
+    state.composer.insert_text("@src ");
+    state.composer.input_mentions.push(InputMention {
+        start_char: mention_start,
+        end_char: mention_start + 5,
+        kind: MentionKind::Directory,
+        label: "src".to_string(),
+        target: "src".to_string(),
+        description: "directory".to_string(),
+    });
+
+    let draft = state.composer.take_input_draft().unwrap();
+    assert_eq!(draft.text, format!("{pasted} @src "));
+    assert_eq!(draft.mentions[0].start_char, pasted.chars().count() + 1);
+    assert_eq!(draft.mentions[0].end_char, pasted.chars().count() + 6);
+}
+
+#[test]
+fn input_visible_lines_caps_at_three_and_cursor_scrolls() {
+    let mut state = AppState::new();
+    state.composer.insert_text("a\nb\nc\nd");
+
+    assert_eq!(state.composer.input_line_count(), 4);
+    assert_eq!(state.composer.input_visible_line_count(), 3);
+    assert_eq!(state.composer.input_scroll_line, 1);
+
+    assert!(state.composer.cursor_up_in_input());
+    assert_eq!(state.composer.input_scroll_line, 1);
+    assert!(state.composer.cursor_up_in_input());
+    assert_eq!(state.composer.input_scroll_line, 1);
+    assert!(state.composer.cursor_up_in_input());
+    assert_eq!(state.composer.input_scroll_line, 0);
+}
+
+#[test]
+fn input_soft_wraps_by_width_without_mutating_text() {
+    let mut state = AppState::new();
+    state.composer.set_input_wrap_width(6);
+    state.composer.insert_text("abcdefghi");
+
+    assert_eq!(state.composer.input, "abcdefghi");
+    assert_eq!(
+        state.composer.input_line_bounds(),
+        vec![(0, 4), (4, 8), (8, 9)]
+    );
+    assert_eq!(state.composer.input_line_count(), 3);
+    assert_eq!(state.composer.input_visible_line_count(), 3);
+}
+
+#[test]
+fn input_soft_wraps_wide_characters_by_display_width() {
+    let mut state = AppState::new();
+    state.composer.set_input_wrap_width(6);
+    state.composer.insert_text("你好吗x");
+
+    assert_eq!(state.composer.input_line_bounds(), vec![(0, 2), (2, 4)]);
+    assert_eq!(state.composer.input_display_width(0, 2), 4);
+    assert_eq!(state.composer.input_display_width(2, 4), 3);
+}
+
+#[test]
+fn input_soft_wrap_scrolls_after_three_visible_lines() {
+    let mut state = AppState::new();
+    state.composer.set_input_wrap_width(6);
+    state.composer.insert_text("abcdefghijklmnopqrst");
+
+    assert_eq!(
+        state.composer.input_line_bounds(),
+        vec![(0, 4), (4, 8), (8, 12), (12, 16), (16, 20)]
+    );
+    assert_eq!(state.composer.input_visible_line_count(), 3);
+    assert_eq!(state.composer.input_scroll_line, 2);
+}
+
+#[test]
+fn cursor_moves_vertically_across_soft_wrapped_lines() {
+    let mut state = AppState::new();
+    state.composer.set_input_wrap_width(6);
+    state.composer.insert_text("abcdefghijklmnopqrst");
+
+    assert_eq!(state.composer.input_cursor_line_col(), Some((4, 4)));
+    assert!(state.composer.cursor_up_in_input());
+    assert_eq!(state.composer.input_cursor_line_col(), Some((3, 4)));
+    assert_eq!(state.composer.cursor_char, 16);
+
+    assert!(state.composer.cursor_down_in_input());
+    assert_eq!(state.composer.input_cursor_line_col(), Some((4, 4)));
+    assert_eq!(state.composer.cursor_char, 20);
+}
+
+#[test]
+fn manual_newlines_remain_real_line_breaks_with_soft_wrap() {
+    let mut state = AppState::new();
+    state.composer.set_input_wrap_width(6);
+    state.composer.insert_text("ab\ncdefghi");
+
+    assert_eq!(state.composer.input, "ab\ncdefghi");
+    assert_eq!(
+        state.composer.input_line_bounds(),
+        vec![(0, 2), (3, 7), (7, 10)]
+    );
+
+    let draft = state.composer.take_input_draft().unwrap();
+    assert_eq!(draft.text, "ab\ncdefghi");
+}
+
+fn settle_files(composer: &mut crate::features::composer::state::ComposerState) {
+    for request in composer.take_requests() {
+        composer.apply_local(crate::platform::files::execute(request));
+    }
+}

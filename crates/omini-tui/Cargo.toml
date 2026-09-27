@@ -26,3 +26,5 @@ tokio-tungstenite.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
 uuid.workspace = true
+tree-sitter.workspace = true
+tree-sitter-bash.workspace = true

@@ -28,6 +28,7 @@ fn builtin_tools_without_configuration_apply_the_complete_default_matrix() {
         ("spawn_agent", None, PermissionDecision::Allow),
         ("run_agent", None, PermissionDecision::Allow),
         ("read_task", None, PermissionDecision::Allow),
+        ("send_message", None, PermissionDecision::Allow),
         ("cancel_task", None, PermissionDecision::Allow),
         ("bash", None, PermissionDecision::Ask),
         ("mcp__server__tool", None, PermissionDecision::Ask),

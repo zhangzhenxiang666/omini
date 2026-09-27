@@ -51,6 +51,8 @@ deny = [
 - `edit`、`write` — 编辑/写入文件
 - `Agent` — 同时匹配 `spawn_agent` 与 `run_agent`（按 `name` 匹配，例如 `Agent(explorer)`）
 
+`SendMessage`（或 `send_message`）可作为不带路径的工具规则使用，例如在 `ask` 中加入 `"SendMessage"` 可覆盖默认放行。
+
 **路径语法：**
 
 | 前缀 | 说明 | 示例 |
@@ -318,7 +320,7 @@ prefix_rule(
 | `search` | 允许 | 搜索操作直接允许 |
 | `edit`、`write` | 需确认 | 写入操作需要用户确认 |
 | `todo_write` | 允许 | 创建待办清单直接允许 |
-| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`cancel_task` | 允许 | 交互与 Agent task 工具直接允许 |
+| `ask_user`、`skill`、`spawn_agent`、`run_agent`、`read_task`、`send_message`、`cancel_task` | 允许 | 交互与 Agent task 工具默认直接允许；显式 `SendMessage` 规则仍可覆盖默认值 |
 | `bash` | 默认放行，风险命令询问，极端命令拒绝 | 显式 `.rules` 优先于内置询问，解析失败或包装超限仍询问 |
 
 ## 相关文档

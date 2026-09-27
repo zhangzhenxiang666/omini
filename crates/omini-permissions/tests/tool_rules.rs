@@ -36,6 +36,23 @@ fn matching_allow_ask_and_deny_rules_choose_the_strictest_decision_and_source() 
 }
 
 #[test]
+fn explicit_send_message_rule_overrides_builtin_allow() {
+    let rule = "SendMessage";
+    let engine = engine_with_sources(
+        raw(&[], &[rule], &[]),
+        None,
+        Some(PathBuf::from("/home/test")),
+    );
+    assert_eq!(
+        engine.check("send_message", None, &json!({"task_id":"child"})),
+        PermissionCheck {
+            decision: PermissionDecision::Ask,
+            source: Some(permission_source("ask", USER_SOURCE, rule)),
+        }
+    );
+}
+
+#[test]
 fn user_and_project_sources_keep_the_stricter_effective_origin() {
     let rule = "Read(**/*.rs)";
     let engine = engine_with_sources(

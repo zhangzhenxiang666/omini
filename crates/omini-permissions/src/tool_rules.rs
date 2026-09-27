@@ -123,7 +123,7 @@ fn parse_tool_rule_parts(
 fn is_supported_permission_tool(tool: &str) -> bool {
     matches!(
         tool,
-        "read" | "search" | "edit" | "write" | "agent" | "ask_user" | "todo_write"
+        "read" | "search" | "edit" | "write" | "agent" | "ask_user" | "todo_write" | "send_message"
     )
 }
 
@@ -138,6 +138,7 @@ pub(crate) fn normalize_tool_name(tool: &str) -> String {
         "Write" | "write" => "write".to_string(),
         "Agent" | "agent" | "spawn_agent" | "run_agent" => "agent".to_string(),
         "TodoWrite" | "todo_write" => "todo_write".to_string(),
+        "SendMessage" | "send_message" => "send_message".to_string(),
         other => other.to_ascii_lowercase(),
     }
 }

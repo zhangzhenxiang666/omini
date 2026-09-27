@@ -38,6 +38,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    #[command(about = "离线预览 TUI 的全部组件与状态")]
+    TuiDebug,
     #[command(about = "管理本地 omini-server daemon")]
     Server {
         #[command(subcommand)]
@@ -113,6 +115,10 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             Ok(ExitCode::SUCCESS)
         }
         Some(CliCommand::Server { command }) => run_server_command(command),
+        Some(CliCommand::TuiDebug) => {
+            omini_tui::run_debug_ui()?;
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

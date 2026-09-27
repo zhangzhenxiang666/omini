@@ -2068,6 +2068,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "toml",
+ "tree-sitter",
+ "tree-sitter-bash",
  "unicode-width",
  "uuid",
 ]
