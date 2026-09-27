@@ -3,7 +3,46 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::{bash_highlight, tool_error_display_text, tool_title_style, word_wrap};
+use super::{bash_highlight, tool_error_display_text, truncate_display_width, word_wrap};
+
+/// Shell 标题优先呈现调用目的；无描述时直接展示单行命令。
+pub fn render_preview(tool_use: &ToolUseBlock, content_width: usize) -> Vec<Line<'static>> {
+    let desc = tool_use
+        .input
+        .get("description")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim();
+    let command = tool_use
+        .input
+        .get("command")
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .replace('\n', " ↵ ");
+
+    let mut lines = Vec::new();
+    if !desc.is_empty() {
+        lines.push(Line::from(Span::styled(
+            desc.replace('\n', " "),
+            Style::default()
+                .fg(crate::ui::theme::MUTED)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    let mut command_spans = vec![Span::styled(
+        "$ ",
+        Style::default().fg(crate::ui::theme::ACCENT),
+    )];
+    command_spans.extend(bash_highlight::truncated_command_spans(
+        &command,
+        content_width.saturating_sub(2),
+        Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
+    ));
+    lines.push(Line::from(command_spans).style(Style::default().bg(crate::ui::theme::PANEL)));
+    lines
+}
 
 pub fn render(
     tool_use: &ToolUseBlock,
@@ -11,14 +50,12 @@ pub fn render(
     content_width: usize,
 ) -> Vec<Line<'static>> {
     let dim = crate::ui::theme::MUTED;
-    let accent = crate::ui::theme::ACCENT;
     let error = crate::ui::theme::ERROR;
     let output = crate::ui::theme::MUTED;
 
     const MAX_OUTPUT_LINES: usize = 10;
 
     let mut lines: Vec<Line> = Vec::new();
-    let title_style = tool_title_style(accent);
     let desc = tool_use
         .input
         .get("description")
@@ -32,17 +69,22 @@ pub fn render(
         .unwrap_or("")
         .trim();
 
-    lines.push(Line::from(vec![Span::styled("Shell", title_style)]));
+    if !desc.is_empty() {
+        lines.push(Line::from(Span::styled(
+            truncate_display_width(&desc.replace('\n', " "), content_width),
+            Style::default().fg(dim).add_modifier(Modifier::ITALIC),
+        )));
+    }
     for (index, spans) in bash_highlight::wrapped_command_spans(
         cmd,
-        content_width.saturating_sub(4).max(1),
+        content_width.saturating_sub(2).max(1),
         Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
     )
     .into_iter()
     .enumerate()
     {
         let mut command = vec![Span::styled(
-            if index == 0 { "  $ " } else { "    " },
+            if index == 0 { "$ " } else { "  " },
             Style::default().fg(crate::ui::theme::ACCENT),
         )];
         command.extend(spans);
@@ -63,15 +105,6 @@ pub fn render(
                 ]));
             }
         };
-
-    if !desc.is_empty() {
-        push_indented(
-            "  └ ",
-            "    ",
-            format!("# {desc}"),
-            Style::default().fg(dim).add_modifier(Modifier::ITALIC),
-        );
-    }
 
     if let Some(tr) = result
         && tr.is_error
@@ -110,7 +143,7 @@ pub fn render(
                 );
             }
             let wl = &wrapped[*line_idx];
-            if display_idx == 0 && desc.is_empty() {
+            if display_idx == 0 {
                 push_indented("  └ ", "    ", wl.clone(), out_style);
             } else {
                 push_indented("    ", "    ", wl.clone(), out_style);

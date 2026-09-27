@@ -1,6 +1,7 @@
 use crate::features::tools::{ToolCategory, activity_summary_line, tool_category};
 use omini_model::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::text::Line;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssistantBlockKind {
@@ -39,6 +40,7 @@ pub struct ActivityGroup {
     thinking_ms: Option<u64>,
     active_thinking_ms: Option<u64>,
     tool_counts: Vec<(ToolCategory, usize)>,
+    last_tool: Option<Arc<ToolUseBlock>>,
     pub orphan_results: Vec<ToolResultBlock>,
 }
 
@@ -47,6 +49,7 @@ impl ActivityGroup {
         self.thinking_ms.is_none()
             && self.active_thinking_ms.is_none()
             && self.tool_counts.is_empty()
+            && self.last_tool.is_none()
             && self.orphan_results.is_empty()
     }
 
@@ -65,6 +68,8 @@ impl ActivityGroup {
     }
 
     pub fn add_tool(&mut self, tool_use: &ToolUseBlock) {
+        // 检查点会复制活动组；共享工具输入，避免大参数随历史消息反复复制。
+        self.last_tool = Some(Arc::new(tool_use.clone()));
         let category = tool_category(tool_use);
         if let Some((_, count)) = self
             .tool_counts
@@ -75,6 +80,10 @@ impl ActivityGroup {
         } else {
             self.tool_counts.push((category, 1));
         }
+    }
+
+    pub fn last_tool(&self) -> Option<&ToolUseBlock> {
+        self.last_tool.as_deref()
     }
 
     pub fn summary(&self, content_width: usize) -> Vec<Line<'static>> {

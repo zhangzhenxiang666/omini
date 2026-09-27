@@ -367,11 +367,93 @@ pub fn render_tool(
     lines
 }
 
+/// 活动摘要下只展示最新工具的输入提示；Shell 和 Search 使用紧凑的专属样式。
+/// 行数按工具分别限制，避免长命令或 MCP 参数占满消息视口。
+pub fn render_activity_preview(
+    tool_use: &ToolUseBlock,
+    content_width: usize,
+    project_dir: Option<&Path>,
+) -> Vec<Line<'static>> {
+    let inner_width = content_width.saturating_sub(4);
+    let (lines, max_lines) = if mcp::is_mcp_tool(tool_use) {
+        (
+            render_tool(tool_use, None, None, None, inner_width, project_dir),
+            3,
+        )
+    } else {
+        match tool_use.name.as_str() {
+            "bash" => (bash::render_preview(tool_use, inner_width), 2),
+            "search" => (
+                search::render_preview(tool_use, inner_width, project_dir),
+                1,
+            ),
+            "read" | "view_image" | "skill" => (
+                render_tool(tool_use, None, None, None, inner_width, project_dir),
+                1,
+            ),
+            _ => (
+                render_tool(tool_use, None, None, None, inner_width, project_dir),
+                3,
+            ),
+        }
+    };
+    lines
+        .into_iter()
+        .take(max_lines)
+        .enumerate()
+        .map(|(index, line)| indent_activity_preview(line, index == 0, content_width))
+        .collect()
+}
+
+fn indent_activity_preview(
+    line: Line<'static>,
+    first: bool,
+    content_width: usize,
+) -> Line<'static> {
+    let prefix = if first { "  └ " } else { "    " };
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    if content_width < prefix_width {
+        return Line::from(Span::styled(
+            truncate_display_width(prefix, content_width),
+            Style::default().fg(crate::ui::theme::MUTED),
+        ));
+    }
+
+    let mut spans = vec![Span::styled(
+        prefix,
+        Style::default().fg(crate::ui::theme::MUTED),
+    )];
+    let mut remaining = content_width - prefix_width;
+    for span in line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let width = span.width();
+        if width <= remaining {
+            remaining -= width;
+            spans.push(span);
+        } else {
+            spans.push(Span::styled(
+                truncate_display_width(span.content.as_ref(), remaining),
+                span.style,
+            ));
+            break;
+        }
+    }
+    Line::from(spans).style(line.style)
+}
+
 fn compact_waiting_tool_lines(
     tool_use: &ToolUseBlock,
     content_width: usize,
     project_dir: Option<&Path>,
 ) -> Vec<Line<'static>> {
+    if tool_use.name == "bash" {
+        return bash::render_preview(tool_use, content_width);
+    }
+    if tool_use.name == "search" {
+        return search::render_preview(tool_use, content_width, project_dir);
+    }
     let accent = crate::ui::theme::ACCENT;
     let title_style = tool_title_style(accent);
     if mcp::is_mcp_tool(tool_use) {
@@ -403,26 +485,6 @@ fn compact_waiting_tool_lines(
             }
             spans.push(Span::styled(title, title_style));
             spans.push(Span::raw(format!(" {path_text}")));
-        }
-        "bash" => {
-            spans.push(Span::styled("Bash", title_style));
-            let command = tool_use
-                .input
-                .get("command")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .trim();
-            let used_width: usize = spans.iter().map(|span| span.width()).sum();
-            let command_width = content_width
-                .saturating_sub(used_width)
-                .saturating_sub(UnicodeWidthStr::width("()"));
-            spans.push(Span::raw("("));
-            spans.extend(bash_highlight::truncated_command_spans(
-                command,
-                command_width,
-                Style::default().fg(bash_highlight::COMMAND_TEXT_FG),
-            ));
-            spans.push(Span::raw(")"));
         }
         "ask_user" => {
             spans.push(Span::styled("Ask User", title_style));
@@ -578,6 +640,98 @@ mod tests {
         assert_eq!(plain(&line), "  Thought for <1s, ran 1 shell command");
     }
 
+    /// 给定普通工具的不同输入；当生成活动附件时，则保留各工具的标识并限制宽度和高度。
+    #[test]
+    fn renders_tool_previews() {
+        let cases = [
+            ("bash", "command", "cargo check", "$ cargo check", 1),
+            ("search", "query", "AgentRun", "⌕ Search", 1),
+            ("read", "file_path", "src/lib.rs", "▤ Read", 1),
+            ("skill", "name", "review", "/ Skill", 1),
+            ("mcp__files__list", "path", "src", "files/list", 3),
+        ];
+        for (name, input_key, value, label, max_lines) in cases {
+            let tool = ToolUseBlock {
+                id: name.into(),
+                name: name.into(),
+                input: [(input_key.into(), serde_json::json!(value))]
+                    .into_iter()
+                    .collect(),
+            };
+            let lines = render_activity_preview(&tool, 24, None);
+            let rendered = lines.iter().map(plain).collect::<Vec<_>>().join("\n");
+            assert!(rendered.contains(label), "{name}: {rendered}");
+            assert!(lines.len() <= max_lines, "{name}: {rendered}");
+            assert!(
+                lines
+                    .iter()
+                    .all(|line| UnicodeWidthStr::width(plain(line).as_str()) <= 24),
+                "{name}: {rendered}"
+            );
+            assert!(rendered.starts_with("  └ "), "{name}: {rendered}");
+        }
+    }
+
+    /// 给定有无描述的 Shell 调用；当显示活动附件时，则只保留描述和单行命令。
+    #[test]
+    fn formats_shell_preview() {
+        let mut tool = ToolUseBlock {
+            id: "shell-1".into(),
+            name: "bash".into(),
+            input: [("command".into(), serde_json::json!("cargo check"))]
+                .into_iter()
+                .collect(),
+        };
+        let direct = render_activity_preview(&tool, 80, None);
+        assert_eq!(
+            direct.iter().map(plain).collect::<Vec<_>>(),
+            ["  └ $ cargo check"]
+        );
+        let standalone = render_tool(&tool, None, None, None, 80, None);
+        assert_eq!(
+            standalone.iter().map(plain).collect::<Vec<_>>(),
+            ["$ cargo check"]
+        );
+
+        tool.input
+            .insert("description".into(), serde_json::json!("Check workspace"));
+        let described = render_activity_preview(&tool, 80, None);
+        assert_eq!(
+            described.iter().map(plain).collect::<Vec<_>>(),
+            ["  └ Check workspace", "    $ cargo check"]
+        );
+        let standalone = render_tool(&tool, None, None, None, 80, None);
+        assert_eq!(
+            standalone.iter().map(plain).collect::<Vec<_>>(),
+            ["Check workspace", "$ cargo check"]
+        );
+    }
+
+    /// 给定指定目录的搜索；当显示活动附件时，则查询与搜索范围占同一行。
+    #[test]
+    fn combines_search_scope() {
+        let tool = ToolUseBlock {
+            id: "search-1".into(),
+            name: "search".into(),
+            input: [
+                ("query".into(), serde_json::json!("AgentRun")),
+                ("path".into(), serde_json::json!("src")),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let lines = render_activity_preview(&tool, 80, None);
+        assert_eq!(
+            lines.iter().map(plain).collect::<Vec<_>>(),
+            ["  └ ⌕ Search  AgentRun in src"]
+        );
+        let standalone = render_tool(&tool, None, None, None, 80, None);
+        assert_eq!(
+            standalone.iter().map(plain).collect::<Vec<_>>(),
+            ["⌕ Search  AgentRun in src"]
+        );
+    }
+
     #[test]
     fn skill_tool_renders_invoked_skill_command() {
         let mut input = std::collections::HashMap::new();
@@ -695,12 +849,11 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert!(plain(&lines[0]).starts_with("Shell"));
-        assert!(plain(&lines[1]).starts_with("  $ git commit"));
-        assert_eq!(plain(&lines[2]), "  └ # 创建提交");
-        assert_eq!(plain(&lines[3]), "  Permission denied for tool: bash");
-        assert_eq!(lines[0].spans[0].style.fg, Some(crate::ui::theme::ACCENT));
-        assert_eq!(lines[3].spans[0].style.fg, Some(crate::ui::theme::ERROR));
+        assert_eq!(plain(&lines[0]), "创建提交");
+        assert!(plain(&lines[1]).starts_with("$ git commit"));
+        assert_eq!(plain(&lines[2]), "  Permission denied for tool: bash");
+        assert_eq!(lines[0].spans[0].style.fg, Some(crate::ui::theme::MUTED));
+        assert_eq!(lines[2].spans[0].style.fg, Some(crate::ui::theme::ERROR));
     }
 
     #[test]
@@ -789,7 +942,7 @@ mod tests {
 
         let lines = render_tool(&tool_use, Some(&tool_result), None, None, 80, None);
 
-        assert_eq!(plain(&lines[2]), "  Permission denied · Inspect first");
+        assert_eq!(plain(&lines[1]), "  Permission denied · Inspect first");
         assert!(
             !lines
                 .iter()

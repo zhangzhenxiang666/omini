@@ -2,8 +2,8 @@ use crate::app::event::{Notification, NotificationKind};
 use crate::app::state::{UiMessage, UiSystemEvent, format_run_duration};
 use crate::features::timeline::model::UserDraft;
 use crate::features::tools::{
-    build_bordered_lines, format_thinking_duration, render_tool, tool_error_display_text,
-    truncate_display_width,
+    build_bordered_lines, format_thinking_duration, render_activity_preview, render_tool,
+    tool_error_display_text, truncate_display_width,
 };
 use crate::ui::context::ViewContext;
 use crate::ui::prelude::activity::ActivityGroup;
@@ -432,8 +432,10 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
             &mut tail_selectable,
         );
     }
+    let preview = render_active_preview(state, &activity, content_width);
     flush_activity_group(
         &mut activity,
+        preview,
         content_width,
         &mut tail_lines,
         &mut tail_selectable,
@@ -637,8 +639,10 @@ fn render_message_range(
         );
     }
 
+    let preview = render_active_preview(state, &activity, content_width);
     flush_activity_group(
         &mut activity,
+        preview,
         content_width,
         &mut all_lines,
         &mut selectable_lines,
@@ -678,7 +682,7 @@ fn render_entry(
             }
         }
         crate::features::timeline::projection::TimelineEntry::Boundary(message) => {
-            flush_activity_group(activity, content_width, all_lines, selectable_lines);
+            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
             if let UiMessage::UserInput(input) = message {
                 render_user_message(
                     &crate::features::timeline::model::user_input_draft(input),
@@ -850,7 +854,7 @@ fn render_block(
                 activity.add_tool(tool);
                 return;
             }
-            flush_activity_group(activity, content_width, all_lines, selectable_lines);
+            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
             let result = lookup.result(&tool.id);
             let lines = render_tool(
                 tool,
@@ -863,7 +867,7 @@ fn render_block(
             append_rendered_lines(all_lines, selectable_lines, lines);
         }
         BlockView::Text(text) if !text.trim().is_empty() => {
-            flush_activity_group(activity, content_width, all_lines, selectable_lines);
+            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
             append_rendered_lines(
                 all_lines,
                 selectable_lines,
@@ -877,8 +881,26 @@ fn render_block(
     }
 }
 
+/// 仅在会话仍运行且活动组尚未遇到分界时，展示最新一次普通工具调用。
+fn render_active_preview(
+    state: &ViewContext<'_>,
+    activity: &ActivityGroup,
+    content_width: usize,
+) -> Option<Vec<Line<'static>>> {
+    if !state.session.main_query_active && state.session.run_timer.is_none() {
+        return None;
+    }
+    let tool = activity.last_tool()?;
+    Some(render_activity_preview(
+        tool,
+        content_width,
+        Some(state.project.status_bar.cwd.as_path()),
+    ))
+}
+
 fn flush_activity_group(
     activity: &mut ActivityGroup,
+    preview: Option<Vec<Line<'static>>>,
     content_width: usize,
     all_lines: &mut Vec<Line<'static>>,
     selectable_lines: &mut Vec<String>,
@@ -887,7 +909,11 @@ fn flush_activity_group(
         return;
     }
     let group = std::mem::take(activity);
-    append_rendered_lines(all_lines, selectable_lines, group.summary(content_width));
+    let mut summary = group.summary(content_width);
+    if let Some(preview) = preview {
+        summary.extend(preview);
+    }
+    append_rendered_lines(all_lines, selectable_lines, summary);
     for result in group.orphan_results {
         let color = if result.is_error {
             crate::ui::theme::ERROR
@@ -1222,6 +1248,152 @@ mod tests {
         assert!(rendered.contains("fixed"));
         // 常规工具不再展开独立主行
         assert!(!rendered.contains("⏺ Bash"));
+    }
+
+    /// 给定跨消息延续的活动组；当新工具开始及正文出现时，则附件只跟随最后工具并在分界处收起。
+    #[test]
+    fn tracks_active_preview() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new();
+        state.sessions.views["main"].main_query_active = true;
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::Thinking(ThinkingBlock {
+                        thinking: "hidden".into(),
+                        duration_ms: Some(2_000),
+                    }),
+                    ContentBlock::from_tool_use(
+                        "shell-1".into(),
+                        "bash".into(),
+                        HashMap::from([("command".into(), serde_json::json!("pwd"))]),
+                    ),
+                ],
+            )));
+
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        let first = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(
+            first.contains("Thought for 2s, ran 1 shell command"),
+            "{first}"
+        );
+        assert!(first.contains("  └ $ pwd"), "{first}");
+
+        state.sessions.views["main"].pending_assistant = Some(
+            Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::from_tool_use(
+                        "search-1".into(),
+                        "search".into(),
+                        HashMap::from([("query".into(), serde_json::json!("AgentRun"))]),
+                    ),
+                    ContentBlock::from_tool_result(
+                        "search-1".into(),
+                        false,
+                        "private search output".into(),
+                    ),
+                ],
+            )
+            .into(),
+        );
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        let latest = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(
+            latest.contains("ran 1 shell command, ran 1 search"),
+            "{latest}"
+        );
+        assert!(latest.contains("  └ ⌕ Search  AgentRun in ."), "{latest}");
+        assert!(!latest.contains("  └ $ pwd"), "{latest}");
+        assert!(!latest.contains("private search output"), "{latest}");
+
+        state.sessions.views["main"]
+            .pending_assistant
+            .as_mut()
+            .unwrap()
+            .content
+            .push(ContentBlock::from_text("answer".into()));
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        let closed = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(closed.contains("answer"), "{closed}");
+        assert!(!closed.contains("  └ ⌕ Search"), "{closed}");
+    }
+
+    /// 给定未遇到正文分界的活动组；当运行结束时，则历史只保留摘要。
+    #[test]
+    fn hides_finished_preview() {
+        let backend = TestBackend::new(80, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = AppState::new();
+        state.sessions.views["main"].main_query_active = true;
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(thought_and_shell_call(
+                2_000, "shell-1", "output",
+            )));
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        assert!(
+            state.sessions.views["main"]
+                .selectable_message_lines
+                .join("\n")
+                .contains("  └ $ pwd")
+        );
+
+        state.sessions.views["main"].main_query_active = false;
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        let finished = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(finished.contains("Thought for 2s, ran 1 shell command"));
+        assert!(!finished.contains("  └ $ pwd"), "{finished}");
+    }
+
+    /// 给定活跃的普通工具摘要；当独立展示的工具出现时，则先收起摘要附件。
+    #[test]
+    fn closes_boundary_preview() {
+        let mut state = AppState::new();
+        state.sessions.views["main"].main_query_active = true;
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(Message::new(
+                Role::Assistant,
+                vec![
+                    ContentBlock::from_tool_use(
+                        "shell-1".into(),
+                        "bash".into(),
+                        HashMap::from([("command".into(), serde_json::json!("pwd"))]),
+                    ),
+                    ContentBlock::from_tool_use(
+                        "edit-1".into(),
+                        "edit".into(),
+                        HashMap::from([("file_path".into(), serde_json::json!("src/lib.rs"))]),
+                    ),
+                ],
+            )));
+
+        let rendered = rendered_timeline(&state);
+        assert!(rendered.contains("Ran 1 shell command"), "{rendered}");
+        assert!(rendered.contains("⏺ Patch"), "{rendered}");
+        assert!(!rendered.contains("  └ $ pwd"), "{rendered}");
     }
 
     #[test]
