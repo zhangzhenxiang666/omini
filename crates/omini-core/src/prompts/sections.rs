@@ -52,12 +52,18 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
         "- The main agent uses `spawn_agent` to start background tasks. It returns immediately with a task ID and child thread ID.\n",
     );
     section.push_str(
-        "- Delegate broad or independent work when it improves focus or lets useful work proceed in parallel; choose an agent whose description fits the task.\n",
+        "- Form a quick high-level plan before diving in: separate the critical-path work you must handle yourself from sidecar tasks that could proceed in parallel without blocking your next step.\n",
+    );
+    section.push_str(
+        "- Delegate a sidecar task with `spawn_agent` when parallel work could save time or improve quality: broad or multi-file exploration, independent research or verification, or focused implementation with clear file boundaries. Choose an agent whose description fits the task.\n",
+    );
+    section.push_str(
+        "- Do the work yourself when it is a small quick step, when your next action blocks on your own inspection or judgment, or when the work is too tightly coupled to hand off cleanly.\n",
     );
     match active_profile {
         ActiveProfile::Main | ActiveProfile::Auto => {
             section.push_str(
-                "- For focused implementation work that can be separated by file or module ownership, spawn a `general` agent; give it a bounded scope and explicit files or responsibilities.\n",
+                "- For implementation sidecars, spawn a `general` agent with a bounded scope and explicit file ownership.\n",
             );
         }
         ActiveProfile::Plan => {
@@ -69,9 +75,6 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
     section.push_str("- Completion notifications arrive automatically and contain task identity and status. Do not poll running tasks; continue independent work, or end the current turn if nothing useful remains until a task finishes. A completion notification resumes the main agent automatically; use `read_task` after completion only if you need its full output.\n");
     section.push_str(
         "- Do not duplicate an agent task's investigation in the main context. Use its result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
-    );
-    section.push_str(
-        "- Keep urgent blocking work local when the next step cannot proceed without your own immediate inspection or judgment.\n",
     );
     match active_profile {
         ActiveProfile::Main | ActiveProfile::Auto => {
@@ -90,10 +93,10 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
         "- Use a short `title` as a compact UI label; keep it brief and in the user's language.\n",
     );
     section.push_str(
-        "- Write prompts as self-contained briefs: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own.\n",
+        "- Write each task as a specific, bounded, self-contained brief: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own; let the agent choose its own steps.\n",
     );
     section.push_str(
-        "- Give each task a self-contained goal, relevant context, expected output, and any read-only or ownership limits; let the agent choose its investigation steps.\n",
+        "- Each task should materially advance the main task and must not write to files that you or another delegated task is editing.\n",
     );
     section.push_str(
         "- Only the main agent can start background tasks. A depth-1 agent may use `run_agent` for one synchronous depth-2 child when its tool policy allows it; depth-2 agents cannot derive further agents.\n\n",

@@ -44,7 +44,7 @@ impl Tool for SpawnAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Start a named agent as a background task. Returns task_id and status immediately. Completion is reported automatically; usually continue your work without polling or reading task status. If no independent work remains, end the current turn; completion notifications will resume the main agent automatically. The child follows the owner thread's active profile. Only the main agent can use this tool."
+        "Start a named agent as a background task that runs in parallel while you continue your own work. Delegate self-contained sidecar tasks that do not block your next step — broad exploration, independent research, or focused implementation with clear file boundaries — and skip it for small quick steps or tightly coupled work. Returns task_id and status immediately. Completion is reported automatically; usually continue your work without polling or reading task status. If no independent work remains, end the current turn; completion notifications will resume the main agent automatically. The child follows the owner thread's active profile. Only the main agent can use this tool."
     }
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
