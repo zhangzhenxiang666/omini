@@ -121,8 +121,8 @@ fn unknown_variants_and_legacy_shape_are_rejected() {
 }
 
 #[test]
-fn protocol_rev_seven() {
-    assert_eq!(omini_protocol::PROTOCOL_REVISION, 7);
+fn protocol_rev_eight() {
+    assert_eq!(omini_protocol::PROTOCOL_REVISION, 8);
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn task_input_event_scope() {
         thread_id: "child-1".to_string(),
         item: HistoryItem::UserInput(omini_domain::conversation::UserInput {
             intent: omini_domain::input::UserInputIntent::Message,
-            parts: vec![InputPart::Text {
+            parts: vec![omini_domain::input::InputPart::Text {
                 text: "follow up".to_string(),
             }],
             attachments: Vec::new(),

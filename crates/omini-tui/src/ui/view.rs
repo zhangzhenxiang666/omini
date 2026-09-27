@@ -611,7 +611,7 @@ mod tests {
             provider: "test-provider".to_string(),
             created_at: now,
             updated_at: now,
-            runtime_state,
+            runtime_state: runtime_state.map(Into::into),
         }
     }
 

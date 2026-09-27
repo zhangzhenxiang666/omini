@@ -41,7 +41,7 @@ impl ThreadRuntime {
                     connected_client_count,
                     skills,
                     mcp_servers,
-                    subagent_threads,
+                    subagent_threads: subagent_threads.into_iter().map(Into::into).collect(),
                     now: Utc::now(),
                     git_branch,
                 },

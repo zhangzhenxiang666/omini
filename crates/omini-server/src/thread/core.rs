@@ -240,14 +240,6 @@ impl ThreadRuntime {
         self.core.cancel_agent_run(run_id).await
     }
 
-    pub async fn intervene_agent_run(
-        &self,
-        run_id: String,
-        message: omini_model::message::Message,
-    ) -> Result<(), CoreError> {
-        self.core.intervene_agent_run(run_id, message).await
-    }
-
     /// 将结构化用户输入写入子任务历史并投递到对应消息队列。
     pub async fn send_task_input(
         &self,

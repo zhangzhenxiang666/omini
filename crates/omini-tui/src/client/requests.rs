@@ -39,7 +39,7 @@ pub async fn handle_project_request(
             *blank_profile = profile;
             emit_blank_thread(event_tx, connection).await?;
             event_tx
-                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile.into()))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(ProjectAction::None)
@@ -132,7 +132,9 @@ pub async fn handle_project_request(
         ClientRequest::ProfileToggle => {
             *blank_profile = toggle_profile(*blank_profile);
             event_tx
-                .send(RuntimeToUiEvent::ActiveProfileChanged(*blank_profile))
+                .send(RuntimeToUiEvent::ActiveProfileChanged(
+                    (*blank_profile).into(),
+                ))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(ProjectAction::None)
@@ -140,7 +142,7 @@ pub async fn handle_project_request(
         ClientRequest::ProfileSet { profile } => {
             *blank_profile = profile;
             event_tx
-                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile.into()))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             Ok(ProjectAction::None)
@@ -184,7 +186,7 @@ pub async fn create_thread(
     .await?;
     let thread_id = response.thread_id;
     event_tx
-        .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+        .send(RuntimeToUiEvent::ActiveProfileChanged(profile.into()))
         .await
         .map_err(|_| "TUI event receiver closed".to_string())?;
     Ok(thread_id)
@@ -276,7 +278,7 @@ pub async fn save_agent(
     original_path: Option<PathBuf>,
     draft: protocol::AgentDraft,
 ) -> Result<(), String> {
-    let _: protocol::AckResponse = post_json_without_client(
+    post_no_content_without_client(
         http,
         &project_agents_url_with_target(connection, target_thread_id),
         &protocol::SaveAgentRequest {

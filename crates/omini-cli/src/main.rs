@@ -138,13 +138,8 @@ fn connect_current_project() -> Result<omini_tui::StartupConnection, String> {
     let cwd = env::current_dir().map_err(|err| format!("read cwd: {err}"))?;
     let status = ensure_daemon()?;
     let http = daemon_http_client()?;
-    let register: protocol::RegisterClientResponse = post_json_without_client(
-        &http,
-        &format!("http://{}/v1/clients", status.addr),
-        &protocol::RegisterClientRequest {
-            kind: Some("tui".to_string()),
-        },
-    )?;
+    let register: protocol::RegisterClientResponse =
+        post_empty_without_client(&http, &format!("http://{}/v1/clients", status.addr))?;
     let project: protocol::ProjectSummary = post_json_without_client(
         &http,
         &format!("http://{}/v1/projects", status.addr),
@@ -199,9 +194,8 @@ fn stop_server() -> Result<ExitCode, Box<dyn Error>> {
         return Ok(ExitCode::SUCCESS);
     };
 
-    let _: protocol::AckResponse =
-        post_empty_without_client(&http, &format!("http://{}/v1/shutdown", status.addr))
-            .map_err(io::Error::other)?;
+    post_no_content_without_client(&http, &format!("http://{}/v1/shutdown", status.addr))
+        .map_err(io::Error::other)?;
 
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
@@ -304,8 +298,7 @@ fn replace_incompatible_daemon(
     status: DaemonStatus,
     protocol_revision: u32,
 ) -> Result<(), String> {
-    let _: protocol::AckResponse =
-        post_empty_without_client(http, &format!("http://{}/v1/shutdown", status.addr))?;
+    post_no_content_without_client(http, &format!("http://{}/v1/shutdown", status.addr))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if discover_daemon(http).is_none() {
@@ -458,6 +451,27 @@ where
         .send()
         .map_err(|err| format!("POST {url}: {err}"))?;
     decode_response(response, url)
+}
+
+/// 发送无请求体命令，并验证成功响应没有内容。
+fn post_no_content_without_client(
+    http: &reqwest::blocking::Client,
+    url: &str,
+) -> Result<(), String> {
+    let response = http
+        .post(url)
+        .send()
+        .map_err(|err| format!("POST {url}: {err}"))?;
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    if response.status().is_success() {
+        return Err(format!(
+            "{url} returned {}, expected 204",
+            response.status()
+        ));
+    }
+    decode_response::<serde_json::Value>(response, url).map(|_| ())
 }
 
 fn get_json_without_client<T>(http: &reqwest::blocking::Client, url: &str) -> Result<T, String>

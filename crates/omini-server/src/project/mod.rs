@@ -65,10 +65,6 @@ impl ProjectManager {
         }
     }
 
-    pub fn id(&self) -> &str {
-        &self.project_id
-    }
-
     pub fn has_active_or_connected_threads(&self) -> bool {
         self.threads
             .lock()

@@ -23,7 +23,7 @@ async fn create_project(
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
     project
 }
 
@@ -190,7 +190,7 @@ async fn projects_restart_restores_threads() {
             &CreateThreadRequest::default(),
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
 
     daemon.restart().await;
 

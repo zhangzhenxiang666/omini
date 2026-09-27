@@ -1,17 +1,15 @@
-use crate::daemon::GlobalDaemonManager;
 use crate::event::bridge::{
     fallback_thread_title_from_user_input, resolve_plan_command_from_protocol_request,
     resolve_tool_pause_command_from_protocol_request, run_submitted_response_from_runtime_result,
     submit_run_command_from_protocol_request_for_thread,
 };
 use crate::event::tool_pause::ToolPauseResolutionStart;
-use crate::routes::{
-    ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
-    require_daemon_thread, require_project,
-};
+use crate::routes::extract::ClientId;
+use crate::routes::extract::{ApiJson, ApiPath, ApiQuery};
+use crate::routes::{ApiResult, api_error, core_error, require_daemon_thread, require_project};
 use axum::Json;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::State;
+use axum::http::StatusCode;
 use omini_protocol as protocol;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -22,11 +20,33 @@ pub struct ListRunsQuery {
     include_archived: bool,
 }
 
+/// 组装本模块的 HTTP 路由和 OpenAPI 描述。
+pub(crate) fn routes() -> utoipa_axum::router::OpenApiRouter<crate::app::AppState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .routes(utoipa_axum::routes!(list_agent_runs))
+        .routes(utoipa_axum::routes!(get_agent_run))
+        .routes(utoipa_axum::routes!(archive_agent_run))
+        .routes(utoipa_axum::routes!(submit_agent_input))
+        .routes(utoipa_axum::routes!(submit_run))
+        .routes(utoipa_axum::routes!(cancel_run))
+        .routes(utoipa_axum::routes!(resolve_tool_pause))
+        .routes(utoipa_axum::routes!(resolve_plan))
+}
+
+/// 列出线程的 AgentRun，可选择包含已归档记录。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs",
+    operation_id = "list_agent_runs",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("include_archived" = Option<bool>, Query, description = "是否包含已归档运行")),
+    responses((status = 200, description = "成功", body = omini_protocol::AgentRunsResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn list_agent_runs(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    Query(query): Query<ListRunsQuery>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    ApiQuery(query): ApiQuery<ListRunsQuery>,
 ) -> ApiResult<protocol::AgentRunsResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
@@ -36,10 +56,19 @@ pub async fn list_agent_runs(
         .map_err(core_error)
 }
 
+/// 读取指定 AgentRun 及其步骤和工具调用详情。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}",
+    operation_id = "get_agent_run",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("run_id" = String, Path)),
+    responses((status = 200, description = "成功", body = omini_protocol::AgentRunDetailResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn get_agent_run(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, run_id)): ApiPath<(String, String, String)>,
 ) -> ApiResult<protocol::AgentRunDetailResponse> {
     let project = require_project(&manager, &project_id).await?;
     project
@@ -56,12 +85,22 @@ pub async fn get_agent_run(
         })
 }
 
+/// 归档或恢复 AgentRun；运行中的记录不能归档。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/archive",
+    operation_id = "archive_agent_run",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("run_id" = String, Path)),
+    request_body = omini_protocol::ArchiveAgentRunRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn archive_agent_run(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
-    Json(request): Json<protocol::ArchiveAgentRunRequest>,
-) -> ApiResult<protocol::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, run_id)): ApiPath<(String, String, String)>,
+    ApiJson(request): ApiJson<protocol::ArchiveAgentRunRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let project = require_project(&manager, &project_id).await?;
     let detail = project
         .get_agent_run_detail(&thread_id, &run_id)
@@ -99,90 +138,28 @@ pub async fn archive_agent_run(
             "AgentRun does not exist",
         ));
     }
-    Ok(Json(protocol::AckResponse::ok()))
-}
-
-#[axum::debug_handler]
-pub async fn intervene_agent_run(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<protocol::AgentRunMessageRequest>,
-) -> ApiResult<protocol::AckResponse> {
-    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
-    let project = require_project(&manager, &project_id).await?;
-    let detail = project
-        .get_agent_run_detail(&thread_id, &run_id)
-        .await
-        .map_err(core_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::NOT_FOUND,
-                "run_not_found",
-                "AgentRun does not exist",
-            )
-        })?;
-    let Some(parent_run_id) = detail.run.parent_run_id else {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "run_not_child_agent",
-            "User intervention is only available for child AgentRuns",
-        ));
-    };
-    let parent = project
-        .get_agent_run_detail(&thread_id, &parent_run_id)
-        .await
-        .map_err(core_error)?
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::CONFLICT,
-                "parent_run_unavailable",
-                "Parent AgentRun is unavailable",
-            )
-        })?;
-    if parent.run.parent_run_id.is_some() {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "run_not_direct_child",
-            "User intervention is only available for direct child AgentRuns",
-        ));
-    }
-    if is_terminal_run(detail.run.status) {
-        return Err(api_error(
-            StatusCode::CONFLICT,
-            "run_terminal",
-            "Completed child AgentRuns cannot receive messages",
-        ));
-    }
-    let message = request.message.trim();
-    if message.is_empty() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "empty_message",
-            "Message must not be empty",
-        ));
-    }
-    thread
-        .intervene_agent_run(
-            run_id,
-            omini_model::message::Message::from_user_text(message.to_string()),
-        )
-        .await
-        .map_err(core_error)?;
-    Ok(Json(protocol::AckResponse::ok()))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 向运行中的直接子 AgentRun 提交结构化用户输入。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/input",
+    operation_id = "submit_agent_input",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("run_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::AgentRunInputRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn submit_agent_input(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<protocol::AgentRunInputRequest>,
-) -> ApiResult<protocol::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, run_id)): ApiPath<(String, String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<protocol::AgentRunInputRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     let project = require_project(&manager, &project_id).await?;
     let detail = project
         .get_agent_run_detail(&thread_id, &run_id)
@@ -240,7 +217,7 @@ pub async fn submit_agent_input(
         .send_task_input(run_id, detail.run.thread_id, command)
         .await
         .map_err(core_error)?;
-    Ok(Json(protocol::AckResponse::ok()))
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// 判断 AgentRun 是否已进入不再接受用户输入的终态。
@@ -255,15 +232,24 @@ fn is_terminal_run(status: protocol::AgentRunStatus) -> bool {
 }
 
 /// 向当前线程提交一次新的运行请求。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs",
+    operation_id = "submit_run",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::SubmitRunRequest,
+    responses((status = 202, description = "成功", body = omini_protocol::RunSubmittedResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn submit_run(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<protocol::SubmitRunRequest>,
-) -> ApiResult<protocol::RunSubmittedResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<protocol::SubmitRunRequest>,
+) -> Result<(StatusCode, Json<protocol::RunSubmittedResponse>), crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     manager.ensure_bundled_rg().await.map_err(|error| {
         api_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -323,24 +309,32 @@ pub async fn submit_run(
         .submit_prepared_run(command)
         .await
         .map(run_submitted_response_from_runtime_result)
-        .map(Json)
+        .map(|run| (StatusCode::ACCEPTED, Json(run)))
         .map_err(core_error)
 }
 
 /// 取消当前线程正在执行的运行。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/cancel",
+    operation_id = "cancel_run",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("run_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn cancel_run(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, run_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-) -> ApiResult<protocol::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, run_id)): ApiPath<(String, String, String)>,
+    client_id: ClientId,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     if run_id == "current" {
         return thread
             .cancel_run()
             .await
-            .map(|_| Json(protocol::AckResponse::ok()))
+            .map(|_| StatusCode::NO_CONTENT)
             .map_err(core_error);
     }
     let project = require_project(&manager, &project_id).await?;
@@ -357,7 +351,7 @@ pub async fn cancel_run(
         })?;
     if run.run.parent_run_id.is_some() {
         thread.cancel_agent_run(run_id).await.map_err(core_error)?;
-        return Ok(Json(protocol::AckResponse::ok()));
+        return Ok(StatusCode::NO_CONTENT);
     }
     if !matches!(
         run.run.status,
@@ -365,25 +359,34 @@ pub async fn cancel_run(
             | protocol::AgentRunStatus::Running
             | protocol::AgentRunStatus::WaitingApproval
     ) {
-        return Ok(Json(protocol::AckResponse::ok()));
+        return Ok(StatusCode::NO_CONTENT);
     }
     thread
         .cancel_run()
         .await
-        .map(|_| Json(protocol::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 处理当前线程中的工具权限请求
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/tool-pauses/{tool_use_id}/resolve",
+    operation_id = "resolve_tool_pause",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("tool_use_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::ResolveToolPauseRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn resolve_tool_pause(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, tool_use_id)): Path<(String, String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<protocol::ResolveToolPauseRequest>,
-) -> ApiResult<protocol::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, tool_use_id)): ApiPath<(String, String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<protocol::ResolveToolPauseRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    let client_id = client_id_from_headers(&headers)?.to_string();
+    let client_id = client_id.0;
     match thread
         .begin_tool_pause_resolution(client_id, &tool_use_id)
         .await
@@ -392,7 +395,7 @@ pub async fn resolve_tool_pause(
             // runtime 启动即加载,这里不再需要 ensure_loaded 等待。
         }
         ToolPauseResolutionStart::AlreadyResolved => {
-            return Ok(Json(protocol::AckResponse::ok()));
+            return Ok(StatusCode::NO_CONTENT);
         }
         ToolPauseResolutionStart::ClientNotConnected => {
             return Err(api_error(
@@ -408,7 +411,7 @@ pub async fn resolve_tool_pause(
             request,
         ))
         .await
-        .map(|_| Json(protocol::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
@@ -417,15 +420,24 @@ pub async fn resolve_tool_pause(
 /// `ApproveInNewThread` 不走 core 审批状态机:server 路由层在调用 core 之前先
 /// 读 plan 文件并 fork 新 `RuntimeThread`,通过 runtime event 通道广播
 /// `ThreadSwitched`;core 收到此 action 后只负责关闭审批抽屉,不改状态。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/plans/plan/resolve",
+    operation_id = "resolve_plan",
+    tag = "runs",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::ResolvePlanRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn resolve_plan(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<protocol::ResolvePlanRequest>,
-) -> ApiResult<protocol::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<protocol::ResolvePlanRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     if let protocol::PlanApprovalAction::ApproveInNewThread { profile } = request.action {
         // 「在新线程中执行计划」:在调用 core.resolve_plan 之前先 fork,避免
         // 旧 thread 的 plan 审批状态被 core 重复处理(后端实际只关闭抽屉)。
@@ -445,6 +457,6 @@ pub async fn resolve_plan(
             request,
         ))
         .await
-        .map(|_| Json(protocol::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }

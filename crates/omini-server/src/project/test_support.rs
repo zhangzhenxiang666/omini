@@ -4,7 +4,6 @@ use crate::store::{self as store_model, Database};
 use chrono::{TimeZone, Utc};
 use omini_config::OminiRoot;
 use omini_config::project::ProjectDir;
-use omini_protocol as client_proto;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -120,7 +119,10 @@ pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectMana
     )
 }
 
-pub(super) fn has_provider(providers: &[client_proto::ProviderInfo], provider: &str) -> bool {
+pub(super) fn has_provider(
+    providers: &[omini_domain::config::ProviderInfo],
+    provider: &str,
+) -> bool {
     providers.iter().any(|candidate| candidate.id == provider)
 }
 

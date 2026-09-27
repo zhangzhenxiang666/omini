@@ -66,7 +66,7 @@ impl ProjectManager {
                 provider: request.provider.as_deref(),
                 model: request.model.as_deref(),
             },
-            EffortSelection::ClientRequest(request.thinking_effort),
+            EffortSelection::ClientRequest(request.thinking_effort.map(Into::into)),
         )?;
 
         let thread_id = uuid::Uuid::new_v4().to_string();
@@ -98,6 +98,7 @@ impl ProjectManager {
         })?;
         let active_profile = request
             .profile
+            .map(Into::into)
             .unwrap_or(runtime_contract::thread_domain::ActiveProfile::Main);
         // 新 thread 在数据库中还没有 UI 或 LLM 消息，因此两个视角都为空。
         let loaded = load_thread_snapshot(
@@ -191,6 +192,7 @@ impl ProjectManager {
             CoreError::persistence("failed to persist forked thread", error.to_string())
         })?;
         // 4. 构造新 `ThreadRuntime`，active_profile 来自 approval。
+        let profile: runtime_contract::thread_domain::PlanExecutionProfile = profile.into();
         let active_profile = profile.active_profile();
         let loaded = load_thread_snapshot(
             &self.db,
@@ -689,10 +691,7 @@ mod tests {
         let mut events = from_thread.subscribe();
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                runtime_contract::thread_domain::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, client_proto::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
@@ -781,10 +780,7 @@ mod tests {
         std::fs::write(plans_dir.join("plan.md"), "# plan\n").expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                runtime_contract::thread_domain::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, client_proto::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
 
@@ -819,10 +815,7 @@ mod tests {
             .expect("old plan file should be written");
 
         let error = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                runtime_contract::thread_domain::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, client_proto::PlanExecutionProfile::Main)
             .await
             .expect_err("fork should fail when plan file missing");
         let message = error.message();
@@ -846,7 +839,7 @@ mod tests {
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
         let manager = Arc::new(manager);
-        let project_id = manager.id().to_string();
+        let project_id = manager.project_id.clone();
 
         let from_thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
@@ -870,10 +863,7 @@ mod tests {
         .expect("plan file should be written");
 
         let to_thread_id = manager
-            .fork_thread_for_plan(
-                &from_thread_id,
-                runtime_contract::thread_domain::PlanExecutionProfile::Main,
-            )
+            .fork_thread_for_plan(&from_thread_id, client_proto::PlanExecutionProfile::Main)
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);

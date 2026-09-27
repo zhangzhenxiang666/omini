@@ -24,7 +24,7 @@ pub fn thread_summary_from_protocol(
         provider: thread.provider,
         created_at: thread.created_at,
         updated_at: thread.updated_at,
-        runtime_state: thread.runtime_state,
+        runtime_state: thread.runtime_state.map(Into::into),
     }
 }
 
@@ -144,7 +144,7 @@ pub fn model_config_from_protocol(
                 .collect()
         }),
         extra_headers: model.extra_headers,
-        extra_body: model.extra_body,
+        extra_body: model.extra_body.map(|body| body.into_iter().collect()),
     }
 }
 

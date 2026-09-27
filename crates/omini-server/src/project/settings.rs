@@ -4,7 +4,6 @@ use crate::{
 };
 use omini_config::{ModelSelection, Settings};
 use omini_core::CoreError;
-use omini_domain as domain;
 use omini_protocol as client_proto;
 
 impl ProjectManager {
@@ -17,7 +16,7 @@ impl ProjectManager {
             context_window: Some(model.context_window),
             active_provider: model.provider_id.clone(),
             model: model.model_id.clone(),
-            thinking_effort: model.thinking_effort,
+            thinking_effort: model.thinking_effort.map(Into::into),
         })
     }
 
@@ -53,7 +52,7 @@ impl ProjectManager {
             .resolve_model(&ModelSelection {
                 active_provider: request.provider,
                 model: request.model,
-                thinking_effort: request.thinking_effort,
+                thinking_effort: request.thinking_effort.map(Into::into),
             })
             .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
         let mut state = self
@@ -75,8 +74,7 @@ impl ProjectManager {
     ) -> Result<client_proto::ProjectRuntimeConfigResponse, CoreError> {
         let settings = self.fresh_settings_with_state()?;
         let current = settings.active_model();
-        if request.effort != domain::config::ThinkingEffort::None && !current.capabilities.thinking
-        {
+        if request.effort != client_proto::ThinkingEffort::None && !current.capabilities.thinking {
             return Err(CoreError::invalid_model_selection(format!(
                 "Current model '{}' does not support thinking",
                 current.model_id
@@ -86,7 +84,7 @@ impl ProjectManager {
             .resolve_model(&ModelSelection {
                 active_provider: current.provider_id.clone(),
                 model: current.model_id.clone(),
-                thinking_effort: Some(request.effort),
+                thinking_effort: Some(request.effort.into()),
             })
             .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
 

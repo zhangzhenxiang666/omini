@@ -306,7 +306,7 @@ fn query_runtime_status(
         }),
         pending_pauses: pending_pause_ids
             .iter()
-            .map(|tool_use_id| permission_pause(tool_use_id))
+            .map(|tool_use_id| permission_pause(tool_use_id).into())
             .collect(),
         pending_plan_approval: None,
         active_tools: Vec::new(),
@@ -538,7 +538,7 @@ fn initial_runtime_status_restores_full_background_pause_without_activity() {
     pause.preview_tool_use_id = Some("tool_1".to_string());
     pause.source_thread_id = Some("agent_1".to_string());
     pause.source_agent_label = Some("explorer".to_string());
-    status.pending_pauses = vec![pause.clone()];
+    status.pending_pauses = vec![pause.clone().into()];
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -710,7 +710,10 @@ fn runtime_status_sync_updates_subagent_mention_candidates() {
             short_description: None,
             location: "<built-in>".to_string(),
         },
-    ];
+    ]
+    .into_iter()
+    .map(Into::into)
+    .collect();
 
     state.apply_event(RuntimeToUiEvent::RuntimeStatusSynced {
         status,
@@ -791,13 +794,13 @@ fn plan_approval_resolved_closes_only_matching_plan() {
     state.dialogs.plan.plan_approval_auto = true;
     state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
         plan_id: "other_plan".to_string(),
-        action: protocol::PlanApprovalAction::ContinueDiscussing,
+        action: omini_runtime_contract::thread_domain::PlanApprovalAction::ContinueDiscussing,
     });
     assert!(state.dialogs.plan.plan_approval.is_some());
 
     state.apply_event(RuntimeToUiEvent::PlanApprovalResolved {
         plan_id: "plan".to_string(),
-        action: protocol::PlanApprovalAction::ContinueDiscussing,
+        action: omini_runtime_contract::thread_domain::PlanApprovalAction::ContinueDiscussing,
     });
 
     assert!(state.dialogs.plan.plan_approval.is_none());

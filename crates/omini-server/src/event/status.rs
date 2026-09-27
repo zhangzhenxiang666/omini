@@ -88,7 +88,7 @@ impl RuntimeStatusProjection {
     pub fn record_event(&mut self, event: &omini_protocol::RuntimeEvent, now: DateTime<Utc>) {
         match &event.event {
             client_proto::TypedRuntimeEvent::ActiveProfileChanged(event) => {
-                self.active_profile = event.profile;
+                self.active_profile = event.profile.into();
             }
             client_proto::TypedRuntimeEvent::ThreadTitleChanged(_)
             | client_proto::TypedRuntimeEvent::AgentManagementUpdated { .. } => {}
@@ -155,7 +155,7 @@ impl RuntimeStatusProjection {
         client_proto::ThreadRuntimeStatus {
             thread_id: thread_id.to_string(),
             state: self.state(),
-            active_profile: self.active_profile,
+            active_profile: self.active_profile.into(),
             loaded: context.loaded,
             controller_id: context.controller_id,
             connected_client_count: context.connected_client_count,
@@ -563,7 +563,8 @@ mod tests {
                         payload: serde_json::Map::new(),
                     },
                 ),
-            },
+            }
+            .into(),
         ))
     }
 
@@ -605,7 +606,7 @@ mod tests {
             &client_proto::RuntimeEvent::new(
                 client_proto::TypedRuntimeEvent::ActiveProfileChanged(
                     client_proto::ActiveProfileChangedEvent {
-                        profile: runtime_contract::thread_domain::ActiveProfile::Plan,
+                        profile: client_proto::ActiveProfile::Plan,
                     },
                 ),
             ),
@@ -759,14 +760,14 @@ mod tests {
         projection.record_event(&sequenced(2, "run_finished").event, now);
         projection.record_event(
             &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::ToolPauseRequested(
-                pause.clone(),
+                pause.clone().into(),
             )),
             now,
         );
 
         let status = status_snapshot(&projection, now);
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
-        assert_eq!(status.pending_pauses, vec![pause]);
+        assert_eq!(status.pending_pauses, vec![pause.into()]);
 
         projection.record_event(
             &client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::AgentTaskEvent(

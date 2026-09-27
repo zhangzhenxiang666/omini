@@ -1,4 +1,3 @@
-use omini_protocol as protocol;
 use omini_protocol::ProtocolError;
 use reqwest::Method;
 
@@ -109,6 +108,38 @@ where
     decode_response(response, url).await
 }
 
+/// 发送带客户端身份的命令，并确认服务端返回空的 204 响应。
+pub async fn post_no_content<B: serde::Serialize + ?Sized>(
+    http: &reqwest::Client,
+    url: &str,
+    client_id: &str,
+    body: &B,
+) -> Result<(), String> {
+    let response = http
+        .post(url)
+        .header(CLIENT_ID_HEADER, client_id)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| format!("POST {url}: {err}"))?;
+    expect_no_content(response, url).await
+}
+
+/// 发送无需客户端身份的命令，并确认服务端返回空的 204 响应。
+pub async fn post_no_content_without_client<B: serde::Serialize + ?Sized>(
+    http: &reqwest::Client,
+    url: &str,
+    body: &B,
+) -> Result<(), String> {
+    let response = http
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .map_err(|err| format!("POST {url}: {err}"))?;
+    expect_no_content(response, url).await
+}
+
 pub async fn post_json_without_client<B, T>(
     http: &reqwest::Client,
     url: &str,
@@ -151,8 +182,7 @@ pub async fn send_empty(
         .send()
         .await
         .map_err(|err| format!("request {url}: {err}"))?;
-    let _: protocol::AckResponse = decode_response(response, url).await?;
-    Ok(())
+    expect_no_content(response, url).await
 }
 
 pub async fn send_empty_without_client(
@@ -165,8 +195,22 @@ pub async fn send_empty_without_client(
         .send()
         .await
         .map_err(|err| format!("request {url}: {err}"))?;
-    let _: protocol::AckResponse = decode_response(response, url).await?;
-    Ok(())
+    expect_no_content(response, url).await
+}
+
+async fn expect_no_content(response: reqwest::Response, url: &str) -> Result<(), String> {
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    if response.status().is_success() {
+        return Err(format!(
+            "{url} returned {}, expected 204",
+            response.status()
+        ));
+    }
+    decode_response::<serde_json::Value>(response, url)
+        .await
+        .map(|_| ())
 }
 
 pub async fn decode_response<T>(response: reqwest::Response, url: &str) -> Result<T, String>

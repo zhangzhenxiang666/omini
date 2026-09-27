@@ -32,6 +32,7 @@ omini-cli / omini-tui
 依赖边界：
 
 - `omini-protocol` 是公开客户端/服务端边界；`omini-runtime-contract` 是内部服务端/核心边界，两者不放运行时实现。
+- `omini-server` 的项目、线程、运行、附件等模块分别注册 `OpenApiRouter<AppState>`；根模块组合路由、注入状态并发布 OpenAPI。handler 保持中文用途注释、`debug_handler` 和接口描述，HTTP 请求与响应的 wire 类型由 `omini-protocol` 定义。
 - `omini-domain` 只承载共享词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
 - 会话时间线使用 `ConversationEntry`，原始 `UserInput`、助手消息和系统事件分别建模；Provider 上下文独立使用 `omini-model::Message`。
 - Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
@@ -40,7 +41,7 @@ omini-cli / omini-tui
 
 ### TUI 内部边界
 
-`omini-tui` 继续使用 Ratatui，按功能维护状态和视图：`features` 包含时间线、输入框、会话、权限、Ask、计划、工具和各页面；`ui` 提供主题、布局、Markdown、Diff、滚动和文本选择能力。`app` 管理应用循环、焦点优先级、事件更新和副作用调度；`client` 负责 HTTP/WebSocket、协议映射、重连重放与附件上传；`platform` 负责终端、剪贴板和本地文件探测。启动入口及协议格式保持不变。
+`omini-tui` 继续使用 Ratatui，按功能维护状态和视图：`features` 包含时间线、输入框、会话、权限、Ask、计划、工具和各页面；`ui` 提供主题、布局、Markdown、Diff、滚动和文本选择能力。`app` 管理应用循环、焦点优先级、事件更新和副作用调度；`client` 负责 HTTP/WebSocket、协议映射、重连重放与附件上传；`platform` 负责终端、剪贴板和本地文件探测。
 
 主会话和直接子 Agent 共用 `SessionState`，以会话 ID 存在 `SessionStore`。当前会话直接选取，渲染不再交换主/子会话字段。输入编辑器独立保存文本、光标、引用、附件、补全与队列；提交时携带目标会话。输入和服务端事件先更新状态并返回待执行的网络、文件或剪贴板操作，应用循环执行后把异步结果作为事件送回。视图仅读取状态并返回屏幕命中与布局反馈。历史与流式内容由同一个时间线投影处理；聚合器组合条目，工具组件只展示单次调用。
 
@@ -70,7 +71,7 @@ omini-cli / omini-tui
 
 - `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 7 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 8 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 

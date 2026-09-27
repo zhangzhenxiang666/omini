@@ -4,7 +4,8 @@ use crate::daemon::{GlobalDaemonManager, ProjectError};
 use crate::project::{ProjectManager, ThreadError};
 use crate::thread::ThreadRuntime;
 use axum::Json;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use omini_protocol::ProtocolError;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ pub mod agents;
 pub mod attachments;
 pub mod clients;
 pub mod controllers;
+pub mod extract;
 pub mod health;
 pub mod projects;
 pub mod runs;
@@ -19,10 +21,19 @@ pub mod shutdown;
 pub mod skills;
 pub mod threads;
 
-const CLIENT_ID_HEADER: &str = "x-omini-client-id";
+/// 统一保存公开状态码和错误体，确保提取错误与业务错误使用相同协议。
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    pub status: StatusCode,
+    pub error: ProtocolError,
+}
 
-// 路由层统一把业务错误压成协议错误，避免各 handler 手写不同的 HTTP envelope。
-pub(crate) type ApiError = (StatusCode, Json<ProtocolError>);
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.error)).into_response()
+    }
+}
+
 pub(crate) type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub(crate) fn api_error(
@@ -30,7 +41,10 @@ pub(crate) fn api_error(
     code: impl Into<String>,
     message: impl Into<String>,
 ) -> ApiError {
-    (status, Json(ProtocolError::new(code, message)))
+    ApiError {
+        status,
+        error: ProtocolError::new(code, message),
+    }
 }
 
 pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
@@ -84,68 +98,6 @@ pub async fn require_daemon_thread(
     require_thread(&project, thread_id).await
 }
 
-pub fn client_id_from_headers(headers: &HeaderMap) -> Result<&str, ApiError> {
-    headers
-        .get(CLIENT_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            api_error(
-                StatusCode::UNAUTHORIZED,
-                "missing_client_id",
-                "Mutating requests must include x-omini-client-id",
-            )
-        })
-}
-
-pub async fn ensure_controller(
-    thread: &ThreadRuntime,
-    headers: &HeaderMap,
-) -> Result<(), ApiError> {
-    let client_id = client_id_from_headers(headers)?;
-    if thread.is_controller(client_id).await {
-        // 严格 mutation 只允许当前 controller 执行;新架构下 runtime 启动即
-        // 加载,ThreadRuntime 一旦从 manager 拿到就已经持有完整 messages /
-        // usage,不再需要等待 hydrate。
-        Ok(())
-    } else {
-        Err(api_error(
-            StatusCode::FORBIDDEN,
-            "not_controller",
-            "This client is observing the thread and cannot mutate it",
-        ))
-    }
-}
-
-pub async fn ensure_connected_controller(
-    thread: &ThreadRuntime,
-    headers: &HeaderMap,
-) -> Result<(), ApiError> {
-    let client_id = client_id_from_headers(headers)?;
-    // 运行相关用户动作必须来自已连接 WebSocket 的客户端；请求会先接管 controller，
-    // 再进入 core，由 controller 语义负责冲突裁决。
-    if !thread.is_client_connected(client_id).await {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "client_not_connected",
-            "This client is not connected to the thread event stream",
-        ));
-    }
-    if thread
-        .takeover_controller(client_id.to_string())
-        .await
-        .is_none()
-    {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "client_not_connected",
-            "This client is not connected to the thread event stream",
-        ));
-    }
-    // 已连接客户端可以接管;runtime 已就绪,直接通过。
-    Ok(())
-}
-
 pub fn project_error(error: ProjectError) -> ApiError {
     match error {
         ProjectError::NotFound => api_error(
@@ -195,8 +147,8 @@ mod tests {
     fn core_error_maps_runtime_closed_to_unavailable() {
         let error = core_error(omini_core::CoreError::RuntimeClosed);
 
-        assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(error.1.0.code, "runtime_closed");
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.error.code, "runtime_closed");
     }
 
     #[test]
@@ -205,31 +157,31 @@ mod tests {
             "Unknown model 'test'",
         ));
 
-        assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1.0.code, "invalid_model_selection");
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert_eq!(error.error.code, "invalid_model_selection");
     }
 
     #[test]
     fn core_error_maps_missing_thread_to_not_found() {
         let error = core_error(omini_core::CoreError::ThreadNotFound);
 
-        assert_eq!(error.0, StatusCode::NOT_FOUND);
-        assert_eq!(error.1.0.code, "thread_not_found");
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.error.code, "thread_not_found");
     }
 
     #[test]
     fn project_conflict_maps_to_http_conflict() {
         let error = project_error(ProjectError::Conflict("busy".to_string()));
 
-        assert_eq!(error.0, StatusCode::CONFLICT);
-        assert_eq!(error.1.0.code, "project_conflict");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "project_conflict");
     }
 
     #[test]
     fn missing_project_path_maps_to_http_conflict() {
         let error = project_error(ProjectError::MissingPath("/missing".to_string()));
 
-        assert_eq!(error.0, StatusCode::CONFLICT);
-        assert_eq!(error.1.0.code, "project_path_missing");
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.error.code, "project_path_missing");
     }
 }

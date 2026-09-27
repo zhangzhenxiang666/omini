@@ -13,7 +13,9 @@ impl ProjectManager {
         self.db
             .list_agent_runs(thread_id, include_archived)
             .await
-            .map(|runs| client_proto::AgentRunsResponse { runs })
+            .map(|runs| client_proto::AgentRunsResponse {
+                runs: runs.into_iter().map(Into::into).collect(),
+            })
             .map_err(|error| CoreError::persistence("failed to list AgentRuns", error.to_string()))
     }
 
@@ -44,9 +46,9 @@ impl ProjectManager {
                 CoreError::persistence("failed to load ToolUses", error.to_string())
             })?;
         Ok(Some(client_proto::AgentRunDetailResponse {
-            run,
-            steps,
-            tool_uses,
+            run: run.into(),
+            steps: steps.into_iter().map(Into::into).collect(),
+            tool_uses: tool_uses.into_iter().map(Into::into).collect(),
         }))
     }
 

@@ -2,9 +2,9 @@ mod support;
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use omini_protocol::{
-    AckResponse, AttachmentUploadResponse, ClientThreadRole, ControllerLease, CreateProjectRequest,
-    CreateThreadRequest, InputPart, ProtocolError, RegisterClientRequest, RegisterClientResponse,
-    RenameThreadRequest, ServerEnvelope, SubmitRunRequest, ThreadRuntimeStatusResponse,
+    AttachmentUploadResponse, ClientThreadRole, ControllerLease, CreateProjectRequest,
+    CreateThreadRequest, InputPart, ProtocolError, RegisterClientResponse, RenameThreadRequest,
+    RunSubmittedResponse, ServerEnvelope, SubmitRunRequest, ThreadRuntimeStatus,
     ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent, UserInput,
 };
 use reqwest::Method;
@@ -26,7 +26,7 @@ async fn project_and_thread(daemon: &support::TestDaemon) -> (String, String) {
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
 
     let (status, thread): (_, omini_protocol::CreateThreadResponse) = daemon
         .send_json(
@@ -36,22 +36,22 @@ async fn project_and_thread(daemon: &support::TestDaemon) -> (String, String) {
             &CreateThreadRequest::default(),
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
     (project.id, thread.thread_id)
 }
 
 async fn register_client(daemon: &support::TestDaemon) -> String {
-    let (status, response): (_, RegisterClientResponse) = daemon
-        .send_json(
-            Method::POST,
-            "/clients",
-            None,
-            &RegisterClientRequest {
-                kind: Some("test".to_string()),
-            },
-        )
-        .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    let response = daemon
+        .client()
+        .post(daemon.url("/clients"))
+        .send()
+        .await
+        .expect("registration request should complete");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let response: RegisterClientResponse = response
+        .json()
+        .await
+        .expect("registration response should decode");
     uuid::Uuid::parse_str(&response.client_id).expect("client ID should be a UUID");
     response.client_id
 }
@@ -204,6 +204,51 @@ async fn threads_websocket_initializes_in_protocol_order() {
 }
 
 #[tokio::test]
+async fn threads_run_returns_accepted_with_run_id() {
+    let mut daemon = support::TestDaemon::start("thread-run-accepted").await;
+    let (project_id, thread_id) = project_and_thread(&daemon).await;
+    let client_id = register_client(&daemon).await;
+    let mut request = daemon
+        .websocket_url(&format!(
+            "/projects/{project_id}/threads/{thread_id}/events"
+        ))
+        .into_client_request()
+        .expect("WebSocket request should build");
+    request.headers_mut().insert(
+        "x-omini-client-id",
+        HeaderValue::from_str(&client_id).expect("client ID should be a valid header"),
+    );
+    let (mut socket, _) = connect_async(request)
+        .await
+        .expect("thread WebSocket should connect");
+    // 等待初始状态帧，确保服务端已经登记该客户端的连接和控制权。
+    for _ in 0..7 {
+        socket
+            .next()
+            .await
+            .expect("initial WebSocket envelope should arrive")
+            .expect("initial WebSocket frame should be valid");
+    }
+
+    let (status, submitted): (_, RunSubmittedResponse) = daemon
+        .send_json(
+            Method::POST,
+            &format!("/projects/{project_id}/threads/{thread_id}/runs"),
+            Some(&client_id),
+            &SubmitRunRequest::SubmitMessage {
+                input: UserInput::plain("hello"),
+                client_echo_id: None,
+            },
+        )
+        .await;
+    assert_eq!(status, reqwest::StatusCode::ACCEPTED);
+    assert!(!submitted.run_id.is_empty());
+
+    drop(socket);
+    daemon.shutdown().await;
+}
+
+#[tokio::test]
 async fn duplicate_connections_are_refcounted() {
     let mut daemon = support::TestDaemon::start("thread-duplicate-client").await;
     let (project_id, thread_id) = project_and_thread(&daemon).await;
@@ -239,13 +284,13 @@ async fn duplicate_connections_are_refcounted() {
     }
 
     // 连接数按 client_id 去重展示，但在线状态必须保留底层 WebSocket 引用计数。
-    let (status, response): (_, ThreadRuntimeStatusResponse) = daemon
+    let (status, response): (_, ThreadRuntimeStatus) = daemon
         .get(&format!(
             "/projects/{project_id}/threads/{thread_id}/status"
         ))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(response.status.connected_client_count, 1);
+    assert_eq!(response.connected_client_count, 1);
 
     close_socket(&mut first).await;
     let (status, lease): (_, ControllerLease) = daemon
@@ -271,6 +316,33 @@ async fn duplicate_connections_are_refcounted() {
         .await;
     assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
     assert_eq!(error.code, "client_not_connected");
+
+    let (mut reconnected, _) = connect_async(request())
+        .await
+        .expect("same client should reconnect");
+    let mut resumed_status = None;
+    for _ in 0..7 {
+        let message = tokio::time::timeout(std::time::Duration::from_secs(1), reconnected.next())
+            .await
+            .expect("reconnect envelope should arrive")
+            .expect("reconnected WebSocket should remain open")
+            .expect("reconnect frame should be valid")
+            .into_text()
+            .expect("reconnect frame should be text");
+        if let ServerEnvelope::RuntimeStatus { status } =
+            serde_json::from_str::<ServerEnvelope>(&message).expect("envelope should decode")
+        {
+            resumed_status = Some(status);
+        }
+    }
+    let resumed_status = resumed_status.expect("reconnect should include runtime status");
+    assert_eq!(resumed_status.thread_id, thread_id);
+    assert_eq!(resumed_status.connected_client_count, 1);
+    assert_eq!(
+        resumed_status.controller_id.as_deref(),
+        Some(client_id.as_str())
+    );
+    close_socket(&mut reconnected).await;
 
     daemon.shutdown().await;
 }
@@ -358,8 +430,8 @@ async fn threads_controller_mutations_preserve_contract() {
 
     // 重命名要求已有 controller；这个连接同时覆盖 server 自动授予的初始控制权。
     let requested_title = format!("  {}  ", "界".repeat(400));
-    let (status, response): (_, AckResponse) = daemon
-        .send_json(
+    daemon
+        .send_no_content(
             Method::POST,
             &format!("/projects/{project_id}/threads/{thread_id}/rename"),
             Some(&client_id),
@@ -368,8 +440,6 @@ async fn threads_controller_mutations_preserve_contract() {
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(response, AckResponse::ok());
 
     let (status, threads): (_, ThreadsResponse) =
         daemon.get(&format!("/projects/{project_id}/threads")).await;
@@ -465,7 +535,7 @@ async fn threads_controller_mutations_preserve_contract() {
             &CreateThreadRequest::default(),
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
     let response = daemon
         .client()
         .get(daemon.url(&format!(

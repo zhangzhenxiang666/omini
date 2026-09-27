@@ -1,27 +1,50 @@
-use crate::daemon::GlobalDaemonManager;
 use crate::event::bridge::{
     models_response_from_runtime_snapshot, set_active_profile_command_from_protocol_request,
     set_model_command_from_protocol_request, set_thinking_effort_command_from_protocol_request,
 };
+use crate::routes::extract::ClientId;
+use crate::routes::extract::{ApiJson, ApiPath, ApiQuery, ApiWebSocketUpgrade};
 use crate::routes::{
-    ApiResult, api_error, client_id_from_headers, core_error, ensure_connected_controller,
-    ensure_controller, require_daemon_thread, require_project, require_thread,
+    ApiResult, api_error, core_error, require_daemon_thread, require_project, require_thread,
 };
 use crate::ws;
 use axum::Json;
-use axum::extract::ws::WebSocketUpgrade;
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use omini_protocol as client_proto;
 use serde::Deserialize;
-use std::sync::Arc;
+
+/// 组装本模块的 HTTP 路由和 OpenAPI 描述。
+pub(crate) fn routes() -> utoipa_axum::router::OpenApiRouter<crate::app::AppState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .routes(utoipa_axum::routes!(list_threads))
+        .routes(utoipa_axum::routes!(list_thread_statuses))
+        .routes(utoipa_axum::routes!(thread_status))
+        .routes(utoipa_axum::routes!(create_thread))
+        .routes(utoipa_axum::routes!(list_models))
+        .routes(utoipa_axum::routes!(set_model))
+        .routes(utoipa_axum::routes!(set_thinking_effort))
+        .routes(utoipa_axum::routes!(set_profile))
+        .routes(utoipa_axum::routes!(toggle_profile))
+        .routes(utoipa_axum::routes!(rename_thread))
+        .routes(utoipa_axum::routes!(compact_context))
+        .routes(utoipa_axum::routes!(thread_events))
+}
 
 /// 列出指定项目下的线程。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads",
+    operation_id = "list_threads",
+    tag = "threads",
+    params(("project_id" = String, Path)),
+    responses((status = 200, description = "成功", body = omini_protocol::ThreadsResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn list_threads(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path(project_id): Path<String>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath(project_id): ApiPath<String>,
 ) -> ApiResult<client_proto::ThreadsResponse> {
     let project = require_project(&manager, &project_id).await?;
     project.list_threads().await.map(Json).map_err(core_error)
@@ -34,11 +57,19 @@ pub(crate) struct ThreadStatusQuery {
 }
 
 /// 列出指定项目下当前活跃线程的运行状态。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/statuses",
+    operation_id = "list_thread_statuses",
+    tag = "threads",
+    params(("project_id" = String, Path), ("status" = Option<String>, Query, description = "逗号分隔的线程状态")),
+    responses((status = 200, description = "成功", body = omini_protocol::ThreadStatusesResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn list_thread_statuses(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path(project_id): Path<String>,
-    Query(query): Query<ThreadStatusQuery>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath(project_id): ApiPath<String>,
+    ApiQuery(query): ApiQuery<ThreadStatusQuery>,
 ) -> ApiResult<client_proto::ThreadStatusesResponse> {
     let project = require_project(&manager, &project_id).await?;
     let filter = parse_status_filter(query.status.as_deref())?;
@@ -46,11 +77,19 @@ pub async fn list_thread_statuses(
 }
 
 /// 获取当前活跃线程的运行状态。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/status",
+    operation_id = "thread_status",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path)),
+    responses((status = 200, description = "成功", body = omini_protocol::ThreadRuntimeStatus), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn thread_status(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-) -> ApiResult<client_proto::ThreadRuntimeStatusResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+) -> ApiResult<client_proto::ThreadRuntimeStatus> {
     let project = require_project(&manager, &project_id).await?;
     let status = if let Some(thread) = project.cached_thread(&thread_id) {
         thread.runtime_status()
@@ -61,29 +100,46 @@ pub async fn thread_status(
             "Thread is not currently active",
         ));
     };
-    Ok(Json(client_proto::ThreadRuntimeStatusResponse { status }))
+    Ok(Json(status))
 }
 
 /// 在指定项目下创建一个新线程。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads",
+    operation_id = "create_thread",
+    tag = "threads",
+    params(("project_id" = String, Path)),
+    request_body = omini_protocol::CreateThreadRequest,
+    responses((status = 201, description = "成功", body = omini_protocol::CreateThreadResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn create_thread(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path(project_id): Path<String>,
-    Json(request): Json<client_proto::CreateThreadRequest>,
-) -> ApiResult<client_proto::CreateThreadResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath(project_id): ApiPath<String>,
+    ApiJson(request): ApiJson<client_proto::CreateThreadRequest>,
+) -> Result<(StatusCode, Json<client_proto::CreateThreadResponse>), crate::routes::ApiError> {
     let project = require_project(&manager, &project_id).await?;
     project
         .create_thread(request)
         .await
-        .map(Json)
+        .map(|thread| (StatusCode::CREATED, Json(thread)))
         .map_err(core_error)
 }
 
 /// 列出当前线程可切换的模型。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/models",
+    operation_id = "threads_list_models",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path)),
+    responses((status = 200, description = "成功", body = omini_protocol::ModelsResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn list_models(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
 ) -> ApiResult<client_proto::ModelsResponse> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     Ok(Json(models_response_from_runtime_snapshot(
@@ -92,135 +148,177 @@ pub async fn list_models(
 }
 
 /// 设置当前线程使用的模型。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/model",
+    operation_id = "threads_set_model",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::SetModelRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn set_model(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::SetModelRequest>,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<client_proto::SetModelRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     thread
         .set_model(set_model_command_from_protocol_request(request))
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 设置当前线程的思考强度。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/thinking-effort",
+    operation_id = "threads_set_thinking_effort",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::SetThinkingEffortRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn set_thinking_effort(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::SetThinkingEffortRequest>,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<client_proto::SetThinkingEffortRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     thread
         .set_thinking_effort(set_thinking_effort_command_from_protocol_request(request))
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 设置当前线程的活跃供应商配置。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/profile",
+    operation_id = "set_profile",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::SetActiveProfileRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn set_profile(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::SetActiveProfileRequest>,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<client_proto::SetActiveProfileRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     thread
         .set_active_profile(set_active_profile_command_from_protocol_request(request))
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 在当前线程中切换活跃供应商配置。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/profile/toggle",
+    operation_id = "toggle_profile",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn toggle_profile(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     thread
         .toggle_active_profile()
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
-/// 加载并打开指定的已有线程。
-#[axum::debug_handler]
-pub async fn open_thread(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::OpenThreadRequest>,
-) -> ApiResult<client_proto::AckResponse> {
-    let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_controller(&thread, &headers).await?;
-    // target thread 的 runtime 已经在 `require_daemon_thread` 阶段被
-    // `manager.thread(...)` 同步加载好,这里不再需要额外的 ensure_loaded。
-    let _ = require_daemon_thread(&manager, &project_id, &request.thread_id).await?;
-    Ok(Json(client_proto::AckResponse::ok()))
-}
-
 /// 重命名当前线程。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/rename",
+    operation_id = "rename_thread",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::RenameThreadRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn rename_thread(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::RenameThreadRequest>,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<client_proto::RenameThreadRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_controller_claimed(&thread, &headers).await?;
+    client_id.require_controller(&thread).await?;
     let title = normalize_thread_title(request.title)?;
     thread
         .rename_thread(title)
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 对当前线程上下文执行压缩。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/compact",
+    operation_id = "compact_context",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body = omini_protocol::CompactContextRequest,
+    responses((status = 204, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn compact_context(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    Json(request): Json<client_proto::CompactContextRequest>,
-) -> ApiResult<client_proto::AckResponse> {
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiJson(request): ApiJson<client_proto::CompactContextRequest>,
+) -> Result<StatusCode, crate::routes::ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_connected_controller(&thread, &headers).await?;
+    client_id.take_control(&thread).await?;
     thread
         .compact_context(request.instructions)
         .await
-        .map(|_| Json(client_proto::AckResponse::ok()))
+        .map(|_| StatusCode::NO_CONTENT)
         .map_err(core_error)
 }
 
 /// 建立当前线程的事件 WebSocket 订阅。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/events",
+    operation_id = "thread_events",
+    tag = "threads",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    responses((status = 101, description = "成功"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn thread_events(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiWebSocketUpgrade(ws): ApiWebSocketUpgrade,
 ) -> impl IntoResponse {
-    let client_id = match client_id_from_headers(&headers) {
-        Ok(client_id) => client_id.to_string(),
-        Err(error) => return error.into_response(),
-    };
+    let client_id = client_id.0;
 
     let project = match require_project(&manager, &project_id).await {
         Ok(project) => project,
@@ -235,23 +333,6 @@ pub async fn thread_events(
         Err(error) => error.into_response(),
     }
 }
-
-async fn ensure_controller_claimed(
-    thread: &crate::thread::ThreadRuntime,
-    headers: &HeaderMap,
-) -> Result<(), crate::routes::ApiError> {
-    let client_id = client_id_from_headers(headers)?;
-    if thread.is_controller(client_id).await {
-        Ok(())
-    } else {
-        Err(api_error(
-            StatusCode::FORBIDDEN,
-            "not_controller",
-            "This client is observing the thread and cannot mutate it",
-        ))
-    }
-}
-
 fn normalize_thread_title(title: String) -> Result<String, crate::routes::ApiError> {
     let title = title.trim();
     if title.is_empty() {

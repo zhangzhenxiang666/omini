@@ -6,7 +6,9 @@ use omini_protocol as protocol;
 
 pub fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUiEvent {
     match event.event {
-        protocol::TypedRuntimeEvent::AgentRunChanged(run) => RuntimeToUiEvent::AgentRunChanged(run),
+        protocol::TypedRuntimeEvent::AgentRunChanged(run) => {
+            RuntimeToUiEvent::AgentRunChanged(run.into())
+        }
         protocol::TypedRuntimeEvent::RunStarted => RuntimeToUiEvent::RunStarted,
         protocol::TypedRuntimeEvent::UserMessageInjected {
             item,
@@ -37,7 +39,7 @@ pub fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUi
         protocol::TypedRuntimeEvent::ModelChanged(event) => RuntimeToUiEvent::ModelChanged {
             provider: event.provider,
             model: event.model,
-            thinking_effort: event.thinking_effort,
+            thinking_effort: event.thinking_effort.map(Into::into),
             context_window: event.context_window,
         },
         protocol::TypedRuntimeEvent::UsageChanged(usage) => RuntimeToUiEvent::UsageChanged(usage),
@@ -48,19 +50,19 @@ pub fn runtime_event_from_protocol(event: protocol::RuntimeEvent) -> RuntimeToUi
             }
         }
         protocol::TypedRuntimeEvent::ActiveProfileChanged(event) => {
-            RuntimeToUiEvent::ActiveProfileChanged(event.profile)
+            RuntimeToUiEvent::ActiveProfileChanged(event.profile.into())
         }
         protocol::TypedRuntimeEvent::ThreadTitleChanged(event) => {
             RuntimeToUiEvent::ThreadTitleChanged { title: event.title }
         }
         protocol::TypedRuntimeEvent::ToolPauseRequested(request) => {
-            RuntimeToUiEvent::ToolPauseRequested(request)
+            RuntimeToUiEvent::ToolPauseRequested(request.into())
         }
         protocol::TypedRuntimeEvent::PlanSubmitted(plan) => RuntimeToUiEvent::PlanSubmitted(plan),
         protocol::TypedRuntimeEvent::PlanApprovalResolved(event) => {
             RuntimeToUiEvent::PlanApprovalResolved {
                 plan_id: event.plan_id,
-                action: event.action,
+                action: event.action.into(),
             }
         }
         protocol::TypedRuntimeEvent::AgentManagementUpdated { records } => {

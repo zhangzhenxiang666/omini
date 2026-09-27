@@ -49,7 +49,7 @@ impl ProjectManager {
             threads,
             active_provider: model.provider_id.clone(),
             model: model.model_id.clone(),
-            thinking_effort: model.thinking_effort,
+            thinking_effort: model.thinking_effort.map(Into::into),
             context_window,
             mcp_server_count,
             has_project_instructions,

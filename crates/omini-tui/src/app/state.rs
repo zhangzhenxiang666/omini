@@ -252,7 +252,9 @@ impl AppState {
         self.project.status_bar.git_branch = git_branch;
         self.composer
             .mention_autocomplete
-            .set_candidates(agent_summaries_to_mention_candidates(subagent_threads));
+            .set_candidates(agent_summaries_to_mention_candidates(
+                subagent_threads.into_iter().map(Into::into).collect(),
+            ));
         self.composer.update_input_autocomplete();
         self.sync_pending_plan_approval(pending_plan_approval);
         if restore_pending_pauses {
@@ -289,7 +291,7 @@ impl AppState {
     }
 
     fn sync_pending_tool_pauses(&mut self, pending_pauses: Vec<omini_protocol::ToolPauseRequest>) {
-        self.dialogs.pending_tool_pauses = pending_pauses.into();
+        self.dialogs.pending_tool_pauses = pending_pauses.into_iter().map(Into::into).collect();
         if self.dialogs.pending_tool_pauses.is_empty() {
             self.reset_permission_drawer();
             return;

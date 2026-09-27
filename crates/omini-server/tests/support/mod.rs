@@ -161,6 +161,31 @@ impl TestDaemon {
         decode(response).await
     }
 
+    pub async fn send_no_content<B: Serialize>(
+        &self,
+        method: Method,
+        path: &str,
+        client_id: Option<&str>,
+        body: &B,
+    ) {
+        let mut request = self.client.request(method, self.url(path)).json(body);
+        if let Some(client_id) = client_id {
+            request = request.header("x-omini-client-id", client_id);
+        }
+        let response = request
+            .send()
+            .await
+            .expect("command request should complete");
+        assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+        assert!(
+            response
+                .bytes()
+                .await
+                .expect("response body should load")
+                .is_empty()
+        );
+    }
+
     pub async fn send_bytes(
         &self,
         path: &str,

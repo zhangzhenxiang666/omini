@@ -1,6 +1,6 @@
 mod support;
 
-use omini_protocol::{AckResponse, DaemonHealthResponse};
+use omini_protocol::DaemonHealthResponse;
 use serde_json::Value;
 use std::process::Command;
 
@@ -46,13 +46,13 @@ async fn daemon_foreground_startup_publishes_health_and_cleans_runtime_state() {
         .send()
         .await
         .expect("shutdown request should complete");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(
         response
-            .json::<AckResponse>()
+            .bytes()
             .await
-            .expect("shutdown response should decode"),
-        AckResponse::ok()
+            .expect("shutdown body should load")
+            .is_empty()
     );
     daemon.wait_for_shutdown().await;
 

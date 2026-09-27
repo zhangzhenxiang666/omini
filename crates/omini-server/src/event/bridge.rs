@@ -36,7 +36,7 @@ pub async fn submit_run_command_from_protocol_request_for_thread(
         } => (
             input,
             client_echo_id,
-            runtime_contract::thread::RunIntent::ExecuteCommand(command),
+            runtime_contract::thread::RunIntent::ExecuteCommand(command.into()),
         ),
     };
     validate_attachment_ids(&input.attachment_ids)?;
@@ -44,7 +44,7 @@ pub async fn submit_run_command_from_protocol_request_for_thread(
     let attachments = thread.resolve_attachments(&input.attachment_ids).await?;
     Ok(runtime_contract::thread::SubmitRunCommand {
         input: omini_runtime_contract::thread::RuntimeUserInput {
-            parts: input.parts,
+            parts: input.parts.into_iter().map(Into::into).collect(),
             attachments,
         },
         client_echo_id,
@@ -131,7 +131,7 @@ pub fn models_response_from_runtime_snapshot(
     snapshot: runtime_contract::thread::ModelsSnapshot,
 ) -> client_proto::ModelsResponse {
     client_proto::ModelsResponse {
-        providers: snapshot.providers,
+        providers: snapshot.providers.into_iter().map(Into::into).collect(),
         current_provider: snapshot.current_provider,
         current_model: snapshot.current_model,
     }
@@ -146,7 +146,7 @@ pub fn agents_response_from_runtime_snapshot(
             .into_iter()
             .map(agent_record_snapshot_to_protocol)
             .collect(),
-        providers: snapshot.providers,
+        providers: snapshot.providers.into_iter().map(Into::into).collect(),
         current_provider: snapshot.current_provider,
         current_model: snapshot.current_model,
     }
@@ -192,7 +192,7 @@ pub fn set_model_command_from_protocol_request(
     runtime_contract::thread::SetModelCommand {
         provider: request.provider,
         model: request.model,
-        thinking_effort: request.thinking_effort,
+        thinking_effort: request.thinking_effort.map(Into::into),
     }
 }
 
@@ -200,7 +200,7 @@ pub fn set_thinking_effort_command_from_protocol_request(
     request: client_proto::SetThinkingEffortRequest,
 ) -> runtime_contract::thread::SetThinkingEffortCommand {
     runtime_contract::thread::SetThinkingEffortCommand {
-        effort: request.effort,
+        effort: request.effort.into(),
     }
 }
 
@@ -208,7 +208,7 @@ pub fn set_active_profile_command_from_protocol_request(
     request: client_proto::SetActiveProfileRequest,
 ) -> runtime_contract::thread::SetActiveProfileCommand {
     runtime_contract::thread::SetActiveProfileCommand {
-        profile: request.profile,
+        profile: request.profile.into(),
     }
 }
 
@@ -218,7 +218,7 @@ pub fn resolve_tool_pause_command_from_protocol_request(
 ) -> runtime_contract::thread::ResolveToolPauseCommand {
     runtime_contract::thread::ResolveToolPauseCommand {
         tool_use_id,
-        response: request.response,
+        response: request.response.into(),
     }
 }
 
@@ -228,7 +228,7 @@ pub fn resolve_plan_command_from_protocol_request(
 ) -> runtime_contract::thread::ResolvePlanCommand {
     runtime_contract::thread::ResolvePlanCommand {
         plan_id,
-        action: request.action,
+        action: request.action.into(),
     }
 }
 
@@ -249,7 +249,7 @@ fn agent_record_snapshot_to_protocol(
         tools: record.tools,
         disallow_tools: record.disallow_tools,
         model: record.model,
-        source_kind: record.source_kind,
+        source_kind: record.source_kind.into(),
         editable: record.editable,
     }
 }
@@ -285,7 +285,7 @@ pub fn models_response_from_settings(settings: &Settings) -> client_proto::Model
     providers.sort_by(|a, b| a.id.cmp(&b.id));
     let model = settings.active_model();
     client_proto::ModelsResponse {
-        providers,
+        providers: providers.into_iter().map(Into::into).collect(),
         current_provider: model.provider_id.clone(),
         current_model: model.model_id.clone(),
     }
@@ -381,7 +381,7 @@ fn typed_runtime_event_from_runtime_contract_event(
 ) -> client_proto::TypedRuntimeEvent {
     match event {
         runtime_contract::RuntimeToServerEvent::AgentRunChanged(run) => {
-            client_proto::TypedRuntimeEvent::AgentRunChanged(run)
+            client_proto::TypedRuntimeEvent::AgentRunChanged(run.into())
         }
         runtime_contract::RuntimeToServerEvent::RunStarted => {
             client_proto::TypedRuntimeEvent::RunStarted
@@ -410,7 +410,7 @@ fn typed_runtime_event_from_runtime_contract_event(
         } => client_proto::TypedRuntimeEvent::ModelChanged(client_proto::ModelChangedEvent {
             provider,
             model,
-            thinking_effort,
+            thinking_effort: thinking_effort.map(Into::into),
             context_window,
         }),
         runtime_contract::RuntimeToServerEvent::UsageChanged(usage) => {
@@ -427,7 +427,9 @@ fn typed_runtime_event_from_runtime_contract_event(
         ),
         runtime_contract::RuntimeToServerEvent::ActiveProfileChanged(profile) => {
             client_proto::TypedRuntimeEvent::ActiveProfileChanged(
-                client_proto::ActiveProfileChangedEvent { profile },
+                client_proto::ActiveProfileChangedEvent {
+                    profile: profile.into(),
+                },
             )
         }
         runtime_contract::RuntimeToServerEvent::AgentManagementUpdated { records } => {
@@ -465,14 +467,17 @@ fn typed_runtime_event_from_runtime_contract_event(
             client_proto::TypedRuntimeEvent::TaskOutputDelta(output)
         }
         runtime_contract::RuntimeToServerEvent::ToolPauseRequested(request) => {
-            client_proto::TypedRuntimeEvent::ToolPauseRequested(request)
+            client_proto::TypedRuntimeEvent::ToolPauseRequested(request.into())
         }
         runtime_contract::RuntimeToServerEvent::PlanSubmitted(plan) => {
             client_proto::TypedRuntimeEvent::PlanSubmitted(plan)
         }
         runtime_contract::RuntimeToServerEvent::PlanApprovalResolved { plan_id, action } => {
             client_proto::TypedRuntimeEvent::PlanApprovalResolved(
-                client_proto::PlanApprovalResolvedEvent { plan_id, action },
+                client_proto::PlanApprovalResolvedEvent {
+                    plan_id,
+                    action: action.into(),
+                },
             )
         }
         runtime_contract::RuntimeToServerEvent::CompactSummaryStarted(event) => {

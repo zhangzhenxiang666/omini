@@ -41,9 +41,9 @@ impl ProjectManager {
         let update = omini_core::save_project_agent(
             &self.cwd,
             runtime_contract::SaveProjectAgentCommand {
-                source_kind: request.source_kind,
+                source_kind: request.source_kind.into(),
                 original_agent_id: request.original_agent_id,
-                draft: request.draft,
+                draft: request.draft.into(),
             },
         )?;
         self.refresh_target_thread_agents(target_thread_id, update.records)
@@ -74,10 +74,12 @@ impl ProjectManager {
                 provider: &request.provider,
                 model: &request.model,
             },
-            EffortSelection::ClientRequest(request.thinking_effort),
+            EffortSelection::ClientRequest(request.thinking_effort.map(Into::into)),
         )?;
         let draft =
             omini_core::generate_project_agent_draft(&settings, &request.description).await?;
-        Ok(client_proto::GenerateAgentResponse { draft })
+        Ok(client_proto::GenerateAgentResponse {
+            draft: draft.into(),
+        })
     }
 }

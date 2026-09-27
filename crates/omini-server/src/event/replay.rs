@@ -835,7 +835,8 @@ mod tests {
                             payload: serde_json::Map::new(),
                         },
                     ),
-                },
+                }
+                .into(),
             ),
             "thread_snapshot" => {
                 client_proto::TypedRuntimeEvent::ThreadSnapshot(client_proto::ThreadSnapshotEvent {
@@ -1164,7 +1165,7 @@ mod tests {
             2,
             runtime_contract::RuntimeToServerEvent::PlanApprovalResolved {
                 plan_id: "plan".to_string(),
-                action: client_proto::PlanApprovalAction::ContinueDiscussing,
+                action: runtime_contract::thread_domain::PlanApprovalAction::ContinueDiscussing,
             },
         ));
 

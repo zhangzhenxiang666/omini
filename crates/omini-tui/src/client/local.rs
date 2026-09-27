@@ -53,7 +53,7 @@ pub async fn handle_local_request(
             client_echo_id,
         } => {
             upload_images(http, base, client_id, &mut input).await?;
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/runs/{task_id}/input"),
                 client_id,
@@ -110,7 +110,7 @@ pub async fn handle_local_request(
             .await?;
         }
         ClientRequest::ProfileSet { profile } => {
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/profile"),
                 client_id,
@@ -134,7 +134,7 @@ pub async fn handle_local_request(
             thinking_effort,
         } => {
             // 1. 更新当前 thread runtime
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/model"),
                 client_id,
@@ -159,7 +159,7 @@ pub async fn handle_local_request(
         }
         ClientRequest::ModelThinkingEffortSet { effort } => {
             // 1. 更新当前 thread runtime
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/thinking-effort"),
                 client_id,
@@ -193,13 +193,13 @@ pub async fn handle_local_request(
         ClientRequest::ThreadNew { profile } => {
             emit_blank_thread(event_tx, connection).await?;
             event_tx
-                .send(RuntimeToUiEvent::ActiveProfileChanged(profile))
+                .send(RuntimeToUiEvent::ActiveProfileChanged(profile.into()))
                 .await
                 .map_err(|_| "TUI event receiver closed".to_string())?;
             return Ok(LocalAction::Blank(profile));
         }
         ClientRequest::ThreadRename { title } => {
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/rename"),
                 client_id,
@@ -208,7 +208,7 @@ pub async fn handle_local_request(
             .await?;
         }
         ClientRequest::ContextCompact { instructions } => {
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/compact"),
                 client_id,
@@ -220,7 +220,7 @@ pub async fn handle_local_request(
             tool_use_id,
             response,
         } => {
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/tool-pauses/{tool_use_id}/resolve"),
                 client_id,
@@ -229,7 +229,7 @@ pub async fn handle_local_request(
             .await?;
         }
         ClientRequest::PlanResolve { action } => {
-            post_json::<_, protocol::AckResponse>(
+            post_no_content(
                 http,
                 &format!("{base}/plans/plan/resolve"),
                 client_id,

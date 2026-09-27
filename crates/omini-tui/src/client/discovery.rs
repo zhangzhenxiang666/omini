@@ -13,17 +13,14 @@ pub async fn fetch_calibrated_runtime_status(
     base: &str,
 ) -> Option<protocol::ThreadRuntimeStatus> {
     let started_at = Instant::now();
-    let response: protocol::ThreadRuntimeStatusResponse = timeout(
+    let status: protocol::ThreadRuntimeStatus = timeout(
         Duration::from_secs(2),
         get_json(http, &format!("{base}/status")),
     )
     .await
     .ok()?
     .ok()?;
-    Some(apply_runtime_status_latency(
-        response.status,
-        started_at.elapsed(),
-    ))
+    Some(apply_runtime_status_latency(status, started_at.elapsed()))
 }
 
 pub fn apply_runtime_status_latency(
@@ -78,14 +75,8 @@ pub async fn reconnect_latest_daemon(
 ) -> Result<(), String> {
     let addr = discover_healthy_daemon(http).await?;
     // daemon 重启后端口和进程内 client registry 都会变；先重建身份，再按 UUID open 原项目。
-    let register: protocol::RegisterClientResponse = post_json_without_client(
-        http,
-        &format!("http://{addr}/v1/clients"),
-        &protocol::RegisterClientRequest {
-            kind: Some("tui".to_string()),
-        },
-    )
-    .await?;
+    let register: protocol::RegisterClientResponse =
+        post_empty_without_client(http, &format!("http://{addr}/v1/clients")).await?;
     let open: protocol::OpenProjectResponse = post_empty_without_client(
         http,
         &format!("http://{addr}/v1/projects/{}/open", connection.project_id),

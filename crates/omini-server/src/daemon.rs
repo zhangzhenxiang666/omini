@@ -237,7 +237,7 @@ impl GlobalDaemonManager {
             &self.root,
             &BootstrapProviderConfig {
                 provider_id: request.provider_id,
-                protocol: request.protocol,
+                protocol: request.protocol.into(),
                 base_url: request.base_url,
                 model_id: request.model_id,
                 api_key_env,

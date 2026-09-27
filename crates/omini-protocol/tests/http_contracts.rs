@@ -1,18 +1,9 @@
 use omini_protocol::{
-    AckResponse, AgentRecord, AgentSourceKind, CreateProjectRequest, CreateThreadRequest,
-    GenerateAgentRequest, GenerateAgentResponse, ProjectPathStatus, ProtocolError, SetModelRequest,
+    AgentRecord, AgentSourceKind, CreateProjectRequest, CreateThreadRequest, GenerateAgentRequest,
+    GenerateAgentResponse, ProjectPathStatus, ProtocolError, SetModelRequest,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
-
-#[test]
-fn register_client_request_empty_body_uses_default_kind() {
-    let request: omini_protocol::RegisterClientRequest =
-        serde_json::from_value(json!({})).expect("empty registration request should be accepted");
-
-    assert_eq!(request.kind, None);
-    assert_eq!(serde_json::to_value(request).unwrap(), json!({}));
-}
 
 #[test]
 fn create_project_request_without_name_omits_name() {
@@ -131,14 +122,13 @@ fn agent_record_empty_tool_policies_are_omitted() {
 }
 
 #[test]
-fn protocol_response_constructors_preserve_error_and_success_values() {
+fn protocol_error_preserves_wire_values() {
     let error = ProtocolError::new("invalid_model", "model is unavailable");
 
     assert_eq!(
         serde_json::to_value(error).unwrap(),
         json!({ "code": "invalid_model", "message": "model is unavailable" })
     );
-    assert_eq!(AckResponse::ok(), AckResponse { ok: true });
 }
 
 fn assert_data_error<T>(value: Value, reason: &str)

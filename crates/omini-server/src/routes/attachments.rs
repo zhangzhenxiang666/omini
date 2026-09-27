@@ -1,26 +1,46 @@
-use crate::daemon::GlobalDaemonManager;
-use crate::routes::{ApiError, api_error, core_error, ensure_controller, require_daemon_thread};
+use crate::routes::extract::ClientId;
+use crate::routes::extract::{ApiMultipart, ApiPath};
+use crate::routes::{ApiError, api_error, core_error, require_daemon_thread};
 use axum::Json;
 use axum::body::Body;
-use axum::extract::{Multipart, Path, State};
+use axum::extract::State;
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderName};
-use axum::http::{HeaderMap, HeaderValue, Response, StatusCode};
+use axum::http::{HeaderValue, Response, StatusCode};
 use omini_protocol as protocol;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 
+/// 组装本模块的 HTTP 路由和 OpenAPI 描述。
+pub(crate) fn routes() -> utoipa_axum::router::OpenApiRouter<crate::app::AppState> {
+    utoipa_axum::router::OpenApiRouter::new()
+        .routes(utoipa_axum::routes!(upload_attachment))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            MAX_ATTACHMENT_BYTES + 1024 * 1024,
+        ))
+        .routes(utoipa_axum::routes!(get_attachment))
+}
+
+/// 将单个图片附件流式保存到当前线程；要求持有控制权且限制为 20 MiB。
+#[utoipa::path(
+    post,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/attachments",
+    operation_id = "upload_attachment",
+    tag = "attachments",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
+    request_body(content = inline(omini_protocol::AttachmentUploadForm), content_type = "multipart/form-data"),
+    responses((status = 201, description = "成功", body = omini_protocol::AttachmentUploadResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn upload_attachment(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id)): Path<(String, String)>,
-    headers: HeaderMap,
-    mut multipart: Multipart,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id)): ApiPath<(String, String)>,
+    client_id: ClientId,
+    ApiMultipart(mut multipart): ApiMultipart,
 ) -> Result<(StatusCode, Json<protocol::AttachmentUploadResponse>), ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
-    ensure_controller(&thread, &headers).await?;
+    client_id.require_controller(&thread).await?;
 
     let mut upload = None;
     while let Some(mut field) = multipart.next_field().await.map_err(invalid_multipart)? {
@@ -97,10 +117,19 @@ pub async fn upload_attachment(
     ))
 }
 
+/// 读取当前线程的附件字节；不存在或归属不符时返回 404。
+#[utoipa::path(
+    get,
+    path = "/v1/projects/{project_id}/threads/{thread_id}/attachments/{attachment_id}",
+    operation_id = "get_attachment",
+    tag = "attachments",
+    params(("project_id" = String, Path), ("thread_id" = String, Path), ("attachment_id" = String, Path)),
+    responses((status = 200, description = "图片原始字节", body = Vec<u8>, content_type = "application/octet-stream"), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+)]
 #[axum::debug_handler]
 pub async fn get_attachment(
-    State(manager): State<Arc<GlobalDaemonManager>>,
-    Path((project_id, thread_id, attachment_id)): Path<(String, String, String)>,
+    State(crate::app::AppState { manager, .. }): State<crate::app::AppState>,
+    ApiPath((project_id, thread_id, attachment_id)): ApiPath<(String, String, String)>,
 ) -> Result<Response<Body>, ApiError> {
     let thread = require_daemon_thread(&manager, &project_id, &thread_id).await?;
     let Some(attachment) = thread

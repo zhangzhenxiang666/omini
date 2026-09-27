@@ -64,7 +64,7 @@ async fn register_project(daemon: &support::TestDaemon, workspace: &std::path::P
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
     project.id
 }
 

@@ -222,7 +222,7 @@ mod tests {
     }
 
     fn pending_pause() -> protocol::ToolPauseRequest {
-        protocol::ToolPauseRequest {
+        omini_runtime_contract::thread_domain::ToolPauseRequest {
             tool_use_id: "tool_1".to_string(),
             preview_tool_use_id: None,
             tool_name: "bash".to_string(),
@@ -236,6 +236,7 @@ mod tests {
                 },
             ),
         }
+        .into()
     }
 
     #[test]
@@ -253,7 +254,7 @@ mod tests {
 
         assert_eq!(
             summary.runtime_state,
-            Some(protocol::ThreadRuntimeState::Compacting)
+            Some(omini_runtime_contract::thread_domain::ThreadRuntimeState::Compacting)
         );
     }
 

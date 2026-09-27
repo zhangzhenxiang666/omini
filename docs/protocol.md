@@ -1,6 +1,8 @@
 # Client / Server Protocol
 
-Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `7`。Revision 7 为直接异步子 Agent 增加完整会话历史快照、任务级结构化输入和输入回显事件；客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。
+Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` 为 `8`。客户端必须在连接前检查 `GET /v1/health` 返回的 `protocol_revision`。完整 HTTP 路径和响应描述见 `GET /v1/openapi.json`；调试构建还提供 `/docs`。
+
+Revision 8 调整 HTTP 状态与响应形状：注册客户端及创建项目、线程返回 `201`，提交异步运行返回 `202` 和 `run_id`；没有返回数据的命令返回 `204` 空响应。查询和返回配置快照的接口仍返回 `200`。单线程状态接口直接返回状态对象，不再包一层 `status`。`POST /v1/clients` 不定义请求体。`/threads/{thread_id}/open` 与 `/runs/{run_id}/messages` 已删除。所有 HTTP 错误体使用 `{ "code": "...", "message": "..." }`，包括 JSON、路径和查询参数解析错误。
 
 ## 会话历史
 
@@ -45,7 +47,7 @@ Omini 的公开 client/server 协议位于 `/v1`，当前 `protocol_revision` �
 }
 ```
 
-主线程的直接异步子 Agent 使用 `POST /v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/input` 接收同样的结构化输入。响应成功后，`agent_task_user_message_injected` 事件携带任务 ID、子线程 ID、原始 `HistoryItem` 和可选 `client_echo_id`。只能向仍运行的直接子任务发送输入；终态任务及非直接子任务返回冲突错误。现有 `/runs/{run_id}/messages` 纯文本接口继续保留。
+主线程的直接异步子 Agent 使用 `POST /v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/input` 接收同样的结构化输入。响应成功后，`agent_task_user_message_injected` 事件携带任务 ID、子线程 ID、原始 `HistoryItem` 和可选 `client_echo_id`。只能向仍运行的直接子任务发送输入；终态任务及非直接子任务返回冲突错误。
 
 ## 命令分层
 
@@ -102,6 +104,12 @@ GET /v1/projects/{project_id}/threads/{thread_id}/attachments/{attachment_id}
 | Code | 含义 |
 | --- | --- |
 | `invalid_input_part` | part、项目路径或附件 ID 集合无效 |
+| `invalid_json` | JSON 请求体缺失、语法错误或字段无效 |
+| `invalid_path` | 路径参数无法解析 |
+| `invalid_query` | 查询参数无法解析 |
+| `invalid_websocket_upgrade` | WebSocket 握手参数无效 |
+| `route_not_found` | 请求路径不存在 |
+| `method_not_allowed` | 路径存在，但不支持请求使用的 HTTP 方法 |
 | `skill_not_found` | 当前 registry 中不存在该 Skill |
 | `skill_not_invocable` | Skill 不允许用户调用 |
 | `subagent_not_found` | 当前 registry 中不存在该 Subagent |

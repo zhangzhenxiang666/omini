@@ -2,8 +2,8 @@ mod support;
 
 use futures_util::StreamExt;
 use omini_protocol::{
-    AckResponse, AgentDraft, AgentSourceKind, AgentsResponse, CreateProjectRequest,
-    CreateThreadRequest, ProtocolError, SaveAgentRequest, ServerEnvelope, TypedRuntimeEvent,
+    AgentDraft, AgentSourceKind, AgentsResponse, CreateProjectRequest, CreateThreadRequest,
+    ProtocolError, SaveAgentRequest, ServerEnvelope, TypedRuntimeEvent,
 };
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
@@ -35,7 +35,7 @@ async fn project_id(daemon: &support::TestDaemon) -> String {
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
     project.id
 }
 
@@ -62,16 +62,14 @@ async fn agents_project_draft_round_trips() {
         draft: draft("cache-helper"),
     };
 
-    let (status, response): (_, AckResponse) = daemon
-        .send_json(
+    daemon
+        .send_no_content(
             Method::POST,
             &format!("/projects/{project_id}/agents"),
             None,
             &request,
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(response, AckResponse::ok());
 
     let (status, agents): (_, AgentsResponse) =
         daemon.get(&format!("/projects/{project_id}/agents")).await;
@@ -103,13 +101,13 @@ async fn agents_project_draft_round_trips() {
         .send()
         .await
         .expect("delete request should complete");
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(
+    assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+    assert!(
         response
-            .json::<AckResponse>()
+            .bytes()
             .await
-            .expect("delete response should decode"),
-        AckResponse::ok()
+            .expect("delete body should load")
+            .is_empty()
     );
 
     let (status, agents): (_, AgentsResponse) =
@@ -172,7 +170,7 @@ async fn agents_target_thread_broadcasts_update() {
             &CreateThreadRequest::default(),
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
+    assert_eq!(status, reqwest::StatusCode::CREATED);
 
     let client_id = "observer-client";
     let mut request = daemon
@@ -196,8 +194,8 @@ async fn agents_target_thread_broadcasts_update() {
             .expect("initial WebSocket frame should be valid");
     }
 
-    let (status, response): (_, AckResponse) = daemon
-        .send_json(
+    daemon
+        .send_no_content(
             Method::POST,
             &format!(
                 "/projects/{project_id}/agents?target_thread_id={}",
@@ -211,8 +209,6 @@ async fn agents_target_thread_broadcasts_update() {
             },
         )
         .await;
-    assert_eq!(status, reqwest::StatusCode::OK);
-    assert_eq!(response, AckResponse::ok());
 
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
@@ -240,7 +236,10 @@ async fn agents_target_thread_broadcasts_update() {
         .find(|record| record.name == "target-helper")
         .expect("broadcast should include the saved agent");
     assert_eq!(record.instructions, "Run the target-helper workflow.");
-    assert_eq!(record.source_kind, AgentSourceKind::Project);
+    assert_eq!(
+        record.source_kind,
+        omini_domain::subagents::AgentSourceKind::Project
+    );
     assert!(record.editable);
 
     daemon.shutdown().await;
