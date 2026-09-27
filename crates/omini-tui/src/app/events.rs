@@ -72,34 +72,6 @@ impl AppState {
         Self::draft_from_inputs(&mut self.composer.queued_user_inputs)
     }
 
-    pub fn take_queued_user_draft_for_intervention(
-        &mut self,
-        client_echo_id: String,
-    ) -> Option<UserDraft> {
-        if !self.composer.pending_intervention_inputs.is_empty() {
-            return None;
-        }
-
-        let pending = std::mem::take(&mut self.composer.queued_user_inputs);
-        let draft = Self::draft_from_input_iter(pending.iter())?;
-        self.composer.pending_intervention_inputs = pending;
-        self.composer.pending_intervention_client_echo_id = Some(client_echo_id);
-        Some(draft)
-    }
-
-    fn take_pending_intervention_ui_messages(&mut self) -> (Vec<UiMessage>, Option<String>) {
-        let messages = self
-            .composer
-            .pending_intervention_inputs
-            .drain(..)
-            .map(|draft| UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft)))
-            .collect();
-        (
-            messages,
-            self.composer.pending_intervention_client_echo_id.take(),
-        )
-    }
-
     pub fn push_optimistic_echo(&mut self, ui_message: UiMessage, client_echo_id: String) {
         self.extend_optimistic_echoes(vec![ui_message], client_echo_id);
     }
@@ -345,13 +317,14 @@ impl AppState {
             } => {
                 self.start.show_start_screen = false;
                 let ui_message = map_history_item(item);
-                let replaces_matching_local_echo = matches!(
-                    (self.sessions.views["main"].messages.last(), &ui_message),
-                    (
-                        Some(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft))),
-                        UiMessage::UserInput(input)
-                    ) if draft == &crate::features::timeline::model::user_input_draft(input)
-                );
+                let replaces_matching_local_echo = client_echo_id.is_none()
+                    && matches!(
+                        (self.sessions.views["main"].messages.last(), &ui_message),
+                        (
+                            Some(UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(draft))),
+                            UiMessage::UserInput(input)
+                        ) if draft == &crate::features::timeline::model::user_input_draft(input)
+                    );
                 if self
                     .take_client_echo_positions(client_echo_id.as_deref())
                     .is_none()
@@ -366,7 +339,10 @@ impl AppState {
                             .render_cache
                             .get_mut()
                             .mark_dirty(index);
-                    } else if self.sessions.views["main"].messages.last() != Some(&ui_message) {
+                    } else if client_echo_id.is_some()
+                        || self.sessions.views["main"].messages.last() != Some(&ui_message)
+                    {
+                        // 不同提交可以有相同内容；仅无提交 ID 的重放沿用相邻消息去重。
                         self.sessions.views["main"].messages.push(ui_message);
                     }
                 }
@@ -512,12 +488,6 @@ impl AppState {
                 {
                     self.sessions.views["main"].messages.extend(msg.finish());
                 }
-                let (pending_inputs, client_echo_id) = self.take_pending_intervention_ui_messages();
-                if let Some(client_echo_id) = client_echo_id {
-                    self.extend_optimistic_echoes(pending_inputs, client_echo_id);
-                } else {
-                    self.sessions.views["main"].messages.extend(pending_inputs);
-                }
                 if self.sessions.views["main"].auto_scroll {
                     self.sessions.views["main"].scroll_offset = 0;
                 }
@@ -548,8 +518,6 @@ impl AppState {
                             elapsed,
                         }));
                 }
-                self.composer.pending_intervention_inputs.clear();
-                self.composer.pending_intervention_client_echo_id = None;
                 self.sessions.views["main"].pending_client_echoes.clear();
                 if self.sessions.views["main"].auto_scroll {
                     self.sessions.views["main"].scroll_offset = 0;
@@ -1093,7 +1061,6 @@ impl AppState {
         self.sessions.views["main"].pending_proposed_plan = None;
         self.sessions.views["main"].pending_compact_summary = None;
         self.sessions.views["main"].thinking_started_at = None;
-        self.composer.pending_intervention_client_echo_id = None;
         self.sessions.views["main"].main_query_active = false;
         self.sessions.views["main"].run_timer = None;
         self.sessions.views["main"].manual_compact_running = false;

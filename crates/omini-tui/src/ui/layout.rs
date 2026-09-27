@@ -117,7 +117,7 @@ pub fn render(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame) {
         return;
     }
 
-    let drawer_len = crate::ui::prelude::input::queued_drawer_inputs(state).len();
+    let drawer_len = state.composer.queued_user_inputs.len();
     let queued_height = if drawer_len == 0 {
         0
     } else {

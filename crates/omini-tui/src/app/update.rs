@@ -317,6 +317,157 @@ mod tests {
         response
     }
 
+    fn history_input(text: &str) -> omini_protocol::HistoryItem {
+        omini_protocol::HistoryItem::UserInput(omini_domain::conversation::UserInput {
+            intent: omini_domain::input::UserInputIntent::Message,
+            parts: vec![omini_domain::input::InputPart::Text {
+                text: text.to_string(),
+            }],
+            attachments: Vec::new(),
+        })
+    }
+
+    /// 服务端回显是插入消息的唯一展示来源，轮次结束不再追加本地副本。
+    #[test]
+    fn intervention_echo_once() {
+        // 给定：主会话运行中暂存一条输入。
+        let mut state = AppState::new();
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        state.composer.input = "first".to_string();
+        let mut tx = Effects::default();
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.composer.queued_user_inputs.len(), 1);
+
+        // 当：插入队列并收到服务端回显。
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::ALT, &mut tx);
+        let Some(ClientRequest::RunInterveneInput {
+            input,
+            client_echo_id: Some(client_echo_id),
+        }) = tx.requests.pop_front()
+        else {
+            panic!("expected intervention request");
+        };
+        assert_eq!(
+            input.input.parts,
+            vec![omini_protocol::InputPart::Text {
+                text: "first".to_string(),
+            }]
+        );
+        assert!(state.composer.queued_user_inputs.is_empty());
+        assert!(state.sessions.views["main"].messages.is_empty());
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::ALT, &mut tx);
+        assert!(tx.requests.is_empty());
+        handle_runtime_event(
+            &mut state,
+            RuntimeToUiEvent::UserMessageInjected {
+                item: history_input("first"),
+                client_echo_id: Some(client_echo_id),
+            },
+            &mut tx,
+        );
+
+        // 则：轮次与运行结束后，消息仅展示一次，也不会再次发送。
+        handle_runtime_event(&mut state, RuntimeToUiEvent::TurnEnded, &mut tx);
+        handle_runtime_event(&mut state, RuntimeToUiEvent::RunFinished, &mut tx);
+        assert!(tx.requests.is_empty());
+        assert_eq!(
+            state.sessions.views["main"]
+                .messages
+                .iter()
+                .filter(|message| matches!(message, crate::app::state::UiMessage::UserInput(_)))
+                .count(),
+            1
+        );
+    }
+
+    /// 多次插入后仍可暂存，运行结束只发送最后尚未插入的队列。
+    #[test]
+    fn consecutive_injections() {
+        // 给定：主会话运行中可连续输入。
+        let mut state = AppState::new();
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        let mut tx = Effects::default();
+
+        // 当：首条尚未回显时继续输入，并再次插入相同文本。
+        let mut echo_ids = Vec::new();
+        for _ in 0..2 {
+            state.composer.input = "same".to_string();
+            handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+            handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::ALT, &mut tx);
+            let Some(ClientRequest::RunInterveneInput {
+                client_echo_id: Some(client_echo_id),
+                ..
+            }) = tx.requests.pop_front()
+            else {
+                panic!("expected intervention request");
+            };
+            assert!(state.composer.queued_user_inputs.is_empty());
+            echo_ids.push(client_echo_id);
+        }
+        for client_echo_id in &echo_ids {
+            handle_runtime_event(
+                &mut state,
+                RuntimeToUiEvent::UserMessageInjected {
+                    item: history_input("same"),
+                    client_echo_id: Some(client_echo_id.clone()),
+                },
+                &mut tx,
+            );
+        }
+        state.composer.input = "tail".to_string();
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+        handle_runtime_event(&mut state, RuntimeToUiEvent::TurnEnded, &mut tx);
+        handle_runtime_event(&mut state, RuntimeToUiEvent::RunFinished, &mut tx);
+
+        // 则：不同提交 ID 的同文消息都可见，结束时只提交剩余输入。
+        assert_ne!(echo_ids[0], echo_ids[1]);
+        assert_eq!(
+            state.sessions.views["main"]
+                .messages
+                .iter()
+                .filter(|message| matches!(message, crate::app::state::UiMessage::UserInput(_)))
+                .count(),
+            2
+        );
+        let Some(ClientRequest::RunSubmitUserInput { input, .. }) = tx.requests.pop_front() else {
+            panic!("expected remaining queued input");
+        };
+        assert_eq!(
+            input.input.parts,
+            vec![omini_protocol::InputPart::Text {
+                text: "tail".to_string(),
+            }]
+        );
+        assert!(tx.requests.is_empty());
+        assert!(state.composer.queued_user_inputs.is_empty());
+    }
+
+    /// 提交错误只由现有通知路径呈现，不自动重发可能已落库的输入。
+    #[test]
+    fn intervention_error_notice() {
+        // 给定：运行中存在待插入输入。
+        let mut state = AppState::new();
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        state.composer.input = "first".to_string();
+        let mut tx = Effects::default();
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+
+        // 当：插入请求失败，客户端报告错误。
+        handle_composer_key(&mut state, KeyCode::Enter, KeyModifiers::ALT, &mut tx);
+        assert!(matches!(
+            tx.requests.pop_front(),
+            Some(ClientRequest::RunInterveneInput { .. })
+        ));
+        handle_runtime_event(&mut state, RuntimeToUiEvent::error("failed"), &mut tx);
+
+        // 则：错误可见，队列保持清空，且不会自动重试。
+        assert!(state.composer.queued_user_inputs.is_empty());
+        assert!(tx.requests.is_empty());
+        assert!(state.sessions.views["main"].messages.iter().any(|message| {
+            matches!(message, crate::app::state::UiMessage::SystemEvent(crate::app::state::UiSystemEvent::Notification(notification)) if notification.kind == crate::app::event::NotificationKind::Error)
+        }));
+    }
+
     #[test]
     fn idle_main_accepts_input_and_escape_cancels_active_agent_tasks() {
         let mut state = AppState::new();

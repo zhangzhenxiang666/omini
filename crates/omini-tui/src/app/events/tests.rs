@@ -252,6 +252,43 @@ fn user_message_injected_with_unmatched_client_echo_id_appends_for_observers() {
     );
 }
 
+/// 不同提交即使文本相同，也不能把前一条本地回显误认为本次插入。
+#[test]
+fn unmatched_echo_preserves_previous() {
+    // 给定：上一条提交的乐观回显仍在时间线中。
+    let mut state = AppState::new();
+    let local = UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(UserDraft::plain(
+        "same".to_string(),
+    )));
+    state.push_optimistic_echo(local.clone(), "earlier".to_string());
+
+    // 当：另一条同文插入收到自己的服务端回显。
+    state.apply_event(RuntimeToUiEvent::UserMessageInjected {
+        item: HistoryItem::UserInput(UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: "same".to_string(),
+            }],
+            attachments: Vec::new(),
+        }),
+        client_echo_id: Some("intervention".to_string()),
+    });
+
+    // 则：上一条本地回显保留，本次插入作为独立消息展示。
+    assert_eq!(state.sessions.views["main"].messages.len(), 2);
+    assert_eq!(state.sessions.views["main"].messages[0], local);
+    assert!(matches!(
+        &state.sessions.views["main"].messages[1],
+        UiMessage::UserInput(input)
+            if input.parts == vec![InputPart::Text { text: "same".to_string() }]
+    ));
+    assert!(
+        state.sessions.views["main"]
+            .pending_client_echoes
+            .contains_key("earlier")
+    );
+}
+
 #[test]
 fn thinking_delta_starts_timer_and_text_delta_settles_duration() {
     let mut state = AppState::new();

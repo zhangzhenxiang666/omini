@@ -37,10 +37,6 @@ pub struct ComposerState {
     pub input_wrap_width: usize,
     /// 当前 query 运行期间由普通 Enter 暂存在 UI 侧的用户输入。
     pub queued_user_inputs: VecDeque<UserDraft>,
-    /// 已提交给 engine、等待当前轮结束后插入历史的用户输入。
-    pub pending_intervention_inputs: VecDeque<UserDraft>,
-    /// 当前 intervention 请求对应的 optimistic echo token。
-    pub pending_intervention_client_echo_id: Option<String>,
     /// 光标偏移量，按 Unicode 字符计数（不是字节）
     pub cursor_char: usize,
     /// 命令自动补全
@@ -63,8 +59,6 @@ impl Default for ComposerState {
             input_scroll_line: 0,
             input_wrap_width: DEFAULT_INPUT_WRAP_WIDTH,
             queued_user_inputs: VecDeque::new(),
-            pending_intervention_inputs: VecDeque::new(),
-            pending_intervention_client_echo_id: None,
             cursor_char: 0,
             autocomplete: CommandAutocomplete {
                 all_commands: crate::features::commands::builtin_command_summaries(),

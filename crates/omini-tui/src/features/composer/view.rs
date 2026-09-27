@@ -1,5 +1,4 @@
 use crate::app::state::AppState;
-use crate::features::timeline::model::UserDraft;
 use crate::ui::context::ViewContext;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -16,7 +15,7 @@ pub fn render_input(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, are
     frame.render_widget(bg_widget, area);
     let visible_line_count = state.composer.input_visible_line_count();
 
-    let drawer_len = queued_drawer_inputs(state).len();
+    let drawer_len = state.composer.queued_user_inputs.len();
     let queued_height = if drawer_len == 0 {
         0
     } else {
@@ -320,21 +319,14 @@ fn render_queued_user_inputs(state: &mut ViewContext<'_>, frame: &mut ratatui::F
         .bg(bg_color)
         .add_modifier(ratatui::style::Modifier::BOLD);
     let meta_style = Style::default().fg(crate::ui::theme::MUTED).bg(bg_color);
-    let is_pending = !state.composer.pending_intervention_inputs.is_empty();
-    let input_texts = queued_drawer_inputs(state)
+    let input_texts = state
+        .composer
+        .queued_user_inputs
         .iter()
         .map(|draft| draft.text.clone())
         .collect::<Vec<_>>();
-    let title = if is_pending {
-        format!("插入到下一轮 ({})", input_texts.len())
-    } else {
-        format!("已排队消息 ({})", input_texts.len())
-    };
-    let title_meta = if is_pending {
-        " - 等待当前轮次边界"
-    } else {
-        " - 当前运行结束后发送"
-    };
+    let title = format!("已排队消息 ({})", input_texts.len());
+    let title_meta = " - 未插入时在当前运行结束后发送";
     let title_line = Line::from(vec![
         Span::styled(" ", bg),
         Span::styled(title, title_style),
@@ -378,18 +370,11 @@ fn render_queued_user_inputs(state: &mut ViewContext<'_>, frame: &mut ratatui::F
     frame.render_widget(Paragraph::new(lines).style(bg), chunks[1]);
 
     let hint_style = Style::default().fg(crate::ui::theme::SELECTED).bg(bg_color);
-    let footer = if is_pending {
-        Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled("输入队列已锁定，等待插入完成", meta_style),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(" ", bg),
-            Span::styled("Alt+Enter", hint_style),
-            Span::styled(" 将排队消息插入到下一轮 LLM 前", meta_style),
-        ])
-    };
+    let footer = Line::from(vec![
+        Span::styled(" ", bg),
+        Span::styled("Alt+Enter", hint_style),
+        Span::styled(" 立即提交排队输入", meta_style),
+    ]);
     state.register_selectable_screen_line(
         chunks[2].y,
         chunks[2].x,
@@ -415,16 +400,6 @@ fn line_to_plain_text(line: &Line<'_>) -> String {
         .iter()
         .map(|span| span.content.as_ref())
         .collect::<String>()
-}
-
-pub fn queued_drawer_inputs<'a>(
-    state: &'a ViewContext<'_>,
-) -> &'a std::collections::VecDeque<UserDraft> {
-    if state.composer.pending_intervention_inputs.is_empty() {
-        &state.composer.queued_user_inputs
-    } else {
-        &state.composer.pending_intervention_inputs
-    }
 }
 
 fn ellipsize_width(text: &str, max_width: usize) -> String {

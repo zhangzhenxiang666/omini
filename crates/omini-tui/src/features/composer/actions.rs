@@ -32,18 +32,17 @@ pub fn flush_queued_user_inputs(state: &mut AppState, request_tx: &mut Effects) 
 }
 
 pub fn submit_queued_intervention(state: &mut AppState, request_tx: &mut Effects) {
-    if !state.is_main_query_active() || !state.composer.pending_intervention_inputs.is_empty() {
+    if !state.is_main_query_active() {
         return;
     }
 
-    let client_echo_id = uuid::Uuid::new_v4().to_string();
-    let Some(draft) = state.take_queued_user_draft_for_intervention(client_echo_id.clone()) else {
+    let Some(draft) = state.take_queued_user_draft() else {
         return;
     };
 
     let _ = request_tx.send(ClientRequest::RunInterveneInput {
         input: protocol::user_input_from_draft(draft),
-        client_echo_id: Some(client_echo_id),
+        client_echo_id: Some(uuid::Uuid::new_v4().to_string()),
     });
 }
 

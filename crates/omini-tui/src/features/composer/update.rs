@@ -308,10 +308,6 @@ pub fn handle_composer_key(
             state.composer.update_input_autocomplete();
         }
         (KeyCode::Enter, _) => {
-            if !state.composer.pending_intervention_inputs.is_empty() {
-                return true;
-            }
-
             if let Some(draft) = state.composer.take_input_draft() {
                 if draft.text.starts_with('/') {
                     if !state.is_run_active() && is_compact_command(&draft.text) {

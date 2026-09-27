@@ -161,7 +161,7 @@ fn general_lines(content_width: usize, selected: usize, max_lines: usize) -> Vec
         ("PageUp / PageDown", "滚动消息"),
         ("Ctrl+Home / Ctrl+End", "跳到顶部或底部"),
         ("Esc", "运行中取消；补全或 Help 中关闭当前面板"),
-        ("Alt+Enter", "运行中插入排队输入"),
+        ("Alt+Enter", "运行中立即提交排队输入"),
         ("Ctrl+C", "清空输入"),
     ];
     let mut lines = vec![
