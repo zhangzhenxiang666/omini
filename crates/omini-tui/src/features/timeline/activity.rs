@@ -31,7 +31,7 @@ pub fn classify_assistant_block(block: &ContentBlock) -> AssistantBlockKind {
 pub fn is_activity_boundary_tool(tool_use: &ToolUseBlock) -> bool {
     matches!(
         tool_use.name.as_str(),
-        "spawn_agent" | "run_agent" | "edit" | "ask_user" | "write" | "todo_write"
+        "spawn_agent" | "run_agent" | "send_message" | "edit" | "ask_user" | "write" | "todo_write"
     )
 }
 
@@ -112,7 +112,14 @@ mod tests {
             AssistantBlockKind::VisibleText
         );
 
-        for name in ["spawn_agent", "edit", "ask_user", "write", "todo_write"] {
+        for name in [
+            "spawn_agent",
+            "send_message",
+            "edit",
+            "ask_user",
+            "write",
+            "todo_write",
+        ] {
             let tool =
                 ContentBlock::from_tool_use(name.to_string(), name.to_string(), HashMap::new());
             assert_eq!(

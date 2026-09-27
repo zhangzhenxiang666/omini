@@ -27,6 +27,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "ask_user",
     "spawn_agent",
     "run_agent",
+    "send_message",
     "mcp__docs__search",
     "custom_tool",
 ];
@@ -243,6 +244,9 @@ fn tool_sample(name: &str) -> ToolUseBlock {
         }
         "spawn_agent" | "run_agent" => {
             serde_json::json!({"name":"Explore", "title":"梳理架构与历史事件"})
+        }
+        "send_message" => {
+            serde_json::json!({"target":"task-1", "message":"请复查边界情况，并汇报剩余风险"})
         }
         "mcp__docs__search" => serde_json::json!({"query":"Ratatui", "limit":10}),
         _ => serde_json::json!({"question":"这是什么工具？", "count":2}),

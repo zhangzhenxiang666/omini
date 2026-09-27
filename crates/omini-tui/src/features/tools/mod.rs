@@ -282,9 +282,9 @@ fn category_phrase(category: &ToolCategory, count: usize) -> String {
     }
 }
 
-/// 纯编排调用不产生可见条目，也不参与活动统计。
+/// 纯编排调用不产生可见条目，也不参与活动统计；`send_message` 单独作为分界展示。
 pub fn is_hidden_tool(name: &str) -> bool {
-    matches!(name, "read_task" | "send_message" | "cancel_task")
+    matches!(name, "read_task" | "cancel_task")
 }
 
 pub fn render_tool(
@@ -344,6 +344,9 @@ pub fn render_tool(
             ),
             "ask_user" => ask_user::render(tool_use, tool_result, content_width),
             "spawn_agent" | "run_agent" => agent::render(tool_use, tool_result, content_width),
+            "send_message" => {
+                agent::render_send_message(tool_use, tool_result, None, content_width)
+            }
             _ => fallback::render(tool_use, tool_result, content_width),
         }
     };

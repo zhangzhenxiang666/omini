@@ -469,6 +469,10 @@ impl AppState {
                     .subagent_completion_durations
                     .insert(node.task_id.clone(), duration);
             }
+            // 节点回收后 send_message 历史条目仍需可读的目标标题。
+            self.sessions
+                .subagent_title_memory
+                .insert(node.task_id.clone(), node.display_title().to_string());
         }
         self.sessions
             .subagent_order

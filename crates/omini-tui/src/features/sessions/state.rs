@@ -13,6 +13,8 @@ pub struct SessionsState {
     pub background_tasks: HashMap<String, TaskStatus>,
     /// 子 agent 节点回收后仍用于完成通知的运行时长。
     pub subagent_completion_durations: HashMap<String, Duration>,
+    /// 子 agent 节点回收后仍用于 `send_message` 条目解析的显示标题。
+    pub subagent_title_memory: HashMap<String, String>,
     /// 父 tool_use_id 到子 agent thread id 的映射。
     pub subagents_by_tool_use: HashMap<String, String>,
     /// 当前主线程直接异步子任务的显示顺序；索引 0 始终保留给 main。

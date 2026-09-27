@@ -711,6 +711,32 @@ fn render_user_message(
     );
 }
 
+/// 渲染主 Agent 注入子会话的消息：首行以 `↳` 标记来源，续行缩进对齐，
+/// 正文用常规文本色保持可读；空白段落不产生空行。
+fn build_agent_message_lines(text: &str, content_width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for paragraph in text
+        .lines()
+        .filter(|paragraph| !paragraph.trim().is_empty())
+    {
+        for line in crate::ui::drawer::wrap_preserving_display_width(
+            paragraph,
+            content_width.saturating_sub(2).max(1),
+        ) {
+            let prefix = if lines.is_empty() {
+                Span::styled("↳ ", Style::default().fg(crate::ui::theme::ACCENT))
+            } else {
+                Span::raw("  ")
+            };
+            lines.push(Line::from(vec![
+                prefix,
+                Span::styled(line, Style::default().fg(crate::ui::theme::TEXT)),
+            ]));
+        }
+    }
+    lines
+}
+
 fn render_ui_boundary(
     ui_message: &UiMessage,
     state: &ViewContext<'_>,
@@ -733,24 +759,7 @@ fn render_ui_boundary(
             build_user_draft_lines(draft, content_width)
         }
         UiMessage::SystemEvent(UiSystemEvent::AgentMessage(message)) => {
-            let mut lines = vec![Line::from(Span::styled(
-                "↳ 主 Agent",
-                Style::default()
-                    .fg(crate::ui::theme::ACCENT)
-                    .add_modifier(Modifier::BOLD),
-            ))];
-            for paragraph in message.text.lines() {
-                for line in crate::ui::drawer::wrap_preserving_display_width(
-                    paragraph,
-                    content_width.saturating_sub(2).max(1),
-                ) {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {line}"),
-                        Style::default().fg(crate::ui::theme::MUTED),
-                    )));
-                }
-            }
-            lines
+            build_agent_message_lines(&message.text, content_width)
         }
         UiMessage::SystemEvent(UiSystemEvent::TaskNotification(notification)) => notification
             .tasks
@@ -887,14 +896,23 @@ fn render_block(
             }
             flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
             let result = lookup.result(&tool.id);
-            let lines = render_tool(
-                tool,
-                result,
-                None,
-                None,
-                content_width,
-                Some(state.project.status_bar.cwd.as_path()),
-            );
+            let lines = if tool.name == "send_message" {
+                crate::features::tools::agent::render_send_message(
+                    tool,
+                    result,
+                    send_message_target_label(state, tool),
+                    content_width,
+                )
+            } else {
+                render_tool(
+                    tool,
+                    result,
+                    None,
+                    None,
+                    content_width,
+                    Some(state.project.status_bar.cwd.as_path()),
+                )
+            };
             append_rendered_lines(all_lines, selectable_lines, lines);
         }
         BlockView::Text(text) if !text.trim().is_empty() => {
@@ -910,6 +928,32 @@ fn render_block(
         }
         _ => {}
     }
+}
+
+/// 解析 `send_message` 目标 task ID 对应的子任务显示名：优先任务标题，
+/// 缺失时回退 Agent 名称；解析不到（如收件方为 `parent`）返回 None，
+/// 由渲染回退到工具输入里的原始 target 文本。
+/// 发送方拿到 task ID 的前提是 spawn 结果已返回、节点已入列；重连快照也在渲染前
+/// 重建节点，因此按消息增量渲染的缓存无需为节点插入登记额外失效。
+fn send_message_target_label<'a>(
+    state: &'a ViewContext<'_>,
+    tool: &omini_model::message::ToolUseBlock,
+) -> Option<&'a str> {
+    let target = tool.input.get("target")?.as_str()?;
+    if let Some(node) = state
+        .sessions
+        .subagents
+        .values()
+        .find(|node| node.task_id == target)
+    {
+        return Some(node.display_title());
+    }
+    // 子任务结束后节点被回收；沿用回收时记住的标题，避免历史条目退化为原始 task ID。
+    state
+        .sessions
+        .subagent_title_memory
+        .get(target)
+        .map(String::as_str)
 }
 
 /// 仅在会话仍运行且活动组尚未遇到分界时，展示最新一次普通工具调用。
@@ -1178,6 +1222,19 @@ mod tests {
         let lines = build_notification_lines(&Notification::error("failed"), 80);
 
         assert_eq!(lines[0].spans[0].style.fg, Some(crate::ui::theme::ERROR));
+    }
+
+    #[test]
+    fn agent_message_uses_quiet_injection_style() {
+        // 给定主 Agent 注入子会话的多段消息。
+        let lines = build_agent_message_lines("请复查边界情况\n\n如果仍有问题再回报", 40);
+
+        let plain: Vec<String> = lines.iter().map(line_to_plain_text).collect();
+        // 空白段落不产生空行，首行箭头标记来源，续行缩进对齐。
+        assert_eq!(plain, vec!["↳ 请复查边界情况", "  如果仍有问题再回报"]);
+        // 首行箭头使用主题色，正文恢复常规文本色，不再有独立的主 Agent 标题行。
+        assert_eq!(lines[0].spans[0].style.fg, Some(crate::ui::theme::ACCENT));
+        assert_eq!(lines[1].spans[1].style.fg, Some(crate::ui::theme::TEXT));
     }
 
     #[test]
@@ -1474,9 +1531,17 @@ mod tests {
                     ("title".into(), serde_json::json!("Search architecture")),
                 ]),
             ),
+            ContentBlock::from_tool_use(
+                "send-1".into(),
+                "send_message".into(),
+                HashMap::from([
+                    ("target".into(), serde_json::json!("task-1")),
+                    ("message".into(), serde_json::json!("请复查边界情况")),
+                ]),
+            ),
             ContentBlock::from_tool_use("run-2".into(), "run_agent".into(), HashMap::new()),
         ];
-        let results = ["run-1", "read-1", "cancel-1", "spawn-1", "run-2"]
+        let results = ["run-1", "read-1", "cancel-1", "spawn-1", "send-1", "run-2"]
             .into_iter()
             .map(|id| ContentBlock::from_tool_result(id.into(), false, "hidden result".into()))
             .collect::<Vec<_>>();
@@ -1543,11 +1608,78 @@ mod tests {
         assert!(!rendered.contains("hidden result"));
         assert!(rendered.contains("● Agent \"Search architecture\" finished · 9m 51s"));
         assert!(rendered.contains("◆ Explore · Search architecture"));
+        // send_message 按目标 task ID 解析子任务标题，作为分界条目展示。
+        assert!(rendered.contains("↪ Search architecture · 请复查边界情况"));
         assert!(!rendered.contains("后台 ·"));
         assert!(!rendered.contains("同步 ·"));
         assert!(!rendered.to_lowercase().contains("ctrl+"));
         assert!(!rendered.contains("to expand"));
         assert!(rendered.contains("Search architecture"));
+    }
+
+    /// 给定缓存路径已按子任务标题渲染 send_message 条目；当子任务结束被回收且触发
+    /// 宽度变化全量重绘时，则条目仍显示回收时记忆的标题而不是原始 task ID。
+    #[test]
+    fn send_message_label_survives_task_prune_and_rebuild() {
+        let mut state = AppState::new();
+        state.sessions.subagents.insert(
+            "thread-1".into(),
+            crate::features::sessions::model::SubagentNode {
+                task_id: "task-1".into(),
+                thread_id: "thread-1".into(),
+                parent_thread_id: "main-thread".into(),
+                spawn_tool_use_id: "spawn-1".into(),
+                agent_label: "Explore".into(),
+                title: "Search architecture".into(),
+                execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
+                status: omini_domain::task::TaskStatus::Running,
+                duration: None,
+                started_at: chrono::Utc::now(),
+                messages: Vec::new(),
+            },
+        );
+        state.sessions.subagent_order.push("task-1".into());
+        state.sessions.views["main"]
+            .messages
+            .push(assistant_item(Message::new(
+                Role::Assistant,
+                vec![ContentBlock::from_tool_use(
+                    "send-1".into(),
+                    "send_message".into(),
+                    HashMap::from([
+                        ("target".into(), serde_json::json!("task-1")),
+                        ("message".into(), serde_json::json!("请复查边界情况")),
+                    ]),
+                )],
+            )));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 80, 16)))
+            .unwrap();
+        let before = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(
+            before.contains("↪ Search architecture · 请复查边界情况"),
+            "{before}"
+        );
+
+        let child = state.sessions.subagents.get_mut("thread-1").unwrap();
+        child.status = omini_domain::task::TaskStatus::Completed;
+        state.prune_terminal_tasks();
+        // 换一块更宽的终端强制缓存全量重建，走标题记忆而非活动节点。
+        let mut resized = Terminal::new(TestBackend::new(100, 16)).unwrap();
+        resized
+            .draw(|frame| render_messages(&mut state, frame, Rect::new(0, 0, 100, 16)))
+            .unwrap();
+        let after = state.sessions.views["main"]
+            .selectable_message_lines
+            .join("\n");
+        assert!(
+            after.contains("↪ Search architecture · 请复查边界情况"),
+            "{after}"
+        );
     }
 
     #[test]
@@ -1585,12 +1717,20 @@ mod tests {
                     ("title".into(), serde_json::json!("Find entrypoints")),
                 ]),
             ),
+            ContentBlock::from_tool_use(
+                "send-1".into(),
+                "send_message".into(),
+                HashMap::from([
+                    ("target".into(), serde_json::json!("task-9")),
+                    ("message".into(), serde_json::json!("检查输出路径")),
+                ]),
+            ),
             ContentBlock::from_tool_use("search-2".into(), "search".into(), HashMap::new()),
         ];
         blocks.extend(
             [
                 "bash-1", "read-1", "edit-1", "bash-2", "write-1", "search-1", "ask-1", "read-2",
-                "todo-1", "bash-3", "spawn-1", "search-2",
+                "todo-1", "bash-3", "spawn-1", "send-1", "search-2",
             ]
             .into_iter()
             .map(|id| ContentBlock::from_tool_result(id.into(), false, "hidden result".into())),
@@ -1613,6 +1753,7 @@ mod tests {
             "⏺ Checklist",
             "Ran 1 shell command",
             "◆ Explore · Find entrypoints",
+            "↪ task-9 · 检查输出路径",
             "Ran 1 search",
         ];
         let mut remaining = rendered.as_str();
@@ -1636,6 +1777,13 @@ mod tests {
         let events = vec![
             UiMessage::SystemEvent(UiSystemEvent::UserInputEcho(
                 crate::features::timeline::model::UserDraft::plain("user input".into()),
+            )),
+            UiMessage::SystemEvent(UiSystemEvent::AgentMessage(
+                omini_domain::conversation::AgentMessage {
+                    source_run_id: "main-run".into(),
+                    tool_use_id: "tool-1".into(),
+                    text: "keep going".into(),
+                },
             )),
             UiMessage::SystemEvent(UiSystemEvent::Plan {
                 text: "# Proposed plan".into(),

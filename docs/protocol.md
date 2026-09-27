@@ -49,7 +49,7 @@ Revision 8 调整 HTTP 状态与响应形状：注册客户端及创建项目、
 
 主线程的直接异步子 Agent 使用 `POST /v1/projects/{project_id}/threads/{thread_id}/runs/{run_id}/input` 接收同样的结构化输入。这里的 `thread_id` 是主线程，`run_id` 是子任务 ID；请求必须带 `client_echo_id` 和已连接的 `x-omini-client-id`。服务端登记投递并持久化子会话 UI 历史后广播 `agent_task_user_message_queued`；事件携带任务 ID、子线程 ID、原始 `HistoryItem`、客户端 ID 和回显 ID。模型历史等子 Agent 到达安全输入边界才追加，顺序可以与 UI 历史不同。同一客户端、回显 ID 和子任务的重复请求只投递一次；同键不同内容报错，不同客户端的相同正文保留为两条。只能向仍运行的直接子任务发送新输入；终态任务及非直接子任务返回冲突错误，相同来源键的成功重试仍返回成功。
 
-主 Agent 的 `send_message` 使用发送 Run ID、ToolUse ID 和目标 task ID 作为来源键，持久化入队后立即返回。入队时，子任务历史增加 `system_event` 的 `agent_message`，并广播 `agent_task_message_queued`；正文只显示在子会话，来源标为“主 Agent”。模型在安全输入边界收到带来源标注的 User 角色消息；UI 历史与模型历史可以有不同顺序。任务取消、异常或服务重启造成待处理消息无法注入时，投递记录标为失败，数量写入任务结果的 `undelivered_messages`，并通过已有任务完成通知的摘要报告。
+主 Agent 的 `send_message` 使用发送 Run ID、ToolUse ID 和目标 task ID 作为来源键，持久化入队后立即返回。入队时，子任务历史增加 `system_event` 的 `agent_message`，并广播 `agent_task_message_queued`；主时间线以 `↪ 任务标题 · 消息首行` 单行分界展示该调用，正文完整显示在子会话并以 `↳` 前缀标记来源。模型在安全输入边界收到带来源标注的 User 角色消息；UI 历史与模型历史可以有不同顺序。任务取消、异常或服务重启造成待处理消息无法注入时，投递记录标为失败，数量写入任务结果的 `undelivered_messages`，并通过已有任务完成通知的摘要报告。
 
 ## 命令分层
 

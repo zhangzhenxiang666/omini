@@ -108,6 +108,17 @@ pub struct SubagentNode {
     pub messages: Vec<Message>,
 }
 
+impl SubagentNode {
+    /// 时间线条目使用的显示名：优先任务标题，缺失时回退 Agent 名称。
+    pub fn display_title(&self) -> &str {
+        if self.title.is_empty() {
+            self.agent_label.as_str()
+        } else {
+            self.title.as_str()
+        }
+    }
+}
+
 impl From<AgentTaskSnapshot> for SubagentNode {
     fn from(snapshot: AgentTaskSnapshot) -> Self {
         Self::from(snapshot.task)
