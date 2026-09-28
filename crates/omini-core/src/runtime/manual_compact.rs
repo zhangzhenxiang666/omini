@@ -272,7 +272,7 @@ pub async fn persist_compact_summary_event(
         id: Uuid::new_v4().to_string(),
         title: "LLM Summary".to_string(),
         markdown: event.summary.clone(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     };
     history::persist_compact_summary_ui_message(thread_id, &summary, model_ref, persistence_tx)
         .await;

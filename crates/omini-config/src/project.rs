@@ -1,4 +1,5 @@
 use crate::{ConfigError, ResolvedConfig};
+use jiff::Timestamp;
 use omini_domain::config::ThinkingEffort;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -63,7 +64,7 @@ impl ProjectsDir {
         let project = ProjectDir { path: project_path };
 
         if !project.state_path().exists() {
-            let now = chrono::Utc::now();
+            let now = Timestamp::now();
             let selection = config.first_selection();
 
             project.save_state(&ProjectState {
@@ -75,7 +76,7 @@ impl ProjectsDir {
             })?;
         } else {
             let mut state = project.load_state()?;
-            state.accessed_at = chrono::Utc::now();
+            state.accessed_at = Timestamp::now();
             project.save_state(&state)?;
         }
 
@@ -108,7 +109,7 @@ impl ProjectDir {
     pub fn load_state(&self) -> Result<ProjectState, ConfigError> {
         let path = self.state_path();
         if !path.exists() {
-            let now = chrono::Utc::now();
+            let now = Timestamp::now();
             return Ok(ProjectState {
                 default_provider: None,
                 default_model: None,
@@ -189,6 +190,6 @@ pub struct ProjectState {
     pub default_provider: Option<String>,
     pub default_model: Option<String>,
     pub thinking_effort: Option<ThinkingEffort>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub accessed_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub accessed_at: jiff::Timestamp,
 }

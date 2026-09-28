@@ -104,7 +104,7 @@ pub struct SubagentNode {
     /// Agent 结束后显示的实际运行时长。
     pub duration: Option<std::time::Duration>,
     /// 从任务快照恢复的创建时间，用于列表实时计时和缺少完成时间时的回退计算。
-    pub started_at: chrono::DateTime<chrono::Utc>,
+    pub started_at: jiff::Timestamp,
     pub messages: Vec<Message>,
 }
 
@@ -131,7 +131,9 @@ impl From<AgentTaskInfo> for SubagentNode {
         let duration = task
             .completed_at
             .or_else(|| task.status.is_terminal().then_some(task.updated_at))
-            .and_then(|completed_at| (completed_at - started_at).to_std().ok());
+            .and_then(|completed_at| {
+                std::time::Duration::try_from(completed_at.duration_since(started_at)).ok()
+            });
         Self {
             task_id: task.task_id,
             thread_id: task.thread_id,

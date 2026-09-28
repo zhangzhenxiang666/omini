@@ -6,7 +6,7 @@ use omini_domain::input::{InputPart, RunCommand, UserInputIntent};
 use omini_domain::usage::Usage;
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
-use omini_server::history;
+use omini_server::store::load_messages;
 
 #[tokio::test]
 // agent 用量只累计 owner 总量，不覆盖主线程当前 context 用量。
@@ -67,7 +67,7 @@ async fn typed_user_input_history_does_not_expose_expanded_llm_text() {
         .unwrap();
 
     assert_eq!(
-        history::load_messages(&db, "typed", &project.thread("typed")).await,
+        load_messages(&db, "typed", &project.thread("typed")).await,
         vec![ConversationEntry::UserInput(display)]
     );
     assert_eq!(
@@ -133,7 +133,7 @@ async fn tool_results_keep_their_timeline_and_model_context_positions() {
         vec![tool_use, tool_result, assistant_reply]
     );
     assert!(matches!(
-        history::load_messages(&db, "tool-results", &thread_dir)
+        load_messages(&db, "tool-results", &thread_dir)
             .await
             .as_slice(),
         [

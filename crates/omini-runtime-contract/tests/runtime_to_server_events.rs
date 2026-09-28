@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::Timestamp;
 use omini_domain::conversation::ProposedPlan;
 use omini_domain::task::{TaskChangedEvent, TaskOutputDelta, TaskOutputStream, TaskStatus};
 use omini_model::message::{Message, Role, ToolResultBlock, ToolUseBlock};
@@ -239,7 +239,7 @@ fn runtime_to_server_event_malformed_shapes_are_rejected_with_stable_reasons() {
 }
 
 fn runtime_event_cases() -> Vec<(RuntimeToServerEvent, Value)> {
-    let now = Utc.with_ymd_and_hms(2026, 9, 26, 0, 0, 0).single().unwrap();
+    let now = "2026-09-26T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
     let notification = Notification::info("notice");
     let usage = ThreadUsageSnapshot {
         current_context_tokens: 1,
@@ -546,8 +546,6 @@ fn assert_data_error(value: Value, reason: &str) {
     );
 }
 
-fn fixed_time() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 8, 12, 0, 0, 0)
-        .single()
-        .expect("fixed test time should be valid")
+fn fixed_time() -> Timestamp {
+    "2026-08-12T00:00:00Z".parse::<jiff::Timestamp>().unwrap()
 }

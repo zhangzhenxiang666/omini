@@ -6,6 +6,7 @@ use crate::features::tools::render_tool;
 use crate::platform::terminal;
 use crate::ui::theme;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use jiff::Timestamp;
 use omini_model::message::{ContentBlock, ToolResultBlock, ToolUseBlock};
 use ratatui::{
     layout::Rect,
@@ -444,7 +445,7 @@ fn sample_screen(screen: usize) -> AppState {
                 title: "优化 TUI".into(),
                 markdown: "# 计划\n\n重新设计主题、输入框与工具展示。".into(),
                 path: "/tmp/debug-plan.md".into(),
-                created_at: chrono::Utc::now(),
+                created_at: Timestamp::now(),
             });
             if screen == 17 {
                 state.dialogs.plan.plan_approval_auto = true;
@@ -457,7 +458,7 @@ fn sample_screen(screen: usize) -> AppState {
             ))
         }
         9 => {
-            let now = chrono::Utc::now();
+            let now = Timestamp::now();
             let thread = ThreadSummary {
                 id: "debug".into(),
                 title: "TUI 样式检查".into(),
@@ -550,7 +551,7 @@ fn sample_screen(screen: usize) -> AppState {
                         omini_domain::task::TaskStatus::Running
                     },
                     duration: completed.then_some(std::time::Duration::from_secs(12)),
-                    started_at: chrono::Utc::now(),
+                    started_at: Timestamp::now(),
                     messages: Vec::new(),
                 },
             );

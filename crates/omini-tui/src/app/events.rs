@@ -10,6 +10,7 @@ use crate::app::state::{
 use crate::client::catalog::ThinkingEffort;
 use crate::features::composer::editor::combined_user_draft;
 use crate::features::timeline::model::UserDraft;
+use jiff::Timestamp;
 use omini_domain::conversation::ToolResultRecord;
 use omini_domain::subagents::AgentSummary;
 use omini_domain::task::TaskStatus;
@@ -468,7 +469,10 @@ impl AppState {
                         .is_terminal()
                         .then_some(event.task.completed_at.unwrap_or(event.task.updated_at))
                         .and_then(|finished_at| {
-                            (finished_at - event.task.created_at).to_std().ok()
+                            std::time::Duration::try_from(
+                                finished_at.duration_since(event.task.created_at),
+                            )
+                            .ok()
                         });
                     if let Some(view) = self.sessions.views.get_mut(&node.task_id)
                         && !matches!(
@@ -582,7 +586,7 @@ impl AppState {
                                 execution_mode,
                                 status: TaskStatus::Running,
                                 duration: None,
-                                started_at: chrono::Utc::now(),
+                                started_at: Timestamp::now(),
                                 messages: Vec::new(),
                             },
                         );
@@ -647,10 +651,10 @@ impl AppState {
                         {
                             node.status = status;
                             if status.is_terminal() && node.duration.is_none() {
-                                node.duration = chrono::Utc::now()
-                                    .signed_duration_since(node.started_at)
-                                    .to_std()
-                                    .ok();
+                                node.duration = std::time::Duration::try_from(
+                                    Timestamp::now().duration_since(node.started_at),
+                                )
+                                .ok();
                             }
                         }
                         if let Some(view) = self.sessions.views.get_mut(&task_id) {
@@ -978,10 +982,9 @@ impl AppState {
             TaskStatus::Completed
         };
         if node.duration.is_none() {
-            node.duration = chrono::Utc::now()
-                .signed_duration_since(node.started_at)
-                .to_std()
-                .ok();
+            node.duration =
+                std::time::Duration::try_from(Timestamp::now().duration_since(node.started_at))
+                    .ok();
         }
         let task_id = node.task_id.clone();
         self.invalidate_task_notice(&task_id);

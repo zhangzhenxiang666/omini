@@ -2,7 +2,8 @@ use crate::app::event::ThreadRuntimeState;
 use crate::app::state::InteractionStep;
 use crate::ui::context::ViewContext;
 use crate::ui::text::{line_width, pad_display_width, register_selectable_lines, truncate_str};
-use chrono::{DateTime, Local, Utc};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -331,10 +332,10 @@ fn render_thread_row_backgrounds(
 }
 
 /// 将 UTC 时间格式化为相对时间（如 "刚刚", "3分钟前", "2h前"）。
-pub fn relative_time(utc: DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let duration = now.signed_duration_since(utc);
-    let seconds = duration.num_seconds().max(0);
+pub fn relative_time(utc: Timestamp) -> String {
+    let now = Timestamp::now();
+    let duration = now.duration_since(utc);
+    let seconds = duration.as_secs().max(0);
     if seconds < 60 {
         "刚刚".to_string()
     } else if seconds < 3600 {
@@ -347,6 +348,8 @@ pub fn relative_time(utc: DateTime<Utc>) -> String {
         format!("{}周前", seconds / 604800)
     } else {
         // 超过一个月显示日期
-        utc.with_timezone(&Local).format("%m-%d").to_string()
+        utc.to_zoned(TimeZone::system())
+            .strftime("%m-%d")
+            .to_string()
     }
 }

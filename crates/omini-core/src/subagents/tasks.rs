@@ -9,7 +9,7 @@ use crate::tools::{
     create_agent_registry_from_parent,
 };
 use crate::types::events::EngineToRuntimeEvent;
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
 use omini_domain::conversation::{AgentMessage, UserInput};
@@ -526,7 +526,7 @@ impl AgentTaskSupervisor {
                 if let Some(task) = tasks.get_mut(id) {
                     task.info.status = TaskStatus::Cancelling;
                     task.accepting_messages = false;
-                    task.info.updated_at = Utc::now();
+                    task.info.updated_at = Timestamp::now();
                     task.cancelled.store(true, Ordering::Relaxed);
                     task.cancel_notify.notify_waiters();
                 }
@@ -680,7 +680,7 @@ impl AgentTaskSupervisor {
             .project
             .create_thread(&thread_id)
             .map_err(|error| format!("failed to create agent thread: {error}"))?;
-        let now = Utc::now();
+        let now = Timestamp::now();
         let initial_context_version = 1;
         let info = AgentTaskInfo {
             task_id: task_id.clone(),
@@ -987,7 +987,7 @@ impl AgentTaskSupervisor {
                                 run_id: info.task_id.clone(),
                                 step_no: next_step_no,
                                 status: omini_domain::agent_run::AgentStepStatus::Running,
-                                started_at: Utc::now(),
+                                started_at: Timestamp::now(),
                                 finished_at: None,
                                 input_tokens: 0,
                                 output_tokens: 0,
@@ -1004,7 +1004,7 @@ impl AgentTaskSupervisor {
                             .send(RuntimePersistenceEvent::UpdateAgentStep {
                                 step_id,
                                 status: omini_domain::agent_run::AgentStepStatus::Completed,
-                                finished_at: Some(Utc::now()),
+                                finished_at: Some(Timestamp::now()),
                                 add_input_tokens: 0,
                                 add_output_tokens: 0,
                             })
@@ -1028,7 +1028,7 @@ impl AgentTaskSupervisor {
                             input: serde_json::to_value(&tool_use.input)
                                 .unwrap_or(serde_json::Value::Null),
                             status: omini_domain::agent_run::ToolUseStatus::Running,
-                            updated_at: Utc::now(),
+                            updated_at: Timestamp::now(),
                         };
                         tool_uses.insert(tool_use.id.clone(), record.clone());
                         let _ = self
@@ -1044,7 +1044,7 @@ impl AgentTaskSupervisor {
                 }
                 EngineToRuntimeEvent::ToolResult(tool_result) => {
                     if let Some(mut record) = tool_uses.get(&tool_result.tool_use_id).cloned() {
-                        record.updated_at = Utc::now();
+                        record.updated_at = Timestamp::now();
                         let status = if tool_result.is_error {
                             omini_domain::agent_run::ToolUseStatus::Failed
                         } else {
@@ -1151,7 +1151,7 @@ impl AgentTaskSupervisor {
                     if matches!(request.kind, ToolPauseKind::Permission(_))
                         && let Some(mut record) = tool_uses.get(&request.tool_use_id).cloned()
                     {
-                        record.updated_at = Utc::now();
+                        record.updated_at = Timestamp::now();
                         record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
                         let _ = self
                             .task_manager
@@ -1366,7 +1366,7 @@ impl AgentTaskSupervisor {
                 status = TaskStatus::Failed;
             }
         }
-        let completed_at = Utc::now();
+        let completed_at = Timestamp::now();
         let (ack_tx, ack_rx) = oneshot::channel();
         let persistence_result = self
             .task_manager
@@ -1682,6 +1682,7 @@ fn extract_final_text(messages: &[Message]) -> Option<String> {
 mod tests {
     use crate::tools::read_task_tool::{ReadTaskInput, ReadTaskTool};
     use crate::tools::{PendingToolPause, PendingToolPauses, Tool};
+    use jiff::SignedDuration;
     use omini_domain::usage::Usage;
     use omini_model::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::thread_domain::{
@@ -1692,7 +1693,7 @@ mod tests {
     use super::*;
 
     fn task_info(depth: u8) -> AgentTaskInfo {
-        let now = Utc::now();
+        let now = Timestamp::now();
         AgentTaskInfo {
             task_id: format!("task_{depth}"),
             thread_id: format!("thread_{depth}"),
@@ -2039,7 +2040,7 @@ mod tests {
 
     #[test]
     fn recovery_keeps_recent_delivered_background_history_limit() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut tasks = Vec::new();
         for index in 0..35 {
             let mut task = task_info(1);
@@ -2048,7 +2049,7 @@ mod tests {
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
             task.status = TaskStatus::Completed;
             task.notification_delivered = true;
-            task.updated_at = now + chrono::Duration::seconds(i64::from(index));
+            task.updated_at = now + SignedDuration::from_secs(i64::from(index));
             task.completed_at = Some(task.updated_at);
             tasks.push(task);
         }
@@ -2066,7 +2067,7 @@ mod tests {
 
     #[test]
     fn recovery_keeps_running_and_undelivered_background_tasks_beyond_limit() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut tasks = Vec::new();
         for index in 0..35 {
             let mut task = task_info(1);
@@ -2075,7 +2076,7 @@ mod tests {
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
             task.status = TaskStatus::Completed;
             task.notification_delivered = true;
-            task.updated_at = now + chrono::Duration::seconds(i64::from(index));
+            task.updated_at = now + SignedDuration::from_secs(i64::from(index));
             task.completed_at = Some(task.updated_at);
             tasks.push(task);
         }
@@ -2083,7 +2084,7 @@ mod tests {
         running.task_id = "running_old".to_string();
         running.thread_id = "thread_running_old".to_string();
         running.spawn_tool_use_id = "spawn_running_old".to_string();
-        running.updated_at = now - chrono::Duration::seconds(100);
+        running.updated_at = now - SignedDuration::from_secs(100);
         tasks.push(running);
         let mut undelivered = task_info(1);
         undelivered.task_id = "undelivered_old".to_string();
@@ -2091,7 +2092,7 @@ mod tests {
         undelivered.spawn_tool_use_id = "spawn_undelivered_old".to_string();
         undelivered.status = TaskStatus::Completed;
         undelivered.notification_delivered = false;
-        undelivered.updated_at = now - chrono::Duration::seconds(101);
+        undelivered.updated_at = now - SignedDuration::from_secs(101);
         undelivered.completed_at = Some(undelivered.updated_at);
         tasks.push(undelivered);
 
@@ -2105,7 +2106,7 @@ mod tests {
 
     #[test]
     fn mark_notifications_delivered_prunes_old_delivered_background_tasks() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut tasks = Vec::new();
         let mut delivered_ids = Vec::new();
         for index in 0..32 {
@@ -2115,7 +2116,7 @@ mod tests {
             task.spawn_tool_use_id = format!("spawn_{index:02}");
             task.status = TaskStatus::Completed;
             task.notification_delivered = false;
-            task.updated_at = now + chrono::Duration::seconds(i64::from(index));
+            task.updated_at = now + SignedDuration::from_secs(i64::from(index));
             task.completed_at = Some(task.updated_at);
             delivered_ids.push(task.task_id.clone());
             tasks.push(task);
@@ -2134,7 +2135,7 @@ mod tests {
 
     #[test]
     fn mark_notifications_delivered_does_not_prune_running_or_undelivered_tasks() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let mut tasks = Vec::new();
         let mut delivered_ids = Vec::new();
         for index in 0..31 {
@@ -2144,7 +2145,7 @@ mod tests {
             task.spawn_tool_use_id = format!("spawn_done_{index:02}");
             task.status = TaskStatus::Completed;
             task.notification_delivered = false;
-            task.updated_at = now + chrono::Duration::seconds(i64::from(index));
+            task.updated_at = now + SignedDuration::from_secs(i64::from(index));
             task.completed_at = Some(task.updated_at);
             delivered_ids.push(task.task_id.clone());
             tasks.push(task);
@@ -2153,7 +2154,7 @@ mod tests {
         running.task_id = "running_old".to_string();
         running.thread_id = "thread_running_old".to_string();
         running.spawn_tool_use_id = "spawn_running_old".to_string();
-        running.updated_at = now - chrono::Duration::seconds(100);
+        running.updated_at = now - SignedDuration::from_secs(100);
         tasks.push(running);
         let mut undelivered = task_info(1);
         undelivered.task_id = "undelivered_old".to_string();
@@ -2161,7 +2162,7 @@ mod tests {
         undelivered.spawn_tool_use_id = "spawn_undelivered_old".to_string();
         undelivered.status = TaskStatus::Completed;
         undelivered.notification_delivered = false;
-        undelivered.updated_at = now - chrono::Duration::seconds(101);
+        undelivered.updated_at = now - SignedDuration::from_secs(101);
         undelivered.completed_at = Some(undelivered.updated_at);
         tasks.push(undelivered);
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-chrono.workspace = true
+jiff.workspace = true
 omini-domain.workspace = true
 omini-model.workspace = true
 omini-runtime-contract.workspace = true

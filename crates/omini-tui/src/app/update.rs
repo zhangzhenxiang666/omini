@@ -201,8 +201,8 @@ mod tests {
     };
     use crate::app::state::InputMention;
     use crate::features::timeline::model::MentionKind;
-    use chrono::Utc;
     use crossterm::event::{KeyEvent, MouseButton, MouseEventKind};
+    use jiff::Timestamp;
     use std::path::PathBuf;
 
     fn add_background_task(state: &mut AppState, task_id: &str, thread_id: &str) {
@@ -308,7 +308,7 @@ mod tests {
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),
             path: PathBuf::from("/tmp/plan.md"),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         }
     }
 

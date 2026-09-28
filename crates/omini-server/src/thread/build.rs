@@ -3,8 +3,8 @@ use crate::event::replay::SequencedRuntimeEvent;
 use crate::event::tool_pause::apply_tool_pause_update;
 use crate::event::{replay::RuntimeReplayBuffer, status::RuntimeStatusProjection};
 use crate::thread::{ThreadRuntime, ThreadRuntimeInputs};
-use crate::{git, store::Database};
-use chrono::Utc;
+use crate::{git, store::Store};
+use jiff::Timestamp;
 use omini_config::{Settings, project::ProjectDir};
 use omini_core::{AgentCoreThread, CoreError};
 use omini_domain as domain;
@@ -32,7 +32,7 @@ impl ThreadRuntime {
         settings: Settings,
         project: ProjectDir,
         thread_id: String,
-        db: Arc<Database>,
+        db: Arc<Store>,
         active_profile: runtime_contract::thread_domain::ActiveProfile,
         inputs: ThreadRuntimeInputs,
     ) -> Result<Self, CoreError> {
@@ -114,8 +114,15 @@ impl ThreadRuntime {
                         message,
                         ..
                     } = &event {
+                        let agent_thread_dir = persistence_project.thread(agent_thread_id);
                         match persistence_db
-                            .enqueue_agent_message(task_id, owner_thread_id, agent_thread_id, message)
+                            .enqueue_agent_message(
+                                task_id,
+                                owner_thread_id,
+                                agent_thread_id,
+                                message,
+                                &agent_thread_dir,
+                            )
                             .await
                         {
                             Ok(fresh) => {
@@ -362,7 +369,7 @@ fn broadcast_sequenced_runtime_event(
     status_projection
         .lock()
         .expect("status projection lock poisoned")
-        .record_event(&sequenced.event, Utc::now());
+        .record_event(&sequenced.event, Timestamp::now());
     let _ = runtime_event_tx.send(sequenced);
 }
 

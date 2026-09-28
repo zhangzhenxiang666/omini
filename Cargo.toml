@@ -11,6 +11,7 @@ members = [
     "crates/omini-protocol",
     "crates/omini-runtime-contract",
     "crates/omini-server",
+    "crates/omini-entity",
     "crates/omini-tui",
 ]
 default-members = ["crates/omini-cli"]
@@ -25,7 +26,6 @@ async-trait = "0.1.89"
 axum = { version = "0.8.7", features = ["ws", "macros", "multipart"] }
 base64 = "0.22.1"
 bytes = "1.11.1"
-chrono = { version = "0.4.44", features = ["serde"] }
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"
 daemonize = "0.5.0"
@@ -33,6 +33,7 @@ dirs = "6.0.0"
 futures-util = "0.3.31"
 http = "1.4.0"
 indexmap = { version = "2.14.0", features = ["serde"] }
+jiff = { version = "0.2", features = ["serde"] }
 pin-project-lite = "0.2.17"
 pulldown-cmark = "0.13"
 rand = "0.8"
@@ -51,8 +52,9 @@ serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 similar = { version = "3.1", features = ["text"] }
-sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "chrono"] }
 thiserror = "2.0.18"
+toasty = { version = "0.11.0", default-features = false, features = ["sqlite", "jiff"] }
+toasty-driver-sqlite = "0.11.0"
 tokio = { version = "1.52.2", features = [
     "rt",
     "rt-multi-thread",
@@ -71,7 +73,7 @@ tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25.1"
 unicode-width = "0.2"
 uuid = { version = "1.23.1", features = ["v4"] }
-utoipa = { version = "5.5.0", features = ["axum_extras", "chrono", "uuid"] }
+utoipa = { version = "5.5.0", features = ["axum_extras", "jiff_0_2", "uuid"] }
 utoipa-axum = "0.2.0"
 utoipa-swagger-ui = { version = "9.0.2", default-features = false, features = ["axum", "vendored"] }
 url = { version = "2.5.8", features = ["serde"] }
@@ -86,4 +88,5 @@ omini-provider-api = { path = "crates/omini-provider-api" }
 omini-protocol = { path = "crates/omini-protocol" }
 omini-runtime-contract = { path = "crates/omini-runtime-contract" }
 omini-server = { path = "crates/omini-server" }
+omini-entity = { path = "crates/omini-entity" }
 omini-tui = { path = "crates/omini-tui" }

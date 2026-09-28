@@ -133,13 +133,13 @@ mod tests {
     use super::*;
     use crate::app::event::RuntimeToUiEvent;
     use crate::app::event::ThreadUsageSnapshot;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use std::time::Duration;
     use tokio::sync::mpsc;
 
     #[test]
     fn agent_urls_use_only_project_scope() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let connection = ProjectConnection {
             addr: "127.0.0.1:4317".parse().expect("address should parse"),
             project_id: "project-1".to_string(),
@@ -196,7 +196,7 @@ mod tests {
             connected_client_count: 1,
             activity: Some(protocol::ThreadRuntimeActivity {
                 kind: protocol::ThreadRuntimeActivityKind::Query,
-                started_at: Utc::now(),
+                started_at: Timestamp::now(),
                 elapsed_ms: 1_500,
             }),
             pending_pauses: Vec::new(),
@@ -241,7 +241,7 @@ mod tests {
 
     #[test]
     fn thread_summary_mapping_preserves_runtime_state() {
-        let now = Utc::now();
+        let now = Timestamp::now();
         let summary = thread_summary_from_protocol(protocol::ThreadSummary {
             id: "thread_1".to_string(),
             title: "hello".to_string(),
@@ -297,7 +297,7 @@ mod tests {
         status.state = protocol::ThreadRuntimeState::Compacting;
         status.activity = Some(protocol::ThreadRuntimeActivity {
             kind: protocol::ThreadRuntimeActivityKind::Compact,
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             elapsed_ms: 700,
         });
 

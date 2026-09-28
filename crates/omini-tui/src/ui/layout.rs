@@ -1,5 +1,6 @@
 use crate::app::state::{AgentStatus, InteractionStep, format_run_duration};
 use crate::ui::context::ViewContext;
+use jiff::Timestamp;
 use ratatui::layout::Alignment;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -191,7 +192,7 @@ fn render_session_selector(state: &ViewContext<'_>, frame: &mut ratatui::Frame, 
     let selected_style = Style::default()
         .fg(crate::ui::theme::ACCENT)
         .add_modifier(Modifier::BOLD);
-    let now = chrono::Utc::now();
+    let now = Timestamp::now();
     let mut rows = Vec::with_capacity(state.session_count());
     rows.push(("main".to_string(), None, 0usize));
     for (index, task_id) in state.sessions.subagent_order.iter().enumerate() {
@@ -233,8 +234,7 @@ fn render_session_selector(state: &ViewContext<'_>, frame: &mut ratatui::Frame, 
             let duration = if node.status.is_terminal() {
                 node.duration.unwrap_or_default()
             } else {
-                now.signed_duration_since(node.started_at)
-                    .to_std()
+                std::time::Duration::try_from(now.duration_since(node.started_at))
                     .unwrap_or_default()
             };
             let elapsed = format_run_duration(duration);

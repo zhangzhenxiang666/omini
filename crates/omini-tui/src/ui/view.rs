@@ -16,7 +16,7 @@ mod tests {
     };
     use crate::client::catalog::{ModelConfig, ThinkingEffort};
     use crate::features::help::state::HelpDrawerState;
-    use chrono::Utc;
+    use jiff::{SignedDuration, Timestamp};
     use omini_domain::conversation::ProposedPlan;
     use omini_model::message::{Message, Role};
     use ratatui::Terminal;
@@ -196,7 +196,7 @@ mod tests {
             command_summary("help", CommandKind::Builtin),
             command_summary("commit-message", CommandKind::Skill),
         ];
-        let now = Utc::now();
+        let now = Timestamp::now();
         state.start.startup_recent_threads = vec![ThreadSummary {
             id: "thread-1".to_string(),
             title: "Fix flaky CI".to_string(),
@@ -239,7 +239,7 @@ mod tests {
         let backend = TestBackend::new(60, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let threads = vec![
             thread_summary("stored", "Stored only", None, now),
             thread_summary(
@@ -320,7 +320,7 @@ mod tests {
         let backend = TestBackend::new(34, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut state = AppState::new();
-        let now = Utc::now();
+        let now = Timestamp::now();
         let long_title = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz";
         let threads = vec![thread_summary(
             "working",
@@ -459,7 +459,7 @@ mod tests {
                 execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
                 status: omini_domain::task::TaskStatus::Running,
                 duration: None,
-                started_at: Utc::now(),
+                started_at: Timestamp::now(),
                 messages: Vec::new(),
             },
         );
@@ -517,7 +517,7 @@ mod tests {
                     execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
                     status: TaskStatus::Running,
                     duration: None,
-                    started_at: Utc::now() - chrono::Duration::seconds(67),
+                    started_at: Timestamp::now() - SignedDuration::from_secs(67),
                     messages: Vec::new(),
                 },
             );
@@ -551,7 +551,7 @@ mod tests {
                 .subagents
                 .get_mut("thread-1")
                 .unwrap()
-                .started_at -= chrono::Duration::seconds(1);
+                .started_at -= SignedDuration::from_secs(1);
             terminal
                 .draw(|frame| crate::app::draw(&mut state, frame))
                 .unwrap();
@@ -560,7 +560,7 @@ mod tests {
             let node = state.sessions.subagents.get_mut("thread-1").unwrap();
             node.status = TaskStatus::Completed;
             node.duration = Some(std::time::Duration::from_secs(68));
-            node.started_at -= chrono::Duration::seconds(100);
+            node.started_at -= SignedDuration::from_secs(100);
             state.sessions.active_session_task_id = Some("task-1".to_string());
             terminal
                 .draw(|frame| crate::app::draw(&mut state, frame))
@@ -676,7 +676,7 @@ mod tests {
         id: &str,
         title: &str,
         runtime_state: Option<omini_protocol::ThreadRuntimeState>,
-        now: chrono::DateTime<Utc>,
+        now: jiff::Timestamp,
     ) -> ThreadSummary {
         ThreadSummary {
             id: id.to_string(),
@@ -998,7 +998,7 @@ mod tests {
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),
             path: "/tmp/plan.md".into(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         });
 
         terminal
@@ -1016,7 +1016,7 @@ mod tests {
             title: "Plan".to_string(),
             markdown: "# Plan\n\n- Step".to_string(),
             path: "/tmp/plan.md".into(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         });
 
         terminal

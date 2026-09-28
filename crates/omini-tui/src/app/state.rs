@@ -1,4 +1,5 @@
 use crate::app::event::{ActiveProfile, SubmittedPlan, ToolPauseRequest};
+use jiff::Timestamp;
 use omini_domain::task::TaskStatus;
 use rand::Rng;
 use std::collections::HashSet;
@@ -312,7 +313,7 @@ impl AppState {
                 title: plan.title,
                 markdown: plan.markdown,
                 path: PathBuf::new(),
-                created_at: chrono::Utc::now(),
+                created_at: Timestamp::now(),
             }),
             None => self.clear_plan_approval(),
         }

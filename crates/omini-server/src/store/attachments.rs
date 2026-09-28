@@ -1,21 +1,33 @@
-use super::*;
+use super::Store;
+use crate::store::StoreError;
+use omini_entity::{Attachment, Thread};
 
-impl Database {
+impl Store {
+    /// 附件归属线程必须存在;模型 schema 无数据库外键,创建边界显式校验。
     pub async fn create_attachment(&self, attachment: &Attachment) -> Result<(), StoreError> {
-        sqlx::query(
-            "INSERT INTO attachment(
-                id, thread_id, original_name, mime_type, size, sha256, relative_path, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&attachment.id)
-        .bind(&attachment.thread_id)
-        .bind(&attachment.original_name)
-        .bind(&attachment.mime_type)
-        .bind(attachment.size)
-        .bind(&attachment.sha256)
-        .bind(&attachment.relative_path)
-        .bind(attachment.created_at)
-        .execute(&self.pool)
+        let mut db = self.conn();
+        if Thread::filter_by_id(&attachment.thread_id)
+            .first()
+            .exec(&mut db)
+            .await?
+            .is_none()
+        {
+            return Err(StoreError::MissingRow(format!(
+                "thread '{}'",
+                attachment.thread_id
+            )));
+        }
+        toasty::create!(Attachment {
+            id: attachment.id.clone(),
+            thread_id: attachment.thread_id.clone(),
+            original_name: attachment.original_name.clone(),
+            mime_type: attachment.mime_type.clone(),
+            size: attachment.size,
+            sha256: attachment.sha256.clone(),
+            relative_path: attachment.relative_path.clone(),
+            created_at: attachment.created_at,
+        })
+        .exec(&mut db)
         .await?;
         Ok(())
     }
@@ -25,15 +37,13 @@ impl Database {
         thread_id: &str,
         attachment_id: &str,
     ) -> Result<Option<Attachment>, StoreError> {
-        sqlx::query_as::<_, Attachment>(
-            "SELECT id, thread_id, original_name, mime_type, size, sha256, relative_path, created_at
-             FROM attachment WHERE id = ? AND thread_id = ?",
-        )
-        .bind(attachment_id)
-        .bind(thread_id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(Into::into)
+        let mut db = self.conn();
+        // 主键点查后比对归属线程,等价于原 WHERE id = ? AND thread_id = ?。
+        Ok(Attachment::filter_by_id(attachment_id)
+            .first()
+            .exec(&mut db)
+            .await?
+            .filter(|row| row.thread_id == thread_id))
     }
 
     pub async fn get_attachments(

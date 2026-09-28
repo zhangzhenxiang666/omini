@@ -3,7 +3,7 @@ use crate::{
         replay::{RuntimeReplayBuffer, SequencedRuntimeEvent},
         status::RuntimeStatusProjection,
     },
-    store::Database,
+    store::Store,
 };
 use omini_config::{Settings, project::ProjectDir};
 use omini_core::AgentCoreThread;
@@ -54,7 +54,7 @@ pub struct ThreadRuntime {
     // 创建 runtime 时的项目配置快照；server 用它补充 snapshot/status 中的只读信息。
     settings: Settings,
     // thread 元数据、消息、usage 和 core persistence event 的 SQLite 存储。
-    db: Arc<Database>,
+    db: Arc<Store>,
     // core runtime 事件经过本地 seq 编号后的广播流，WebSocket 订阅和 replay 去重都用它。
     runtime_event_tx: broadcast::Sender<SequencedRuntimeEvent>,
     // server 本地产生的协议事件入口，例如 thread title 变更；fanout 会统一编号和广播。

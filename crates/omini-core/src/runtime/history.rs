@@ -70,8 +70,8 @@ pub async fn persist_ui_message(
     let _ = persistence_tx
         .send(RuntimePersistenceEvent::UiMessageAppended {
             thread_id: thread_id.to_string(),
-            message: Message::new(msg.role.clone(), ui_message_blocks(msg, active_profile)),
-            model_ref: model_ref_for_role(msg.role.clone(), model_ref),
+            message: Message::new(msg.role, ui_message_blocks(msg, active_profile)),
+            model_ref: model_ref_for_role(msg.role, model_ref),
         })
         .await;
 }

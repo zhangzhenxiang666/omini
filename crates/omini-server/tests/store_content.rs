@@ -5,9 +5,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use omini_config::project::ThreadDir;
 use omini_domain::conversation::CompactionSummary;
+use omini_entity::prepare_blocks;
 use omini_model::message::{ContentBlock, ImageSource, ImageSourceType, Message, Role, TextBlock};
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
-use omini_server::{history, store::*};
+use omini_server::store::*;
 use std::fs;
 
 #[tokio::test]
@@ -33,10 +34,7 @@ async fn images_use_assets_and_round_trip() {
         .await
         .unwrap();
     assert_eq!(loaded, vec![message]);
-    let db_content: String = sqlx::query_scalar("SELECT content FROM llm_messages LIMIT 1")
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
+    let db_content = first_llm_content(&db, "t1").await.expect("llm row");
     assert!(!db_content.contains(&BASE64_STANDARD.encode(raw)));
     let asset = fs::read_dir(project.thread("t1").assets_dir())
         .unwrap()
@@ -80,18 +78,9 @@ async fn compact_reuses_existing_media_asset() {
     .unwrap();
 
     assert_eq!(fs::read_dir(thread_dir.assets_dir()).unwrap().count(), 1);
-    let stored: Vec<String> = sqlx::query_scalar(
-        "SELECT content FROM llm_messages
-             WHERE thread_id = 't1' AND (
-                 (context_version = 1 AND ordinal = 0) OR
-                 (context_version = 2 AND ordinal = 1)
-             ) ORDER BY context_version",
-    )
-    .fetch_all(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(stored.len(), 2);
-    assert_eq!(stored[0], stored[1]);
+    let v1 = llm_content_at(&db, "t1", 1, 0).await.expect("v1 row");
+    let v2 = llm_content_at(&db, "t1", 2, 1).await.expect("v2 row");
+    assert_eq!(v1, v2);
 }
 
 #[tokio::test]
@@ -129,7 +118,7 @@ async fn large_summary_uses_sidecar() {
             .count(),
         1
     );
-    let loaded = history::load_messages(&db, "t1", &project.thread("t1")).await;
+    let loaded = load_messages(&db, "t1", &project.thread("t1")).await;
     assert_eq!(
         loaded,
         vec![omini_domain::conversation::ConversationEntry::SystemEvent(

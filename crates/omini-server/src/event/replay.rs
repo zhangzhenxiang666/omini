@@ -759,7 +759,6 @@ fn agent_delta_bytes(events: &[SequencedRuntimeEvent]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
 
     use super::*;
     use crate::event::bridge::{
@@ -975,15 +974,15 @@ mod tests {
     ) -> runtime_contract::RuntimePersistenceEvent {
         runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
             thread_id: thread_id.to_string(),
-            message: omini_model::message::Message::new(role.clone(), blocks),
+            message: omini_model::message::Message::new(role, blocks),
             model_ref: (role == omini_model::message::Role::Assistant)
                 .then(|| "test/model".to_string()),
         }
     }
 
-    fn fixed_time() -> chrono::DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
-            .single()
+    fn fixed_time() -> jiff::Timestamp {
+        "2026-08-20T00:00:00Z"
+            .parse()
             .expect("fixed test time should be valid")
     }
 

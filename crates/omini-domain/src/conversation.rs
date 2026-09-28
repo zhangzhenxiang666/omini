@@ -1,6 +1,6 @@
 use crate::input::{AttachmentMetadata, InputPart, UserInputIntent};
 use crate::task::TaskCompletion;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -52,7 +52,7 @@ pub struct ProposedPlan {
     pub title: String,
     pub markdown: String,
     pub path: PathBuf,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -60,13 +60,13 @@ pub struct CompactionSummary {
     pub id: String,
     pub title: String,
     pub markdown: String,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct TaskNotification {
     pub tasks: Vec<TaskCompletion>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
 }
 
 /// 系统执行工具后产生的结果；在模型上下文中对应 User 角色消息。
@@ -102,7 +102,6 @@ pub enum ConversationEntry {
 mod tests {
     use super::*;
     use crate::task::{TaskCompletion, TaskKind, TaskStatus};
-    use chrono::TimeZone;
 
     #[test]
     fn task_notification_uses_generic_tag_and_rejects_the_old_tag() {
@@ -116,7 +115,7 @@ mod tests {
                     status: TaskStatus::Completed,
                     summary: None,
                 }],
-                created_at: chrono::Utc.with_ymd_and_hms(2026, 9, 26, 0, 0, 0).unwrap(),
+                created_at: "2026-09-26T00:00:00Z".parse::<jiff::Timestamp>().unwrap(),
             }));
         let value = serde_json::to_value(&notification).unwrap();
         assert_eq!(value["content"]["type"], "task_notification");

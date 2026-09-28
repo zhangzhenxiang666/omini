@@ -5,7 +5,7 @@ use crate::app::event::{
 };
 use crate::client::catalog::{ModelConfig, ProviderProfile, ProviderType};
 use crate::features::timeline::model::{DisplayMention, MentionKind, UserDraft};
-use chrono::{Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use omini_domain::conversation::{AssistantMessageBlock, UserInput};
 use omini_domain::input::{InputPart, UserInputIntent};
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ fn model_selection_request() -> InteractionRequest {
     }
 }
 
-fn thread_summary(id: &str, updated_at: chrono::DateTime<Utc>) -> ThreadSummary {
+fn thread_summary(id: &str, updated_at: jiff::Timestamp) -> ThreadSummary {
     ThreadSummary {
         id: id.to_string(),
         title: id.to_string(),
@@ -121,12 +121,12 @@ fn model_selection_preserves_max_thinking_effort() {
 
 #[test]
 fn thread_selection_sorts_by_updated_at_descending() {
-    let now = Utc::now();
+    let now = Timestamp::now();
     let mut state = AppState::new();
     let request = InteractionRequest::ThreadSelection {
         threads: vec![
-            thread_summary("middle", now - Duration::minutes(1)),
-            thread_summary("oldest", now - Duration::minutes(2)),
+            thread_summary("middle", now - SignedDuration::from_mins(1)),
+            thread_summary("oldest", now - SignedDuration::from_mins(2)),
             thread_summary("newest", now),
         ],
     };
@@ -607,7 +607,7 @@ fn error_notification_does_not_fail_running_subagents() {
             execution_mode: AgentTaskExecutionMode::Background,
             status: TaskStatus::Running,
             duration: None,
-            started_at: chrono::Utc::now(),
+            started_at: Timestamp::now(),
             messages: Vec::new(),
         },
     );

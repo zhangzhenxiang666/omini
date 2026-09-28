@@ -1,4 +1,4 @@
-use chrono::Local;
+use jiff::Zoned;
 use std::path::PathBuf;
 
 const COMMAND_SHELL: &str = "sh -c";
@@ -22,7 +22,7 @@ impl EnvironmentContext {
             cwd: cwd.to_path_buf(),
             command_shell: COMMAND_SHELL.to_string(),
             login_shell: non_empty_env("SHELL"),
-            current_date: Local::now().format("%Y-%m-%d").to_string(),
+            current_date: Zoned::now().strftime("%Y-%m-%d").to_string(),
             timezone: detect_timezone(),
             platform: std::env::consts::OS.to_string(),
             os: detect_os_pretty_name(),

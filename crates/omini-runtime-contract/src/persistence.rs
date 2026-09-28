@@ -1,5 +1,5 @@
 use crate::thread_domain::{AgentTaskInfo, AgentTaskResult};
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use omini_domain::agent_run::{
     AgentRunSnapshot, AgentRunStatus, AgentStepSnapshot, AgentStepStatus, ToolUseExecutionSnapshot,
     ToolUseStatus,
@@ -35,8 +35,8 @@ pub struct ThreadRecord {
     pub total_tokens: i64,
     pub total_cached_tokens: i64,
     pub llm_context_version: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
 }
 
 /// core 发往 server 的持久化意图词汇表。
@@ -53,8 +53,8 @@ pub enum RuntimePersistenceEvent {
     UpdateAgentRun {
         run_id: String,
         status: AgentRunStatus,
-        started_at: Option<DateTime<Utc>>,
-        finished_at: Option<DateTime<Utc>>,
+        started_at: Option<Timestamp>,
+        finished_at: Option<Timestamp>,
         add_tokens: i64,
     },
     UpsertAgentStep {
@@ -63,7 +63,7 @@ pub enum RuntimePersistenceEvent {
     UpdateAgentStep {
         step_id: String,
         status: AgentStepStatus,
-        finished_at: Option<DateTime<Utc>>,
+        finished_at: Option<Timestamp>,
         add_input_tokens: i64,
         add_output_tokens: i64,
     },
@@ -73,7 +73,7 @@ pub enum RuntimePersistenceEvent {
     },
     SetAgentRunArchived {
         run_id: String,
-        archived_at: Option<DateTime<Utc>>,
+        archived_at: Option<Timestamp>,
     },
     /// 原子创建子线程、task 记录和初始用户消息。
     CreateAgentTask {
@@ -117,7 +117,7 @@ pub enum RuntimePersistenceEvent {
         task_id: String,
         status: TaskStatus,
         result: AgentTaskResult,
-        completed_at: DateTime<Utc>,
+        completed_at: Timestamp,
         ack: oneshot::Sender<Result<(), String>>,
     },
     SetAgentTasksCancelling {

@@ -1,16 +1,21 @@
-use super::*;
+use super::Store;
+use crate::store::StoreError;
+use jiff::Timestamp;
+use omini_config::project::ProjectDir;
+use omini_model::message::Role;
+use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 
 struct AgentMessagePersistence<'a> {
     thread_id: &'a str,
-    message: &'a Message,
+    message: &'a omini_model::message::Message,
     model_ref: Option<&'a str>,
     persist_llm_history: bool,
     display_in_ui: bool,
-    created_at: DateTime<Utc>,
+    created_at: Timestamp,
     project: &'a ProjectDir,
 }
 
-impl Database {
+impl Store {
     async fn persist_agent_message(
         &self,
         request: AgentMessagePersistence<'_>,
@@ -22,7 +27,7 @@ impl Database {
             self.insert_conversation_entry(
                 request.thread_id,
                 &entry,
-                &request.message.role.to_string(),
+                request.message.role,
                 (request.message.role == Role::Assistant)
                     .then_some(request.model_ref)
                     .flatten(),
@@ -42,6 +47,8 @@ impl Database {
         }
         Ok(())
     }
+
+    /// 运行时持久化事件到本层操作的唯一分发点。
     pub async fn apply_persistence_event(
         &self,
         event: &RuntimePersistenceEvent,
@@ -110,7 +117,7 @@ impl Database {
                     model_ref: model_ref.as_deref(),
                     persist_llm_history: *persist_llm_history,
                     display_in_ui: *display_in_ui,
-                    created_at: Utc::now(),
+                    created_at: Timestamp::now(),
                     project,
                 })
                 .await
@@ -122,7 +129,13 @@ impl Database {
                 message,
                 ..
             } => self
-                .enqueue_agent_message(task_id, owner_thread_id, agent_thread_id, message)
+                .enqueue_agent_message(
+                    task_id,
+                    owner_thread_id,
+                    agent_thread_id,
+                    message,
+                    &project.thread(agent_thread_id),
+                )
                 .await
                 .map(|_| ()),
             RuntimePersistenceEvent::InjectTaskMessage {
@@ -131,8 +144,13 @@ impl Database {
                 model_message,
                 ..
             } => {
-                self.inject_task_message(agent_thread_id, key, model_message)
-                    .await
+                self.inject_task_message(
+                    agent_thread_id,
+                    key,
+                    model_message,
+                    &project.thread(agent_thread_id),
+                )
+                .await
             }
             RuntimePersistenceEvent::FailPendingTaskMessages {
                 task_id, reason, ..
@@ -148,7 +166,8 @@ impl Database {
                     .await
             }
             RuntimePersistenceEvent::SetAgentTasksCancelling { task_ids } => {
-                self.set_agent_tasks_cancelling(task_ids, Utc::now()).await
+                self.set_agent_tasks_cancelling(task_ids, Timestamp::now())
+                    .await
             }
             RuntimePersistenceEvent::UpsertTask { task } => self.upsert_task(task).await,
             RuntimePersistenceEvent::InsertTaskNotification {
@@ -163,7 +182,8 @@ impl Database {
                     notification,
                     llm_message,
                     task_ids,
-                    Utc::now(),
+                    Timestamp::now(),
+                    &project.thread(owner_thread_id),
                 )
                 .await
             }
@@ -195,9 +215,9 @@ impl Database {
                     self.insert_conversation_entry(
                         thread_id,
                         &entry,
-                        &message.role.to_string(),
+                        message.role,
                         model_ref.as_deref(),
-                        Utc::now(),
+                        Timestamp::now(),
                         &project.thread(thread_id),
                     )
                     .await
@@ -226,8 +246,13 @@ impl Database {
                 .await
             }
             RuntimePersistenceEvent::AppendLlmMessage { thread_id, message } => {
-                self.append_llm_message(thread_id, message, Utc::now(), &project.thread(thread_id))
-                    .await
+                self.append_llm_message(
+                    thread_id,
+                    message,
+                    Timestamp::now(),
+                    &project.thread(thread_id),
+                )
+                .await
             }
             RuntimePersistenceEvent::ReplaceLlmContext {
                 thread_id,
@@ -239,7 +264,7 @@ impl Database {
                     thread_id,
                     *expected_version,
                     messages,
-                    Utc::now(),
+                    Timestamp::now(),
                     &project.thread(thread_id),
                 )
                 .await

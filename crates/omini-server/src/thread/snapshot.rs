@@ -39,9 +39,9 @@ impl ThreadRuntime {
             .ok_or(CoreError::ThreadNotFound)?;
         let thread_dir = self.project.thread(&self.thread_id);
         // DB → UI 视角:给 TUI 的 ThreadSnapshotEvent 渲染 + user_injection 去重。
-        let messages = crate::history::load_messages(&self.db, &self.thread_id, &thread_dir).await;
+        let messages = crate::store::load_messages(&self.db, &self.thread_id, &thread_dir).await;
         let agent_tasks =
-            crate::history::load_agent_tasks(&self.db, &self.thread_id, &self.project).await;
+            crate::store::load_agent_tasks(&self.db, &self.thread_id, &self.project).await;
         let projected_delivery_keys = self
             .db
             .projected_delivery_keys(&self.thread_id)

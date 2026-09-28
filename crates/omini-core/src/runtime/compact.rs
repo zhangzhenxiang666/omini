@@ -576,7 +576,7 @@ fn try_context_collapse(messages: &[Message], preserve_recent: usize) -> Option<
                 other => content.push(other.clone()),
             }
         }
-        collapsed.push(Message::new(message.role.clone(), content));
+        collapsed.push(Message::new(message.role, content));
     }
     collapsed.extend(newer);
     changed.then_some(collapsed)
@@ -1270,7 +1270,7 @@ fn replace_images_with_placeholders(messages: &[Message]) -> Vec<Message> {
                     other => other.clone(),
                 })
                 .collect();
-            Message::new(message.role.clone(), content)
+            Message::new(message.role, content)
         })
         .collect()
 }

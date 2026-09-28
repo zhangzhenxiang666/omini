@@ -19,8 +19,9 @@ omini-cli / omini-tui
 | `omini-cli` | 程序入口、服务发现与启动、项目注册、启动 TUI。 |
 | `omini-tui` | 终端交互、界面状态与渲染、协议请求。 |
 | `omini-protocol` | 客户端与服务端共用的公开 HTTP/WebSocket 类型。 |
-| `omini-server` | 本地服务、项目和线程生命周期、事件投影与重放、SQLite 持久化。 |
+| `omini-server` | 本地服务、项目和线程生命周期、事件投影与重放、持久化业务层。 |
 | `omini-runtime-contract` | 服务端与核心之间的命令、事件、快照和持久化请求。 |
+| `omini-entity` | SQLite 实体声明（一文件一模型，toasty ORM）、领域枚举原生落库、建库与连接、大内容 sidecar 机制。 |
 | `omini-core` | Agent 执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
 | `omini-model` | Provider 对话上下文的消息、角色和内容块；不代表用户可见的会话时间线。 |
 | `omini-config` | 用户和项目配置，以及 Omini 管理的文件路径。 |
@@ -36,7 +37,9 @@ omini-cli / omini-tui
 - `omini-domain` 只承载共享词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
 - 会话时间线使用 `ConversationEntry`，原始 `UserInput`、助手消息和系统事件分别建模；Provider 上下文独立使用 `omini-model::Message`。
 - Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
-- SQLite、事务、事件重放和持久化投影归服务端；核心事件只表达领域事实。
+- 持久化分两层：`omini-entity` 声明"数据长什么样"（模型即 schema 的单一权威，经 `push_schema` 建库）；`omini-server` 的 store 层用 toasty 查询 API 组合模型并承载业务策略（幂等闸门、投递结算、启动恢复、线程树删除）。核心事件只表达领域事实。
+- `omini-entity` 的模型即领域类型：状态/种类列直接使用领域枚举（`toasty::Embed` 原生落库），无平行 DTO 与转换层；数据库层无外键与级联，引用完整性由 server 创建边界校验、树删除由业务层在事务内显式完成。
+- 持久化假设同一数据库文件只有单个 daemon 进程写入：业务层的读-判-写模式（上下文版本、归档、初始标题）在单连接池上等价于旧的单条条件 UPDATE。
 - 服务端通过核心公开的项目/线程能力工作，不依赖核心内部的 Skill、任务、工具或引擎模块。
 
 ### TUI 内部边界

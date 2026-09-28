@@ -263,6 +263,7 @@ mod tests {
     use crate::runtime::history;
     use crate::runtime::manual_compact::persist_compact_summary_event;
     use crate::types::events::EngineToRuntimeEvent;
+    use jiff::Timestamp;
     use omini_config::project::{ProjectsDir, ThreadDir};
     use omini_config::{RawConfig, ResolvedConfig, Settings};
     use omini_domain::conversation::TaskNotification;
@@ -1458,7 +1459,7 @@ thinking = true
                     status: TaskStatus::Completed,
                     summary: None,
                 }],
-                created_at: chrono::Utc::now(),
+                created_at: Timestamp::now(),
             };
             let (ack, result) = tokio::sync::oneshot::channel();
             engine_tx
@@ -1531,7 +1532,7 @@ thinking = true
             }
         });
         let manager = runtime.task_supervisor.task_manager();
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         manager
             .register(
                 omini_domain::task::TaskInfo {

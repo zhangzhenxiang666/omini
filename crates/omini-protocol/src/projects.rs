@@ -18,10 +18,10 @@ pub struct ProjectSummary {
     pub path: String,
     pub storage_key: String,
     pub path_status: ProjectPathStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_opened_at: Option<DateTime<Utc>>,
+    pub last_opened_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

@@ -63,6 +63,7 @@ async fn delete_thread_tree_cleans_rows_and_files() {
         sha256: "0".repeat(64),
         relative_path: "assets/fixture.png".to_string(),
         created_at: fixed_time(),
+        thread: Default::default(),
     })
     .await
     .unwrap();

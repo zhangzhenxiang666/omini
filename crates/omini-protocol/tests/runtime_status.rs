@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use omini_protocol::{
     ActiveProfile, AgentSummary, PlanSubmittedEvent, ServerEnvelope, SkillSourceKind,
     ThreadRuntimeActivity, ThreadRuntimeActivityKind, ThreadRuntimeCapabilityStatus,
@@ -256,10 +256,8 @@ fn active_status() -> ThreadRuntimeStatus {
     }
 }
 
-fn fixed_time() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
-        .unwrap()
-        .with_timezone(&Utc)
+fn fixed_time() -> Timestamp {
+    "2024-01-02T03:04:05Z".parse().unwrap()
 }
 
 fn assert_data_error<T>(value: Value, reason: &str)

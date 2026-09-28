@@ -1,5 +1,5 @@
 use crate::event::bridge::thread_runtime_skills_from_runtime_snapshot;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::collections::HashMap;
@@ -8,13 +8,13 @@ use std::collections::HashMap;
 struct RuntimeToolActivity {
     tool_use_id: String,
     tool_name: String,
-    started_at: DateTime<Utc>,
+    started_at: Timestamp,
     source_thread_id: Option<String>,
     source_agent_label: Option<String>,
 }
 
 impl RuntimeToolActivity {
-    fn to_protocol(&self, now: DateTime<Utc>) -> client_proto::ThreadRuntimeTool {
+    fn to_protocol(&self, now: Timestamp) -> client_proto::ThreadRuntimeTool {
         client_proto::ThreadRuntimeTool {
             tool_use_id: self.tool_use_id.clone(),
             tool_name: self.tool_name.clone(),
@@ -50,9 +50,9 @@ struct RuntimeAgentTaskContext {
 pub struct RuntimeStatusProjection {
     // active profile 不落入持久化消息；新连接只能从运行态投影拿到当前值。
     active_profile: runtime_contract::thread_domain::ActiveProfile,
-    query_started_at: Option<DateTime<Utc>>,
-    compact_started_at: Option<DateTime<Utc>>,
-    query_pause_started_at: Option<DateTime<Utc>>,
+    query_started_at: Option<Timestamp>,
+    compact_started_at: Option<Timestamp>,
+    query_pause_started_at: Option<Timestamp>,
     query_paused_ms: u64,
     query_state: client_proto::ThreadRuntimeState,
     pending_pauses: HashMap<String, RuntimePendingPause>,
@@ -71,7 +71,7 @@ pub struct RuntimeStatusSnapshotContext {
     // Core 只暴露 MCP 运行态快照；wire DTO 投影由 server 边界负责。
     pub mcp_servers: Vec<runtime_contract::mcp::RuntimeMcpServerSnapshot>,
     pub subagent_threads: Vec<client_proto::AgentSummary>,
-    pub now: DateTime<Utc>,
+    pub now: Timestamp,
     pub git_branch: Option<String>,
 }
 
@@ -85,7 +85,7 @@ impl RuntimeStatusProjection {
         }
     }
 
-    pub fn record_event(&mut self, event: &omini_protocol::RuntimeEvent, now: DateTime<Utc>) {
+    pub fn record_event(&mut self, event: &omini_protocol::RuntimeEvent, now: Timestamp) {
         match &event.event {
             client_proto::TypedRuntimeEvent::ActiveProfileChanged(event) => {
                 self.active_profile = event.profile.into();
@@ -170,7 +170,7 @@ impl RuntimeStatusProjection {
         }
     }
 
-    fn start_query(&mut self, now: DateTime<Utc>) {
+    fn start_query(&mut self, now: Timestamp) {
         self.query_started_at = Some(now);
         self.compact_started_at = None;
         self.query_pause_started_at = None;
@@ -211,7 +211,7 @@ impl RuntimeStatusProjection {
     fn record_tool_use(
         &mut self,
         tool_use: &client_proto::ToolUseBlock,
-        now: DateTime<Utc>,
+        now: Timestamp,
         source_thread_id: Option<String>,
         source_agent_label: Option<String>,
     ) {
@@ -229,7 +229,7 @@ impl RuntimeStatusProjection {
         &mut self,
         tool_use_id: &str,
         tool_name: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
         source_thread_id: Option<String>,
         source_agent_label: Option<String>,
     ) -> RuntimeToolActivity {
@@ -249,7 +249,7 @@ impl RuntimeStatusProjection {
         &mut self,
         thread_id: &str,
         tool_use: &client_proto::ToolUseBlock,
-        now: DateTime<Utc>,
+        now: Timestamp,
         agent_label: Option<String>,
     ) {
         let activity_key = format!("{thread_id}:{}", tool_use.id);
@@ -267,7 +267,7 @@ impl RuntimeStatusProjection {
         self.active_tools.remove(tool_use_id);
     }
 
-    fn record_tool_pause(&mut self, request: &client_proto::ToolPauseRequest, now: DateTime<Utc>) {
+    fn record_tool_pause(&mut self, request: &client_proto::ToolPauseRequest, now: Timestamp) {
         if self.query_started_at.is_some()
             && self.pending_pauses.is_empty()
             && self.query_pause_started_at.is_none()
@@ -292,14 +292,14 @@ impl RuntimeStatusProjection {
         );
     }
 
-    fn finish_pause(&mut self, tool_use_id: &str, now: DateTime<Utc>) {
+    fn finish_pause(&mut self, tool_use_id: &str, now: Timestamp) {
         let removed = self.pending_pauses.remove(tool_use_id).is_some();
         if removed && self.pending_pauses.is_empty() {
             self.resume_query_timer(now);
         }
     }
 
-    fn resume_query_timer(&mut self, now: DateTime<Utc>) {
+    fn resume_query_timer(&mut self, now: Timestamp) {
         let Some(paused_at) = self.query_pause_started_at.take() else {
             return;
         };
@@ -311,7 +311,7 @@ impl RuntimeStatusProjection {
     fn record_agent_task_event(
         &mut self,
         event: &client_proto::AgentTaskEventEnvelope,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) {
         match &event.payload {
             client_proto::AgentTaskEvent::Started { agent, .. } => {
@@ -367,7 +367,7 @@ impl RuntimeStatusProjection {
         }
     }
 
-    fn activity(&self, now: DateTime<Utc>) -> Option<client_proto::ThreadRuntimeActivity> {
+    fn activity(&self, now: Timestamp) -> Option<client_proto::ThreadRuntimeActivity> {
         if let Some(started_at) = self.compact_started_at {
             Some(client_proto::ThreadRuntimeActivity {
                 kind: client_proto::ThreadRuntimeActivityKind::Compact,
@@ -402,7 +402,7 @@ impl RuntimeStatusProjection {
             .unwrap_or(true)
     }
 
-    fn query_elapsed_ms(&self, started_at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
+    fn query_elapsed_ms(&self, started_at: Timestamp, now: Timestamp) -> u64 {
         let active_pause_ms = self
             .query_pause_started_at
             .map(|paused_at| elapsed_ms(paused_at, now))
@@ -460,10 +460,8 @@ fn runtime_mcp_server_status_to_protocol(
     }
 }
 
-fn elapsed_ms(started_at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
-    now.signed_duration_since(started_at)
-        .num_milliseconds()
-        .max(0) as u64
+fn elapsed_ms(started_at: Timestamp, now: Timestamp) -> u64 {
+    now.duration_since(started_at).as_millis().max(0) as u64
 }
 
 pub fn plan_submitted_payload(
@@ -490,18 +488,18 @@ pub fn plan_approval_resolved_plan_id(event: &client_proto::RuntimeEvent) -> Opt
 
 #[cfg(test)]
 mod tests {
+    use jiff::SignedDuration;
     use std::path::PathBuf;
 
     use super::*;
     use crate::event::replay::SequencedRuntimeEvent;
-    use chrono::TimeZone;
     use omini_model::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::mcp::RuntimeMcpToolSnapshot;
     use omini_runtime_contract::thread_domain as event_types;
 
-    fn fixed_time() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
-            .single()
+    fn fixed_time() -> Timestamp {
+        "2026-08-20T00:00:00Z"
+            .parse()
             .expect("fixed test time should be valid")
     }
 
@@ -581,7 +579,7 @@ mod tests {
 
     fn status_snapshot(
         projection: &RuntimeStatusProjection,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> client_proto::ThreadRuntimeStatus {
         projection.to_protocol(
             "s1",
@@ -674,7 +672,7 @@ mod tests {
         let started_at = fixed_time();
 
         projection.record_event(&sequenced(1, "run_started").event, started_at);
-        let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(42));
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(42));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Thinking);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.kind),
@@ -705,9 +703,9 @@ mod tests {
 
         projection.record_event(
             &tool_pause_event("tool_1"),
-            started_at + chrono::Duration::milliseconds(50),
+            started_at + SignedDuration::from_millis(50),
         );
-        let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(70));
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(70));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(status.pending_pauses.len(), 1);
         assert_eq!(
@@ -717,12 +715,9 @@ mod tests {
 
         projection.record_event(
             &tool_result_event("tool_1"),
-            started_at + chrono::Duration::milliseconds(90),
+            started_at + SignedDuration::from_millis(90),
         );
-        let status = status_snapshot(
-            &projection,
-            started_at + chrono::Duration::milliseconds(120),
-        );
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(120));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Working);
         assert!(status.pending_pauses.is_empty());
         assert_eq!(
@@ -797,14 +792,14 @@ mod tests {
         projection.record_event(&sequenced(1, "run_started").event, started_at);
         projection.record_event(
             &tool_pause_event("tool_1"),
-            started_at + chrono::Duration::milliseconds(10),
+            started_at + SignedDuration::from_millis(10),
         );
         projection.record_event(
             &tool_pause_event("tool_2"),
-            started_at + chrono::Duration::milliseconds(20),
+            started_at + SignedDuration::from_millis(20),
         );
 
-        let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(50));
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(50));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -813,9 +808,9 @@ mod tests {
 
         projection.record_event(
             &tool_result_event("tool_1"),
-            started_at + chrono::Duration::milliseconds(60),
+            started_at + SignedDuration::from_millis(60),
         );
-        let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(70));
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(70));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Waiting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -824,12 +819,9 @@ mod tests {
 
         projection.record_event(
             &tool_result_event("tool_2"),
-            started_at + chrono::Duration::milliseconds(80),
+            started_at + SignedDuration::from_millis(80),
         );
-        let status = status_snapshot(
-            &projection,
-            started_at + chrono::Duration::milliseconds(100),
-        );
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(100));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Working);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.elapsed_ms),
@@ -855,7 +847,7 @@ mod tests {
             started_at,
         );
 
-        let status = status_snapshot(&projection, started_at + chrono::Duration::milliseconds(7));
+        let status = status_snapshot(&projection, started_at + SignedDuration::from_millis(7));
         assert_eq!(status.state, client_proto::ThreadRuntimeState::Compacting);
         assert_eq!(
             status.activity.as_ref().map(|activity| activity.kind),

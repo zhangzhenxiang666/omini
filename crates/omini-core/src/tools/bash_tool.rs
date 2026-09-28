@@ -1,7 +1,7 @@
 use super::{Tool, ToolExecutionContext, ToolPolicy, ToolResult};
 use crate::tasks::{BackgroundTaskReservation, TaskCancellation, TaskManager};
 use async_trait::async_trait;
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_domain::task::{TaskInfo, TaskKind, TaskOutputDelta, TaskOutputStream, TaskStatus};
 use omini_runtime_contract::thread_domain::{BashPermissionPreview, PermissionPreview};
 use schemars::JsonSchema;
@@ -124,7 +124,7 @@ impl Tool for BashTool {
             && manager.is_some();
         let task_id = ctx.tool_use_id.clone();
         let started_at = Instant::now();
-        let started_at_utc = Utc::now();
+        let started_at_utc = Timestamp::now();
         let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(30)));
         let mut background_attempted = false;
         let mut output = OutputTail::default();
@@ -168,7 +168,7 @@ impl Tool for BashTool {
                         title: task_title(&input),
                         status: TaskStatus::Running,
                         created_at: started_at_utc,
-                        updated_at: Utc::now(),
+                        updated_at: Timestamp::now(),
                         completed_at: None,
                         result_summary: None,
                     };

@@ -1,14 +1,30 @@
-use super::*;
+use super::Store;
+use super::context::next_llm_ordinal;
+use super::messages::{NewUiJson, insert_ui_json};
+use crate::store::StoreError;
+use jiff::Timestamp;
+use omini_config::project::ThreadDir;
+use omini_domain::agent_run::AgentRunStatus;
 use omini_domain::conversation::{ConversationEntry, UserInput};
 use omini_domain::input::{InputPart, UserInputIntent};
+use omini_domain::task::TaskStatus;
+use omini_entity::{
+    AgentRun, AgentTask, BackgroundTask, LlmMessage, Message, MessageKind, Thread,
+    thread_from_runtime,
+};
+use omini_model::message::Role;
+use omini_runtime_contract::persistence::ThreadRecord;
+use omini_runtime_contract::thread_domain::{AgentTaskInfo, AgentTaskResult};
 
-impl Database {
+impl Store {
+    /// 创建子 Agent 任务:子线程、任务投影、Run、初始 UI 消息与模型上下文
+    /// 必须原子落库,保持与原事务内 7 条 INSERT 一一对应。
     pub async fn create_agent_task(
         &self,
         project_id: &str,
         task: &AgentTaskInfo,
         thread: &ThreadRecord,
-        initial_message: &Message,
+        initial_message: &omini_model::message::Message,
     ) -> Result<(), StoreError> {
         let thread = thread_from_runtime(project_id, thread);
         let initial_content = serde_json::to_string(&initial_message.content)?;
@@ -27,148 +43,116 @@ impl Database {
             }],
             attachments: Vec::new(),
         }))?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO thread(
-                    id,
-                    project_id,
-                    parent_thread_id,
-                    spawn_tool_use_id,
-                    thread_type,
-                    agent_label,
-                    provider,
-                    model,
-                    thinking_effort,
-                    title,
-                    current_context_tokens,
-                    total_tokens,
-                    total_cached_tokens,
-                    llm_context_version,
-                    created_at,
-                    updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&thread.id)
-        .bind(&thread.project_id)
-        .bind(&thread.parent_thread_id)
-        .bind(&thread.spawn_tool_use_id)
-        .bind(&thread.thread_type)
-        .bind(&thread.agent_label)
-        .bind(&thread.provider)
-        .bind(&thread.model)
-        .bind(&thread.thinking_effort)
-        .bind(&thread.title)
-        .bind(thread.current_context_tokens)
-        .bind(thread.total_tokens)
-        .bind(thread.total_cached_tokens)
-        .bind(thread.llm_context_version)
-        .bind(thread.created_at)
-        .bind(thread.updated_at)
-        .execute(&mut *tx)
+        let mut conn = self.conn();
+        let mut tx = conn.transaction().await?;
+        // 引用完整性由本层在创建边界保证(模型 schema 无数据库外键):
+        // owner 线程与显式给出的父线程/父任务/父 Run 必须存在,缺失即整体回滚,
+        // 与旧 schema 的外键拒绝语义一致。
+        ensure_thread_exists(&mut tx, &task.owner_thread_id).await?;
+        ensure_thread_exists(&mut tx, &task.parent_thread_id).await?;
+        if let Some(parent_task_id) = &task.parent_task_id {
+            ensure_task_exists(&mut tx, parent_task_id).await?;
+        }
+        if let Some(parent_run_id) = &task.parent_run_id {
+            ensure_run_exists(&mut tx, parent_run_id).await?;
+        }
+        toasty::create!(Thread {
+            id: thread.id.clone(),
+            project_id: thread.project_id.clone(),
+            parent_thread_id: thread.parent_thread_id.clone(),
+            spawn_tool_use_id: thread.spawn_tool_use_id.clone(),
+            thread_type: thread.thread_type.clone(),
+            agent_label: thread.agent_label.clone(),
+            provider: thread.provider.clone(),
+            model: thread.model.clone(),
+            thinking_effort: thread.thinking_effort.clone(),
+            title: thread.title.clone(),
+            current_context_tokens: thread.current_context_tokens,
+            total_tokens: thread.total_tokens,
+            total_cached_tokens: thread.total_cached_tokens,
+            llm_context_version: thread.llm_context_version,
+            created_at: thread.created_at,
+            updated_at: thread.updated_at,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO background_task(
-                task_id, owner_thread_id, kind, title, status, result_summary,
-                created_at, updated_at, completed_at
-            ) VALUES (?, ?, 'sub_agent', ?, ?, NULL, ?, ?, NULL)",
-        )
-        .bind(&task.task_id)
-        .bind(&task.owner_thread_id)
-        .bind(&task.title)
-        .bind(task_status_for_generic(task.status))
-        .bind(task.created_at)
-        .bind(task.updated_at)
-        .execute(&mut *tx)
+        toasty::create!(BackgroundTask {
+            task_id: task.task_id.clone(),
+            owner_thread_id: task.owner_thread_id.clone(),
+            kind: omini_domain::task::TaskKind::SubAgent,
+            title: task.title.clone(),
+            status: task.status,
+            result_summary: None,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            completed_at: None,
+            notification_delivered: false,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO agent_task(
-                    task_id,
-                    owner_thread_id,
-                    agent_thread_id,
-                    parent_run_id,
-                    parent_task_id,
-                    parent_thread_id,
-                    spawn_tool_use_id,
-                    depth,
-                    execution_mode,
-                    status,
-                    agent_name,
-                    title,
-                    result_json,
-                    created_at,
-                    updated_at,
-                    completed_at,
-                    notification_delivered
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL, 0)",
-        )
-        .bind(&task.task_id)
-        .bind(&task.owner_thread_id)
-        .bind(&task.thread_id)
-        .bind(&task.parent_run_id)
-        .bind(&task.parent_task_id)
-        .bind(&task.parent_thread_id)
-        .bind(&task.spawn_tool_use_id)
-        .bind(i64::from(task.depth))
-        .bind(task.execution_mode.as_str())
-        .bind(task.status.as_str())
-        .bind(&task.agent)
-        .bind(&task.title)
-        .bind(task.created_at)
-        .bind(task.updated_at)
-        .execute(&mut *tx)
+        toasty::create!(AgentTask {
+            task_id: task.task_id.clone(),
+            owner_thread_id: task.owner_thread_id.clone(),
+            agent_thread_id: task.thread_id.clone(),
+            parent_run_id: task.parent_run_id.clone(),
+            parent_task_id: task.parent_task_id.clone(),
+            parent_thread_id: task.parent_thread_id.clone(),
+            spawn_tool_use_id: task.spawn_tool_use_id.clone(),
+            depth: i64::from(task.depth),
+            execution_mode: task.execution_mode,
+            status: task.status,
+            agent_name: task.agent.clone(),
+            title: task.title.clone(),
+            result_json: None,
+            created_at: task.created_at,
+            updated_at: task.updated_at,
+            completed_at: None,
+            notification_delivered: false,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO agent_run(id, thread_id, parent_run_id, status, created_at, started_at, finished_at, total_tokens, archived_at)
-             VALUES (?, ?, ?, 'running', ?, ?, NULL, 0, NULL)",
-        )
-        .bind(&task.task_id)
-        .bind(&task.thread_id)
-        .bind(&task.parent_run_id)
-        .bind(task.created_at)
-        .bind(task.created_at)
-        .execute(&mut *tx)
+        toasty::create!(AgentRun {
+            id: task.task_id.clone(),
+            thread_id: task.thread_id.clone(),
+            parent_run_id: task.parent_run_id.clone(),
+            status: AgentRunStatus::Running,
+            created_at: task.created_at,
+            started_at: Some(task.created_at),
+            finished_at: None,
+            total_tokens: 0,
+            archived_at: None,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO messages(thread_id, role, model_ref, content, kind, created_at)
-             VALUES (?, 'user', NULL, ?, 'conversation_entry', ?)",
-        )
-        .bind(&task.thread_id)
-        .bind(initial_entry)
-        .bind(task.created_at)
-        .execute(&mut *tx)
+        toasty::create!(Message {
+            thread_id: task.thread_id.clone(),
+            role: Role::User,
+            model_ref: None,
+            content: initial_entry,
+            kind: MessageKind::ConversationEntry,
+            created_at: task.created_at,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO messages(
-                    thread_id,
-                    role,
-                    model_ref,
-                    content,
-                    kind,
-                    created_at
-                )
-                VALUES (?, 'user', NULL, ?, 'normal', ?)",
-        )
-        .bind(&task.thread_id)
-        .bind(&initial_content)
-        .bind(task.created_at)
-        .execute(&mut *tx)
+        toasty::create!(Message {
+            thread_id: task.thread_id.clone(),
+            role: Role::User,
+            model_ref: None,
+            content: initial_content.clone(),
+            kind: MessageKind::Normal,
+            created_at: task.created_at,
+        })
+        .exec(&mut tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO llm_messages(
-                    thread_id,
-                    context_version,
-                    ordinal,
-                    role,
-                    content,
-                    created_at)
-                VALUES (?, 1, 0, 'user', ?, ?)",
-        )
-        .bind(&task.thread_id)
-        .bind(initial_content)
-        .bind(task.created_at)
-        .execute(&mut *tx)
+        toasty::create!(LlmMessage {
+            thread_id: task.thread_id.clone(),
+            context_version: 1,
+            ordinal: 0,
+            role: Role::User,
+            content: initial_content,
+            created_at: task.created_at,
+        })
+        .exec(&mut tx)
         .await?;
         tx.commit().await?;
         Ok(())
@@ -178,216 +162,268 @@ impl Database {
         &self,
         owner_thread_id: &str,
     ) -> Result<Vec<AgentTask>, StoreError> {
-        let rows = sqlx::query_as::<_, AgentTaskRow>(
-            "SELECT * FROM agent_task WHERE owner_thread_id = ? ORDER BY created_at, task_id",
+        let mut db = self.conn();
+        Ok(
+            AgentTask::filter(AgentTask::fields().owner_thread_id().eq(owner_thread_id))
+                .order_by((
+                    AgentTask::fields().created_at().asc(),
+                    AgentTask::fields().task_id().asc(),
+                ))
+                .exec(&mut db)
+                .await?,
         )
-        .bind(owner_thread_id)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.into_iter().map(TryInto::try_into).collect()
     }
 
-    /// 按主线程归属查找子任务，避免将子线程 ID 误当作主线程 ID 查询 Run。
+    /// 按主线程归属查找子任务,避免将子线程 ID 误当作主线程 ID 查询 Run。
     pub async fn get_owned_task(
         &self,
         owner_thread_id: &str,
         task_id: &str,
     ) -> Result<Option<AgentTask>, StoreError> {
-        sqlx::query_as::<_, AgentTaskRow>(
-            "SELECT * FROM agent_task WHERE owner_thread_id = ? AND task_id = ?",
-        )
-        .bind(owner_thread_id)
-        .bind(task_id)
-        .fetch_optional(&self.pool)
-        .await?
-        .map(TryInto::try_into)
-        .transpose()
+        let mut db = self.conn();
+        Ok(AgentTask::filter_by_task_id(task_id)
+            .first()
+            .exec(&mut db)
+            .await?
+            .filter(|row| row.owner_thread_id == owner_thread_id))
     }
+
+    /// 任务终态同时结算 agent_task、background_task 与对应 Run 三处投影,
+    /// 三条写入在同一事务内提交。
     pub async fn finish_agent_task(
         &self,
         task_id: &str,
         status: TaskStatus,
         result: &AgentTaskResult,
-        completed_at: DateTime<Utc>,
+        completed_at: Timestamp,
     ) -> Result<(), StoreError> {
-        sqlx::query(
-            "UPDATE agent_task SET
-                    status = ?,
-                    result_json = ?,
-                    updated_at = ?,
-                    completed_at = ?
-                WHERE task_id = ?",
-        )
-        .bind(status.as_str())
-        .bind(serde_json::to_string(result)?)
-        .bind(completed_at)
-        .bind(completed_at)
-        .bind(task_id)
-        .execute(&self.pool)
-        .await?;
-        sqlx::query(
-            "UPDATE background_task SET status = ?, result_summary = ?, updated_at = ?, completed_at = ? WHERE task_id = ?",
-        )
-        .bind(task_status_for_generic(status))
-        .bind(&result.output)
-        .bind(completed_at)
-        .bind(completed_at)
-        .bind(task_id)
-        .execute(&self.pool)
-        .await?;
+        let result_json = serde_json::to_string(result)?;
+        let mut conn = self.conn();
+        let mut tx = conn.transaction().await?;
+        if let Some(mut task) = AgentTask::filter_by_task_id(task_id)
+            .first()
+            .exec(&mut tx)
+            .await?
+        {
+            toasty::update!(task {
+                status,
+                result_json: Some(result_json.clone()),
+                updated_at: completed_at,
+                completed_at: Some(completed_at),
+            })
+            .exec(&mut tx)
+            .await?;
+        }
+        if let Some(mut background) = BackgroundTask::filter_by_task_id(task_id)
+            .first()
+            .exec(&mut tx)
+            .await?
+        {
+            toasty::update!(background {
+                status,
+                result_summary: result.output.clone(),
+                updated_at: completed_at,
+                completed_at: Some(completed_at),
+            })
+            .exec(&mut tx)
+            .await?;
+        }
         let run_status = match status {
-            TaskStatus::Running | TaskStatus::Cancelling => "running",
-            TaskStatus::Completed => "completed",
-            TaskStatus::Failed => "failed",
-            TaskStatus::Cancelled => "cancelled",
-            TaskStatus::Interrupted => "interrupted",
+            TaskStatus::Running | TaskStatus::Cancelling => AgentRunStatus::Running,
+            TaskStatus::Completed => AgentRunStatus::Completed,
+            TaskStatus::Failed => AgentRunStatus::Failed,
+            TaskStatus::Cancelled => AgentRunStatus::Cancelled,
+            TaskStatus::Interrupted => AgentRunStatus::Interrupted,
         };
-        sqlx::query("UPDATE agent_run SET status = ?, finished_at = ? WHERE id = ?")
-            .bind(run_status)
-            .bind(completed_at)
-            .bind(task_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn set_agent_tasks_cancelling(
-        &self,
-        task_ids: &[String],
-        updated_at: DateTime<Utc>,
-    ) -> Result<(), StoreError> {
-        let mut tx = self.pool.begin().await?;
-        for task_id in task_ids {
-            sqlx::query(
-                "UPDATE agent_task SET
-                status = 'cancelling',
-                updated_at = ?
-                WHERE task_id = ? AND status = 'running'",
-            )
-            .bind(updated_at)
-            .bind(task_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE background_task SET status = 'cancelling', updated_at = ? WHERE task_id = ? AND status = 'running'",
-            )
-            .bind(updated_at)
-            .bind(task_id)
-            .execute(&mut *tx)
+        if let Some(mut run) = AgentRun::filter_by_id(task_id)
+            .first()
+            .exec(&mut tx)
+            .await?
+        {
+            toasty::update!(run {
+                status: run_status,
+                finished_at: Some(completed_at),
+            })
+            .exec(&mut tx)
             .await?;
         }
         tx.commit().await?;
         Ok(())
     }
 
+    /// 仅 running 状态的任务转入 cancelling;条件更新保持在事务内原子完成。
+    pub async fn set_agent_tasks_cancelling(
+        &self,
+        task_ids: &[String],
+        updated_at: Timestamp,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.conn();
+        let mut tx = conn.transaction().await?;
+        for task_id in task_ids {
+            if let Some(mut task) = AgentTask::filter_by_task_id(task_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                && task.status == TaskStatus::Running
+            {
+                toasty::update!(task {
+                    status: TaskStatus::Cancelling,
+                    updated_at: updated_at,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
+            if let Some(mut background) = BackgroundTask::filter_by_task_id(task_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                && background.status == TaskStatus::Running
+            {
+                toasty::update!(background {
+                    status: TaskStatus::Cancelling,
+                    updated_at: updated_at,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 任务完成通知幂等落库:仅在存在未投递通知的任务时写入 UI 与模型上下文。
+    /// 闸门判定、两条插入与置位在同一事务内完成。
     pub async fn insert_task_notification(
         &self,
         owner_thread_id: &str,
         notification: &omini_domain::conversation::TaskNotification,
-        llm_message: &Message,
+        llm_message: &omini_model::message::Message,
         task_ids: &[String],
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
+        thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
-        let mut tx = self.pool.begin().await?;
-        let mut has_pending_task = false;
-        for task_id in task_ids {
-            let pending: bool = sqlx::query_scalar(
-                "SELECT EXISTS(
-                    SELECT 1 FROM background_task
-                    WHERE task_id = ? AND notification_delivered = 0
-                )",
-            )
-            .bind(task_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            has_pending_task |= pending;
-        }
+        let mut conn = self.conn();
+        let mut tx = conn.transaction().await?;
+        let has_pending_task = BackgroundTask::filter(
+            BackgroundTask::fields()
+                .task_id()
+                .in_list(task_ids.to_vec())
+                .and(BackgroundTask::fields().notification_delivered().eq(false)),
+        )
+        .first()
+        .exec(&mut tx)
+        .await?
+        .is_some();
         if !has_pending_task {
             tx.commit().await?;
             return Ok(());
         }
 
-        let notification_json =
-            serde_json::to_string(&omini_domain::conversation::ConversationEntry::SystemEvent(
-                omini_domain::conversation::SystemEvent::TaskNotification(notification.clone()),
-            ))?;
-        let model_ref: String =
-            sqlx::query_scalar("SELECT provider || '/' || model FROM thread WHERE id = ?")
-                .bind(owner_thread_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let owner = Thread::filter_by_id(owner_thread_id)
+            .first()
+            .exec(&mut tx)
+            .await?
+            .ok_or_else(|| StoreError::MissingRow(format!("thread '{owner_thread_id}'")))?;
+        let model_ref = format!("{}/{}", owner.provider, owner.model);
+        let notification_json = serde_json::to_string(&ConversationEntry::SystemEvent(
+            omini_domain::conversation::SystemEvent::TaskNotification(notification.clone()),
+        ))?;
+        // UI 消息经统一的 sidecar 路径写入,与其它会话条目一致;
+        // 与后续插入、置位同事务,保持闸门原子性。
+        insert_ui_json(
+            NewUiJson {
+                thread_id: owner_thread_id,
+                role: Role::Assistant,
+                model_ref: Some(&model_ref),
+                content: &notification_json,
+                kind: MessageKind::ConversationEntry,
+                created_at,
+            },
+            thread_dir,
+            &mut tx,
+        )
+        .await?;
+        let version = owner.llm_context_version;
+        let ordinal = next_llm_ordinal(&mut tx, owner_thread_id, version).await?;
         let llm_json = serde_json::to_string(&llm_message.content)?;
-        sqlx::query(
-            "INSERT INTO messages(
-                    thread_id,
-                    role,
-                    model_ref,
-                    content,
-                    kind,
-                    created_at
-                )
-                VALUES (?, 'assistant', ?, ?, 'conversation_entry', ?)",
-        )
-        .bind(owner_thread_id)
-        .bind(model_ref)
-        .bind(notification_json)
-        .bind(created_at)
-        .execute(&mut *tx)
-        .await?;
-        let version: i64 =
-            sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
-                .bind(owner_thread_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let ordinal: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM llm_messages WHERE thread_id = ? AND context_version = ?",
-        )
-        .bind(owner_thread_id)
-        .bind(version)
-        .fetch_one(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO llm_messages(
-                    thread_id,
-                    context_version,
-                    ordinal,
-                    role,
-                    content,
-                    created_at
-                )
-                VALUES (?, ?, ?, 'user', ?, ?)",
-        )
-        .bind(owner_thread_id)
-        .bind(version)
-        .bind(ordinal)
-        .bind(llm_json)
-        .bind(created_at)
-        .execute(&mut *tx)
+        toasty::create!(LlmMessage {
+            thread_id: owner_thread_id.to_string(),
+            context_version: version,
+            ordinal,
+            role: Role::User,
+            content: llm_json,
+            created_at: created_at,
+        })
+        .exec(&mut tx)
         .await?;
         for task_id in task_ids {
-            sqlx::query(
-                "UPDATE background_task SET notification_delivered = 1, updated_at = ? WHERE task_id = ? AND notification_delivered = 0",
-            )
-            .bind(created_at)
-            .bind(task_id)
-            .execute(&mut *tx)
-            .await?;
-            sqlx::query(
-                "UPDATE agent_task SET
-                        notification_delivered = 1,
-                        updated_at = ?
-                    WHERE task_id = ? AND notification_delivered = 0",
-            )
-            .bind(created_at)
-            .bind(task_id)
-            .execute(&mut *tx)
-            .await?;
+            if let Some(mut background) = BackgroundTask::filter_by_task_id(task_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                && !background.notification_delivered
+            {
+                toasty::update!(background {
+                    notification_delivered: true,
+                    updated_at: created_at,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
+            if let Some(mut task) = AgentTask::filter_by_task_id(task_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                && !task.notification_delivered
+            {
+                toasty::update!(task {
+                    notification_delivered: true,
+                    updated_at: created_at,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
         }
         tx.commit().await?;
         Ok(())
     }
 }
 
-fn task_status_for_generic(status: TaskStatus) -> &'static str {
-    status.as_str()
+/// 断言线程存在;缺失按内部数据错误处理(事务随返回回滚)。
+async fn ensure_thread_exists(
+    executor: &mut impl toasty::db::Executor,
+    thread_id: &str,
+) -> Result<(), StoreError> {
+    Thread::filter_by_id(thread_id)
+        .first()
+        .exec(executor)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| StoreError::MissingRow(format!("thread '{thread_id}'")))
+}
+
+/// 断言子任务存在。
+async fn ensure_task_exists(
+    executor: &mut impl toasty::db::Executor,
+    task_id: &str,
+) -> Result<(), StoreError> {
+    AgentTask::filter_by_task_id(task_id)
+        .first()
+        .exec(executor)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| StoreError::MissingRow(format!("agent task '{task_id}'")))
+}
+
+/// 断言 Run 存在。
+async fn ensure_run_exists(
+    executor: &mut impl toasty::db::Executor,
+    run_id: &str,
+) -> Result<(), StoreError> {
+    AgentRun::filter_by_id(run_id)
+        .first()
+        .exec(executor)
+        .await?
+        .map(|_| ())
+        .ok_or_else(|| StoreError::MissingRow(format!("agent run '{run_id}'")))
 }

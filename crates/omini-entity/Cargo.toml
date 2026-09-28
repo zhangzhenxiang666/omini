@@ -1,0 +1,22 @@
+[package]
+name = "omini-entity"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base64.workspace = true
+jiff.workspace = true
+omini-config.workspace = true
+omini-domain.workspace = true
+omini-model.workspace = true
+omini-runtime-contract.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+toasty-driver-sqlite.workspace = true
+toasty.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

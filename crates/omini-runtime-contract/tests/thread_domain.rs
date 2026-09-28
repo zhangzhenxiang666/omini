@@ -1,4 +1,4 @@
-use chrono::{DateTime, TimeZone, Utc};
+use jiff::Timestamp;
 use omini_domain::conversation::ConversationEntry;
 use omini_domain::task::TaskStatus;
 use omini_runtime_contract::thread_domain::{
@@ -579,8 +579,6 @@ fn thread_summary() -> ThreadSummary {
     }
 }
 
-fn fixed_time() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 8, 12, 0, 0, 0)
-        .single()
-        .expect("fixed test time should be valid")
+fn fixed_time() -> Timestamp {
+    "2026-08-12T00:00:00Z".parse::<jiff::Timestamp>().unwrap()
 }

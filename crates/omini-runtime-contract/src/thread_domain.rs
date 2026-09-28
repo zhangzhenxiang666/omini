@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::conversation::{ConversationEntry, ProposedPlan, UserInput};
 use omini_domain::task::TaskStatus;
@@ -75,7 +75,7 @@ impl Notification {
 
 pub const MAX_AGENT_DEPTH: u8 = 2;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentTaskExecutionMode {
     Background,
@@ -122,10 +122,10 @@ pub struct AgentTaskInfo {
     pub status: TaskStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<AgentTaskResult>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     #[serde(default)]
     pub notification_delivered: bool,
 }
@@ -301,8 +301,8 @@ pub struct ThreadSummary {
     pub title: String,
     pub model: String,
     pub provider: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_state: Option<ThreadRuntimeState>,
 }

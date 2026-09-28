@@ -1,8 +1,8 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
     Queued,
@@ -26,9 +26,17 @@ impl AgentRunStatus {
             Self::Interrupted => "interrupted",
         }
     }
+
+    /// 是否为不可再变更的终态;归档等操作仅对终态 Run 开放。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Interrupted
+        )
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStepStatus {
     Running,
@@ -52,7 +60,7 @@ impl AgentStepStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolUseStatus {
     Pending,
@@ -82,11 +90,11 @@ pub struct AgentRunSnapshot {
     pub thread_id: String,
     pub parent_run_id: Option<String>,
     pub status: AgentRunStatus,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub finished_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
     pub total_tokens: i64,
-    pub archived_at: Option<DateTime<Utc>>,
+    pub archived_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,8 +103,8 @@ pub struct AgentStepSnapshot {
     pub run_id: String,
     pub step_no: u32,
     pub status: AgentStepStatus,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
     pub input_tokens: i64,
     pub output_tokens: i64,
 }
@@ -108,5 +116,5 @@ pub struct ToolUseExecutionSnapshot {
     pub name: String,
     pub input: Value,
     pub status: ToolUseStatus,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }

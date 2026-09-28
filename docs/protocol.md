@@ -97,7 +97,7 @@ GET /v1/projects/{project_id}/threads/{thread_id}/attachments/{attachment_id}
 
 读取时会严格验证 project/thread 归属，错误归属和不存在都返回 404。成功响应返回原始二进制，并设置 `Content-Type`、`Content-Length`、`Content-Disposition`、`ETag` 与 `X-Content-Type-Options: nosniff`。
 
-附件元数据记录在 SQLite `attachment` 表：`id`、`thread_id`、`original_name`、`mime_type`、`size`、`sha256`、`relative_path`、`created_at`。内容存放在对应 thread 的 `assets/<sha256>.<ext>`；相同内容可以共享文件，但每次上传都有独立 UUID。一个附件可在同一 thread 的多次 run 中复用，不能跨 thread 使用。删除 thread 会通过外键级联删除元数据并删除整个 thread 目录。当前没有 list/delete API。
+附件元数据记录在 SQLite `attachment` 表：`id`、`thread_id`、`original_name`、`mime_type`、`size`、`sha256`、`relative_path`、`created_at`。内容存放在对应 thread 的 `assets/<sha256>.<ext>`；相同内容可以共享文件，但每次上传都有独立 UUID。一个附件可在同一 thread 的多次 run 中复用，不能跨 thread 使用。删除 thread 时，业务层先逐层收集后代线程，再在单个事务内按依赖顺序显式删除全部关联元数据（数据库层不设外键与级联），随后删除整个 thread 目录。当前没有 list/delete API。
 
 ## 错误码
 

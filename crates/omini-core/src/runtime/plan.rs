@@ -1,5 +1,5 @@
 use crate::proposed_plan::{ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text};
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_config::project::ProjectDir;
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::RuntimeToServerEvent;
@@ -99,7 +99,7 @@ pub async fn persist_latest(
         return Ok(None);
     }
 
-    let created_at = Utc::now();
+    let created_at = Timestamp::now();
     let title = title_from_markdown(&markdown);
     let plans_dir = project.path().join("plans");
     let path = plans_dir.join(CURRENT_PLAN_FILE);

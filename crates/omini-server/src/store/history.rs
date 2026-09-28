@@ -1,20 +1,20 @@
-//! 从 server 持久化记录恢复 core/TUI 使用的历史视图。
+//! 从持久化记录恢复 core/TUI 使用的历史视图。
 //!
-//! SQLite 中的消息按 `kind` 字段区分 JSON 形状:display / plan / compact_summary
-//! 等独立形态的记录直接恢复,`kind=normal` 记录按 ContentBlock 顺序恢复成
-//! `Message`。plan 与否的判定完全以 `kind` 字段为准,不再从 assistant 文本中
-//! 反向解析 `<proposed_plan>` 标签。
+//! messages 表按 `kind` 区分 JSON 形态:ConversationEntry 记录恢复为
+//! 会话条目,其余(kind=normal 的块消息)不进入恢复视图。plan 与否的
+//! 判定完全以 `kind` 为准,不从 assistant 文本反向解析标签。
 
-use crate::store::{self, Database};
+use super::Store;
 use omini_config::project::{ProjectDir, ThreadDir};
 use omini_domain::conversation::ConversationEntry;
+use omini_entity::{MessageKind, load_ui_content};
 use omini_runtime_contract::thread_domain::{
     AgentTaskExecutionMode, AgentTaskInfo, AgentTaskSnapshot,
 };
 
-/// 加载一个线程的消息历史，跳过无法解析的损坏记录以保证线程仍可打开。
+/// 加载一个线程的消息历史,跳过无法解析的损坏记录以保证线程仍可打开。
 pub async fn load_messages(
-    db: &Database,
+    db: &Store,
     thread_id: &str,
     thread_dir: &ThreadDir,
 ) -> Vec<ConversationEntry> {
@@ -27,29 +27,19 @@ pub async fn load_messages(
     };
 
     let mut messages = Vec::with_capacity(stored.len());
-    for sm in stored {
-        let content = match store::load_ui_content(&sm.content, thread_dir) {
+    for message in stored {
+        let content = match load_ui_content(&message.content, thread_dir) {
             Ok(content) => content,
             Err(error) => {
                 tracing::warn!(thread_id, error = %error, "failed to load message sidecar");
                 continue;
             }
         };
-        if sm.kind != "conversation_entry" {
+        if message.kind != MessageKind::ConversationEntry {
             continue;
         }
         match serde_json::from_str::<ConversationEntry>(&content) {
-            Ok(entry) => match entry {
-                ConversationEntry::UserInput(input) => {
-                    messages.push(ConversationEntry::UserInput(input));
-                }
-                ConversationEntry::AssistantMessage(output) => {
-                    messages.push(ConversationEntry::AssistantMessage(output));
-                }
-                ConversationEntry::SystemEvent(output) => {
-                    messages.push(ConversationEntry::SystemEvent(output));
-                }
-            },
+            Ok(entry) => messages.push(entry),
             Err(error) => {
                 tracing::warn!(thread_id, error = %error, "failed to parse conversation entry");
             }
@@ -58,9 +48,9 @@ pub async fn load_messages(
     messages
 }
 
-/// 加载父线程的直接异步子任务，并恢复每个任务的完整会话历史。
+/// 加载父线程的直接异步子任务,并恢复每个任务的完整会话历史。
 pub async fn load_agent_tasks(
-    db: &Database,
+    db: &Store,
     thread_id: &str,
     project: &ProjectDir,
 ) -> Vec<AgentTaskSnapshot> {
@@ -80,6 +70,10 @@ pub async fn load_agent_tasks(
     }) {
         let thread_dir = project.thread(&task.agent_thread_id);
         let history = load_messages(db, &task.agent_thread_id, &thread_dir).await;
+        let result = task
+            .result_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str(json).ok());
         snapshots.push(AgentTaskSnapshot {
             task: AgentTaskInfo {
                 task_id: task.task_id,
@@ -91,10 +85,10 @@ pub async fn load_agent_tasks(
                 spawn_tool_use_id: task.spawn_tool_use_id,
                 agent: task.agent_name,
                 title: task.title,
-                depth: task.depth,
-                execution_mode: task.execution_mode,
+                depth: 1,
+                execution_mode: AgentTaskExecutionMode::Background,
                 status: task.status,
-                result: task.result,
+                result,
                 created_at: task.created_at,
                 updated_at: task.updated_at,
                 completed_at: task.completed_at,

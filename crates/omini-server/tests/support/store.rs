@@ -1,49 +1,20 @@
-use chrono::{TimeZone, Utc};
+//! store 层集成测试的公共夹具:临时库、实体样例与类型化断言助手。
+
 use omini_config::project::ProjectDir;
-use omini_domain::task::TaskStatus;
-use omini_runtime_contract::persistence::ThreadRecord;
-use omini_runtime_contract::thread_domain::{AgentTaskExecutionMode, AgentTaskInfo};
-use omini_server::store::{Database, Project, Thread};
-use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+// 各测试文件按需取用,glob 导入下未逐项使用是预期形态。
+#[allow(unused_imports)]
+pub use omini_entity::CONTENT_SIZE_THRESHOLD;
+#[allow(unused_imports)]
+pub use omini_entity::test_support::{
+    TEST_PROJECT_ID, TestRoot, fixed_time, test_agent_task, test_agent_thread, test_thread,
+};
+use omini_entity::{BackgroundTask, LlmMessage, Message, MessageKind};
+use omini_model::message::Role;
+use omini_server::store::{Project, Store};
 
-pub const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
-static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-pub struct TestRoot {
-    pub path: PathBuf,
-}
-
-impl TestRoot {
-    pub fn new() -> Self {
-        let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "omini-server-store-{}-{sequence}",
-            std::process::id()
-        ));
-        fs::create_dir(&path).expect("test root should be created");
-        Self { path }
-    }
-}
-
-impl Drop for TestRoot {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-pub fn fixed_time() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
-        .single()
-        .expect("fixed test time should be valid")
-}
-
-pub async fn temp_db() -> (Database, ProjectDir, TestRoot) {
+pub async fn temp_db() -> (Store, ProjectDir, TestRoot) {
     let root = TestRoot::new();
-    let db = Database::open(&root.path.join("omini.sqlite"))
-        .await
-        .unwrap();
+    let db = Store::open(&root.path.join("omini.sqlite")).await.unwrap();
     let now = fixed_time();
     db.create_project(&Project {
         id: TEST_PROJECT_ID.to_string(),
@@ -53,74 +24,102 @@ pub async fn temp_db() -> (Database, ProjectDir, TestRoot) {
         created_at: now,
         updated_at: now,
         last_opened_at: None,
+        threads: Default::default(),
     })
     .await
     .unwrap();
     (db, ProjectDir::from_path(root.path.join("project")), root)
 }
 
-pub fn test_thread(id: &str) -> Thread {
-    let now = fixed_time();
-    Thread {
-        id: id.to_string(),
-        project_id: TEST_PROJECT_ID.to_string(),
-        parent_thread_id: None,
-        spawn_tool_use_id: None,
-        thread_type: "main".to_string(),
-        agent_label: None,
-        provider: "openai".to_string(),
-        model: "gpt-test".to_string(),
-        thinking_effort: None,
-        title: None,
-        current_context_tokens: 0,
-        total_tokens: 0,
-        total_cached_tokens: 0,
-        llm_context_version: 1,
-        created_at: now,
-        updated_at: now,
-    }
+/// 按线程与形态统计 UI 消息数(替代原 raw SQL COUNT 断言)。
+pub async fn count_thread_messages(db: &Store, thread_id: &str, kind: MessageKind) -> usize {
+    Message::filter(
+        Message::fields()
+            .thread_id()
+            .eq(thread_id)
+            .and(Message::fields().kind().eq(kind)),
+    )
+    .count()
+    .exec(&mut db.conn())
+    .await
+    .expect("message count query") as usize
 }
 
-pub fn test_agent_task(task_id: &str, thread_id: &str, owner_thread_id: &str) -> AgentTaskInfo {
-    let now = fixed_time();
-    AgentTaskInfo {
-        task_id: task_id.to_string(),
-        thread_id: thread_id.to_string(),
-        parent_run_id: None,
-        parent_task_id: None,
-        owner_thread_id: owner_thread_id.to_string(),
-        parent_thread_id: owner_thread_id.to_string(),
-        spawn_tool_use_id: format!("tool_{task_id}"),
-        agent: "general".to_string(),
-        title: "Test agent".to_string(),
-        depth: 1,
-        execution_mode: AgentTaskExecutionMode::Background,
-        status: TaskStatus::Running,
-        result: None,
-        created_at: now,
-        updated_at: now,
-        completed_at: None,
-        notification_delivered: false,
-    }
+/// 按线程与角色统计模型上下文消息数。
+pub async fn count_thread_llm_messages(db: &Store, thread_id: &str, role: Role) -> usize {
+    LlmMessage::filter(
+        LlmMessage::fields()
+            .thread_id()
+            .eq(thread_id)
+            .and(LlmMessage::fields().role().eq(role)),
+    )
+    .count()
+    .exec(&mut db.conn())
+    .await
+    .expect("llm message count query") as usize
 }
 
-pub fn test_agent_thread(id: &str, parent_thread_id: &str) -> ThreadRecord {
-    let now = fixed_time();
-    ThreadRecord {
-        id: id.to_string(),
-        parent_thread_id: Some(parent_thread_id.to_string()),
-        spawn_tool_use_id: Some(format!("tool_{id}")),
-        thread_type: "agent".to_string(),
-        agent_label: Some("general".to_string()),
-        provider: "openai".to_string(),
-        model: "gpt-test".to_string(),
-        thinking_effort: None,
-        title: Some("Test agent".to_string()),
-        current_context_tokens: 0,
-        total_tokens: 0,
-        total_cached_tokens: 0,
-        llm_context_version: 1,
-        created_at: now,
-        updated_at: now,
-    }
+/// 取指定上下文版本的模型消息行数。
+pub async fn count_llm_version(db: &Store, thread_id: &str, version: i64) -> usize {
+    LlmMessage::filter(
+        LlmMessage::fields()
+            .thread_id()
+            .eq(thread_id)
+            .and(LlmMessage::fields().context_version().eq(version)),
+    )
+    .count()
+    .exec(&mut db.conn())
+    .await
+    .expect("llm version count query") as usize
+}
+
+/// 取模型上下文消息的持久化内容(替代原 raw SQL SELECT content 断言)。
+pub async fn llm_content_at(
+    db: &Store,
+    thread_id: &str,
+    version: i64,
+    ordinal: i64,
+) -> Option<String> {
+    let mut conn = db.conn();
+    LlmMessage::filter(
+        LlmMessage::fields()
+            .thread_id()
+            .eq(thread_id)
+            .and(LlmMessage::fields().context_version().eq(version))
+            .and(LlmMessage::fields().ordinal().eq(ordinal)),
+    )
+    .first()
+    .exec(&mut conn)
+    .await
+    .expect("llm content query")
+    .map(|row| row.content)
+}
+
+/// 取线程首条模型上下文消息的持久化内容。
+pub async fn first_llm_content(db: &Store, thread_id: &str) -> Option<String> {
+    let mut conn = db.conn();
+    LlmMessage::filter(LlmMessage::fields().thread_id().eq(thread_id))
+        .order_by(LlmMessage::fields().ordinal().asc())
+        .first()
+        .exec(&mut conn)
+        .await
+        .expect("llm content query")
+        .map(|row| row.content)
+}
+
+/// 按任务 ID 取后台任务行(通知闸门与创建时间保持断言)。
+pub async fn background_task_row(db: &Store, task_id: &str) -> Option<BackgroundTask> {
+    let mut conn = db.conn();
+    BackgroundTask::filter_by_task_id(task_id)
+        .first()
+        .exec(&mut conn)
+        .await
+        .expect("background task query")
+}
+
+/// 在既有数据库文件上重开 Store(模拟服务重启,触发恢复归一化)。
+pub async fn temp_db_existing(db_path: &std::path::Path) -> (Store, ProjectDir, TestRoot) {
+    let root = TestRoot::from_path(db_path.parent().expect("db parent"));
+    let db = Store::open(db_path).await.unwrap();
+    (db, ProjectDir::from_path(root.path.join("project")), root)
 }

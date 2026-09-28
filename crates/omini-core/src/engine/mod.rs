@@ -2,6 +2,7 @@ use crate::error::RuntimeError;
 use crate::runtime::compact::AutoCompactState;
 use crate::tools::{PendingToolPauses, ToolRegistry, ToolRuntimeContext};
 use crate::types::events::{EngineToRuntimeEvent, TaskMessageSource};
+use jiff::Timestamp;
 use omini_config::Settings;
 use omini_domain::conversation::{AgentMessage, TaskNotification};
 use omini_domain::task::TaskCompletion;
@@ -421,7 +422,7 @@ impl QueryEngine {
 
         let notification = TaskNotification {
             tasks: completions.clone(),
-            created_at: chrono::Utc::now(),
+            created_at: Timestamp::now(),
         };
         let llm_message = Message::from_user_text(format!(
             "<task_notifications>{}</task_notifications>",
@@ -839,8 +840,10 @@ pub(crate) mod tests {
     async fn queued_message_start() {
         // 给定子任务启动前已接受的主 Agent 消息。
         let (base_url, server) = spawn_stop_server(1);
-        let mut engine = QueryEngine::default();
-        engine.preserve_pending_on_run_boundary = true;
+        let engine = QueryEngine {
+            preserve_pending_on_run_boundary: true,
+            ..QueryEngine::default()
+        };
         let source = AgentMessage {
             source_run_id: "run-1".into(),
             tool_use_id: "tool-1".into(),

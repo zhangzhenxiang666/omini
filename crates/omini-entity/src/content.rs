@@ -1,4 +1,15 @@
-use super::*;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use omini_config::project::ThreadDir;
+use omini_model::message::ContentBlock;
+use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write as _};
+use std::path::{Component, Path, PathBuf};
+use uuid::Uuid;
+
+use crate::StoreError;
 
 pub const CONTENT_SIZE_THRESHOLD: usize = 64 * 1024;
 /// 历史 sidecar 的读取上限；超过后恢复流程必须降级，不能把完整文件读入内存。
@@ -44,7 +55,7 @@ pub fn prepare_ui_content(
     })
 }
 
-pub(crate) fn load_ui_content(stored: &str, thread_dir: &ThreadDir) -> Result<String, StoreError> {
+pub fn load_ui_content(stored: &str, thread_dir: &ThreadDir) -> Result<String, StoreError> {
     let Ok(reference) = serde_json::from_str::<serde_json::Value>(stored) else {
         return Ok(stored.to_string());
     };
@@ -117,7 +128,7 @@ fn should_externalize_block(block: &ContentBlock, encoded_len: usize) -> bool {
     }
 }
 
-pub(crate) fn load_blocks(
+pub fn load_blocks(
     stored: &[serde_json::Value],
     thread_dir: &ThreadDir,
 ) -> Result<Vec<ContentBlock>, StoreError> {
@@ -183,7 +194,7 @@ fn read_bounded_sidecar(
     Ok(bytes)
 }
 
-pub(crate) fn persist_staged_asset(
+pub fn persist_staged_asset(
     thread_dir: &ThreadDir,
     staging_path: &Path,
     sha256: &str,
@@ -210,7 +221,7 @@ pub(crate) fn persist_staged_asset(
     Ok((path_to_relative_string(&relative_path)?, true))
 }
 
-pub(crate) fn load_asset(
+pub fn load_asset(
     thread_dir: &ThreadDir,
     relative_path: &str,
     expected_size: u64,
@@ -226,7 +237,7 @@ pub(crate) fn load_asset(
     Ok(bytes)
 }
 
-pub(crate) fn stored_asset_path(
+pub fn stored_asset_path(
     thread_dir: &ThreadDir,
     relative_path: &str,
 ) -> Result<PathBuf, StoreError> {
@@ -343,7 +354,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 pub fn finish_prepared_write(
-    result: Result<(), sqlx::Error>,
+    result: Result<(), toasty::Error>,
     created_files: &[PathBuf],
 ) -> Result<(), StoreError> {
     match result {

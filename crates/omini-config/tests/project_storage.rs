@@ -1,6 +1,6 @@
 mod support;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use omini_config::project::{ProjectDir, ProjectState, ProjectsDir, storage_key};
 use omini_config::{ConfigError, RawConfig, ResolvedConfig};
 use omini_domain::config::ThinkingEffort;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use support::TestTempDir;
 use uuid::Uuid;
 
-fn fixed_time(value: &str) -> DateTime<Utc> {
+fn fixed_time(value: &str) -> Timestamp {
     value.parse().expect("fixed timestamp should parse")
 }
 

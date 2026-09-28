@@ -1,66 +1,76 @@
-use super::*;
+use super::Store;
+use crate::store::StoreError;
+use jiff::Timestamp;
+use omini_config::project::ThreadDir;
+use omini_entity::{LlmMessage, Thread, cleanup_created_files, prepare_blocks};
+use omini_model::message::Message;
+use toasty::db::Executor;
 
-impl Database {
+/// 计算线程当前上下文版本的下一个 ordinal。
+/// toasty 没有 MAX 聚合,用降序投影取首行等价替代 `COALESCE(MAX(ordinal) + 1, 0)`。
+pub(super) async fn next_llm_ordinal(
+    executor: &mut impl Executor,
+    thread_id: &str,
+    version: i64,
+) -> Result<i64, StoreError> {
+    let max = LlmMessage::filter(
+        LlmMessage::fields()
+            .thread_id()
+            .eq(thread_id)
+            .and(LlmMessage::fields().context_version().eq(version)),
+    )
+    .select(LlmMessage::fields().ordinal())
+    .order_by(LlmMessage::fields().ordinal().desc())
+    .first()
+    .exec(executor)
+    .await?;
+    Ok(max.map_or(0, |ordinal| ordinal + 1))
+}
+
+impl Store {
     pub async fn append_llm_message(
         &self,
         thread_id: &str,
         message: &Message,
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         thread_dir: &ThreadDir,
     ) -> Result<(), StoreError> {
         let prepared = prepare_blocks(&message.content, thread_dir)?;
         let content = serde_json::to_string(&prepared.values)?;
-        let mut tx = self.pool.begin().await?;
-        let version: i64 =
-            sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
-                .bind(thread_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let ordinal: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(ordinal) + 1, 0)
-                FROM llm_messages
-                WHERE thread_id = ? AND context_version = ?",
-        )
-        .bind(thread_id)
-        .bind(version)
-        .fetch_one(&mut *tx)
-        .await?;
-        let result = sqlx::query(
-            "INSERT INTO llm_messages(
-                    thread_id,
-                    context_version,
-                    ordinal,
-                    role,
-                    content,
-                    created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(thread_id)
-        .bind(version)
-        .bind(ordinal)
-        .bind(message.role.to_string())
-        .bind(content)
-        .bind(created_at)
-        .execute(&mut *tx)
+        let result: Result<(), StoreError> = async {
+            let mut conn = self.conn();
+            let mut tx = conn.transaction().await?;
+            let version = current_context_version(&mut tx, thread_id).await?;
+            let ordinal = next_llm_ordinal(&mut tx, thread_id, version).await?;
+            toasty::create!(LlmMessage {
+                thread_id: thread_id.to_string(),
+                context_version: version,
+                ordinal,
+                role: message.role,
+                content,
+                created_at: created_at,
+            })
+            .exec(&mut tx)
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        }
         .await;
-        if let Err(error) = result {
+        // 事务内任一步失败(含提交失败)都要清理本次落盘的 sidecar/资产文件。
+        if result.is_err() {
             cleanup_created_files(&prepared.created_files);
-            return Err(error.into());
         }
-        if let Err(error) = tx.commit().await {
-            cleanup_created_files(&prepared.created_files);
-            return Err(error.into());
-        }
-        Ok(())
+        result
     }
 
+    /// 乐观并发替换上下文:事务内校验版本、写入新版本、递增线程版本,
+    /// 任一步与预期不符即以冲突错误回滚。
     pub async fn replace_llm_context(
         &self,
         thread_id: &str,
         expected_version: i64,
         messages: &[Message],
-        created_at: DateTime<Utc>,
+        created_at: Timestamp,
         thread_dir: &ThreadDir,
     ) -> Result<i64, StoreError> {
         let mut prepared_messages = Vec::with_capacity(messages.len());
@@ -69,7 +79,7 @@ impl Database {
             match prepare_blocks(&message.content, thread_dir) {
                 Ok(prepared) => {
                     created_files.extend(prepared.created_files);
-                    prepared_messages.push((message.role.to_string(), prepared.values));
+                    prepared_messages.push((message.role, prepared.values));
                 }
                 Err(error) => {
                     cleanup_created_files(&created_files);
@@ -78,59 +88,39 @@ impl Database {
             }
         }
 
-        let result = async {
-            let mut tx = self.pool.begin().await?;
-            let actual: i64 =
-                sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
-                    .bind(thread_id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if actual != expected_version {
+        let result: Result<i64, StoreError> = async {
+            let mut conn = self.conn();
+            let mut tx = conn.transaction().await?;
+            let mut thread = Thread::filter_by_id(thread_id)
+                .first()
+                .exec(&mut tx)
+                .await?
+                .ok_or_else(|| StoreError::MissingRow(format!("thread '{thread_id}'")))?;
+            if thread.llm_context_version != expected_version {
                 return Err(StoreError::ContextVersionConflict {
                     expected: expected_version,
-                    actual,
+                    actual: thread.llm_context_version,
                 });
             }
             let next_version = expected_version + 1;
             for (ordinal, (role, blocks)) in prepared_messages.iter().enumerate() {
-                sqlx::query(
-                    "INSERT INTO llm_messages(
-                            thread_id,
-                            context_version,
-                            ordinal,
-                            role,
-                            content,
-                            created_at
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(thread_id)
-                .bind(next_version)
-                .bind(i64::try_from(ordinal).unwrap_or(i64::MAX))
-                .bind(role)
-                .bind(serde_json::to_string(blocks)?)
-                .bind(created_at)
-                .execute(&mut *tx)
+                toasty::create!(LlmMessage {
+                    thread_id: thread_id.to_string(),
+                    context_version: next_version,
+                    ordinal: i64::try_from(ordinal).unwrap_or(i64::MAX),
+                    role: *role,
+                    content: serde_json::to_string(blocks)?,
+                    created_at: created_at,
+                })
+                .exec(&mut tx)
                 .await?;
             }
-            let updated = sqlx::query(
-                "UPDATE thread SET
-                        llm_context_version = ?,
-                        updated_at = ?
-                    WHERE id = ? AND llm_context_version = ?",
-            )
-            .bind(next_version)
-            .bind(Utc::now())
-            .bind(thread_id)
-            .bind(expected_version)
-            .execute(&mut *tx)
+            thread.llm_context_version = next_version;
+            toasty::update!(thread {
+                llm_context_version: next_version
+            })
+            .exec(&mut tx)
             .await?;
-            if updated.rows_affected() != 1 {
-                return Err(StoreError::ContextVersionConflict {
-                    expected: expected_version,
-                    actual,
-                });
-            }
             tx.commit().await?;
             Ok(next_version)
         }
@@ -158,28 +148,29 @@ impl Database {
         thread_dir: &ThreadDir,
     ) -> Result<(Vec<Message>, i64), StoreError> {
         loop {
-            let context_version: i64 =
-                sqlx::query_scalar("SELECT llm_context_version FROM thread WHERE id = ?")
-                    .bind(thread_id)
-                    .fetch_one(&self.pool)
-                    .await?;
-            let rows = sqlx::query_as::<_, StoredLlmMessageRow>(
-                "SELECT role, content FROM llm_messages
-                    WHERE thread_id = ? AND context_version = ?
-                    ORDER BY ordinal",
+            let mut db = self.conn();
+            let mut thread = Thread::filter_by_id(thread_id)
+                .first()
+                .exec(&mut db)
+                .await?
+                .ok_or_else(|| StoreError::MissingRow(format!("thread '{thread_id}'")))?;
+            let context_version = thread.llm_context_version;
+            let rows = LlmMessage::filter(
+                LlmMessage::fields()
+                    .thread_id()
+                    .eq(thread_id)
+                    .and(LlmMessage::fields().context_version().eq(context_version)),
             )
-            .bind(thread_id)
-            .bind(context_version)
-            .fetch_all(&self.pool)
+            .order_by(LlmMessage::fields().ordinal().asc())
+            .exec(&mut db)
             .await?;
 
             let mut messages = Vec::with_capacity(rows.len());
             let mut oversized = None;
             for row in rows {
-                let role = parse_role(&row.role)?;
                 let stored = serde_json::from_str::<Vec<serde_json::Value>>(&row.content)?;
-                match load_blocks(&stored, thread_dir) {
-                    Ok(blocks) => messages.push(Message::new(role, blocks)),
+                match omini_entity::load_blocks(&stored, thread_dir) {
+                    Ok(blocks) => messages.push(Message::new(row.role, blocks)),
                     Err(StoreError::OversizedSidecar {
                         actual_bytes,
                         limit_bytes,
@@ -195,17 +186,15 @@ impl Database {
                 return Ok((messages, context_version));
             };
 
-            // 保留旧版本供检查，同时切换活动上下文版本，避免后续请求反复遇到同一大文件。
-            let updated = sqlx::query(
-                "UPDATE thread SET llm_context_version = ?
-                    WHERE id = ? AND llm_context_version = ?",
-            )
-            .bind(context_version + 1)
-            .bind(thread_id)
-            .bind(context_version)
-            .execute(&self.pool)
-            .await?;
-            if updated.rows_affected() == 1 {
+            // 保留旧版本供检查,同时切换活动上下文版本,
+            // 避免后续请求反复遇到同一大文件。
+            if thread.llm_context_version == context_version {
+                thread.llm_context_version = context_version + 1;
+                toasty::update!(thread {
+                    llm_context_version: context_version + 1
+                })
+                .exec(&mut db)
+                .await?;
                 tracing::warn!(
                     thread_id,
                     actual_bytes,
@@ -214,14 +203,20 @@ impl Database {
                 );
                 return Ok((Vec::new(), context_version + 1));
             }
+            // 版本已被并发替换:重读新版本。
         }
     }
 }
 
-fn parse_role(role: &str) -> Result<Role, StoreError> {
-    match role {
-        "user" => Ok(Role::User),
-        "assistant" => Ok(Role::Assistant),
-        _ => Err(StoreError::InvalidData(format!("unknown role {role}"))),
-    }
+/// 读取线程当前上下文版本;线程必须存在,缺行按内部错误处理。
+async fn current_context_version(
+    executor: &mut impl Executor,
+    thread_id: &str,
+) -> Result<i64, StoreError> {
+    Thread::filter_by_id(thread_id)
+        .first()
+        .exec(executor)
+        .await?
+        .map(|thread| thread.llm_context_version)
+        .ok_or_else(|| StoreError::MissingRow(format!("thread '{thread_id}'")))
 }

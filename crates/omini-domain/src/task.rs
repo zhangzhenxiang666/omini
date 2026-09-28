@@ -1,8 +1,8 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// 后台任务的通用执行类型。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskKind {
     SubAgent,
@@ -19,7 +19,7 @@ impl TaskKind {
 }
 
 /// 后台任务在运行时和持久化层共享的状态。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, toasty::Embed)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
     Running,
@@ -81,10 +81,10 @@ pub struct TaskInfo {
     pub kind: TaskKind,
     pub title: String,
     pub status: TaskStatus,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub completed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_summary: Option<String>,
 }

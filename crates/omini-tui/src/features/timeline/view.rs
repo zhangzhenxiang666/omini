@@ -12,6 +12,8 @@ use crate::ui::prelude::{
     line_to_plain_text, line_width, styled_wrapped_draft, truncate_str,
 };
 use crate::ui::theme::USER_MESSAGE_BG;
+#[cfg(test)]
+use jiff::{SignedDuration, Timestamp};
 use omini_domain::task::TaskStatus;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -1253,7 +1255,7 @@ mod tests {
                         status: omini_domain::task::TaskStatus::Cancelled,
                         summary: Some("1 条消息未进入子 Agent 模型上下文".into()),
                     }],
-                    created_at: chrono::Utc::now(),
+                    created_at: Timestamp::now(),
                 },
             )));
 
@@ -1573,7 +1575,7 @@ mod tests {
                 execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
                 status: omini_domain::task::TaskStatus::Running,
                 duration: None,
-                started_at: chrono::Utc::now(),
+                started_at: Timestamp::now(),
                 messages: Vec::new(),
             },
         );
@@ -1597,7 +1599,7 @@ mod tests {
                         status: omini_domain::task::TaskStatus::Completed,
                         summary: None,
                     }],
-                    created_at: chrono::Utc::now(),
+                    created_at: Timestamp::now(),
                 },
             )));
         let rendered = rendered_timeline(&state);
@@ -1634,7 +1636,7 @@ mod tests {
                 execution_mode: crate::app::event::AgentTaskExecutionMode::Background,
                 status: omini_domain::task::TaskStatus::Running,
                 duration: None,
-                started_at: chrono::Utc::now(),
+                started_at: Timestamp::now(),
                 messages: Vec::new(),
             },
         );
@@ -1807,7 +1809,7 @@ mod tests {
                         status: omini_domain::task::TaskStatus::Completed,
                         summary: None,
                     }],
-                    created_at: chrono::Utc::now(),
+                    created_at: Timestamp::now(),
                 },
             )),
         ];
@@ -2697,7 +2699,7 @@ mod tests {
                         status: TaskStatus::Completed,
                         summary: None,
                     }],
-                    created_at: chrono::Utc::now(),
+                    created_at: Timestamp::now(),
                 },
             )));
         assert_cached_reference(&mut state, 80, 24);
@@ -2705,7 +2707,7 @@ mod tests {
             .render_cache
             .borrow()
             .history_passes;
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         state.sessions.subagents.insert(
             "thread-1".into(),
             crate::app::state::SubagentNode {
@@ -2718,7 +2720,7 @@ mod tests {
                 execution_mode: AgentTaskExecutionMode::Background,
                 status: TaskStatus::Running,
                 duration: None,
-                started_at: now - chrono::Duration::seconds(67),
+                started_at: now - SignedDuration::from_secs(67),
                 messages: Vec::new(),
             },
         );
@@ -2730,7 +2732,7 @@ mod tests {
                 kind: TaskKind::SubAgent,
                 title: "Inspect".into(),
                 status: TaskStatus::Completed,
-                created_at: now - chrono::Duration::seconds(67),
+                created_at: now - SignedDuration::from_secs(67),
                 updated_at: now,
                 completed_at: Some(now),
                 result_summary: None,

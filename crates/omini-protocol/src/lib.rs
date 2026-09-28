@@ -3,7 +3,7 @@
 //! 这个 crate 只描述 wire shape；运行时状态、配置加载和 UI 展示逻辑分别留在
 //! `omini-core`、`omini-server` 和 `omini-tui`。
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 
 use omini_domain::conversation::{
     AssistantMessage, SystemEvent, UserInput as ConversationUserInput,

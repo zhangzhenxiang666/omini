@@ -1,5 +1,5 @@
 use crate::project::ProjectManager;
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 
@@ -82,7 +82,7 @@ impl ProjectManager {
             return Ok(false);
         }
         self.db
-            .set_agent_run_archived(run_id, archived.then(Utc::now))
+            .set_agent_run_archived(run_id, archived.then(Timestamp::now))
             .await
             .map_err(|error| {
                 CoreError::persistence("failed to archive AgentRun", error.to_string())

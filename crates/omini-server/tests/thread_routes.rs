@@ -11,7 +11,7 @@ use omini_protocol::{
     ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent, UserInput,
 };
 use omini_runtime_contract::persistence::ClientMessage;
-use omini_server::store::Database;
+use omini_server::store::Store;
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -160,7 +160,7 @@ async fn child_input_ownership() {
         )
         .await;
     assert_eq!(status, reqwest::StatusCode::CREATED);
-    let db = Database::open(&daemon.root().path().join(".omini/omini.db"))
+    let db = Store::open(&daemon.root().path().join(".omini/omini.db"))
         .await
         .unwrap();
     db.create_agent_run(&DomainRun {

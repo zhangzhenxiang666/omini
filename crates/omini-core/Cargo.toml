@@ -6,8 +6,8 @@ edition.workspace = true
 [dependencies]
 async-trait.workspace = true
 base64.workspace = true
-chrono.workspace = true
 dirs.workspace = true
+jiff.workspace = true
 omini-config.workspace = true
 omini-domain.workspace = true
 omini-model.workspace = true

@@ -16,7 +16,6 @@ mod conversation;
 mod daemon;
 mod event;
 mod git;
-pub mod history;
 mod logging;
 pub mod process;
 mod project;
@@ -29,7 +28,7 @@ mod ws;
 /// 启动本地 daemon，并把实际监听端口写入运行状态文件供客户端发现。
 pub async fn serve_daemon(root: OminiRoot) -> io::Result<()> {
     tracing::info!("starting omini server daemon");
-    let db = store::Database::open(&root.db_path())
+    let db = store::Store::open(&root.db_path())
         .await
         .map_err(io::Error::other)?;
     let manager = Arc::new(GlobalDaemonManager::new(root, Arc::new(db)));

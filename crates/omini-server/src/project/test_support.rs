@@ -1,7 +1,6 @@
 use crate::event::replay::SequencedRuntimeEvent;
 use crate::project::{ProjectManager, load_validated_config};
-use crate::store::{self as store_model, Database};
-use chrono::{TimeZone, Utc};
+use crate::store::{self as store_model, Store};
 use omini_config::OminiRoot;
 use omini_config::project::ProjectDir;
 use std::fs;
@@ -11,9 +10,9 @@ use tokio::sync::broadcast;
 
 pub(super) const TEST_PROJECT_ID: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-fn fixed_time() -> chrono::DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
-        .single()
+fn fixed_time() -> jiff::Timestamp {
+    "2026-08-20T00:00:00Z"
+        .parse()
         .expect("fixed test time should be valid")
 }
 
@@ -92,9 +91,7 @@ pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectMana
         .init_project(&storage_key, &config)
         .expect("project should initialize");
     let db_path = root.path().join("omini.sqlite");
-    let db = Database::open(&db_path)
-        .await
-        .expect("database should open");
+    let db = Store::open(&db_path).await.expect("database should open");
     let now = fixed_time();
     db.create_project(&store_model::Project {
         id: TEST_PROJECT_ID.to_string(),
@@ -104,6 +101,7 @@ pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectMana
         created_at: now,
         updated_at: now,
         last_opened_at: None,
+        threads: Default::default(),
     })
     .await
     .expect("project should persist");
@@ -164,5 +162,9 @@ pub(super) fn test_thread(id: &str) -> store_model::Thread {
         llm_context_version: 1,
         created_at: now,
         updated_at: now,
+        project: Default::default(),
+        parent: Default::default(),
+        children: Default::default(),
+        messages: Default::default(),
     }
 }

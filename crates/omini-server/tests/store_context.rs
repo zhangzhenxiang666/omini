@@ -4,7 +4,7 @@ use crate::support::store::*;
 use omini_domain::conversation::{ConversationEntry, UserInput};
 use omini_domain::input::{InputPart, UserInputIntent};
 use omini_model::message::Message;
-use omini_server::{history, store::*};
+use omini_server::store::*;
 use std::fs;
 
 #[tokio::test]
@@ -33,12 +33,7 @@ async fn llm_context_versions_are_immutable() {
             .unwrap(),
         next
     );
-    let old_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM llm_messages WHERE thread_id = 't1' AND context_version = 1",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let old_count = count_llm_version(&db, "t1", 1).await;
     assert_eq!(old_count, 1);
 }
 
@@ -81,16 +76,10 @@ async fn agent_compaction_preserves_ui_history() {
             .unwrap(),
         compacted
     );
-    let old_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM llm_messages
-                WHERE thread_id = 'agent_compact' AND context_version = 1",
-    )
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
+    let old_count = count_llm_version(&db, "agent_compact", 1).await;
     assert_eq!(old_count, 1);
     assert_eq!(
-        history::load_messages(&db, "agent_compact", &project.thread("agent_compact")).await,
+        load_messages(&db, "agent_compact", &project.thread("agent_compact")).await,
         vec![ConversationEntry::UserInput(UserInput {
             intent: UserInputIntent::Message,
             parts: vec![InputPart::Text {

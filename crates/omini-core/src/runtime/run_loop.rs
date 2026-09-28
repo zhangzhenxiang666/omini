@@ -175,7 +175,7 @@ impl AgentRuntime {
         loop {
             self.collect_task_completions().await;
             let run_id = Uuid::new_v4().to_string();
-            let created_at = chrono::Utc::now();
+            let created_at = Timestamp::now();
             let mut run_snapshot = omini_domain::agent_run::AgentRunSnapshot {
                 id: run_id.clone(),
                 thread_id: self.thread_id.clone(),
@@ -228,7 +228,7 @@ impl AgentRuntime {
                 omini_domain::agent_run::AgentRunStatus::Completed
             };
             run_snapshot.status = status;
-            run_snapshot.finished_at = Some(chrono::Utc::now());
+            run_snapshot.finished_at = Some(Timestamp::now());
             let _ = self
                 .persistence_tx
                 .send(RuntimePersistenceEvent::UpdateAgentRun {

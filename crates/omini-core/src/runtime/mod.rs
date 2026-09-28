@@ -17,7 +17,7 @@ use crate::skills::SkillRegistry;
 use crate::subagents::AgentRegistry;
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::events::EngineToRuntimeEvent;
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::conversation::CompactionSummary;

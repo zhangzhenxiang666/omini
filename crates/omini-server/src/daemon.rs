@@ -1,7 +1,7 @@
 use crate::bundled_tools::BundledTools;
 use crate::project::{ProjectManager, load_validated_config};
-use crate::store::{Database, Project, StoreError};
-use chrono::Utc;
+use crate::store::{Project, Store, StoreError};
+use jiff::Timestamp;
 use omini_config::AuthStore;
 use omini_config::BootstrapProviderConfig;
 use omini_config::ConfigError;
@@ -18,13 +18,13 @@ use uuid::Uuid;
 /// daemon 范围内持久化的项目注册表与按需加载的运行时缓存。
 pub struct GlobalDaemonManager {
     root: Arc<OminiRoot>,
-    db: Arc<Database>,
+    db: Arc<Store>,
     projects: Mutex<HashMap<String, Arc<ProjectManager>>>,
     bundled_tools: Arc<BundledTools>,
 }
 
 impl GlobalDaemonManager {
-    pub fn new(root: OminiRoot, db: Arc<Database>) -> Self {
+    pub fn new(root: OminiRoot, db: Arc<Store>) -> Self {
         let bundled_tools = Arc::new(BundledTools::new(root.path().as_path()));
         Self {
             root: Arc::new(root),
@@ -76,8 +76,9 @@ impl GlobalDaemonManager {
         };
         let id = Uuid::new_v4();
         let storage_key = storage_key(&path, id);
-        let now = Utc::now();
+        let now = Timestamp::now();
         let project = Project {
+            threads: Default::default(),
             id: id.to_string(),
             name,
             path: path_string,
@@ -152,7 +153,7 @@ impl GlobalDaemonManager {
             }
         }
 
-        project.updated_at = Utc::now();
+        project.updated_at = Timestamp::now();
         self.db.update_project(&project).await?;
         if relinked {
             self.projects

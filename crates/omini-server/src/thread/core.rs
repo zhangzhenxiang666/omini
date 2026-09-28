@@ -1,5 +1,5 @@
 use crate::{store, thread::ThreadRuntime};
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
 use omini_domain::conversation::UserInput as ConversationUserInput;
@@ -40,7 +40,8 @@ impl ThreadRuntime {
             })?,
             sha256,
             relative_path,
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
+            thread: Default::default(),
         };
         if let Err(error) = self.db.create_attachment(&attachment).await {
             if created {
@@ -218,7 +219,12 @@ impl ThreadRuntime {
             attachments,
         };
         self.db
-            .insert_user_input(&self.thread_id, &input, Utc::now(), &self.thread_dir())
+            .insert_user_input(
+                &self.thread_id,
+                &input,
+                Timestamp::now(),
+                &self.thread_dir(),
+            )
             .await
             .map_err(|error| {
                 CoreError::persistence("failed to persist user input", error.to_string())
@@ -253,7 +259,13 @@ impl ThreadRuntime {
         let source = client_message(&client_id, &prepared)?;
         let fresh = self
             .db
-            .enqueue_client_message(&run_id, &self.thread_id, &child_thread_id, &source)
+            .enqueue_client_message(
+                &run_id,
+                &self.thread_id,
+                &child_thread_id,
+                &source,
+                &self.project.thread(&child_thread_id),
+            )
             .await
             .map_err(|error| match error {
                 store::StoreError::InvalidData(message) => {
@@ -321,7 +333,7 @@ impl ThreadRuntime {
                 "client echo ID was reused with different content",
             ));
         }
-        if status == "failed" {
+        if status == store::DeliveryStatus::Failed {
             return Err(CoreError::invalid_input(
                 "delivery_failed",
                 "previous child user input was not delivered",

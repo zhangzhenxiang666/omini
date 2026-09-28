@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod store;
+
 use reqwest::{Method, Response};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -342,4 +344,3 @@ fn install_bundled_rg(root: &TestTempDir) {
     std::fs::create_dir_all(target.parent().unwrap()).expect("test rg directory should be created");
     std::fs::copy(rg, target).expect("test rg should be copied");
 }
-pub mod store;

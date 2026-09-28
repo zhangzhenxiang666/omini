@@ -1,9 +1,10 @@
 use crate::event::bridge::thread_summary_from_store_record;
 use crate::project::model_selection::{EffortSelection, ModelSelection};
 use crate::project::{ProjectManager, ThreadError};
-use crate::store::{self as store_model, Database};
+use crate::store::{self as store_model, Store};
 use crate::thread::ThreadRuntime;
 use crate::thread::ThreadRuntimeInputs;
+use jiff::Timestamp;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_core::CoreError;
@@ -73,7 +74,7 @@ impl ProjectManager {
         self.project.create_thread(&thread_id).map_err(|error| {
             CoreError::project_state("failed to create thread directory", error)
         })?;
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let model = settings.active_model();
         let thread = store_model::Thread {
             id: thread_id.clone(),
@@ -92,6 +93,10 @@ impl ProjectManager {
             llm_context_version: 1,
             created_at: now,
             updated_at: now,
+            project: Default::default(),
+            parent: Default::default(),
+            children: Default::default(),
+            messages: Default::default(),
         };
         self.db.create_thread(&thread).await.map_err(|error| {
             CoreError::persistence("failed to persist thread", error.to_string())
@@ -168,7 +173,7 @@ impl ProjectManager {
         let new_title = source_title
             .map(|title| format!("{title} (new from plan)"))
             .unwrap_or_else(|| "(new from plan)".to_string());
-        let now = chrono::Utc::now();
+        let now = Timestamp::now();
         let model = settings.active_model();
         let thread = store_model::Thread {
             id: new_thread_id.clone(),
@@ -187,6 +192,10 @@ impl ProjectManager {
             llm_context_version: 1,
             created_at: now,
             updated_at: now,
+            project: Default::default(),
+            parent: Default::default(),
+            children: Default::default(),
+            messages: Default::default(),
         };
         self.db.create_thread(&thread).await.map_err(|error| {
             CoreError::persistence("failed to persist forked thread", error.to_string())
@@ -428,7 +437,7 @@ impl ProjectManager {
 /// UI 历史只从 `messages` 加载；LLM 只加载 `thread.llm_context_version`
 /// 指向的 `llm_messages` 快照，两个视角互不回退。
 async fn load_thread_snapshot(
-    db: &Database,
+    db: &Store,
     project: &ProjectDir,
     thread_id: &str,
     settings: &Settings,
@@ -437,8 +446,8 @@ async fn load_thread_snapshot(
 ) -> Result<ThreadRuntimeInputs, CoreError> {
     let thread_dir = project.thread(thread_id);
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
-    let messages = crate::history::load_messages(db, thread_id, &thread_dir).await;
-    let agent_tasks = crate::history::load_agent_tasks(db, thread_id, project).await;
+    let messages = crate::store::load_messages(db, thread_id, &thread_dir).await;
+    let agent_tasks = crate::store::load_agent_tasks(db, thread_id, project).await;
     let projected_delivery_keys = db
         .projected_delivery_keys(thread_id)
         .await

@@ -1,5 +1,5 @@
 use crate::{event::status::RuntimeStatusSnapshotContext, thread::ThreadRuntime};
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_protocol as client_proto;
 
 impl ThreadRuntime {
@@ -42,7 +42,7 @@ impl ThreadRuntime {
                     skills,
                     mcp_servers,
                     subagent_threads: subagent_threads.into_iter().map(Into::into).collect(),
-                    now: Utc::now(),
+                    now: Timestamp::now(),
                     git_branch,
                 },
             )
@@ -72,7 +72,6 @@ impl ThreadRuntime {
     #[cfg(test)]
     pub(crate) fn record_runtime_event_for_test(&self, kind: &str) {
         use crate::event::replay::SequencedRuntimeEvent;
-        use chrono::TimeZone;
 
         let event = client_proto::RuntimeEvent::new(match kind {
             "run_started" => client_proto::TypedRuntimeEvent::RunStarted,
@@ -84,8 +83,8 @@ impl ThreadRuntime {
             .expect("status projection lock poisoned")
             .record_event(
                 &event,
-                Utc.with_ymd_and_hms(2026, 8, 20, 0, 0, 0)
-                    .single()
+                "2026-08-20T00:00:00Z"
+                    .parse()
                     .expect("fixed test time should be valid"),
             );
         let _ = self

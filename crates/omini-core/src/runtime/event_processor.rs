@@ -130,7 +130,7 @@ impl AgentRuntime {
                             if let Some(run_id) = &run_id_for_events {
                                 next_step_no += 1;
                                 let step_id = uuid::Uuid::new_v4().to_string();
-                                let started_at = chrono::Utc::now();
+                                let started_at = Timestamp::now();
                                 active_step_id = Some(step_id.clone());
                                 let _ = persistence_tx
                                     .send(RuntimePersistenceEvent::UpsertAgentStep {
@@ -156,7 +156,7 @@ impl AgentRuntime {
                                     .send(RuntimePersistenceEvent::UpdateAgentStep {
                                         step_id,
                                         status: omini_domain::agent_run::AgentStepStatus::Completed,
-                                        finished_at: Some(chrono::Utc::now()),
+                                        finished_at: Some(Timestamp::now()),
                                         add_input_tokens: 0,
                                         add_output_tokens: 0,
                                     })
@@ -189,7 +189,7 @@ impl AgentRuntime {
                                     input: serde_json::to_value(&tu.input)
                                         .unwrap_or(serde_json::Value::Null),
                                     status: omini_domain::agent_run::ToolUseStatus::Running,
-                                    updated_at: chrono::Utc::now(),
+                                    updated_at: Timestamp::now(),
                                 };
                                 tool_uses.insert(tu.id.clone(), record.clone());
                                 let _ = persistence_tx
@@ -217,7 +217,7 @@ impl AgentRuntime {
                                 "forwarding tool result event"
                             );
                             if let Some(mut record) = tool_uses.get(&tr.tool_use_id).cloned() {
-                                record.updated_at = chrono::Utc::now();
+                                record.updated_at = Timestamp::now();
                                 let status = if tr.is_error {
                                     omini_domain::agent_run::ToolUseStatus::Failed
                                 } else {
@@ -246,7 +246,7 @@ impl AgentRuntime {
                                 && matches!(req.kind, omini_runtime_contract::thread_domain::ToolPauseKind::Permission(_))
                                 && let Some(run_id) = &run_id_for_events
                             {
-                                record.updated_at = chrono::Utc::now();
+                                record.updated_at = Timestamp::now();
                                 record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
                                 let _ = persistence_tx
                                     .send(RuntimePersistenceEvent::UpsertToolUseExecution {

@@ -29,8 +29,8 @@ pub struct ThreadSummary {
     pub title: String,
     pub model: String,
     pub provider: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_state: Option<ThreadRuntimeState>,
 }
@@ -122,7 +122,7 @@ pub enum ThreadRuntimeActivityKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ThreadRuntimeActivity {
     pub kind: ThreadRuntimeActivityKind,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     /// 已运行时间，单位毫秒；query 活动会扣除等待客户端响应的暂停时长。
     pub elapsed_ms: u64,
 }
@@ -132,7 +132,7 @@ pub struct ThreadRuntimeActivity {
 pub struct ThreadRuntimeTool {
     pub tool_use_id: String,
     pub tool_name: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: Timestamp,
     /// 已运行时间，单位毫秒。
     pub elapsed_ms: u64,
     /// 工具来自子 agent 时，这里标识源线程。

@@ -167,7 +167,7 @@ mod tests {
 
     use crate::app::state::{SelectionPoint, TextSelection};
     use crate::ui::selection::selected_text;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use omini_domain::conversation::ProposedPlan;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -243,7 +243,7 @@ mod tests {
             title: "Plan".to_string(),
             markdown: "# Plan".to_string(),
             path: "/tmp/plan.md".into(),
-            created_at: Utc::now(),
+            created_at: Timestamp::now(),
         });
         state.dialogs.plan.plan_approval_auto = true;
 

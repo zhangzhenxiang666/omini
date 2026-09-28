@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use omini_domain::task::{TaskChangedEvent, TaskCompletion, TaskInfo, TaskOutputDelta, TaskStatus};
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::persistence::RuntimePersistenceEvent;
@@ -174,7 +174,7 @@ impl TaskManager {
             .ok_or_else(|| format!("unknown task '{task_id}'"))?;
         if !task.status.is_terminal() {
             task.status = TaskStatus::Cancelling;
-            task.updated_at = Utc::now();
+            task.updated_at = Timestamp::now();
             self.update(task.clone()).await?;
         }
         Ok(task)
@@ -191,7 +191,7 @@ impl TaskManager {
             .get(task_id)
             .ok_or_else(|| format!("unknown task '{task_id}'"))?;
         task.status = status;
-        task.updated_at = Utc::now();
+        task.updated_at = Timestamp::now();
         task.completed_at = Some(task.updated_at);
         task.result_summary = Some(result_summary.clone());
         self.update(task.clone()).await?;
@@ -268,7 +268,7 @@ mod tests {
     use omini_domain::task::TaskKind;
 
     fn task(task_id: &str, owner: &str, status: TaskStatus) -> TaskInfo {
-        let now = Utc::now();
+        let now = Timestamp::now();
         TaskInfo {
             task_id: task_id.to_string(),
             owner_thread_id: owner.to_string(),

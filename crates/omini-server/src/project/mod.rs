@@ -1,6 +1,6 @@
 //! 项目管理器，负责项目级别的状态维护以及 thread 的管理。
 
-use crate::{store::Database, thread::ThreadRuntime};
+use crate::{store::Store, thread::ThreadRuntime};
 use omini_config::{
     ConfigError, OminiRoot, ResolvedConfig, load_resolved_config_for_cwd, project::ProjectDir,
 };
@@ -29,7 +29,7 @@ pub struct ProjectManager {
     root: Arc<OminiRoot>,
     cwd: PathBuf,
     project: ProjectDir,
-    db: Arc<Database>,
+    db: Arc<Store>,
     // 这里只缓存正在被客户端使用的 runtime；空闲后会关闭并从数据库按需恢复。
     threads: Mutex<HashMap<String, Arc<ThreadRuntime>>>,
 }
@@ -53,7 +53,7 @@ impl ProjectManager {
         root: Arc<OminiRoot>,
         cwd: PathBuf,
         project: ProjectDir,
-        db: Arc<Database>,
+        db: Arc<Store>,
     ) -> Self {
         Self {
             project_id,

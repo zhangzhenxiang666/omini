@@ -44,11 +44,11 @@ pub struct AgentRunSnapshot {
     pub thread_id: String,
     pub parent_run_id: Option<String>,
     pub status: AgentRunStatus,
-    pub created_at: DateTime<Utc>,
-    pub started_at: Option<DateTime<Utc>>,
-    pub finished_at: Option<DateTime<Utc>>,
+    pub created_at: Timestamp,
+    pub started_at: Option<Timestamp>,
+    pub finished_at: Option<Timestamp>,
     pub total_tokens: i64,
-    pub archived_at: Option<DateTime<Utc>>,
+    pub archived_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -57,8 +57,8 @@ pub struct AgentStepSnapshot {
     pub run_id: String,
     pub step_no: u32,
     pub status: AgentStepStatus,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
+    pub started_at: Timestamp,
+    pub finished_at: Option<Timestamp>,
     pub input_tokens: i64,
     pub output_tokens: i64,
 }
@@ -70,7 +70,7 @@ pub struct ToolUseExecutionSnapshot {
     pub name: String,
     pub input: Value,
     pub status: ToolUseStatus,
-    pub updated_at: DateTime<Utc>,
+    pub updated_at: Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

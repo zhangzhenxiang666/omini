@@ -5,7 +5,7 @@ use crate::app::event::{
     PermissionPreview, RuntimeToUiEvent, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest,
 };
 use crate::features::timeline::model::MentionKind;
-use chrono::Utc;
+use jiff::{SignedDuration, Timestamp};
 use omini_domain::conversation::{AssistantMessage, AssistantMessageBlock, ConversationEntry};
 use omini_domain::subagents::{AgentRecord, AgentSourceKind, AgentSummary};
 use omini_domain::task::{TaskChangedEvent, TaskInfo, TaskKind};
@@ -75,7 +75,7 @@ fn start_subagent_with_execution_mode(
 
 /// 通过通用事件更新任务，模拟实时事件与重连重放共用的输入路径。
 fn change_task(state: &mut AppState, task_id: &str, kind: TaskKind, status: TaskStatus) {
-    let now = Utc::now();
+    let now = Timestamp::now();
     state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
         task: TaskInfo {
             task_id: task_id.into(),
@@ -194,7 +194,7 @@ fn background_wait_recovery() {
 fn task_completion_prunes() {
     let mut state = AppState::new();
     start_subagent(&mut state);
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
         task: TaskInfo {
@@ -220,7 +220,7 @@ fn active_terminal_lifecycle() {
     let mut state = AppState::new();
     start_subagent(&mut state);
     state.sessions.active_session_task_id = Some("task_1".to_string());
-    let now = Utc::now();
+    let now = Timestamp::now();
 
     state.apply_event(RuntimeToUiEvent::TaskChanged(TaskChangedEvent {
         task: TaskInfo {
@@ -247,7 +247,7 @@ fn active_terminal_lifecycle() {
 }
 
 fn subagent_snapshot(history: Vec<ConversationEntry>) -> AgentTaskSnapshot {
-    let now = Utc::now();
+    let now = Timestamp::now();
     AgentTaskSnapshot {
         task: AgentTaskInfo {
             task_id: "task_1".to_string(),
@@ -301,7 +301,7 @@ fn query_runtime_status(
         connected_client_count: 1,
         activity: Some(protocol::ThreadRuntimeActivity {
             kind: protocol::ThreadRuntimeActivityKind::Query,
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             elapsed_ms,
         }),
         pending_pauses: pending_pause_ids
@@ -327,7 +327,7 @@ fn compact_runtime_status(elapsed_ms: u64) -> protocol::ThreadRuntimeStatus {
         connected_client_count: 1,
         activity: Some(protocol::ThreadRuntimeActivity {
             kind: protocol::ThreadRuntimeActivityKind::Compact,
-            started_at: Utc::now(),
+            started_at: Timestamp::now(),
             elapsed_ms,
         }),
         pending_pauses: Vec::new(),
@@ -369,7 +369,7 @@ fn submitted_plan(plan_id: &str) -> SubmittedPlan {
         title: "Plan".to_string(),
         markdown: "# Plan".to_string(),
         path: PathBuf::new(),
-        created_at: Utc::now(),
+        created_at: Timestamp::now(),
     }
 }
 
@@ -1033,7 +1033,7 @@ fn task_history_snapshot() {
 #[test]
 fn restore_task_timer() {
     let mut state = AppState::new();
-    let started_at = Utc::now() - chrono::Duration::seconds(95);
+    let started_at = Timestamp::now() - SignedDuration::from_secs(95);
     let mut snapshot = subagent_snapshot(Vec::new());
     snapshot.task.status = TaskStatus::Running;
     snapshot.task.created_at = started_at;
@@ -1061,12 +1061,7 @@ fn restore_task_timer() {
     let node = &state.sessions.subagents["sub_1"];
     assert_eq!(node.started_at, started_at);
     assert_eq!(node.status, TaskStatus::Running);
-    assert!(
-        Utc::now()
-            .signed_duration_since(node.started_at)
-            .num_seconds()
-            >= 95
-    );
+    assert!(Timestamp::now().duration_since(node.started_at).as_secs() >= 95);
     assert_eq!(state.sessions.subagent_order, ["task_1"]);
 }
 
