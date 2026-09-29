@@ -311,8 +311,7 @@ async fn client_delivery_recovery() {
         .await
         .unwrap()
         .unwrap();
-    let result: AgentTaskResult =
-        serde_json::from_str(task_row.result_json.as_deref().expect("result json")).unwrap();
+    let result = task_row.result.expect("task result").0;
     assert_eq!(result.undelivered_messages, Some(1));
     assert_eq!(
         db.client_delivery("task-client", &pending)

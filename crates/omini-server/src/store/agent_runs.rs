@@ -43,7 +43,7 @@ fn tool_use_snapshot(row: ToolUseExecution) -> Result<ToolUseExecutionSnapshot, 
         id: row.id,
         step_id: row.step_id,
         name: row.name,
-        input: serde_json::from_str(&row.input_json)?,
+        input: row.input,
         status: row.status,
         updated_at: row.updated_at,
     })
@@ -148,15 +148,14 @@ impl Store {
         status: ToolUseStatus,
     ) -> Result<(), StoreError> {
         let mut db = self.conn();
-        let input_json = serde_json::to_string(&item.input)?;
-        // 冲突时只更新状态与更新时间;step_id/name/input_json 是首写事实,
+        // 冲突时只更新状态与更新时间;step_id/name/input 是首写事实,
         // 放 on_create 保持原 SQL 的列集合语义。
         ToolUseExecution::upsert_by_id(&item.id)
             .on_create(|create| {
                 create
                     .step_id(item.step_id.clone())
                     .name(item.name.clone())
-                    .input_json(input_json)
+                    .input(item.input.clone())
             })
             .status(status)
             .updated_at(item.updated_at)

@@ -50,7 +50,7 @@ impl Store {
             agent_thread_id,
             source_kind: "client",
             source_key: &source_key,
-            payload: &serde_json::to_string(&message.input)?,
+            payload: serde_json::to_value(&message.input)?,
             entry: ConversationEntry::UserInput(message.input.clone()),
             thread_dir,
         })
@@ -62,22 +62,27 @@ impl Store {
         &self,
         task_id: &str,
         message: &ClientMessage,
-    ) -> Result<Option<(String, DeliveryStatus)>, StoreError> {
+    ) -> Result<Option<(serde_json::Value, DeliveryStatus)>, StoreError> {
         let source_key =
             DeliveryKey::from_client(task_id, &message.client_id, &message.client_echo_id)
                 .source_key;
         let mut db = self.conn();
-        Ok(AgentTaskDelivery::filter(
-            AgentTaskDelivery::fields()
-                .task_id()
-                .eq(task_id)
-                .and(AgentTaskDelivery::fields().source_kind().eq("client"))
-                .and(AgentTaskDelivery::fields().source_key().eq(source_key)),
+        Ok(
+            match AgentTaskDelivery::filter(
+                AgentTaskDelivery::fields()
+                    .task_id()
+                    .eq(task_id)
+                    .and(AgentTaskDelivery::fields().source_kind().eq("client"))
+                    .and(AgentTaskDelivery::fields().source_key().eq(source_key)),
+            )
+            .first()
+            .exec(&mut db)
+            .await?
+            {
+                Some(row) => Some((row.payload.clone(), row.status)),
+                None => None,
+            },
         )
-        .first()
-        .exec(&mut db)
-        .await?
-        .map(|row| (row.payload, row.status)))
     }
 
     pub async fn fail_client_message(
@@ -109,7 +114,7 @@ impl Store {
             agent_thread_id,
             source_kind: "agent",
             source_key: &source_key,
-            payload: &serde_json::to_string(message)?,
+            payload: serde_json::to_value(message)?,
             entry: ConversationEntry::SystemEvent(SystemEvent::AgentMessage(message.clone())),
             thread_dir,
         })
@@ -142,7 +147,7 @@ impl Store {
         )
         .owner_thread_id(owner_thread_id.to_string())
         .agent_thread_id(agent_thread_id.to_string())
-        .payload(payload.to_string())
+        .payload(payload.clone())
         .status(DeliveryStatus::Pending)
         .or_ignore()
         .exec(&mut tx)
@@ -349,9 +354,8 @@ impl Store {
                     .exec(&mut tx)
                     .await?;
                 let mut result = existing
-                    .and_then(|task| task.result_json)
-                    .map(|json| serde_json::from_str::<AgentTaskResult>(&json))
-                    .transpose()?
+                    .and_then(|task| task.result)
+                    .map(|result| result.0)
                     .unwrap_or(AgentTaskResult {
                         output: None,
                         error: None,
@@ -365,7 +369,7 @@ impl Store {
                     .await?
                 {
                     toasty::update!(task {
-                        result_json: Some(serde_json::to_string(&result)?),
+                        result: Some(toasty::stmt::Json(result))
                     })
                     .exec(&mut tx)
                     .await?;
@@ -397,7 +401,7 @@ struct DeliveryRegistration<'a> {
     agent_thread_id: &'a str,
     source_kind: &'a str,
     source_key: &'a str,
-    payload: &'a str,
+    payload: serde_json::Value,
     entry: ConversationEntry,
     thread_dir: &'a ThreadDir,
 }

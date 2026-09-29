@@ -70,10 +70,7 @@ pub async fn load_agent_tasks(
     }) {
         let thread_dir = project.thread(&task.agent_thread_id);
         let history = load_messages(db, &task.agent_thread_id, &thread_dir).await;
-        let result = task
-            .result_json
-            .as_deref()
-            .and_then(|json| serde_json::from_str(json).ok());
+        let result = task.result.map(|result| result.0);
         snapshots.push(AgentTaskSnapshot {
             task: AgentTaskInfo {
                 task_id: task.task_id,

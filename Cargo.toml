@@ -53,7 +53,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 similar = { version = "3.1", features = ["text"] }
 thiserror = "2.0.18"
-toasty = { version = "0.11.0", default-features = false, features = ["sqlite", "jiff"] }
+toasty = { version = "0.11.0", default-features = false, features = ["sqlite", "jiff", "serde"] }
 toasty-driver-sqlite = "0.11.0"
 tokio = { version = "1.52.2", features = [
     "rt",

@@ -103,7 +103,7 @@ impl Store {
             status: task.status,
             agent_name: task.agent.clone(),
             title: task.title.clone(),
-            result_json: None,
+            result: None,
             created_at: task.created_at,
             updated_at: task.updated_at,
             completed_at: None,
@@ -197,7 +197,7 @@ impl Store {
         result: &AgentTaskResult,
         completed_at: Timestamp,
     ) -> Result<(), StoreError> {
-        let result_json = serde_json::to_string(result)?;
+        let result_json = toasty::stmt::Json(result.clone());
         let mut conn = self.conn();
         let mut tx = conn.transaction().await?;
         if let Some(mut task) = AgentTask::filter_by_task_id(task_id)
@@ -207,7 +207,7 @@ impl Store {
         {
             toasty::update!(task {
                 status,
-                result_json: Some(result_json.clone()),
+                result: Some(result_json.clone()),
                 updated_at: completed_at,
                 completed_at: Some(completed_at),
             })
