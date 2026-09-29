@@ -81,11 +81,11 @@ impl ProjectManager {
             project_id: self.project_id.clone(),
             parent_thread_id: None,
             spawn_tool_use_id: None,
-            thread_type: "main".to_string(),
+            thread_type: omini_entity::ThreadType::Main,
             agent_label: None,
             provider: model.provider_id.clone(),
             model: model.model_id.clone(),
-            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
+            thinking_effort: model.thinking_effort,
             title: None,
             current_context_tokens: 0,
             total_tokens: 0,
@@ -180,11 +180,11 @@ impl ProjectManager {
             project_id: self.project_id.clone(),
             parent_thread_id: None,
             spawn_tool_use_id: None,
-            thread_type: "main".to_string(),
+            thread_type: omini_entity::ThreadType::Main,
             agent_label: None,
             provider: model.provider_id.clone(),
             model: model.model_id.clone(),
-            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
+            thinking_effort: model.thinking_effort,
             title: Some(new_title),
             current_context_tokens: 0,
             total_tokens: 0,
@@ -288,20 +288,7 @@ impl ProjectManager {
             return Err(ThreadError::NotFound);
         }
 
-        let thinking_effort = thread_record
-            .thinking_effort
-            .as_deref()
-            .map(str::parse)
-            .transpose()
-            .map_err(|()| {
-                CoreError::persistence(
-                    "failed to load thread",
-                    format!(
-                        "invalid thinking_effort for thread '{}': {:?}",
-                        thread_record.id, thread_record.thinking_effort
-                    ),
-                )
-            })?;
+        let thinking_effort = thread_record.thinking_effort;
         let settings = self.settings_for_model_selection(
             ModelSelection::Exact {
                 provider: &thread_record.provider,

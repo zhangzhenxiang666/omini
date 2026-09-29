@@ -26,7 +26,7 @@ fn runtime_child_uses_server_project() {
         updated_at: now,
     };
 
-    let stored = thread_from_runtime(TEST_PROJECT_ID, &runtime);
+    let stored = thread_from_runtime(TEST_PROJECT_ID, &runtime).unwrap();
 
     assert_eq!(stored.project_id, TEST_PROJECT_ID);
     assert_eq!(stored.id, "child");
@@ -41,7 +41,8 @@ async fn delete_thread_tree_cleans_rows_and_files() {
     db.create_thread(&test_thread("parent")).await.unwrap();
     let mut child = test_thread("child");
     child.parent_thread_id = Some("parent".to_string());
-    child.thread_type = "agent".to_string();
+    use omini_entity::ThreadType;
+    child.thread_type = ThreadType::Agent;
     db.create_thread(&child).await.unwrap();
     db.append_llm_message(
         "child",

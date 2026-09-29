@@ -14,7 +14,9 @@ pub struct Attachment {
     pub original_name: String,
     pub mime_type: String,
     pub size: i64,
+    /// 附件内容的内容寻址键。
     pub sha256: String,
+    /// 线程存储目录下内容寻址文件的相对路径。
     pub relative_path: String,
     pub created_at: Timestamp,
     #[belongs_to(key = thread_id, references = id)]

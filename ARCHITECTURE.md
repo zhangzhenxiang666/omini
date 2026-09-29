@@ -38,7 +38,7 @@ omini-cli / omini-tui
 - 会话时间线使用 `ConversationEntry`，原始 `UserInput`、助手消息和系统事件分别建模；Provider 上下文独立使用 `omini-model::Message`。
 - Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
 - 持久化分两层：`omini-entity` 声明"数据长什么样"（模型即 schema 的单一权威，经 `push_schema` 建库）；`omini-server` 的 store 层用 toasty 查询 API 组合模型并承载业务策略（幂等闸门、投递结算、启动恢复、线程树删除）。核心事件只表达领域事实。
-- `omini-entity` 的模型即领域类型：状态/种类列直接使用领域枚举（`toasty::Embed` 原生落库），无平行 DTO 与转换层；数据库层无外键与级联，引用完整性由 server 创建边界校验、树删除由业务层在事务内显式完成。
+- `omini-entity` 的模型即领域类型：状态/种类列直接使用领域枚举（`toasty::Embed` 原生落库），无平行 DTO 与转换层。词表按语义归属放置：跨 crate 共享的枚举留在其语义 crate（`omini-domain`/`omini-model`/`omini-runtime-contract`）原地派生 `toasty::Embed`，该派生视同 serde 的表示能力标注，不算持久化逻辑；仅 entity 与 store 消费的纯持久化词表留在 `omini-entity`，与宿主实体同文件。数据库层无外键与级联，引用完整性由 server 创建边界校验、树删除由业务层在事务内显式完成。
 - 持久化假设同一数据库文件只有单个 daemon 进程写入：业务层的读-判-写模式（上下文版本、归档、初始标题）在单连接池上等价于旧的单条条件 UPDATE。
 - 服务端通过核心公开的项目/线程能力工作，不依赖核心内部的 Skill、任务、工具或引擎模块。
 

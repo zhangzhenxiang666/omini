@@ -150,7 +150,7 @@ pub(super) fn test_thread(id: &str) -> store_model::Thread {
         project_id: TEST_PROJECT_ID.to_string(),
         parent_thread_id: None,
         spawn_tool_use_id: None,
-        thread_type: "main".to_string(),
+        thread_type: omini_entity::ThreadType::Main,
         agent_label: None,
         provider: "openai".to_string(),
         model: "gpt-test".to_string(),

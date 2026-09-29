@@ -6,8 +6,8 @@ use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_domain::conversation::{AgentMessage, ConversationEntry, SystemEvent};
 use omini_entity::{
-    AgentTask, AgentTaskDelivery, BackgroundTask, DeliveryStatus, LlmMessage, MessageKind, Thread,
-    cleanup_created_files, prepare_blocks,
+    AgentTask, AgentTaskDelivery, BackgroundTask, DeliveryStatus, LlmMessage, MessageKind,
+    SourceKind, Thread, cleanup_created_files, prepare_blocks,
 };
 use omini_model::message::Role;
 use omini_runtime_contract::persistence::ClientMessage;
@@ -26,7 +26,7 @@ impl Store {
             .into_iter()
             .map(|row| DeliveryKey {
                 task_id: row.task_id,
-                source_kind: row.source_kind,
+                source_kind: row.source_kind.as_str().to_string(),
                 source_key: row.source_key,
             })
             .collect())
@@ -48,7 +48,7 @@ impl Store {
             task_id,
             owner_thread_id,
             agent_thread_id,
-            source_kind: "client",
+            source_kind: SourceKind::Client,
             source_key: &source_key,
             payload: serde_json::to_value(&message.input)?,
             entry: ConversationEntry::UserInput(message.input.clone()),
@@ -72,7 +72,11 @@ impl Store {
                 AgentTaskDelivery::fields()
                     .task_id()
                     .eq(task_id)
-                    .and(AgentTaskDelivery::fields().source_kind().eq("client"))
+                    .and(
+                        AgentTaskDelivery::fields()
+                            .source_kind()
+                            .eq(SourceKind::Client),
+                    )
                     .and(AgentTaskDelivery::fields().source_key().eq(source_key)),
             )
             .first()
@@ -92,9 +96,14 @@ impl Store {
         reason: &str,
     ) -> Result<u32, StoreError> {
         let key = DeliveryKey::from_client(task_id, &message.client_id, &message.client_echo_id);
-        self.settle_deliveries(Some(task_id), Some("client"), Some(&key.source_key), reason)
-            .await
-            .map(|counts| counts.first().map_or(0, |(_, count)| *count))
+        self.settle_deliveries(
+            Some(task_id),
+            Some(SourceKind::Client),
+            Some(&key.source_key),
+            reason,
+        )
+        .await
+        .map(|counts| counts.first().map_or(0, |(_, count)| *count))
     }
 
     pub async fn enqueue_agent_message(
@@ -112,7 +121,7 @@ impl Store {
             task_id,
             owner_thread_id,
             agent_thread_id,
-            source_kind: "agent",
+            source_kind: SourceKind::Agent,
             source_key: &source_key,
             payload: serde_json::to_value(message)?,
             entry: ConversationEntry::SystemEvent(SystemEvent::AgentMessage(message.clone())),
@@ -142,7 +151,7 @@ impl Store {
         let mut tx = conn.transaction().await?;
         let inserted = AgentTaskDelivery::upsert_by_task_id_and_source_kind_and_source_key(
             task_id.to_string(),
-            source_kind.to_string(),
+            source_kind,
             source_key.to_string(),
         )
         .owner_thread_id(owner_thread_id.to_string())
@@ -205,15 +214,12 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut conn = self.conn();
         let mut tx = conn.transaction().await?;
+        let source_kind = SourceKind::parse(&key.source_kind)?;
         let delivery = AgentTaskDelivery::filter(
             AgentTaskDelivery::fields()
                 .task_id()
                 .eq(&key.task_id)
-                .and(
-                    AgentTaskDelivery::fields()
-                        .source_kind()
-                        .eq(&key.source_kind),
-                )
+                .and(AgentTaskDelivery::fields().source_kind().eq(source_kind))
                 .and(AgentTaskDelivery::fields().source_key().eq(&key.source_key)),
         )
         .first()
@@ -291,7 +297,7 @@ impl Store {
     pub(super) async fn settle_deliveries(
         &self,
         only_task_id: Option<&str>,
-        source_kind: Option<&str>,
+        source_kind: Option<SourceKind>,
         source_key: Option<&str>,
         reason: &str,
     ) -> Result<Vec<(String, u32)>, StoreError> {
@@ -399,7 +405,7 @@ struct DeliveryRegistration<'a> {
     task_id: &'a str,
     owner_thread_id: &'a str,
     agent_thread_id: &'a str,
-    source_kind: &'a str,
+    source_kind: SourceKind,
     source_key: &'a str,
     payload: serde_json::Value,
     entry: ConversationEntry,

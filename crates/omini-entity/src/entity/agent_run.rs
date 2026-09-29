@@ -19,6 +19,7 @@ pub struct AgentRun {
     pub created_at: Timestamp,
     pub started_at: Option<Timestamp>,
     pub finished_at: Option<Timestamp>,
+    /// 本次运行累计消耗的 token。
     pub total_tokens: i64,
     /// 归档标记;非 NULL 表示已从默认列表隐藏。
     pub archived_at: Option<Timestamp>,

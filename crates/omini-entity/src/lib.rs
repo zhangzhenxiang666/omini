@@ -1,6 +1,6 @@
-//! omini 实体层:SQLite 数据模型的一文件一实体声明,sea-orm 风格。
+//! omini 实体层:SQLite 数据模型的一文件一实体声明(toasty ORM)。
 //!
-//! 本 crate 只负责"数据长什么样"——实体(行模型)、领域 DTO 与二者的转换、
+//! 本 crate 只负责"数据长什么样"——实体(行模型)与持久化列值词表、
 //! 连接与建库([`Database::open`]),以及大内容落盘 sidecar 的存储机制。
 //! 表结构由实体声明经 `push_schema` 生成,模型即 schema 的单一权威,
 //! 库内不存在手写 DDL。
@@ -11,7 +11,7 @@
 
 mod content;
 mod database;
-/// 一文件一实体的模型声明,含行模型、领域 DTO 与转换。
+/// 一文件一实体的模型声明,含行模型与持久化列值词表。
 pub mod entity;
 /// 集成测试与下游 crate 测试共用的夹具(临时库、固定时间、样例实体)。
 pub mod test_support;

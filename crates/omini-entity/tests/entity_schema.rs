@@ -58,3 +58,41 @@ async fn partial_schema_file_is_rejected() {
     );
     drop_db(&path);
 }
+
+/// 未知词表值必须按数据损坏拒绝,而非静默默认。
+#[test]
+fn closed_vocab_parses_reject_unknown_values() {
+    use omini_entity::{SourceKind, StoreError, ThreadType};
+
+    assert!(ThreadType::parse("main").is_ok());
+    assert!(matches!(ThreadType::parse("agent"), Ok(ThreadType::Agent)));
+    assert!(matches!(
+        ThreadType::parse("bogus"),
+        Err(StoreError::InvalidData(_))
+    ));
+
+    assert!(matches!(SourceKind::parse("agent"), Ok(SourceKind::Agent)));
+    assert!(matches!(
+        SourceKind::parse("client"),
+        Ok(SourceKind::Client)
+    ));
+    assert!(matches!(
+        SourceKind::parse("bogus"),
+        Err(StoreError::InvalidData(_))
+    ));
+
+    // 运行时记录携带的未知线程类型/思考力度同样在映射边界被拒绝。
+    use omini_entity::test_support::test_agent_thread;
+    let mut runtime = test_agent_thread("child", "parent");
+    runtime.thread_type = "bogus".to_string();
+    assert!(matches!(
+        omini_entity::thread_from_runtime("p1", &runtime),
+        Err(StoreError::InvalidData(_))
+    ));
+    let mut runtime = test_agent_thread("child", "parent");
+    runtime.thinking_effort = Some("ultra".to_string());
+    assert!(matches!(
+        omini_entity::thread_from_runtime("p1", &runtime),
+        Err(StoreError::InvalidData(_))
+    ));
+}

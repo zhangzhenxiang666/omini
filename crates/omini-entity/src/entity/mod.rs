@@ -12,6 +12,11 @@
 //! 数据库层面没有外键强制与级联:删除父行的业务(如线程树删除)由
 //! 业务代码在事务内显式删除全部关联行。JSON 载荷(result/input/payload
 //! 等)以 TEXT 列存储,序列化由业务代码负责。
+//!
+//! 字段注释按需:struct 文档讲表职责与访问器语义,字段 `///` 只写
+//! 名字与类型表达不了的语义——不变量与生命周期、统计口径、可空
+//! 含义、跨表引用责任;自明字段(`#[key]` 主键、`#[auto]` 时间戳等)
+//! 不加注释。
 
 mod agent_run;
 mod agent_step;
@@ -28,11 +33,11 @@ mod tool_use_execution;
 pub use agent_run::AgentRun;
 pub use agent_step::AgentStep;
 pub use agent_task::AgentTask;
-pub use agent_task_delivery::{AgentTaskDelivery, DeliveryStatus};
+pub use agent_task_delivery::{AgentTaskDelivery, DeliveryStatus, SourceKind};
 pub use attachment::Attachment;
 pub use background_task::BackgroundTask;
 pub use llm_message::LlmMessage;
 pub use message::{Message, MessageKind};
 pub use project::Project;
-pub use thread::{Thread, thread_from_runtime};
+pub use thread::{Thread, ThreadType, parse_thinking_effort, thread_from_runtime};
 pub use tool_use_execution::ToolUseExecution;

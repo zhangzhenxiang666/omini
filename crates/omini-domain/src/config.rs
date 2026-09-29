@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, Default, toasty::Embed,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
     None,
@@ -13,6 +15,7 @@ pub enum ThinkingEffort {
     #[default]
     Medium,
     High,
+    #[column(variant = "xhigh")]
     XHigh,
     Max,
 }

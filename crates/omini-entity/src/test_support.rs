@@ -1,6 +1,6 @@
 //! 集成测试与下游 crate 测试共用的夹具:临时目录、固定时间与样例实体。
 
-use crate::Thread;
+use crate::{Thread, ThreadType};
 use jiff::Timestamp;
 use omini_domain::task::TaskStatus;
 use omini_runtime_contract::persistence::ThreadRecord;
@@ -52,7 +52,7 @@ pub fn test_thread(id: &str) -> Thread {
         project_id: TEST_PROJECT_ID.to_string(),
         parent_thread_id: None,
         spawn_tool_use_id: None,
-        thread_type: "main".to_string(),
+        thread_type: ThreadType::Main,
         agent_label: None,
         provider: "openai".to_string(),
         model: "gpt-test".to_string(),

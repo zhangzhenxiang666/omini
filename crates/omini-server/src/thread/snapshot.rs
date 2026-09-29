@@ -58,20 +58,15 @@ impl ThreadRuntime {
             thread_id: thread.id,
             provider: thread.provider.clone(),
             model: thread.model.clone(),
-            thinking_effort: {
-                let effort = thread
-                    .thinking_effort
-                    .as_deref()
-                    .and_then(|effort| effort.parse().ok());
-                self.settings
-                    .resolve_model(&omini_config::ModelSelection {
-                        active_provider: thread.provider.clone(),
-                        model: thread.model.clone(),
-                        thinking_effort: effort,
-                    })
-                    .ok()
-                    .and_then(|model| model.thinking_effort)
-            },
+            thinking_effort: self
+                .settings
+                .resolve_model(&omini_config::ModelSelection {
+                    active_provider: thread.provider.clone(),
+                    model: thread.model.clone(),
+                    thinking_effort: thread.thinking_effort,
+                })
+                .ok()
+                .and_then(|model| model.thinking_effort),
             active_profile,
             title: thread.title,
             messages,

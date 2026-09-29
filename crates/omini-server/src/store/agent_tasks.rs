@@ -26,7 +26,7 @@ impl Store {
         thread: &ThreadRecord,
         initial_message: &omini_model::message::Message,
     ) -> Result<(), StoreError> {
-        let thread = thread_from_runtime(project_id, thread);
+        let thread = thread_from_runtime(project_id, thread)?;
         let initial_content = serde_json::to_string(&initial_message.content)?;
         let initial_prompt = initial_message
             .content
@@ -61,11 +61,11 @@ impl Store {
             project_id: thread.project_id.clone(),
             parent_thread_id: thread.parent_thread_id.clone(),
             spawn_tool_use_id: thread.spawn_tool_use_id.clone(),
-            thread_type: thread.thread_type.clone(),
+            thread_type: thread.thread_type,
             agent_label: thread.agent_label.clone(),
             provider: thread.provider.clone(),
             model: thread.model.clone(),
-            thinking_effort: thread.thinking_effort.clone(),
+            thinking_effort: thread.thinking_effort,
             title: thread.title.clone(),
             current_context_tokens: thread.current_context_tokens,
             total_tokens: thread.total_tokens,

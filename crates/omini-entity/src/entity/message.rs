@@ -25,6 +25,7 @@ pub struct Message {
     pub role: Role,
     /// assistant 消息必填、其他角色必须为 None(写入方约定)。
     pub model_ref: Option<String>,
+    /// 序列化正文,JSON 形态由 `kind` 决定。
     pub content: String,
     pub kind: MessageKind,
     pub created_at: Timestamp,

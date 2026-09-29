@@ -5,7 +5,7 @@ use omini_config::project::ProjectDir;
 use omini_domain::usage::Usage;
 use omini_entity::{
     AgentRun, AgentStep, AgentTask, AgentTaskDelivery, Attachment, BackgroundTask, LlmMessage,
-    Message, Thread, ToolUseExecution,
+    Message, Thread, ThreadType, ToolUseExecution, parse_thinking_effort,
 };
 use std::fs;
 
@@ -17,11 +17,11 @@ impl Store {
             project_id: thread.project_id.clone(),
             parent_thread_id: thread.parent_thread_id.clone(),
             spawn_tool_use_id: thread.spawn_tool_use_id.clone(),
-            thread_type: thread.thread_type.clone(),
+            thread_type: thread.thread_type,
             agent_label: thread.agent_label.clone(),
             provider: thread.provider.clone(),
             model: thread.model.clone(),
-            thinking_effort: thread.thinking_effort.clone(),
+            thinking_effort: thread.thinking_effort,
             title: thread.title.clone(),
             current_context_tokens: thread.current_context_tokens,
             total_tokens: thread.total_tokens,
@@ -46,7 +46,7 @@ impl Store {
             Thread::fields()
                 .project_id()
                 .eq(project_id)
-                .and(Thread::fields().thread_type().eq("main")),
+                .and(Thread::fields().thread_type().eq(ThreadType::Main)),
         )
         .order_by((
             Thread::fields().updated_at().desc(),
@@ -118,12 +118,13 @@ impl Store {
         model: &str,
         thinking_effort: Option<&str>,
     ) -> Result<(), StoreError> {
+        let thinking_effort = parse_thinking_effort(thinking_effort)?;
         let mut db = self.conn();
         if let Some(mut thread) = Thread::filter_by_id(id).first().exec(&mut db).await? {
             toasty::update!(thread {
                 provider: provider.to_string(),
                 model: model.to_string(),
-                thinking_effort: thinking_effort.map(ToString::to_string),
+                thinking_effort,
             })
             .exec(&mut db)
             .await?;
@@ -136,13 +137,12 @@ impl Store {
         id: &str,
         thinking_effort: Option<&str>,
     ) -> Result<(), StoreError> {
+        let thinking_effort = parse_thinking_effort(thinking_effort)?;
         let mut db = self.conn();
         if let Some(mut thread) = Thread::filter_by_id(id).first().exec(&mut db).await? {
-            toasty::update!(thread {
-                thinking_effort: thinking_effort.map(ToString::to_string),
-            })
-            .exec(&mut db)
-            .await?;
+            toasty::update!(thread { thinking_effort })
+                .exec(&mut db)
+                .await?;
         }
         Ok(())
     }

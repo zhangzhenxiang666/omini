@@ -16,6 +16,7 @@ pub struct LlmMessage {
     /// 同版本内的稳定顺序。
     pub ordinal: i64,
     pub role: Role,
+    /// 内容块的 JSON 序列化(sidecar 处理后的形态)。
     pub content: String,
     pub created_at: Timestamp,
     #[belongs_to(key = thread_id, references = id)]
