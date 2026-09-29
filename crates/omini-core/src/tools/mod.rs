@@ -1118,7 +1118,7 @@ mod tests {
         assert!(
             spawn_agent_tool::SpawnAgentTool
                 .description()
-                .contains("Completion is reported automatically")
+                .contains("completion is reported automatically")
         );
         let read_schema = read_task_tool::ReadTaskTool.input_schema();
         assert!(

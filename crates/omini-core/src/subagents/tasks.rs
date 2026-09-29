@@ -669,7 +669,6 @@ impl AgentTaskSupervisor {
             &ctx.settings,
             &spec,
             &agent_skill_summaries(&tool_registry, &runtime.skill_registry),
-            depth,
         ));
         let settings = Arc::new(settings);
         let slot = self.reserve_task_slot(execution_mode)?;
@@ -1616,12 +1615,7 @@ fn resolve_agent_settings(parent_settings: &Settings, spec: &AgentSpec) -> (Sett
     (settings, warnings)
 }
 
-fn agent_system_prompt(
-    parent: &Settings,
-    spec: &AgentSpec,
-    skills: &[SkillSummary],
-    depth: u8,
-) -> String {
+fn agent_system_prompt(parent: &Settings, spec: &AgentSpec, skills: &[SkillSummary]) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are running as an isolated agent task for Omini.\n\n");
     if let Some(section) = crate::prompts::language_preference_section(parent) {
@@ -1634,13 +1628,7 @@ fn agent_system_prompt(
         prompt.push_str(&section);
     }
     prompt.push_str("\n\n<agent_instructions>\n");
-    if depth < MAX_AGENT_DEPTH {
-        prompt.push_str(
-            "Return a concise final result for the parent agent. You may use run_agent for one synchronous child level when useful.\n\n",
-        );
-    } else {
-        prompt.push_str("Return a concise final result for the parent agent.\n\n");
-    }
+    prompt.push_str("Return a concise final result for the parent agent.\n\n");
     prompt.push_str("<agent>\n  <name>");
     prompt.push_str(&spec.name);
     prompt.push_str("</name>\n  <description>");

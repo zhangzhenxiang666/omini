@@ -49,9 +49,6 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
     section
         .push_str("- Agent tasks isolate their intermediate context from the main conversation.\n");
     section.push_str(
-        "- The main agent uses `spawn_agent` to start background tasks. It returns immediately with a task ID and child thread ID.\n",
-    );
-    section.push_str(
         "- Form a quick high-level plan before diving in: separate the critical-path work you must handle yourself from sidecar tasks that could proceed in parallel without blocking your next step.\n",
     );
     section.push_str(
@@ -72,7 +69,6 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
             );
         }
     }
-    section.push_str("- Completion notifications arrive automatically and contain task identity and status. Do not poll running tasks; continue independent work, or end the current turn if nothing useful remains until a task finishes. A completion notification resumes the main agent automatically; use `read_task` after completion only if you need its full output.\n");
     section.push_str(
         "- Do not duplicate an agent task's investigation in the main context. Use its result as input, then inspect only the specific files needed to integrate, verify, or resolve uncertainty.\n",
     );
@@ -96,10 +92,7 @@ pub fn subagent_section(agents: &[AgentSummary], active_profile: ActiveProfile) 
         "- Write each task as a specific, bounded, self-contained brief: goal, relevant context already known, exact question or expected output, and any limits such as read-only or files to own; let the agent choose its own steps.\n",
     );
     section.push_str(
-        "- Each task should materially advance the main task and must not write to files that you or another delegated task is editing.\n",
-    );
-    section.push_str(
-        "- Only the main agent can start background tasks. A depth-1 agent may use `run_agent` for one synchronous depth-2 child when its tool policy allows it; depth-2 agents cannot derive further agents.\n\n",
+        "- Each task should materially advance the main task and must not write to files that you or another delegated task is editing.\n\n",
     );
     section.push_str("## Available Agents\n\n");
     section.push_str("<available_agents>\n");

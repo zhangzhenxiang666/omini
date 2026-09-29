@@ -44,7 +44,7 @@ impl Tool for RunAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Run a named child agent synchronously and return task_id, status, and its final result. The child follows the owner thread's active profile. Available only to agents below the maximum depth."
+        "Run a named child agent synchronously and return task_id, status, and its final result. Use it sparingly, when a bounded subtask would help complete your current task. The child follows the owner thread's active profile."
     }
 
     async fn call(&self, input: Self::Input, ctx: ToolExecutionContext) -> ToolResult {
