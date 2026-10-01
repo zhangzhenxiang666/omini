@@ -1,6 +1,6 @@
-# 架构概览
+# 架构理念
 
-`omini` 由终端客户端、本地服务和 Agent 核心组成：客户端负责交互，服务端负责项目与线程管理，核心负责 Agent 执行。
+`omini` 分三层：终端客户端负责交互，本地服务负责项目与会话管理，Agent 核心负责执行。典型链路：CLI 以规范化目录注册项目，TUI 取得线程控制权并订阅事件，server 校验后经会话句柄驱动 core，core 发布领域事件，持久化经 `AgentHost` 回到 server 完成。
 
 ```text
 omini-cli / omini-tui
@@ -12,108 +12,57 @@ omini-cli / omini-tui
     omini-core
 ```
 
-## Crate 职责
+本文只讲分层边界、核心契约与不变量；具体行为、交互与配置细节以代码和 `docs/` 为准。
+
+## Crate 一览
 
 | Crate | 职责 |
 | --- | --- |
-| `omini-cli` | 程序入口、服务发现与启动、项目注册、启动 TUI。 |
+| `omini-cli` | 程序入口、服务发现与启动、项目注册。 |
 | `omini-tui` | 终端交互、界面状态与渲染、协议请求。 |
 | `omini-protocol` | 客户端与服务端共用的公开 HTTP/WebSocket 类型。 |
-| `omini-server` | 本地服务、项目与会话生命周期、事件投影与重放、持久化业务层（实现核心的 `AgentHost` 宿主接口）。 |
-| `omini-runtime-contract` | 服务端与核心之间的命令、事件和快照；不含持久化操作，持久化与资源申请由核心经 `AgentHost` 直接调用 server 实现。 |
-| `omini-entity` | SQLite 实体声明（一文件一模型，toasty ORM）、领域枚举原生落库、建库与连接、大内容 sidecar 机制。 |
+| `omini-server` | 本地服务、项目与会话生命周期、事件投影与重放、持久化业务层（实现 `AgentHost`）。 |
+| `omini-runtime-contract` | 服务端与核心之间的命令、事件和快照。 |
+| `omini-entity` | SQLite 实体声明（toasty ORM）、建库与连接、大内容 sidecar。 |
 | `omini-core` | Agent 实例与运行执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
-| `omini-model` | Provider 对话上下文的消息、角色和内容块；不代表用户可见的会话时间线。 |
-| `omini-config` | 用户和项目配置，以及 Omini 管理的文件路径。 |
+| `omini-model` | Provider 对话上下文的消息、角色和内容块。 |
+| `omini-config` | 用户和项目配置及 Omini 管理的文件路径。 |
 | `omini-domain` | 不含传输、运行时或持久化逻辑的共享领域类型。 |
 | `omini-permissions` | 权限策略解析及允许、询问、拒绝决策。 |
 | `omini-provider-api` | Provider 的 HTTP/SSE 客户端及请求响应处理。 |
 | `omini-mcp-client` | MCP 连接、生命周期、工具目录和远程调用。 |
 
-依赖边界：
+## 边界原则
 
-- `omini-protocol` 是公开客户端/服务端边界；`omini-runtime-contract` 是内部服务端/核心边界，两者不放运行时实现。
-- `omini-server` 的项目、线程、运行、附件等模块分别注册 `OpenApiRouter<AppState>`；根模块组合路由、注入状态并发布 OpenAPI。handler 保持中文用途注释、`debug_handler` 和接口描述，HTTP 请求与响应的 wire 类型由 `omini-protocol` 定义。
-- `omini-domain` 只承载共享词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
-- 会话时间线使用 `ConversationEntry`，原始 `UserInput`、助手消息和系统事件分别建模；Provider 上下文独立使用 `omini-model::Message`。
-- Provider、MCP 和权限逻辑由独立 crate 提供，不通过协议或运行时契约泄漏实现。
-- 持久化分两层：`omini-entity` 声明"数据长什么样"（模型即 schema 的单一权威，经 `push_schema` 建库）；`omini-server` 的 store 层用 toasty 查询 API 组合模型并承载业务策略（幂等闸门、投递结算、启动恢复、线程树删除）。核心事件只表达领域事实。
-- `omini-entity` 的模型即领域类型：状态/种类列直接使用领域枚举（`toasty::Embed` 原生落库），无平行 DTO 与转换层。词表按语义归属放置：跨 crate 共享的枚举留在其语义 crate（`omini-domain`/`omini-model`/`omini-runtime-contract`）原地派生 `toasty::Embed`，该派生视同 serde 的表示能力标注，不算持久化逻辑；仅 entity 与 store 消费的纯持久化词表留在 `omini-entity`，与宿主实体同文件。数据库层无外键与级联，引用完整性由 server 创建边界校验、树删除由业务层在事务内显式完成。
-- 持久化假设同一数据库文件只有单个 daemon 进程写入：业务层的读-判-写模式（上下文版本、归档、初始标题）在单连接池上等价于旧的单条条件 UPDATE。
-- 服务端通过核心公开的项目/线程能力工作，不依赖核心内部的 Skill、任务、工具或引擎模块。
-
-### TUI 内部边界
-
-`omini-tui` 继续使用 Ratatui，按功能维护状态和视图：`features` 包含时间线、输入框、会话、权限、Ask、计划、工具和各页面；`ui` 提供主题、布局、Markdown、Diff、滚动和文本选择能力。`app` 管理应用循环、焦点优先级、事件更新和副作用调度；`client` 负责 HTTP/WebSocket、协议映射、重连重放与附件上传；`platform` 负责终端、剪贴板和本地文件探测。
-
-主会话和直接子 Agent 共用 `SessionState`，以会话 ID 存在 `SessionStore`。当前会话直接选取，渲染不再交换主/子会话字段。输入编辑器独立保存文本、光标、引用、附件、补全与队列；提交时携带目标会话。输入和服务端事件先更新状态并返回待执行的网络、文件或剪贴板操作，应用循环执行后把异步结果作为事件送回。视图仅读取状态并返回屏幕命中与布局反馈。历史与流式内容由同一个时间线投影处理；聚合器组合条目，工具组件只展示单次调用。
-
-每个 `SessionState` 持有仅用于界面的时间线渲染缓存：已结算历史按消息增量投影，未结算活动组与流式尾部继续使用同一聚合规则。消息区宽度、项目路径或历史替换会重建缓存；晚到的工具结果和任务通知元数据从最早受影响消息回退。滚动、输入和窗口高度变化只更新可见区域，不重建稳定历史。
-
-权限、Ask 和计划分别拥有自己的状态与内容视图，共享底部抽屉几何和文本能力。焦点优先级由应用层统一确定；后台新到的请求进入队列。`omini tui-debug` 可离线渲染实际组件，用于检查各工具的运行、成功、失败、取消、中断及各交互页面。
-
-## 项目身份与存储
-
-| 字段 | 含义 |
-| --- | --- |
-| `id` | 稳定公开 ID，也是服务缓存键和线程外键。 |
-| `path` | 规范化后的工作目录，可通过重新关联更新。 |
-| `storage_key` | `~/.omini/projects/` 下稳定的目录名。 |
-| `name` | 面向用户的显示名称。 |
-
-`id` 和 `storage_key` 不变；重新关联只更新 `path`，且项目有运行中或已连接的缓存线程时拒绝操作。所有线程（包括分支和子 Agent 任务）都属于某个项目。
-
-## 运行流程
-
-1. CLI 启动或连接本地服务，注册当前规范化目录，并打开服务返回的项目 ID。
-2. 服务端从 SQLite 解析项目，按需创建 `ProjectManager`，使用当前路径和稳定存储目录。
-3. TUI 创建或选择线程、取得控制权并订阅事件。
-4. 服务端校验请求和控制权，再经会话句柄调用核心能力。提交用户输入采用预留/提交流程：先原子预留运行资格（忙碌时返回 409 `run_busy`，被拒绝的输入不保存），预留成功后由 server 持有的受理任务将展示输入与初始 Run 记录放入同一事务。事务开始后不随 HTTP 请求取消而中断；提交成功后继续完成启动确认，启动失败则结算 Run。
-5. 核心以 `AgentInstance` 执行运行并经独占输出通道发布领域事件；持久化与资源申请经异步 `AgentHost` 接口由 server 同步完成后再继续。核心只在安全输入边界（运行开始或运行中干预排空点）将用户消息加入模型上下文。主/子执行在后续模型调用与工具执行前等待关键提交确认；提交失败终止依赖该记录的执行。
-6. 重连时按项目 ID 恢复；项目路径不作为身份。
+- 依赖方向自上而下。`omini-protocol` 是唯一的公开客户端/服务端边界，`omini-runtime-contract` 是内部服务端/核心边界；两者都不放运行时实现。
+- `omini-domain` 只承载跨 crate 共享的词汇。配置、密钥、编排、持久化、传输封装和界面状态由各自 crate 管理。
+- Provider、MCP 和权限是独立 crate，实现不通过协议或运行时契约泄漏。
+- server 只依赖 core 公开的 `omini_core::execution` 能力，不触碰其内部模块；core 不直接持久化，持久化与资源申请经异步 `AgentHost` 接口由 server 同步完成后核心才继续。
+- 输入链路按层分工：TUI 产出有序语义片段、只传不透明附件 ID；server 负责路径规范化、附件归属与控制权校验；core 负责 Skill 展开与模型上下文构造。
+- TUI 内部是单向数据流：输入与服务端事件先更新状态并返回待执行副作用，应用循环执行后把结果作为事件送回；视图只读状态。
 
 ## 会话执行模型
 
-核心公开边界集中在 `omini_core::execution`：实例、句柄、输出、快照与宿主接口由此装配。`runtime` 保持执行实现私有，`agent` 承载 Agent 定义与任务管理；不通过旧模块路径提供兼容门面。
+持久会话（thread 记录）、跨轮次 Agent 实例（`AgentInstance`）与一次运行（`RunId`）三层分离：server 管理会话缓存与装配，core 管理执行与父子任务调度；主 Run 与子 Agent 任务共用同一执行器。
 
-- 持久会话（thread 记录）、跨轮次 Agent 实例（`AgentInstance`）与一次运行（`RunId`）三层分离：server 管理会话缓存与装配，core 管理执行与父子任务调度。主 Run 与子 Agent 任务共用同一执行器，事件汇以双投影区分主/子事件流。
-- core 对外契约是可克隆 `AgentHandle`（命令附带 oneshot ack 确认）、独占单消费者输出 `AgentEvents`（`Event`/`Idle`/`Closed`）与权威 `AgentSnapshot` 查询。构建阶段完成装配并交出输出接收端，宿主接好消费者后才启动实例，启动输出不会遗漏；输出断开即实例收尾。`close()` 幂等，运行中不拒绝关闭；关闭等待已预留的受理窗口、运行、后台任务及 MCP 初始化收尾，server 会话还等待受理任务结算与输出消费者排空。
-- server 侧 `ThreadSession` 用单消费者任务顺序处理核心输出：协议投影与广播、TurnEnded 后的 git 分支探测、tool pause 集合维护。实例公告 `Idle` 且无客户端连接时，会话被关闭并从缓存摘除，下次访问按需重建；可回收判定（无预留、无运行、无未完成任务）来自权威快照，不依赖固定延时，被丢弃的运行预留会唤醒实例重新公告空闲。
-- 子 Agent 会话由 server 通过 `AgentHost::create_agent_session` 原子建立（目录、thread 记录、任务行一次完成），core 不创建 thread 目录或组装记录。子会话的展示输入与模型输入独立传递，后续消息的 UI 历史与模型历史在同一事务内提交。
+core 的对外契约全部集中在 `omini_core::execution`：
 
-## Agent Run 与工具调用
+- `AgentHandle`：可克隆命令通道，命令附带 ack 确认。
+- `AgentEvents`：独占单消费者输出，发布领域事件；输出断开即实例收尾。
+- `AgentSnapshot`：权威状态查询，回收等决策以它为准。
 
-- `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
-- runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经核心的 `AgentHost` 宿主接口由 server 写入。协议 revision 9 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
-- `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
-- 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
+构建阶段完成装配并交出输出接收端，宿主接好消费者后才启动实例，启动输出不会遗漏。server 侧会话以单消费者任务顺序消费核心输出，驱动协议投影与广播。子 Agent 会话由 server 经 `AgentHost::create_agent_session` 原子建立，core 不创建 thread 目录或组装记录。
 
-TUI 按时间线顺序扫描历史和流式助手消息，并在同一助手消息内按内容块应用相同的聚合规则。可见正文、用户输入、`spawn_agent`、`send_message`、`edit`、`ask_user`、`write`、`todo_write` 及非 `ToolResults` 系统事件会结束当前活动摘要；其他工具调用和思考时长合并成摘要。运行中的活动摘要下方临时展示最新普通工具的简短输入预览；新工具替换预览，分界或运行结束后收起，历史只保留摘要。活动预览与独立工具展示共用紧凑的 Shell/Search 布局：Shell 有描述时先显示描述，再显示 `$` 命令，无描述时只显示命令；Search 在一行展示查询和 `in` 路径。`ToolResults` 按 ToolUse ID 配对，不改变分组或顺序，也不在预览中展开结果。Agent 调用条目只展示工具输入里的名称和任务标题，不读取子任务实时状态；任务结束由独立的系统通知展示。权限请求及审批详情只在权限抽屉显示，因此审批队列变化不会重排消息区。
+## 持久化理念
 
-用户可见消息按发言时间保存，因此重放顺序可能与运行中干预进入模型上下文的顺序不同。`UserMessageInjected` 仅属于客户端协议：普通输入由 server 保存后投影，后台任务完成通知在持久化成功后投影；核心不构造 UI 历史项。工具结果由系统生成，在模型上下文中作为紧跟对应 ToolUse 的 `Role::User` 消息保存，同时作为独立的 `SystemEvent::ToolResults` 时间线记录投影，两个序列各自保留顺序。
+- `omini-entity` 的模型即 schema 的单一权威（`push_schema` 建库）：状态/种类列直接使用领域枚举原生落库（`toasty::Embed`，视同 serde 的表示标注），无平行 DTO 与转换层。跨 crate 词表留在其语义 crate 原地派生，仅 entity 与 store 消费的纯持久化词表放 `omini-entity`。
+- `omini-server` 的 store 层组合模型并承载业务策略（幂等闸门、投递结算、启动恢复、树删除）；核心事件只表达领域事实。
+- 数据库无外键与级联：引用完整性由创建边界校验，树删除由业务层在事务内显式完成。
+- 假设同一数据库文件只有单个 daemon 进程写入。
 
-## 输入与附件
+## 关键不变量
 
-- TUI 将输入框内容转为有序语义片段；文本、Skill、项目文件/目录和子 Agent 保持相对顺序。图片标记先上传，协议只传不透明附件 ID，不传客户端路径。
-- 服务端负责路径规范化、附件归属与完整性校验、控制权校验；核心负责 Skill 和 `/init` 展开、子 Agent 校验、模型模态检查，并构造单条 Provider 用户消息。
-- UI 历史保存原始输入意图和附件元数据；展开后的 Skill 内容、内部 `/init` 提示词及图片数据只进入模型上下文。
-- 附件内容存于线程目录下的内容寻址文件，SQLite 将附件 ID 映射到文件。
-
-## 子 Agent 任务
-
-TUI 的状态栏紧跟输入框；存在可切换任务时，会话列表在状态栏下方空一行显示 `main` 和按创建顺序排列的直接异步子 Agent。输入光标在最后一行按 Down 后进入列表，列表用 `❯` 标记高亮项，并保留圆圈标记当前会话；此时输入光标隐藏。Up/Down 只移动高亮项，Enter 才切换消息视图并返回输入框，Esc 不切换而直接返回输入框，位于 `main` 时按 Up 也返回输入框。子 Agent 行右侧实时显示任务耗时，结束后固定为最终耗时，运行中不显示 `running` 标签；重新进入会话时按任务快照的创建时间恢复近似耗时。任务视图按 task ID 保存时间线、流式缓冲和滚动状态。主线程继续在后台接收自己的事件。运行中的任务可切换查看；任务结束后会从列表移除，除非用户当时正在查看它。活动终态视图保留历史并只读，切换到其他视图后移除。输入框焦点下的 Esc 只取消当前选中的子任务及其后代。`spawn_agent` 和 `run_agent` 在主时间线展示稳定的任务身份，不附加“后台／同步”或生命周期状态；`send_message` 同样作为分界显示单行条目 `↪ 任务标题 · 消息首行`，标题按目标 task ID 从子任务节点解析，节点回收后沿用记忆的标题，解析不到时回退原始 target 文本。`read_task`、`cancel_task` 作为纯编排调用不显示，也不计入活动统计。后台任务通知作为分界事件单独显示。
-
-主 Agent 回合结束后，主会话在输入框上方显示 `Waiting for N background tasks to finish` 临时状态，统计当前主线程的异步 Agent 和后台 Bash，包含取消中的任务。任务完成后数量减少，全部结束后提示消失；前台重新运行时显示原有活动状态。提示不进入消息历史、不计入主 Agent 运行时长，也不阻塞用户输入。TUI 按任务 ID 保存通用任务状态，快照恢复后台 Agent，重放恢复后台 Bash；服务端重放缓存只淘汰非活跃任务，保留长期任务直到终态。
-
-派生深度上限为 `MAX_AGENT_DEPTH = 2`：主 Agent 可创建后台任务，一级任务可在工具策略允许时同步运行二级 Agent，二级任务不能继续派生。主线程最多同时运行 8 个后台任务和 10 个同步任务；超限请求作为工具错误拒绝，不创建任务。
-
-`TaskManager` 为后台任务提供统一 ID、类型、owner、状态、并发槽位、列表、查询、取消和完成通知。执行器持有进程或子线程等专属状态，并向 Manager 注册通用取消信号；所有类型的完成通知都使用 `TaskCompletion` 并投影为 `SystemEvent::TaskNotification`。SubAgent 适配器继续管理子线程、消息、AgentRun 与后代取消；同步 `run_agent` 保留在 SubAgent 执行路径。
-
-直接子任务的 TUI 输入按主线程归属和 task ID 定位子 Run，必须带 `client_echo_id`。服务端以 task ID、客户端 ID 和回显 ID 登记投递；主 Agent 的 `send_message` 则使用 task ID、发送 Run ID 和 ToolUse ID。来源键相同且正文相同的重试只接受一次，正文不同返回冲突；不同客户端发送相同正文各保留一条。两种来源的子会话展示历史都在入队时写入并广播，模型上下文在子 Agent 到达安全输入边界后另行追加，因此两种历史可以有不同顺序。主 Agent 工具在投递记录落盘后返回“已入队”；其消息在子会话显示为 `SystemEvent::AgentMessage`，模型收到带“来自主 Agent”标注的 User 角色消息。两种来源在安全边界使用同一个投递键注入操作。子任务结束或服务重启时，未注入的记录转为失败，数量记入任务结果并随已有任务完成通知呈现。重连 replay 根据已投影到 UI 的来源键裁剪事件。
-
-只有主 Agent 可启动异步 SubAgent，或将运行超过 30 秒的 Bash 命令转为后台任务；达到阈值但并发槽位已满时，Bash 保持前台执行并遵循原超时。`read_task` 和 `cancel_task` 可操作不同类型的后台任务，不提供等待工具或兼容别名。`read_task` 立即返回；未结束任务的结果附带 `guidance`，说明完成后自动通知，无需轮询，可继续其他工作或结束当前回合。主 Agent 空闲时收到完成通知会自动开始后续运行；运行中则在安全边界处理通知。管理器按 owner 提供近期跨类型列表与状态筛选，但本期不增加 Agent 列表工具或 Client 查询 API。
-
-SubAgent 任务归属于主线程并拥有子线程；Bash 任务关联原始工具调用。Bash stdout/stderr 以带 task ID、tool use ID 和流类型的 `TaskOutput` 事件增量发送，服务端在进程内为重连保留受限近期输出尾部。Client 接收通用任务状态和输出事件，自行决定呈现方式。最终结果持久化，增量输出只驻留内存；服务重启或关闭不恢复进程，启动时将未结束任务标记为 `interrupted`。
-
-已提交消息是持久化边界。完成通知先持久化，再进入模型历史或界面，以保持“当前轮次 → 任务通知 → 下一轮回复”的顺序。服务重启后不恢复运行中的任务，未提交的增量可丢弃。取消任务会影响其后代，不影响兄弟任务；取消前台运行或关闭运行时也会取消主线程拥有的任务树。
+- **两条消息序列互相独立**：用户可见时间线用 `ConversationEntry`，Provider 上下文用 `omini-model::Message`，两者顺序可以不同；core 不构造 UI 历史项。
+- **安全输入边界**：用户消息只在运行开始或运行中干预的排空点加入模型上下文。
+- **先持久化后可见**：任务完成通知等事实先落盘，再进入模型历史或界面。
+- **项目身份与路径分离**：`id` 与 `storage_key` 不可变，`path` 可重新关联；重连按项目 ID 恢复，路径不作为身份。
