@@ -172,7 +172,7 @@ pub fn render_edit(
         .max(1);
     let line_width = max_line.to_string().len().max(3);
 
-    for (hunk_idx, (hunk, rows)) in expanded_hunks.iter().enumerate() {
+    for (hunk_idx, (_, rows)) in expanded_hunks.iter().enumerate() {
         if hunk_idx > 0 {
             lines.push(padded_line_bg(
                 &format_ellipsis_line(line_width),
@@ -181,12 +181,6 @@ pub fn render_edit(
                 w,
             ));
         }
-        lines.push(padded_line_bg(
-            &format!("@@ -{} +{} @@", hunk.old_start, hunk.new_start),
-            crate::ui::theme::MUTED,
-            header_bg,
-            w,
-        ));
         render_hunk_rows(
             &mut lines, rows, line_width, w, ctx_bg, add_bg, del_bg, green_fg, red_fg,
         );
@@ -693,7 +687,7 @@ pub fn render_write(
     let line_width = max_line.to_string().len().max(3);
 
     let ctx_bg = crate::ui::theme::BACKGROUND;
-    for (hunk_idx, (hunk, rows)) in expanded_hunks.iter().enumerate() {
+    for (hunk_idx, (_, rows)) in expanded_hunks.iter().enumerate() {
         if hunk_idx > 0 {
             lines.push(padded_line_bg(
                 &format_ellipsis_line(line_width),
@@ -702,12 +696,6 @@ pub fn render_write(
                 w,
             ));
         }
-        lines.push(padded_line_bg(
-            &format!("@@ -{} +{} @@", hunk.old_start, hunk.new_start),
-            crate::ui::theme::MUTED,
-            header_bg,
-            w,
-        ));
         render_hunk_rows(
             &mut lines,
             rows,
@@ -1033,7 +1021,6 @@ mod tests {
         let marker_col = text
             .iter()
             .skip(1)
-            .filter(|line| !line.starts_with("@@"))
             .find_map(|l| l.find('+').or_else(|| l.find('-')))
             .expect("some change row");
         let ellipsis_col = ellipsis_rows[0].find('⋮').unwrap();
