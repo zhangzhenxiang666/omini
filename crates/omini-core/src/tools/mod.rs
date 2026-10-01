@@ -1,5 +1,5 @@
+use crate::agent::{AgentRegistry, AgentTaskSupervisor};
 use crate::skills::SkillRegistry;
-use crate::subagents::{AgentRegistry, AgentTaskSupervisor};
 use crate::tasks::TaskManager;
 use crate::types::events::EngineToRuntimeEvent;
 use async_trait::async_trait;

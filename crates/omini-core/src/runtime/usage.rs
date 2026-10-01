@@ -1,21 +1,21 @@
 use super::*;
+use crate::execution::handle::OutputHandle;
+use crate::execution::host::AgentHost;
 
+/// 累计线程总用量（压缩摘要等不进入当前上下文的请求）并广播总量变化。
 pub async fn record_total_usage_and_notify(
     thread_id: &str,
     usage: Usage,
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
+    output: &OutputHandle,
+    host: &dyn AgentHost,
     usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
 ) {
-    let _ = persistence_tx
-        .send(RuntimePersistenceEvent::RecordThreadTotalUsage {
-            thread_id: thread_id.to_string(),
-            usage,
-        })
-        .await;
+    if let Err(error) = host.record_thread_total_usage(thread_id, usage).await {
+        tracing::warn!(thread_id, error = %error, "failed to record thread total usage");
+    }
     let snapshot = record_total_usage_snapshot(usage_state, usage, None);
-    let _ = event_tx
-        .send(RuntimeToServerEvent::UsageTotalsChanged {
+    let _ = output
+        .send_event(RuntimeToServerEvent::UsageTotalsChanged {
             total_tokens: snapshot.total_tokens,
             total_cached_tokens: snapshot.total_cached_tokens,
         })

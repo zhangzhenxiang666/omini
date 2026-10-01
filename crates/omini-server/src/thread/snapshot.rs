@@ -1,8 +1,8 @@
-use crate::{event::bridge::protocol_events_from_loaded_thread_snapshot, thread::ThreadRuntime};
+use crate::{event::bridge::protocol_events_from_loaded_thread_snapshot, thread::ThreadSession};
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub async fn current_snapshot_events(
         &self,
     ) -> Result<Vec<client_proto::RuntimeEvent>, CoreError> {

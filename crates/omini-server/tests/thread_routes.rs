@@ -10,7 +10,7 @@ use omini_protocol::{
     RunSubmittedResponse, ServerEnvelope, SubmitRunRequest, ThreadRuntimeStatus,
     ThreadStatusesResponse, ThreadsResponse, TypedRuntimeEvent, UserInput,
 };
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_server::store::Store;
 use reqwest::Method;
 use tokio_tungstenite::connect_async;
@@ -182,10 +182,48 @@ async fn child_input_ownership() {
         &project_id,
         &task,
         &test_agent_thread("child-thread", &thread_id),
+        &crate::support::store::test_user_input(&ModelMessage::from_user_text("start".into())),
         &ModelMessage::from_user_text("start".into()),
     )
     .await
     .unwrap();
+    // 直接写库的子任务对已装配的会话不可见（实例的监督器是内存权威）。
+    // 先用一次性连接让空闲会话进入「服务过客户端」状态，断开后按新回收
+    // 语义摘除缓存；轮询列表确认摘除后，下一次访问重建的会话会从数据库
+    // 加载子任务，等价于服务重启后的恢复路径。
+    {
+        let probe_id = register_client(&daemon).await;
+        let mut request = daemon
+            .websocket_url(&format!(
+                "/projects/{project_id}/threads/{thread_id}/events"
+            ))
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "x-omini-client-id",
+            HeaderValue::from_str(&probe_id).unwrap(),
+        );
+        let (mut probe_socket, _) = connect_async(request).await.unwrap();
+        close_socket(&mut probe_socket).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let (_, threads): (_, ThreadsResponse) =
+                    daemon.get(&format!("/projects/{project_id}/threads")).await;
+                let cached = threads
+                    .threads
+                    .iter()
+                    .find(|summary| summary.id == thread_id)
+                    .and_then(|summary| summary.runtime_state)
+                    .is_some();
+                if !cached {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("initial session should be reclaimed after probe disconnect");
+    }
     let client_id = register_client(&daemon).await;
     let mut request = daemon
         .websocket_url(&format!(

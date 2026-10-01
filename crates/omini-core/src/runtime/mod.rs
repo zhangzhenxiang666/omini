@@ -1,20 +1,22 @@
-pub mod active_run;
-pub mod agent_management;
-pub mod capabilities;
-pub mod compact;
-pub mod event_processor;
-pub mod history;
-pub mod manual_compact;
-pub mod plan;
-pub mod plan_approval;
-pub mod run_loop;
-pub mod service;
-pub mod usage;
-pub mod user_input;
+pub(crate) mod active_run;
+pub(crate) mod capabilities;
+pub(crate) mod command;
+pub(crate) mod compact;
+pub(crate) mod event_sink;
+pub(crate) mod history;
+pub(crate) mod manual_compact;
+pub(crate) mod plan;
+pub(crate) mod plan_approval;
+pub(crate) mod run_loop;
+pub(crate) mod service;
+pub(crate) mod usage;
+pub(crate) mod user_input;
 
+use crate::CoreError;
+use crate::agent::AgentRegistry;
 use crate::engine::{QueryContext, ToolPauseResolver};
+use crate::error::RuntimeError;
 use crate::skills::SkillRegistry;
-use crate::subagents::AgentRegistry;
 use crate::tools::{ToolRegistry, ToolRuntimeContext};
 use crate::types::events::EngineToRuntimeEvent;
 use jiff::Timestamp;
@@ -22,23 +24,18 @@ use omini_config::Settings;
 use omini_domain::config::ThinkingEffort;
 use omini_domain::conversation::CompactionSummary;
 use omini_domain::usage::Usage;
-use omini_model::message::Message;
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
+use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
+use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::thread_domain::{
     ActiveProfile, Notification, PlanApprovalAction, SubmittedPlan, ThreadUsageSnapshot,
-    ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
 };
-use omini_runtime_contract::{RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-pub use capabilities::CapabilityStore;
-pub use service::AgentRuntime;
-pub use service::AgentRuntimeChannels;
-pub use service::AgentRuntimeDeps;
-pub use service::RuntimeCapabilityHandles;
+pub(crate) use capabilities::CapabilityStore;
+pub(crate) use service::AgentRuntime;
 
 /// 把已批准 plan 包装为新线程首条 user message 的公开入口,server 端 fork 时调用。
 ///

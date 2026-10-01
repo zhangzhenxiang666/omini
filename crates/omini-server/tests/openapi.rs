@@ -26,6 +26,11 @@ async fn openapi_exposes_routes_and_resolvable_schemas() {
         paths["/v1/projects/{project_id}/threads/{thread_id}/runs"]["post"]["responses"]["202"]
             .is_object()
     );
+    // 忙碌时重复提交返回 409 run_busy，被拒绝的输入不保存。
+    assert!(
+        paths["/v1/projects/{project_id}/threads/{thread_id}/runs"]["post"]["responses"]["409"]
+            .is_object()
+    );
     assert!(paths["/v1/projects/{project_id}/threads/{thread_id}/rename"]["post"]["responses"]["204"]["content"].is_null());
     assert!(paths["/v1/projects/{project_id}/threads/{thread_id}/status"]["get"]["responses"]["200"]["content"].is_object());
     assert!(

@@ -123,3 +123,25 @@ pub async fn temp_db_existing(db_path: &std::path::Path) -> (Store, ProjectDir, 
     let db = Store::open(db_path).await.unwrap();
     (db, ProjectDir::from_path(root.path.join("project")), root)
 }
+
+/// 从样例模型消息派生原样的展示输入，仅用于保留旧测试夹具的输入意图。
+pub fn test_user_input(
+    message: &omini_model::message::Message,
+) -> omini_domain::conversation::UserInput {
+    omini_domain::conversation::UserInput {
+        intent: omini_domain::input::UserInputIntent::Message,
+        parts: message
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                omini_model::message::ContentBlock::Text(text) => {
+                    Some(omini_domain::input::InputPart::Text {
+                        text: text.text.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect(),
+        attachments: Vec::new(),
+    }
+}

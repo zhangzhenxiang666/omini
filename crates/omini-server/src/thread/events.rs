@@ -1,13 +1,13 @@
 use crate::{
     event::{bridge::runtime_event_from_runtime_contract_event, replay::SequencedRuntimeEvent},
-    thread::ThreadRuntime,
+    thread::ThreadSession,
 };
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use tokio::sync::broadcast;
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub fn subscribe(&self) -> broadcast::Receiver<SequencedRuntimeEvent> {
         self.runtime_event_tx.subscribe()
     }
@@ -38,7 +38,7 @@ impl ThreadRuntime {
         Ok(())
     }
 
-    /// 「在新线程中执行计划」审批通过后，server 端 fork 出新 ThreadRuntime，
+    /// 「在新线程中执行计划」审批通过后，server 端 fork 出新 ThreadSession，
     /// 通过此方法向老 thread 的 ws 广播 `ThreadSwitched`,TUI 收到后断开旧
     /// ws 并连接到新 thread 的 ws。
     pub fn broadcast_thread_switched(&self, from: String, to: String) {

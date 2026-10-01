@@ -295,6 +295,8 @@ impl GlobalDaemonManager {
             project,
             Arc::clone(&self.db),
         ));
+        // 会话空闲回收 drain 任务随项目管理器启动（幂等，重复调用无副作用）。
+        loaded.start_session_reclaim();
 
         let mut projects = self.projects.lock().expect("projects lock poisoned");
         Ok(Arc::clone(

@@ -1,4 +1,4 @@
-use crate::subagents::AgentTaskRequest;
+use crate::agent::AgentTaskRequest;
 use crate::tools::{Tool, ToolExecutionContext, ToolResult};
 use async_trait::async_trait;
 use schemars::JsonSchema;

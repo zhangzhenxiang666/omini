@@ -80,7 +80,10 @@ thinking = true
     fs::write(root.join("config.toml"), content).expect("config should be written");
 }
 
-pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectManager, ProjectDir) {
+pub(super) async fn project_manager_for(
+    root: &Path,
+    cwd: &Path,
+) -> (std::sync::Arc<ProjectManager>, ProjectDir) {
     write_config(root, false);
     fs::create_dir_all(cwd).expect("cwd should be created");
     let root = Arc::new(OminiRoot::from_path(root.to_path_buf()));
@@ -105,16 +108,15 @@ pub(super) async fn project_manager_for(root: &Path, cwd: &Path) -> (ProjectMana
     })
     .await
     .expect("project should persist");
-    (
-        ProjectManager::new(
-            TEST_PROJECT_ID.to_string(),
-            root,
-            cwd.to_path_buf(),
-            project.clone(),
-            Arc::new(db),
-        ),
-        project,
-    )
+    let manager = Arc::new(ProjectManager::new(
+        TEST_PROJECT_ID.to_string(),
+        root,
+        cwd.to_path_buf(),
+        project.clone(),
+        Arc::new(db),
+    ));
+    manager.start_session_reclaim();
+    (manager, project)
 }
 
 pub(super) fn has_provider(

@@ -2,12 +2,13 @@ use crate::event::bridge::runtime_event_from_runtime_contract_event;
 use crate::event::replay::SequencedRuntimeEvent;
 use crate::event::tool_pause::apply_tool_pause_update;
 use crate::event::{replay::RuntimeReplayBuffer, status::RuntimeStatusProjection};
-use crate::thread::{ThreadRuntime, ThreadRuntimeInputs};
+use crate::thread::{ThreadSession, ThreadSessionInputs};
 use crate::{git, store::Store};
 use jiff::Timestamp;
 use omini_config::{Settings, project::ProjectDir};
-use omini_core::{AgentCoreThread, CoreError};
-use omini_domain as domain;
+use omini_core::CoreError;
+use omini_core::execution::AgentHost;
+use omini_core::execution::{AgentInstance, AgentInstanceConfig, AgentInstanceLoad, AgentOutput};
 use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::collections::HashSet;
@@ -15,18 +16,20 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use tracing::Instrument;
 
-impl ThreadRuntime {
+impl ThreadSession {
     /// 同步构造：不读 DB、不跨 `.await`，所需的
-    /// `ThreadRuntimeInputs` 由调用方提前加载并派生好。
+    /// `ThreadSessionInputs` 由调用方提前加载并派生好。
     ///
     /// 这样拆有两个原因:
     /// 1. `create_thread` / `fork_thread_for_plan` 创建的是空 thread，
     ///    在 `build` 里再读一次 DB 是浪费;
     /// 2. 调用方可以在 `threads` 锁外完成异步加载,只在短临界区里
-    ///    get / insert runtime cache,保证外层 future 始终 `Send`。
+    ///    get / insert session cache,保证外层 future 始终 `Send`。
     ///
-    /// LLM 输入在 `load_thread_snapshot` 里从当前 `llm_messages` 版本加载，
-    /// 这里只原样转发，不再做代码层面的过滤或合并。
+    /// 装配顺序遵循 core 契约：先建实例拿到独占输出接收端，消费者任务就位后
+    /// 才启动实例，启动输出不会遗漏。`idle_reclaim` 用于把可回收的空闲会话
+    /// 从 manager 缓存中摘除。
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         project_id: String,
         settings: Settings,
@@ -34,9 +37,10 @@ impl ThreadRuntime {
         thread_id: String,
         db: Arc<Store>,
         active_profile: runtime_contract::thread_domain::ActiveProfile,
-        inputs: ThreadRuntimeInputs,
-    ) -> Result<Self, CoreError> {
-        let ThreadRuntimeInputs {
+        inputs: ThreadSessionInputs,
+        idle_reclaim: mpsc::UnboundedSender<(String, omini_core::execution::AgentHandle)>,
+    ) -> Result<Arc<Self>, CoreError> {
+        let ThreadSessionInputs {
             snapshot: loaded,
             thread_messages,
             llm_context_version,
@@ -52,201 +56,83 @@ impl ThreadRuntime {
         let (controller_tx, _) = broadcast::channel(32);
         let (runtime_event_tx, _) = broadcast::channel(512);
         let (server_event_inbox_tx, mut server_event_inbox_rx) = mpsc::unbounded_channel();
-        // 核心在 build 时已灌入完整 messages / usage,replay buffer 也要从
-        // 这次的 snapshot 推一次 record_snapshot,让后来连接的 ws 不会重复
-        // 收到这些已被历史覆盖的事件(目前 snapshot 不发 runtime 事件,
-        // 这里保留以防未来 snapshot 再次走 runtime 通道)。
-        // `snapshot` 来自 DB(给 user-injection / title 去重用),
-        // `thread_messages` 来自当前 LLM context（给 LLM 级去重用）。必须在
-        // `core` spawn 之前调用，因为之后会 move。
+        // replay buffer 用装配快照推一次 record_snapshot，让后来连接的 ws 不会
+        // 重复收到这些已被历史覆盖的事件。`snapshot` 来自 DB(给
+        // user-injection / title 去重用)，`thread_messages` 来自当前 LLM
+        // context（给 LLM 级去重用）。
         let replay_buffer = Arc::new(Mutex::new(RuntimeReplayBuffer::default()));
         {
             let mut buffer = replay_buffer.lock().expect("replay buffer lock poisoned");
             buffer.record_snapshot(&loaded, &thread_messages);
         }
-        let core = AgentCoreThread::spawn_for_thread_with_active_profile(
-            settings.clone(),
+        let status_projection = Arc::new(Mutex::new(RuntimeStatusProjection::with_active_profile(
+            active_profile,
+        )));
+        let pending_tool_pauses = Arc::new(Mutex::new(HashSet::new()));
+        let presence = Arc::new(Mutex::new(super::presence::ClientPresence::default()));
+        let git_branch = Arc::new(Mutex::new(git::detect_git_branch(&settings.cwd)));
+        let git_cwd = settings.cwd.clone();
+        let session_settings = settings.clone();
+
+        // core 输出的唯一消费者持有宿主；宿主的本地投影（完成通知、排队消息）
+        // 经 server_event_inbox 汇入同一条广播流。
+        let host = Arc::new(super::SessionHost::new(
+            Arc::clone(&db),
+            project_id,
             project.clone(),
             thread_id.clone(),
+            Arc::clone(&replay_buffer),
+            server_event_inbox_tx.clone(),
+        ));
+        let mut instance = AgentInstance::build(AgentInstanceConfig {
+            settings,
+            project: project.clone(),
+            thread_id: thread_id.clone(),
             active_profile,
-            omini_core::AgentCoreThreadLoad {
+            load: AgentInstanceLoad {
                 messages: thread_messages,
                 llm_context_version,
                 usage: thread_usage,
                 agent_tasks,
                 background_tasks,
             },
-        )?;
-        let mut persistence_rx = core
-            .take_persistence_receiver()
-            .expect("thread persistence receiver already taken");
-        let mut tool_pause_rx = core.subscribe();
-        let mut runtime_event_rx = core.subscribe();
-        let status_projection = Arc::new(Mutex::new(RuntimeStatusProjection::with_active_profile(
-            active_profile,
-        )));
-        let persistence_db = Arc::clone(&db);
-        let persisted_replay_buffer = Arc::clone(&replay_buffer);
-        let replay_thread_id = thread_id.clone();
-        let persistence_project = project.clone();
-        let persistence_project_id = project_id;
-        let persistence_server_event_tx = server_event_inbox_tx.clone();
-        // core 发出的持久化事件先落 SQLite，成功后再裁剪 replay，避免重连时漏掉未落盘内容。
-        let persistence_handle = tokio::spawn(
-            async move {
-                while let Some(event) = persistence_rx.recv().await {
-                    let mut failed_count = 0;
-                    let mut fresh_agent_message = false;
-                    let result = if let runtime_contract::RuntimePersistenceEvent::FailPendingTaskMessages {
-                        task_id, reason, ..
-                    } = &event {
-                        match persistence_db.fail_task_messages(task_id, reason).await {
-                            Ok(count) => {
-                                failed_count = count;
-                                Ok(())
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else if let runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
-                        task_id,
-                        owner_thread_id,
-                        agent_thread_id,
-                        message,
-                        ..
-                    } = &event {
-                        let agent_thread_dir = persistence_project.thread(agent_thread_id);
-                        match persistence_db
-                            .enqueue_agent_message(
-                                task_id,
-                                owner_thread_id,
-                                agent_thread_id,
-                                message,
-                                &agent_thread_dir,
-                            )
-                            .await
-                        {
-                            Ok(fresh) => {
-                                fresh_agent_message = fresh;
-                                Ok(())
-                            }
-                            Err(error) => Err(error),
-                        }
-                    } else {
-                        persistence_db
-                            .apply_persistence_event(
-                                &event,
-                                &persistence_project_id,
-                                &persistence_project,
-                            )
-                            .await
-                    };
-                    if result.is_ok() {
-                        persisted_replay_buffer
-                            .lock()
-                            .expect("replay buffer lock poisoned")
-                            .record_persistence(&replay_thread_id, &event);
-                        if let runtime_contract::RuntimePersistenceEvent::InsertTaskNotification {
-                            notification,
-                            ..
-                        } = &event
-                        {
-                            let _ =
-                                persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
-                                    client_proto::TypedRuntimeEvent::UserMessageInjected {
-                                        item: omini_protocol::HistoryItem::SystemEvent(
-                                            domain::conversation::SystemEvent::TaskNotification(
-                                                notification.clone(),
-                                            ),
-                                        ),
-                                        client_echo_id: None,
-                                    },
-                                ));
-                        }
-                        if let runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
-                            task_id,
-                            agent_thread_id,
-                            message,
-                            ..
-                        } = &event && fresh_agent_message
-                        {
-                            let _ = persistence_server_event_tx.send(client_proto::RuntimeEvent::new(
-                                client_proto::TypedRuntimeEvent::AgentTaskMessageQueued {
-                                    task_id: task_id.clone(),
-                                    thread_id: agent_thread_id.clone(),
-                                    item: client_proto::HistoryItem::SystemEvent(
-                                        domain::conversation::SystemEvent::AgentMessage(message.clone()),
-                                    ),
-                                },
-                            ));
-                        }
-                    } else if let Err(error) = &result {
-                        tracing::error!(error = %error, "runtime persistence event failed");
-                    }
-                    match event {
-                        runtime_contract::RuntimePersistenceEvent::ReplaceLlmContext {
-                            expected_version,
-                            ack,
-                            ..
-                        } => {
-                            let _ = ack.send(
-                                result
-                                    .map(|_| expected_version + 1)
-                                    .map_err(|error| error.to_string()),
-                            );
-                        }
-                        runtime_contract::RuntimePersistenceEvent::CreateAgentTask {
-                            ack, ..
-                        }
-                        | runtime_contract::RuntimePersistenceEvent::PersistAgentMessage {
-                            ack,
-                            ..
-                        }
-                        | runtime_contract::RuntimePersistenceEvent::EnqueueAgentMessage {
-                            ack,
-                            ..
-                        }
-                        | runtime_contract::RuntimePersistenceEvent::InjectTaskMessage {
-                            ack,
-                            ..
-                        }
-                        | runtime_contract::RuntimePersistenceEvent::FinishAgentTask {
-                            ack, ..
-                        }
-                        | runtime_contract::RuntimePersistenceEvent::InsertTaskNotification {
-                            ack,
-                            ..
-                        } => {
-                            let _ = ack.send(result.map_err(|error| error.to_string()));
-                        }
-                        runtime_contract::RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. } => {
-                            let _ = ack.send(result.map(|_| failed_count).map_err(|error| error.to_string()));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            .instrument(tracing::debug_span!(
-                "thread",
-                thread_id = %thread_id,
-                task_kind = "persistence_fanout"
-            )),
+            host: host as Arc<dyn AgentHost>,
+        })?;
+        let handle = instance.handle();
+        let mut events = instance.take_events();
+
+        // 消费者任务持有的共享投影句柄。
+        let consumer_runtime_event_tx = runtime_event_tx.clone();
+        let consumer_replay_buffer = Arc::clone(&replay_buffer);
+        let consumer_status_projection = Arc::clone(&status_projection);
+        let consumer_pending_tool_pauses = Arc::clone(&pending_tool_pauses);
+        let consumer_presence = Arc::clone(&presence);
+        let consumer_git_branch = Arc::clone(&git_branch);
+        let consumer_thread_id = thread_id.clone();
+        let consumer_handle = handle.clone();
+        let consumer_span = tracing::debug_span!(
+            "thread",
+            thread_id = %consumer_thread_id,
+            task_kind = "session_consumer"
         );
-        let runtime_event_fanout_tx = runtime_event_tx.clone();
-        let runtime_replay_buffer = Arc::clone(&replay_buffer);
-        let runtime_status_projection = Arc::clone(&status_projection);
-        let git_branch = Arc::new(Mutex::new(git::detect_git_branch(&settings.cwd)));
-        let git_branch_cache = Arc::clone(&git_branch);
-        let git_branch_cwd = settings.cwd.clone();
-        // runtime 事件加上本地 seq 后再广播，WebSocket 层用 seq 处理 replay/订阅交叠。
-        // TurnEnded 时同步检测 git 分支变化，有变化时更新缓存并推送 GitBranchChanged。
-        let runtime_event_handle = tokio::spawn(
+        let acceptances = Arc::new(super::acceptance::Acceptances::default());
+        let consumer_acceptances = Arc::clone(&acceptances);
+        let (consumer_done_tx, consumer_finished) = tokio::sync::watch::channel(false);
+        let _consumer_handle = tokio::spawn(
             async move {
+                // 消费者就位后才启动实例，保证启动输出（装配诊断、首条事件）
+                // 从第一个 poll 起就在接收端之后产生。
+                instance.start();
                 let mut next_seq = 1u64;
                 loop {
                     tokio::select! {
-                        event = runtime_event_rx.recv() => {
-                            match event {
-                                Ok(event) => {
+                        output = events.recv() => {
+                            match output {
+                                Some(AgentOutput::Event(event)) => {
+                                    let event = *event;
+                                    // tool pause 集合在协议转换前用 core 事件维护，
+                                    // 与 seq/replay/status 投影同点，无需独立 watcher。
+                                    apply_tool_pause_update(&consumer_pending_tool_pauses, &event);
                                     let Some(event) = runtime_event_from_core_with_fallback(event) else {
                                         continue;
                                     };
@@ -254,33 +140,57 @@ impl ThreadRuntime {
                                     broadcast_sequenced_runtime_event(
                                         event,
                                         &mut next_seq,
-                                        &runtime_replay_buffer,
-                                        &runtime_status_projection,
-                                        &runtime_event_fanout_tx,
+                                        &consumer_replay_buffer,
+                                        &consumer_status_projection,
+                                        &consumer_runtime_event_tx,
                                     );
                                     if is_turn_ended {
-                                        let branch = git::detect_git_branch(&git_branch_cwd);
-                                        let mut cache = git_branch_cache.lock()
+                                        let branch = git::detect_git_branch(&git_cwd);
+                                        let mut cache = consumer_git_branch
+                                            .lock()
                                             .expect("git branch cache lock poisoned");
                                         if branch != *cache {
                                             *cache = branch.clone();
                                             drop(cache);
                                             broadcast_sequenced_runtime_event(
-                                                client_proto::RuntimeEvent::new(client_proto::TypedRuntimeEvent::GitBranchChanged(
-                                                    client_proto::GitBranchChangedEvent { branch },
-                                                )),
+                                                client_proto::RuntimeEvent::new(
+                                                    client_proto::TypedRuntimeEvent::GitBranchChanged(
+                                                        client_proto::GitBranchChangedEvent { branch },
+                                                    ),
+                                                ),
                                                 &mut next_seq,
-                                                &runtime_replay_buffer,
-                                                &runtime_status_projection,
-                                                &runtime_event_fanout_tx,
+                                                &consumer_replay_buffer,
+                                                &consumer_status_projection,
+                                                &consumer_runtime_event_tx,
                                             );
                                         }
                                     }
                                 }
-                                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                                    tracing::warn!(skipped, "runtime event stream lagged");
+                                Some(AgentOutput::Idle) => {
+                                    // 实例公告空闲：服务过客户端且当前无连接、实例
+                                    // 可回收时关闭实例并让 manager 摘除缓存。从未
+                                    // 有过连接的会话可能正等待首个客户端连入，跳过。
+                                    let (has_clients, served_clients) = {
+                                        let presence = consumer_presence
+                                            .lock()
+                                            .expect("presence lock poisoned");
+                                        (
+                                            !presence.connection_counts.is_empty(),
+                                            presence.has_ever_connected,
+                                        )
+                                    };
+                                    if !has_clients
+                                        && served_clients
+                                        && consumer_handle.begin_idle_close()
+                                    {
+                                        tracing::debug!(
+                                            thread_id = %consumer_thread_id,
+                                            "reclaiming idle session without clients"
+                                        );
+                                        let _ = consumer_handle.request_close().await;
+                                    }
                                 }
-                                Err(broadcast::error::RecvError::Closed) => break,
+                                Some(AgentOutput::Closed) | None => break,
                             }
                         }
                         event = server_event_inbox_rx.recv() => {
@@ -290,61 +200,47 @@ impl ThreadRuntime {
                             broadcast_sequenced_runtime_event(
                                 event,
                                 &mut next_seq,
-                                &runtime_replay_buffer,
-                                &runtime_status_projection,
-                                &runtime_event_fanout_tx,
+                                &consumer_replay_buffer,
+                                &consumer_status_projection,
+                                &consumer_runtime_event_tx,
                             );
                         }
                     }
                 }
-            }
-            .instrument(tracing::debug_span!(
-                "thread",
-                thread_id = %thread_id,
-                task_kind = "runtime_event_fanout"
-            )),
-        );
-        let pending_tool_pauses = Arc::new(Mutex::new(HashSet::new()));
-        let pending_tool_pause_events = Arc::clone(&pending_tool_pauses);
-        // 工具暂停状态跟随 runtime 事件维护，HTTP resolve 用它做幂等和重复点击保护。
-        let tool_pause_handle = tokio::spawn(
-            async move {
-                loop {
-                    match tool_pause_rx.recv().await {
-                        Ok(event) => {
-                            apply_tool_pause_update(&pending_tool_pause_events, &event);
-                        }
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(skipped, "runtime tool pause event stream lagged");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
+                // 实例已公告 Closed（或通道结束）：等待实例任务退出，避免悬挂。
+                if let Some(join) = instance.join().take() {
+                    let _ = join.await;
                 }
+                consumer_acceptances.wait_finished().await;
+                // 宿主本地产生的已提交事实可能晚于 core 尾部入队，关闭前排空。
+                while let Ok(event) = server_event_inbox_rx.try_recv() {
+                    broadcast_sequenced_runtime_event(event, &mut next_seq,
+                        &consumer_replay_buffer, &consumer_status_projection, &consumer_runtime_event_tx);
+                }
+                consumer_done_tx.send_replace(true);
+                let _ = idle_reclaim.send((consumer_thread_id.clone(), consumer_handle));
             }
-            .instrument(tracing::debug_span!(
-                "thread",
-                thread_id = %thread_id,
-                task_kind = "tool_pause_watcher"
-            )),
+            .instrument(consumer_span),
         );
-        Ok(Self {
-            core,
+
+        Ok(Arc::new(Self {
+            handle,
+            acceptances,
             thread_id,
             project,
-            settings,
+            settings: session_settings,
             db,
             runtime_event_tx,
             server_event_inbox_tx,
-            presence: Mutex::new(super::presence::ClientPresence::default()),
+            presence,
             pending_tool_pauses,
             status_projection,
             git_branch,
             replay_buffer,
             controller_tx,
-            _persistence_handle: persistence_handle,
-            _runtime_event_handle: runtime_event_handle,
-            _tool_pause_handle: tool_pause_handle,
-        })
+            _consumer_handle,
+            consumer_finished,
+        }))
     }
 }
 

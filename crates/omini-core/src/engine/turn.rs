@@ -43,6 +43,13 @@ impl QueryEngine {
     ) -> TurnOutcome {
         debug_assert!(tool_tasks.is_empty());
         let _ = event_tx.send(EngineToRuntimeEvent::TurnStarted).await;
+        if ctx.runtime_context.is_some()
+            && let Err(error) = crate::engine::commit_events(event_tx).await
+        {
+            return TurnOutcome::Interrupted {
+                finish_reason: FinishReason::Error(error),
+            };
+        }
 
         let compact_context = compact::CompactRequestContext {
             settings: &ctx.settings,
@@ -154,6 +161,12 @@ impl QueryEngine {
                         .send(EngineToRuntimeEvent::ToolUse(tool_use.clone()))
                         .await;
 
+                    if ctx.runtime_context.is_some()
+                        && let Err(message) = crate::engine::commit_events(event_tx).await
+                    {
+                        stream_error = Some(RuntimeError::Persistence { message });
+                        break;
+                    }
                     if let Some(reason) =
                         rejection_reason(&tool_use, mode, &mut requested_finalization, repeat_guard)
                     {

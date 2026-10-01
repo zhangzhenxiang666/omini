@@ -3,7 +3,7 @@
 //! 这个模块负责把持久化 snapshot、运行中 replay、runtime fanout 和 controller 状态变化
 //! 统一编码成 `ServerEnvelope` 发给单个客户端连接。
 
-use crate::{project::ProjectManager, thread::ThreadRuntime};
+use crate::{project::ProjectManager, thread::ThreadSession};
 use axum::extract::ws::{Message as AxumMessage, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use omini_protocol::{self as protocol, RuntimeEvent, ServerEnvelope};
@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 pub async fn handle_socket(
     socket: WebSocket,
     manager: Arc<ProjectManager>,
-    thread: Arc<ThreadRuntime>,
+    thread: Arc<ThreadSession>,
     thread_id: String,
     client_id: String,
 ) {

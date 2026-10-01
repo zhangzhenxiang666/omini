@@ -1,14 +1,14 @@
 mod support;
 
 use crate::support::store::*;
+use omini_entity::NewThread;
 use omini_model::message::Message;
-use omini_runtime_contract::persistence::ThreadRecord;
 use omini_server::store::*;
 
 #[test]
 fn runtime_child_uses_server_project() {
     let now = fixed_time();
-    let runtime = ThreadRecord {
+    let runtime = NewThread {
         id: "child".to_string(),
         parent_thread_id: Some("parent".to_string()),
         spawn_tool_use_id: Some("tool".to_string()),
@@ -26,7 +26,7 @@ fn runtime_child_uses_server_project() {
         updated_at: now,
     };
 
-    let stored = thread_from_runtime(TEST_PROJECT_ID, &runtime).unwrap();
+    let stored = omini_entity::thread_from_parts(TEST_PROJECT_ID, &runtime).unwrap();
 
     assert_eq!(stored.project_id, TEST_PROJECT_ID);
     assert_eq!(stored.id, "child");

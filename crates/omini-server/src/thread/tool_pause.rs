@@ -1,6 +1,6 @@
-use crate::{event::tool_pause::ToolPauseResolutionStart, thread::ThreadRuntime};
+use crate::{event::tool_pause::ToolPauseResolutionStart, thread::ThreadSession};
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub async fn begin_tool_pause_resolution(
         &self,
         client_id: String,

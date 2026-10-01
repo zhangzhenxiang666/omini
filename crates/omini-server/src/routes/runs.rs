@@ -268,7 +268,11 @@ fn is_terminal_run(status: protocol::AgentRunStatus) -> bool {
     tag = "runs",
     params(("project_id" = String, Path), ("thread_id" = String, Path), ("x-omini-client-id" = String, Header, description = "已注册并连接的客户端 ID")),
     request_body = omini_protocol::SubmitRunRequest,
-    responses((status = 202, description = "成功", body = omini_protocol::RunSubmittedResponse), (status = "default", description = "API 错误", body = omini_protocol::ProtocolError))
+    responses(
+        (status = 202, description = "成功", body = omini_protocol::RunSubmittedResponse),
+        (status = 409, description = "线程已有运行在进行中（run_busy），被拒绝的输入不会保存", body = omini_protocol::ProtocolError),
+        (status = "default", description = "API 错误", body = omini_protocol::ProtocolError)
+    )
 )]
 #[axum::debug_handler]
 pub async fn submit_run(

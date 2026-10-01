@@ -5,11 +5,9 @@
 
 pub mod events;
 pub mod mcp;
-pub mod persistence;
 pub mod project;
 pub mod thread;
 pub mod thread_domain;
 
-pub use events::{RuntimeToServerEvent, ServerToRuntimeEvent};
-pub use persistence::{RuntimePersistenceEvent, ThreadRecord};
+pub use events::RuntimeToServerEvent;
 pub use project::{AgentManagementUpdate, DeleteProjectAgentCommand, SaveProjectAgentCommand};

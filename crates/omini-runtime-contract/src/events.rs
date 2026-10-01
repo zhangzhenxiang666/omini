@@ -1,8 +1,7 @@
-use crate::persistence::ClientMessage;
 use crate::thread_domain::{
     ActiveProfile, AgentTaskEventEnvelope, CompactEvent, CompactSummaryDeltaEvent,
     CompactSummaryFailedEvent, CompactSummaryFinishedEvent, Notification, PlanApprovalAction,
-    SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest, ToolPauseResponse,
+    SubmittedPlan, ThreadUsageSnapshot, ToolPauseRequest,
 };
 use omini_domain::agent_run::AgentRunSnapshot;
 use omini_domain::config::ThinkingEffort;
@@ -10,54 +9,6 @@ use omini_domain::subagents::AgentRecord;
 use omini_domain::task::{TaskChangedEvent, TaskOutputDelta};
 use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
 use serde::{Deserialize, Serialize};
-
-/// server/facade 发往 runtime 的事件。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ServerToRuntimeEvent {
-    /// 取消当前主 Run 及其子任务，或取消指定子 Run 及其后代。
-    CancelRun {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        run_id: Option<String>,
-    },
-    /// 用户消息的 LLM 上下文行。展示行与 echo 由 server 在接收路径直接处理,
-    /// 不进入 runtime;语义见 `submit_run` 的所有权划分。
-    SendMessage {
-        message: Message,
-    },
-    CompactContext {
-        instructions: Option<String>,
-    },
-    SetThinkingEffort(
-        #[serde(with = "serde_server_event_payload::thinking_effort")] ThinkingEffort,
-    ),
-    ToggleActiveProfile,
-    SetActiveProfile(#[serde(with = "serde_server_event_payload::profile")] ActiveProfile),
-    /// 运行中插话的 LLM 上下文行。`None` 指当前主 Run，`Some` 指定子 Run；消息在安全输入边界提交。
-    /// 直接子 Run 的客户端来源用于在注入时原子写入展示与模型历史。
-    InterveneMessage {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        run_id: Option<String>,
-        message: Message,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_source: Option<ClientMessage>,
-    },
-    ModelSelected {
-        provider: String,
-        model: String,
-        thinking_effort: Option<ThinkingEffort>,
-    },
-    CloseRuntime,
-    SubagentRegistryChanged,
-    ResolveToolPause {
-        tool_use_id: String,
-        response: ToolPauseResponse,
-    },
-    ResolvePlanApproval {
-        plan_id: String,
-        action: PlanApprovalAction,
-    },
-}
 
 /// runtime 发往 server/facade 的事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,7 +56,7 @@ pub enum RuntimeToServerEvent {
     PlanApprovalAccepted {
         message: Message,
     },
-    /// server 端 fork 出新 ThreadRuntime 后，作为原 thread 推送给客户端的
+    /// server 端 fork 出新 ThreadSession 后，作为原 thread 推送给客户端的
     /// 外部线程切换通知。承载在普通 runtime 通道上，以便 ws 文本帧能直接编码为
     /// `TypedRuntimeEvent::ThreadSwitched`。
     ThreadSwitched {
@@ -126,64 +77,6 @@ impl RuntimeToServerEvent {
 
     pub fn error(message: impl Into<String>) -> Self {
         Self::Notification(Notification::error(message))
-    }
-}
-
-mod serde_server_event_payload {
-    use crate::thread_domain::ActiveProfile;
-    use omini_domain::config::ThinkingEffort;
-    use serde::Deserialize;
-    use serde::Serializer;
-    use serde::ser::SerializeStruct;
-
-    pub mod thinking_effort {
-        use super::*;
-
-        pub fn serialize<S>(effort: &ThinkingEffort, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut state = serializer.serialize_struct("ThinkingEffortPayload", 1)?;
-            state.serialize_field("effort", effort)?;
-            state.end()
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<ThinkingEffort, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            #[derive(Deserialize)]
-            struct ThinkingEffortPayload {
-                effort: ThinkingEffort,
-            }
-
-            Ok(ThinkingEffortPayload::deserialize(deserializer)?.effort)
-        }
-    }
-
-    pub mod profile {
-        use super::*;
-
-        pub fn serialize<S>(profile: &ActiveProfile, serializer: S) -> Result<S::Ok, S::Error>
-        where
-            S: Serializer,
-        {
-            let mut state = serializer.serialize_struct("ActiveProfilePayload", 1)?;
-            state.serialize_field("profile", profile)?;
-            state.end()
-        }
-
-        pub fn deserialize<'de, D>(deserializer: D) -> Result<ActiveProfile, D::Error>
-        where
-            D: serde::Deserializer<'de>,
-        {
-            #[derive(Deserialize)]
-            struct ActiveProfilePayload {
-                profile: ActiveProfile,
-            }
-
-            Ok(ActiveProfilePayload::deserialize(deserializer)?.profile)
-        }
     }
 }
 

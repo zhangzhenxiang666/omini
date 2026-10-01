@@ -21,6 +21,10 @@ impl QueryState {
         }
     }
 
+    pub fn fail(&mut self, error: String) {
+        self.finish_reason = FinishReason::Error(error);
+    }
+
     pub fn turns(&self) -> usize {
         self.turns
     }

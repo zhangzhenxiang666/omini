@@ -25,9 +25,10 @@ impl AgentRuntime {
                     message: plan_message,
                 })
                 .await;
-                self.process_run(RunStart::UserMessage).await;
+                // 计划批准后的运行是内部运行：自行分配 RunId 并经宿主创建记录。
+                self.process_run(RunStart::UserMessage, None).await;
             }
-            // Server 路由层在收到此 action 时已自行 fork 新 thread 并广播
+            // 宿主路由层在收到此 action 时已自行 fork 新 thread 并广播
             // ThreadSwitched；core 这里只关闭原 thread 的审批抽屉，不改状态。
             PlanApprovalAction::ApproveInNewThread { .. } => {
                 self.send_plan_approval_resolved(plan_id, action).await;
@@ -52,7 +53,7 @@ impl AgentRuntime {
                 &self.thread_id,
                 plan,
                 &format!("{}/{}", model.provider_id, model.model_id),
-                &self.persistence_tx,
+                self.host.as_ref(),
             )
             .await;
         }

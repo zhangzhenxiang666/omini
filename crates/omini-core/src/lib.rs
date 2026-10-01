@@ -1,17 +1,20 @@
 //! 本地 Omini daemon 的核心实现。
 //!
-//! 本模块中的 `pub` 保留给面向 server 的 facade。`pub(crate) mod` 用于建立 crate 内部的子系统边界；
+//! 对 `omini-server` 的公开边界是 [`execution`] 模块：`AgentInstance` 表示执行实例，
+//! `AgentHandle` 提供可克隆的命令句柄，`AgentEvents` 是独占输出接收端，`AgentHost`
+//! 是 core 依赖宿主的窄接口。`pub(crate) mod` 用于建立 crate 内部的子系统边界；
 //! 子系统中的成员使用 `pub`，除非有意设置更窄的子模块边界。
 
+pub(crate) mod agent;
 pub(crate) mod engine;
 pub(crate) mod error;
+pub mod execution;
 pub(crate) mod frontmatter;
 pub(crate) mod mcp;
 pub(crate) mod prompts;
 pub(crate) mod proposed_plan;
 pub(crate) mod runtime;
 pub(crate) mod skills;
-pub(crate) mod subagents;
 pub(crate) mod tasks;
 pub(crate) mod title_generation;
 pub(crate) mod tools;
@@ -21,20 +24,11 @@ pub(crate) mod util;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-use crate::runtime::AgentRuntime;
 use omini_config::Settings;
-use omini_config::project::ProjectDir;
 use omini_domain::subagents as subagent_types;
-use omini_model::message::Message;
 use omini_runtime_contract::project as project_types;
 use omini_runtime_contract::thread as thread_types;
-use omini_runtime_contract::thread_domain::{ActiveProfile, ThreadUsageSnapshot};
-use omini_runtime_contract::{RuntimePersistenceEvent, RuntimeToServerEvent, ServerToRuntimeEvent};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinHandle;
-use tracing::Instrument;
 
 pub use crate::error::CoreError;
 pub use crate::title_generation::{TitleGenError, generate_thread_title};
@@ -71,18 +65,18 @@ pub fn save_project_agent(
         .as_deref()
         .map(|agent_id| resolve_editable_agent_path(cwd, agent_id))
         .transpose()?;
-    if crate::subagents::agent_name_exists(cwd, &command.draft.name, original_path.as_deref()) {
+    if crate::agent::agent_name_exists(cwd, &command.draft.name, original_path.as_deref()) {
         return Err(CoreError::new(format!(
             "agent '{}' 已存在",
             command.draft.name
         )));
     }
-    let written_path = crate::subagents::write_agent_file(cwd, command.source_kind, &command.draft)
+    let written_path = crate::agent::write_agent_file(cwd, command.source_kind, &command.draft)
         .map_err(CoreError::new)?;
     if let Some(path) = original_path
         && path != written_path
     {
-        crate::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+        crate::agent::delete_agent_file(&path).map_err(CoreError::new)?;
     }
     Ok(project_types::AgentManagementUpdate {
         records: project_agent_records(cwd),
@@ -94,7 +88,7 @@ pub fn delete_project_agent(
     command: project_types::DeleteProjectAgentCommand,
 ) -> Result<project_types::AgentManagementUpdate, CoreError> {
     let path = resolve_editable_agent_path(cwd, &command.agent_id)?;
-    crate::subagents::delete_agent_file(&path).map_err(CoreError::new)?;
+    crate::agent::delete_agent_file(&path).map_err(CoreError::new)?;
     Ok(project_types::AgentManagementUpdate {
         records: project_agent_records(cwd),
     })
@@ -106,11 +100,10 @@ pub async fn generate_project_agent_draft(
 ) -> Result<subagent_types::GeneratedAgentDraft, CoreError> {
     let mut parse_error = None;
     for attempt in 0..2 {
-        match crate::subagents::generate_agent_draft_checked_from_settings(settings, description)
-            .await
+        match crate::agent::generate_agent_draft_checked_from_settings(settings, description).await
         {
             Ok(draft) => return Ok(draft),
-            Err(crate::subagents::GenerateAgentDraftError::Parse(message)) if attempt == 0 => {
+            Err(crate::agent::GenerateAgentDraftError::Parse(message)) if attempt == 0 => {
                 parse_error = Some(message);
             }
             Err(error) => return Err(CoreError::new(error.to_string())),
@@ -121,408 +114,8 @@ pub async fn generate_project_agent_draft(
     ))
 }
 
-/// Thread-scoped core facade between `omini-server` and the agent runtime.
-///
-/// `omini-server::thread::ThreadRuntime` 为每个 daemon thread 持有一个
-/// `AgentCoreThread`。server 通过这里把已经通过 HTTP/controller 校验的用户动作
-/// 转成 `omini-runtim-contract` 的 `ServerToRuntimeEvent`，同时订阅 runtime 事件和持久化事件，再负责
-/// SQLite 落盘、WebSocket fanout、replay buffer、presence 和 controller 语义。
-///
-/// runtime 输出保持 `omini-runtim-contract` 的 `RuntimeToServerEvent` 形态，协议层
-/// `RuntimeEvent` 编码由 `omini-server` 的 runtime adapter 负责。
-///
-/// 边界约束：这里只桥接 core runtime 输入、runtime 输出、持久化输出和只读能力查询。
-/// thread registry、HTTP 状态码、WebSocket 订阅、controller 冲突、replay 以及数据库写入
-/// 都属于 `omini-server`；不要把 daemon 级编排继续塞回 core。
-pub struct AgentCoreThread {
-    thread_id: String,
-    // server 接受并鉴权后的用户动作从这里进入 core runtime。
-    request_tx: mpsc::Sender<ServerToRuntimeEvent>,
-    // runtime 输出事件按 server-core 契约广播给 server。
-    event_tx: broadcast::Sender<RuntimeToServerEvent>,
-    persistence_rx: Mutex<Option<mpsc::Receiver<RuntimePersistenceEvent>>>,
-    // HTTP 查询和配置 mutation 需要读取当前线程配置快照；真正执行仍通过 request_tx 进入 runtime。
-    settings: Arc<RwLock<Settings>>,
-    // 与 runtime 共享同一个 MCP manager，保证 server 查询到的是当前线程实际运行状态。
-    mcp_manager: Arc<crate::mcp::McpManager>,
-    // 与 runtime 共享同一个能力 store，保证只读状态反映当前 thread 实际能力。
-    capabilities: Arc<crate::runtime::CapabilityStore>,
-    // agent runtime 主循环：消费 request_tx 输入并驱动模型、工具、权限和内部事件。
-    _runtime_handle: JoinHandle<()>,
-    // runtime 事件 fanout：把 RuntimeToServerEvent 广播给 server。
-    _fanout_handle: JoinHandle<()>,
-}
-
-pub struct AgentCoreThreadLoad {
-    pub messages: Vec<Message>,
-    pub llm_context_version: i64,
-    pub usage: ThreadUsageSnapshot,
-    pub agent_tasks: Vec<omini_runtime_contract::thread_domain::AgentTaskInfo>,
-    pub background_tasks: Vec<omini_domain::task::TaskInfo>,
-}
-
-impl AgentCoreThread {
-    /// 启动一个 core runtime，并创建 server 可订阅的 runtime/persistence fanout。
-    ///
-    /// 唯一的生产入口 `spawn_for_thread_with_active_profile` 强制要求传入一个
-    /// 由 server 端已经预创建好的 `thread_id`（对应目录、DB 行都已存在），
-    /// 并把持久化层的 messages / usage 一次性灌进 runtime,启动后 core 即处于
-    /// "已加载"状态 —— 不再需要后续的 hydrate 事件。
-    pub fn spawn_for_thread_with_active_profile(
-        settings: Settings,
-        project: ProjectDir,
-        thread_id: String,
-        active_profile: ActiveProfile,
-        load: AgentCoreThreadLoad,
-    ) -> Result<Self, CoreError> {
-        let AgentCoreThreadLoad {
-            messages,
-            llm_context_version,
-            usage,
-            agent_tasks,
-            background_tasks,
-        } = load;
-        let settings_snapshot = Arc::new(RwLock::new(settings.clone()));
-        let (runtime_event_tx, mut runtime_event_rx) = mpsc::channel::<RuntimeToServerEvent>(512);
-        let (runtime_persistence_tx, runtime_persistence_rx) =
-            mpsc::channel::<RuntimePersistenceEvent>(512);
-        let (request_tx, request_rx) = mpsc::channel::<ServerToRuntimeEvent>(512);
-        let (event_tx, _) = broadcast::channel::<RuntimeToServerEvent>(512);
-        let handles = crate::runtime::RuntimeCapabilityHandles::load(&settings);
-        let mcp_manager = Arc::clone(&handles.mcp_manager);
-        let capabilities = Arc::clone(&handles.capabilities);
-
-        let thread_dir = project.thread(&thread_id);
-        let channels = crate::runtime::AgentRuntimeChannels {
-            event_tx: runtime_event_tx,
-            persistence_tx: runtime_persistence_tx,
-            request_rx,
-        };
-        let deps = crate::runtime::AgentRuntimeDeps {
-            settings,
-            project,
-            thread_id: thread_id.clone(),
-            thread_dir,
-            messages,
-            llm_context_version,
-            usage,
-            active_profile,
-            agent_tasks,
-            background_tasks,
-        };
-        let runtime = AgentRuntime::with_capability_handles(channels, deps, handles);
-        let runtime_handle = runtime.run();
-        let fanout_tx = event_tx.clone();
-        let runtime_fanout_thread_id = thread_id.clone();
-        let fanout_handle = tokio::spawn(
-            async move {
-                tracing::debug!("core runtime event fanout started");
-                while let Some(event) = runtime_event_rx.recv().await {
-                    let _ = fanout_tx.send(event);
-                }
-                tracing::debug!("core runtime event fanout stopped");
-            }
-            .instrument(tracing::debug_span!(
-                "core_fanout",
-                thread_id = %runtime_fanout_thread_id,
-                task_kind = "runtime_event_fanout"
-            )),
-        );
-
-        Ok(Self {
-            thread_id,
-            request_tx,
-            event_tx,
-            persistence_rx: Mutex::new(Some(runtime_persistence_rx)),
-            settings: settings_snapshot,
-            mcp_manager,
-            capabilities,
-            _runtime_handle: runtime_handle,
-            _fanout_handle: fanout_handle,
-        })
-    }
-
-    /// 订阅 core 内部 runtime 事件流。
-    ///
-    /// 每个 subscriber 都会收到 `RuntimeToServerEvent`，server 会在此基础上编码协议事件、
-    /// 追加本地序号、维护 replay/status projection，并通过 WebSocket 发给控制者和观察者。
-    pub fn subscribe(&self) -> broadcast::Receiver<RuntimeToServerEvent> {
-        self.event_tx.subscribe()
-    }
-
-    /// 订阅 core 产生的持久化事件。
-    ///
-    /// core 不直接写 daemon 数据库；server 消费这个 stream 后负责落盘和 replay buffer 裁剪。
-    pub fn take_persistence_receiver(&self) -> Option<mpsc::Receiver<RuntimePersistenceEvent>> {
-        self.persistence_rx
-            .lock()
-            .expect("persistence receiver lock poisoned")
-            .take()
-    }
-
-    pub fn list_models(&self) -> thread_types::ModelsSnapshot {
-        let settings = self.settings.read().expect("core settings lock poisoned");
-        models_snapshot_from_settings(&settings)
-    }
-
-    pub fn list_agents(&self) -> thread_types::AgentsSnapshot {
-        let settings = self.settings.read().expect("core settings lock poisoned");
-        project_agents_snapshot(&settings)
-    }
-
-    pub fn list_skills(&self) -> Vec<thread_types::SkillSummarySnapshot> {
-        let registry = self.capabilities.skill_registry();
-        user_invocable_skill_summaries(&registry)
-    }
-
-    pub fn runtime_skills(&self) -> Vec<thread_types::RuntimeSkillSnapshot> {
-        let skill_registry = self.capabilities.skill_registry();
-        let mut skills = skill_registry
-            .skills()
-            .map(|skill| thread_types::RuntimeSkillSnapshot {
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                short_description: skill.short_description.clone(),
-                source_kind: runtime_skill_source_kind(skill.source_kind()),
-                directory: skill.directory.clone(),
-                status: thread_types::RuntimeCapabilityStatus::Available,
-                disable_model_invocation: skill.disable_model_invocation,
-                user_invocable: skill.user_invocable,
-            })
-            .collect::<Vec<_>>();
-        skills.sort_by(|left, right| {
-            runtime_skill_source_sort(left.source_kind)
-                .cmp(&runtime_skill_source_sort(right.source_kind))
-                .then_with(|| left.name.cmp(&right.name))
-        });
-        skills
-    }
-
-    pub fn runtime_mcp_servers(
-        &self,
-    ) -> Vec<omini_runtime_contract::mcp::RuntimeMcpServerSnapshot> {
-        self.mcp_manager.runtime_snapshots()
-    }
-
-    pub fn runtime_subagents(&self) -> Vec<subagent_types::AgentSummary> {
-        self.capabilities.subagent_registry().summaries()
-    }
-
-    pub async fn submit_run(
-        &self,
-        command: thread_types::SubmitRunCommand,
-    ) -> Result<thread_types::RunSubmitted, CoreError> {
-        let command = self.prepare_run(command)?;
-        self.submit_prepared_run(command).await
-    }
-
-    pub fn prepare_run(
-        &self,
-        command: thread_types::SubmitRunCommand,
-    ) -> Result<thread_types::PreparedRunCommand, CoreError> {
-        let thread_types::SubmitRunCommand {
-            input,
-            client_echo_id,
-            intent,
-        } = command;
-        let command = match intent {
-            thread_types::RunIntent::ExecuteCommand(command) => Some(command),
-            thread_types::RunIntent::SubmitMessage | thread_types::RunIntent::InterveneMessage => {
-                None
-            }
-        };
-        let settings = self
-            .settings
-            .read()
-            .expect("core settings lock poisoned")
-            .clone();
-        let message = crate::runtime::user_input::prepare_submission(
-            input.clone(),
-            command,
-            &settings,
-            &self.capabilities,
-        )?;
-        Ok(thread_types::PreparedRunCommand {
-            message,
-            input,
-            client_echo_id,
-            intent,
-        })
-    }
-
-    pub async fn submit_prepared_run(
-        &self,
-        command: thread_types::PreparedRunCommand,
-    ) -> Result<thread_types::RunSubmitted, CoreError> {
-        let event = match command.intent {
-            thread_types::RunIntent::SubmitMessage | thread_types::RunIntent::ExecuteCommand(_) => {
-                ServerToRuntimeEvent::SendMessage {
-                    message: command.message,
-                }
-            }
-            thread_types::RunIntent::InterveneMessage => ServerToRuntimeEvent::InterveneMessage {
-                run_id: None,
-                message: command.message,
-                client_source: None,
-            },
-        };
-        self.send_to_runtime(event).await?;
-        Ok(thread_types::RunSubmitted {
-            run_id: "current".to_string(),
-        })
-    }
-
-    pub async fn cancel_run(&self) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::CancelRun { run_id: None })
-            .await
-    }
-
-    pub async fn cancel_agent_run(&self, run_id: String) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::CancelRun {
-            run_id: Some(run_id),
-        })
-        .await
-    }
-
-    pub async fn intervene_agent_run(
-        &self,
-        run_id: String,
-        message: omini_model::message::Message,
-    ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
-            run_id: Some(run_id),
-            message,
-            client_source: None,
-        })
-        .await
-    }
-
-    /// 向子 Run 投递已登记来源键的客户端输入，实际注入由安全边界确认。
-    pub async fn intervene_client_run(
-        &self,
-        run_id: String,
-        message: omini_model::message::Message,
-        source: omini_runtime_contract::persistence::ClientMessage,
-    ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::InterveneMessage {
-            run_id: Some(run_id),
-            message,
-            client_source: Some(source),
-        })
-        .await
-    }
-
-    pub async fn compact_context(&self, instructions: Option<String>) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::CompactContext { instructions })
-            .await
-    }
-
-    pub async fn toggle_active_profile(&self) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::ToggleActiveProfile)
-            .await
-    }
-
-    pub async fn set_active_profile(
-        &self,
-        command: thread_types::SetActiveProfileCommand,
-    ) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::SetActiveProfile(command.profile))
-            .await
-    }
-
-    pub async fn set_model(&self, command: thread_types::SetModelCommand) -> Result<(), CoreError> {
-        let thread_types::SetModelCommand {
-            provider,
-            model,
-            thinking_effort: requested_effort,
-        } = command;
-        let thinking_effort;
-        {
-            let mut settings = self.settings.write().expect("core settings lock poisoned");
-            settings
-                .select_model(omini_config::ModelSelection {
-                    active_provider: provider.clone(),
-                    model: model.clone(),
-                    thinking_effort: requested_effort,
-                })
-                .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
-            thinking_effort = settings.active_model().thinking_effort;
-        }
-        self.send_to_runtime(ServerToRuntimeEvent::ModelSelected {
-            provider,
-            model,
-            thinking_effort,
-        })
-        .await
-    }
-
-    pub async fn set_thinking_effort(
-        &self,
-        command: thread_types::SetThinkingEffortCommand,
-    ) -> Result<(), CoreError> {
-        let requested_effort = command.effort;
-        {
-            let mut settings = self.settings.write().expect("core settings lock poisoned");
-            settings
-                .set_thinking_effort(Some(requested_effort))
-                .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
-        }
-        self.send_to_runtime(ServerToRuntimeEvent::SetThinkingEffort(requested_effort))
-            .await
-    }
-
-    pub async fn resolve_tool_pause(
-        &self,
-        command: thread_types::ResolveToolPauseCommand,
-    ) -> Result<(), CoreError> {
-        let thread_types::ResolveToolPauseCommand {
-            tool_use_id,
-            response,
-        } = command;
-        self.send_to_runtime(ServerToRuntimeEvent::ResolveToolPause {
-            tool_use_id,
-            response,
-        })
-        .await
-    }
-
-    pub async fn resolve_plan(
-        &self,
-        command: thread_types::ResolvePlanCommand,
-    ) -> Result<(), CoreError> {
-        let thread_types::ResolvePlanCommand { plan_id, action } = command;
-        self.send_to_runtime(ServerToRuntimeEvent::ResolvePlanApproval { plan_id, action })
-            .await
-    }
-
-    pub async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::SubagentRegistryChanged)
-            .await
-    }
-
-    pub async fn shutdown(&self) -> Result<(), CoreError> {
-        self.send_to_runtime(ServerToRuntimeEvent::CloseRuntime)
-            .await
-    }
-
-    /// 向 runtime 投递一个已通过 server 校验的内部事件。
-    ///
-    /// channel 关闭意味着对应线程的 runtime 已退出，调用方应把它视为 core 线程不可用。
-    async fn send_to_runtime(&self, event: ServerToRuntimeEvent) -> Result<(), CoreError> {
-        tracing::trace!(
-            thread_id = %self.thread_id,
-            event_kind = server_to_runtime_event_kind(&event),
-            "sending event to runtime"
-        );
-        self.request_tx
-            .send(event)
-            .await
-            .map_err(|_| CoreError::RuntimeClosed)
-    }
-}
-
 fn project_agent_records(cwd: &Path) -> Vec<subagent_types::AgentRecord> {
-    crate::subagents::list_agent_records(cwd)
+    crate::agent::list_agent_records(cwd)
 }
 
 fn resolve_editable_agent_path(cwd: &Path, agent_id: &str) -> Result<PathBuf, CoreError> {
@@ -541,7 +134,7 @@ fn agent_record_id(record: &subagent_types::AgentRecord) -> String {
         .unwrap_or_else(|| record.name.clone())
 }
 
-fn user_invocable_skill_summaries(
+pub(crate) fn user_invocable_skill_summaries(
     registry: &crate::skills::SkillRegistry,
 ) -> Vec<thread_types::SkillSummarySnapshot> {
     let mut skills = registry
@@ -558,21 +151,29 @@ fn user_invocable_skill_summaries(
     skills
 }
 
-fn server_to_runtime_event_kind(event: &ServerToRuntimeEvent) -> &'static str {
-    match event {
-        ServerToRuntimeEvent::SendMessage { .. } => "send_message",
-        ServerToRuntimeEvent::InterveneMessage { .. } => "intervene_message",
-        ServerToRuntimeEvent::CancelRun { .. } => "cancel_run",
-        ServerToRuntimeEvent::CompactContext { .. } => "compact_context",
-        ServerToRuntimeEvent::ModelSelected { .. } => "model_selected",
-        ServerToRuntimeEvent::SetThinkingEffort(_) => "set_thinking_effort",
-        ServerToRuntimeEvent::ToggleActiveProfile => "toggle_active_profile",
-        ServerToRuntimeEvent::SetActiveProfile(_) => "set_active_profile",
-        ServerToRuntimeEvent::ResolveToolPause { .. } => "resolve_tool_pause",
-        ServerToRuntimeEvent::ResolvePlanApproval { .. } => "resolve_plan_approval",
-        ServerToRuntimeEvent::SubagentRegistryChanged => "subagent_registry_changed",
-        ServerToRuntimeEvent::CloseRuntime => "close_runtime",
-    }
+pub(crate) fn runtime_skill_snapshots(
+    capabilities: &crate::runtime::CapabilityStore,
+) -> Vec<thread_types::RuntimeSkillSnapshot> {
+    let skill_registry = capabilities.skill_registry();
+    let mut skills = skill_registry
+        .skills()
+        .map(|skill| thread_types::RuntimeSkillSnapshot {
+            name: skill.name.clone(),
+            description: skill.description.clone(),
+            short_description: skill.short_description.clone(),
+            source_kind: runtime_skill_source_kind(skill.source_kind()),
+            directory: skill.directory.clone(),
+            status: thread_types::RuntimeCapabilityStatus::Available,
+            disable_model_invocation: skill.disable_model_invocation,
+            user_invocable: skill.user_invocable,
+        })
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| {
+        runtime_skill_source_sort(left.source_kind)
+            .cmp(&runtime_skill_source_sort(right.source_kind))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    skills
 }
 
 fn runtime_skill_source_kind(

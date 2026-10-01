@@ -5,7 +5,6 @@ use omini_domain::conversation::{ConversationEntry, UserInput};
 use omini_domain::input::{InputPart, RunCommand, UserInputIntent};
 use omini_domain::usage::Usage;
 use omini_model::message::{ContentBlock, Message, Role};
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_server::store::load_messages;
 
 #[tokio::test]
@@ -26,16 +25,9 @@ async fn owner_agent_usage_updates_totals() {
         cached_tokens: 2,
     };
 
-    db.apply_persistence_event(
-        &RuntimePersistenceEvent::RecordOwnerAgentUsage {
-            thread_id: "owner".to_string(),
-            usage: agent_usage,
-        },
-        TEST_PROJECT_ID,
-        &project,
-    )
-    .await
-    .unwrap();
+    db.record_thread_total_usage("owner", agent_usage)
+        .await
+        .unwrap();
 
     let owner = db.get_thread("owner").await.unwrap().unwrap();
     assert_eq!(owner.current_context_tokens, 10);
@@ -113,14 +105,15 @@ async fn tool_results_keep_their_timeline_and_model_context_positions() {
             .unwrap();
     }
     for message in [&tool_use, &tool_result, &assistant_reply] {
-        db.apply_persistence_event(
-            &RuntimePersistenceEvent::UiMessageAppended {
-                thread_id: "tool-results".to_string(),
-                message: message.clone(),
-                model_ref: (message.role == Role::Assistant).then(|| "provider/model".to_string()),
-            },
-            TEST_PROJECT_ID,
-            &project,
+        let entry = omini_server::conversation::entry_from_model_message(message.clone())
+            .expect("model message should map to a conversation entry");
+        db.insert_conversation_entry(
+            "tool-results",
+            &entry,
+            message.role,
+            (message.role == Role::Assistant).then_some("provider/model"),
+            fixed_time(),
+            &thread_dir,
         )
         .await
         .unwrap();
@@ -146,4 +139,58 @@ async fn tool_results_keep_their_timeline_and_model_context_positions() {
             && results[0].tool_use_id == "tool-1"
             && results[0].content == "file contents"
     ));
+}
+
+#[tokio::test]
+async fn commit_agent_message() {
+    // 给定子会话双历史写入，当模型历史步骤失败，则 UI 插入与新 sidecar 一起回滚。
+    let (db, project, _root) = temp_db().await;
+    let missing = project.create_thread("missing").unwrap();
+    let message = Message::new(
+        Role::Assistant,
+        vec![ContentBlock::from_text(
+            "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
+        )],
+    );
+    assert!(
+        db.persist_agent_message(
+            omini_server::store::AgentMessageCommit {
+                thread_id: "missing",
+                message: &message,
+                model_ref: Some("test/model"),
+                persist_llm_history: true,
+                display_in_ui: true,
+            },
+            &missing,
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(db.get_messages("missing").await.unwrap().len(), 0);
+    assert_eq!(
+        std::fs::read_dir(missing.sidecars_dir()).unwrap().count(),
+        0
+    );
+
+    // 当两条历史写入成功，则消息同时进入 UI 与当前模型上下文。
+    db.create_thread(&test_thread("missing")).await.unwrap();
+    db.persist_agent_message(
+        omini_server::store::AgentMessageCommit {
+            thread_id: "missing",
+            message: &message,
+            model_ref: Some("test/model"),
+            persist_llm_history: true,
+            display_in_ui: true,
+        },
+        &missing,
+    )
+    .await
+    .unwrap();
+    assert_eq!(db.get_messages("missing").await.unwrap().len(), 1);
+    assert_eq!(
+        db.load_current_llm_messages("missing", &missing)
+            .await
+            .unwrap(),
+        vec![message]
+    );
 }

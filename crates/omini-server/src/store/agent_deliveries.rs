@@ -10,7 +10,7 @@ use omini_entity::{
     SourceKind, Thread, cleanup_created_files, prepare_blocks,
 };
 use omini_model::message::Role;
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_runtime_contract::thread_domain::{AgentTaskResult, DeliveryKey};
 
 impl Store {

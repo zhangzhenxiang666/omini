@@ -39,5 +39,5 @@ pub use background_task::BackgroundTask;
 pub use llm_message::LlmMessage;
 pub use message::{Message, MessageKind};
 pub use project::Project;
-pub use thread::{Thread, ThreadType, parse_thinking_effort, thread_from_runtime};
+pub use thread::{NewThread, Thread, ThreadType, parse_thinking_effort, thread_from_parts};
 pub use tool_use_execution::ToolUseExecution;

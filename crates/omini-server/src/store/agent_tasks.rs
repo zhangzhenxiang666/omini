@@ -6,14 +6,12 @@ use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_domain::agent_run::AgentRunStatus;
 use omini_domain::conversation::{ConversationEntry, UserInput};
-use omini_domain::input::{InputPart, UserInputIntent};
 use omini_domain::task::TaskStatus;
 use omini_entity::{
-    AgentRun, AgentTask, BackgroundTask, LlmMessage, Message, MessageKind, Thread,
-    thread_from_runtime,
+    AgentRun, AgentTask, BackgroundTask, LlmMessage, Message, MessageKind, NewThread, Thread,
+    thread_from_parts,
 };
 use omini_model::message::Role;
-use omini_runtime_contract::persistence::ThreadRecord;
 use omini_runtime_contract::thread_domain::{AgentTaskInfo, AgentTaskResult};
 
 impl Store {
@@ -23,26 +21,14 @@ impl Store {
         &self,
         project_id: &str,
         task: &AgentTaskInfo,
-        thread: &ThreadRecord,
+        thread: &NewThread,
+        initial_prompt: &UserInput,
         initial_message: &omini_model::message::Message,
     ) -> Result<(), StoreError> {
-        let thread = thread_from_runtime(project_id, thread)?;
+        let thread = thread_from_parts(project_id, thread)?;
         let initial_content = serde_json::to_string(&initial_message.content)?;
-        let initial_prompt = initial_message
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                omini_model::message::ContentBlock::Text(text) => Some(text.text.as_str()),
-                _ => None,
-            })
-            .collect::<String>();
-        let initial_entry = serde_json::to_string(&ConversationEntry::UserInput(UserInput {
-            intent: UserInputIntent::Message,
-            parts: vec![InputPart::Text {
-                text: initial_prompt,
-            }],
-            attachments: Vec::new(),
-        }))?;
+        let initial_entry =
+            serde_json::to_string(&ConversationEntry::UserInput(initial_prompt.clone()))?;
         let mut conn = self.conn();
         let mut tx = conn.transaction().await?;
         // 引用完整性由本层在创建边界保证(模型 schema 无数据库外键):

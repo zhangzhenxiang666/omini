@@ -4,7 +4,7 @@ use omini_domain::conversation::{
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_protocol::HistoryItem;
 
-pub(crate) fn history_item_from_model_message(message: Message) -> HistoryItem {
+pub fn history_item_from_model_message(message: Message) -> HistoryItem {
     match entry_from_model_message(message.clone()) {
         Some(entry) => entry.into(),
         None => HistoryItem::UserInput(omini_domain::conversation::UserInput {
@@ -24,7 +24,7 @@ pub(crate) fn history_item_from_model_message(message: Message) -> HistoryItem {
     }
 }
 
-pub(crate) fn entry_from_model_message(message: Message) -> Option<ConversationEntry> {
+pub fn entry_from_model_message(message: Message) -> Option<ConversationEntry> {
     if message.role == Role::Assistant {
         let assistant = assistant_from_model_message(message);
         return (!assistant.blocks.is_empty())

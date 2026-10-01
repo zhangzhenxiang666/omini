@@ -19,7 +19,139 @@ pub struct NewMessage {
     pub created_at: Timestamp,
 }
 
+/// 一次子会话消息提交，按执行投影决定写入模型历史、展示历史或两者。
+pub struct AgentMessageCommit<'a> {
+    pub thread_id: &'a str,
+    pub message: &'a omini_model::message::Message,
+    pub model_ref: Option<&'a str>,
+    pub persist_llm_history: bool,
+    pub display_in_ui: bool,
+}
+
 impl Store {
+    /// 原子受理新运行：展示输入与初始运行记录同时提交，失败时一起回滚。
+    /// sidecar 由本操作拥有，只有事务成功后才保留本次创建的文件。
+    pub async fn accept_run_input(
+        &self,
+        run: &omini_domain::agent_run::AgentRunSnapshot,
+        input: &omini_domain::conversation::UserInput,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        let content = serde_json::to_string(&ConversationEntry::UserInput(input.clone()))?;
+        let PreparedUiContent {
+            value,
+            created_files,
+        } = prepare_ui_content(&content, thread_dir)?;
+        let result: Result<(), toasty::Error> = async {
+            let mut db = self.conn();
+            let mut tx = db.transaction().await?;
+            toasty::create!(Message {
+                thread_id: run.thread_id.clone(),
+                role: Role::User,
+                model_ref: None,
+                content: value,
+                kind: MessageKind::ConversationEntry,
+                created_at: run.created_at,
+            })
+            .exec(&mut tx)
+            .await?;
+            toasty::create!(omini_entity::AgentRun {
+                id: run.id.clone(),
+                thread_id: run.thread_id.clone(),
+                parent_run_id: run.parent_run_id.clone(),
+                status: run.status,
+                created_at: run.created_at,
+                started_at: run.started_at,
+                finished_at: run.finished_at,
+                total_tokens: run.total_tokens,
+                archived_at: run.archived_at,
+            })
+            .exec(&mut tx)
+            .await?;
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        finish_prepared_write(result, &created_files)
+    }
+
+    /// 子会话的展示历史与模型历史一次提交，后续写入失败时一起回滚。
+    pub async fn persist_agent_message(
+        &self,
+        commit: AgentMessageCommit<'_>,
+        thread_dir: &ThreadDir,
+    ) -> Result<(), StoreError> {
+        let AgentMessageCommit {
+            thread_id,
+            message,
+            model_ref,
+            persist_llm_history,
+            display_in_ui,
+        } = commit;
+        let ui_json = if display_in_ui {
+            crate::conversation::entry_from_model_message(message.clone())
+                .map(|entry| serde_json::to_string(&entry))
+                .transpose()?
+        } else {
+            None
+        };
+        let mut created_files = Vec::new();
+        let result: Result<(), StoreError> = async {
+            let ui_content = if let Some(json) = ui_json {
+                let prepared = prepare_ui_content(&json, thread_dir)?;
+                created_files.extend(prepared.created_files);
+                Some(prepared.value)
+            } else {
+                None
+            };
+            let llm_content = if persist_llm_history {
+                let prepared = prepare_blocks(&message.content, thread_dir)?;
+                created_files.extend(prepared.created_files);
+                Some(serde_json::to_string(&prepared.values)?)
+            } else {
+                None
+            };
+            let now = Timestamp::now();
+            let mut conn = self.conn();
+            let mut tx = conn.transaction().await?;
+            if let Some(content) = ui_content {
+                toasty::create!(Message {
+                    thread_id: thread_id.to_string(),
+                    role: message.role,
+                    model_ref: model_ref.map(ToString::to_string),
+                    content,
+                    kind: MessageKind::ConversationEntry,
+                    created_at: now,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
+            if let Some(content) = llm_content {
+                let version =
+                    crate::store::context::current_context_version(&mut tx, thread_id).await?;
+                let ordinal =
+                    crate::store::context::next_llm_ordinal(&mut tx, thread_id, version).await?;
+                toasty::create!(omini_entity::LlmMessage {
+                    thread_id: thread_id.to_string(),
+                    context_version: version,
+                    ordinal,
+                    role: message.role,
+                    content,
+                    created_at: now,
+                })
+                .exec(&mut tx)
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            omini_entity::cleanup_created_files(&created_files);
+        }
+        result
+    }
+
     pub async fn insert_message(
         &self,
         msg: &NewMessage,

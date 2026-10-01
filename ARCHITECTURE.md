@@ -7,7 +7,7 @@ omini-cli / omini-tui
         │ HTTP + WebSocket（omini-protocol）
         ▼
    omini-server
-        │ 命令、事件、快照（omini-runtime-contract）
+        │ 执行契约（omini_core::execution）与事件类型（omini-runtime-contract）
         ▼
     omini-core
 ```
@@ -19,10 +19,10 @@ omini-cli / omini-tui
 | `omini-cli` | 程序入口、服务发现与启动、项目注册、启动 TUI。 |
 | `omini-tui` | 终端交互、界面状态与渲染、协议请求。 |
 | `omini-protocol` | 客户端与服务端共用的公开 HTTP/WebSocket 类型。 |
-| `omini-server` | 本地服务、项目和线程生命周期、事件投影与重放、持久化业务层。 |
-| `omini-runtime-contract` | 服务端与核心之间的命令、事件、快照和持久化请求。 |
+| `omini-server` | 本地服务、项目与会话生命周期、事件投影与重放、持久化业务层（实现核心的 `AgentHost` 宿主接口）。 |
+| `omini-runtime-contract` | 服务端与核心之间的命令、事件和快照；不含持久化操作，持久化与资源申请由核心经 `AgentHost` 直接调用 server 实现。 |
 | `omini-entity` | SQLite 实体声明（一文件一模型，toasty ORM）、领域枚举原生落库、建库与连接、大内容 sidecar 机制。 |
-| `omini-core` | Agent 执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
+| `omini-core` | Agent 实例与运行执行、工具、提示词、Skill、子 Agent、计划、压缩及 Provider/MCP 编排。 |
 | `omini-model` | Provider 对话上下文的消息、角色和内容块；不代表用户可见的会话时间线。 |
 | `omini-config` | 用户和项目配置，以及 Omini 管理的文件路径。 |
 | `omini-domain` | 不含传输、运行时或持久化逻辑的共享领域类型。 |
@@ -68,15 +68,24 @@ omini-cli / omini-tui
 1. CLI 启动或连接本地服务，注册当前规范化目录，并打开服务返回的项目 ID。
 2. 服务端从 SQLite 解析项目，按需创建 `ProjectManager`，使用当前路径和稳定存储目录。
 3. TUI 创建或选择线程、取得控制权并订阅事件。
-4. 服务端校验请求和控制权，再经运行时边界调用核心能力。提交用户输入时，服务端先保存并广播用户可见消息，再派发执行。
-5. 核心运行 Agent 并发出运行时和持久化事件；服务端负责保存、投影和广播。核心只在安全输入边界（运行开始或运行中干预排空点）将用户消息加入模型上下文。
+4. 服务端校验请求和控制权，再经会话句柄调用核心能力。提交用户输入采用预留/提交流程：先原子预留运行资格（忙碌时返回 409 `run_busy`，被拒绝的输入不保存），预留成功后由 server 持有的受理任务将展示输入与初始 Run 记录放入同一事务。事务开始后不随 HTTP 请求取消而中断；提交成功后继续完成启动确认，启动失败则结算 Run。
+5. 核心以 `AgentInstance` 执行运行并经独占输出通道发布领域事件；持久化与资源申请经异步 `AgentHost` 接口由 server 同步完成后再继续。核心只在安全输入边界（运行开始或运行中干预排空点）将用户消息加入模型上下文。主/子执行在后续模型调用与工具执行前等待关键提交确认；提交失败终止依赖该记录的执行。
 6. 重连时按项目 ID 恢复；项目路径不作为身份。
+
+## 会话执行模型
+
+核心公开边界集中在 `omini_core::execution`：实例、句柄、输出、快照与宿主接口由此装配。`runtime` 保持执行实现私有，`agent` 承载 Agent 定义与任务管理；不通过旧模块路径提供兼容门面。
+
+- 持久会话（thread 记录）、跨轮次 Agent 实例（`AgentInstance`）与一次运行（`RunId`）三层分离：server 管理会话缓存与装配，core 管理执行与父子任务调度。主 Run 与子 Agent 任务共用同一执行器，事件汇以双投影区分主/子事件流。
+- core 对外契约是可克隆 `AgentHandle`（命令附带 oneshot ack 确认）、独占单消费者输出 `AgentEvents`（`Event`/`Idle`/`Closed`）与权威 `AgentSnapshot` 查询。构建阶段完成装配并交出输出接收端，宿主接好消费者后才启动实例，启动输出不会遗漏；输出断开即实例收尾。`close()` 幂等，运行中不拒绝关闭；关闭等待已预留的受理窗口、运行、后台任务及 MCP 初始化收尾，server 会话还等待受理任务结算与输出消费者排空。
+- server 侧 `ThreadSession` 用单消费者任务顺序处理核心输出：协议投影与广播、TurnEnded 后的 git 分支探测、tool pause 集合维护。实例公告 `Idle` 且无客户端连接时，会话被关闭并从缓存摘除，下次访问按需重建；可回收判定（无预留、无运行、无未完成任务）来自权威快照，不依赖固定延时，被丢弃的运行预留会唤醒实例重新公告空闲。
+- 子 Agent 会话由 server 通过 `AgentHost::create_agent_session` 原子建立（目录、thread 记录、任务行一次完成），core 不创建 thread 目录或组装记录。子会话的展示输入与模型输入独立传递，后续消息的 UI 历史与模型历史在同一事务内提交。
 
 ## Agent Run 与工具调用
 
 - `AgentRun` 是 Agent 一次运行的治理和查询单位，关联 Thread、可选父 Run、状态、时间和累计 Token，不表示 Bash 等后台任务。Agent Run 的每次模型调用是一个 `AgentStep`；同一响应产生的多个 ToolUse 记录在该 Step 下，并在全部收敛后继续下一 Step。Bash 不创建 AgentRun 或虚假的 Step。
 - runtime 控制事件用可选 `run_id` 统一面向主 Run 与子 Run：`None` 表示当前 Thread 的主 Run，`Some(id)` 表示指定子 Run。取消主 Run 会同时取消其子任务；取消子 Run 会影响其后代。取消和插话各自保留单一事件类型，具体目标由该字段区分。
-- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经 runtime contract 的持久化意图写入。协议 revision 9 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
+- Run、Step、ToolUse 的事实保存在服务端 SQLite，并经核心的 `AgentHost` 宿主接口由 server 写入。协议 revision 9 暴露 Agent Run 快照、详情、归档状态和状态事件，并为直接异步子 Agent 提供完整 `ConversationEntry` 历史、结构化任务输入和任务级回显事件；Run 记录通过归档标记隐藏，不物理删除。
 - `Tool` 只描述强类型输入、名称、说明、Schema 和调用行为。`ToolPolicy<T>` 按具体 Tool 类型绑定，在注册时提供外部预检与权限预览；参数解析、profile 策略、权限暂停和执行编排由 ToolRegistry/运行时负责。
 - 子 Agent 的 Run ID 与其 task ID 相同，并由父 Run 关联。服务重启会中断主运行、取消后台子任务；等待审批的主 Run 元数据及 ToolUse 保留供恢复流程识别。
 

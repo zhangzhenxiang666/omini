@@ -86,13 +86,13 @@ fn closed_vocab_parses_reject_unknown_values() {
     let mut runtime = test_agent_thread("child", "parent");
     runtime.thread_type = "bogus".to_string();
     assert!(matches!(
-        omini_entity::thread_from_runtime("p1", &runtime),
+        omini_entity::thread_from_parts("p1", &runtime),
         Err(StoreError::InvalidData(_))
     ));
     let mut runtime = test_agent_thread("child", "parent");
     runtime.thinking_effort = Some("ultra".to_string());
     assert!(matches!(
-        omini_entity::thread_from_runtime("p1", &runtime),
+        omini_entity::thread_from_parts("p1", &runtime),
         Err(StoreError::InvalidData(_))
     ));
 }

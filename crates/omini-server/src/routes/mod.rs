@@ -2,7 +2,7 @@
 
 use crate::daemon::{GlobalDaemonManager, ProjectError};
 use crate::project::{ProjectManager, ThreadError};
-use crate::thread::ThreadRuntime;
+use crate::thread::ThreadSession;
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -57,6 +57,7 @@ pub(crate) fn core_error(error: omini_core::CoreError) -> ApiError {
             code: "attachment_not_found",
             ..
         } => StatusCode::NOT_FOUND,
+        omini_core::CoreError::RunBusy => StatusCode::CONFLICT,
         omini_core::CoreError::InvalidInput {
             code: "delivery_key_conflict" | "delivery_failed",
             ..
@@ -86,7 +87,7 @@ pub async fn require_project(
 pub async fn require_thread(
     manager: &ProjectManager,
     thread_id: &str,
-) -> Result<Arc<ThreadRuntime>, ApiError> {
+) -> Result<Arc<ThreadSession>, ApiError> {
     manager
         .get_or_load_thread(thread_id)
         .await
@@ -97,7 +98,7 @@ pub async fn require_daemon_thread(
     manager: &GlobalDaemonManager,
     project_id: &str,
     thread_id: &str,
-) -> Result<Arc<ThreadRuntime>, ApiError> {
+) -> Result<Arc<ThreadSession>, ApiError> {
     let project = require_project(manager, project_id).await?;
     require_thread(&project, thread_id).await
 }

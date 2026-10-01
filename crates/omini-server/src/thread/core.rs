@@ -1,13 +1,13 @@
-use crate::{store, thread::ThreadRuntime};
+use crate::{store, thread::ThreadSession};
 use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_core::CoreError;
 use omini_domain::conversation::UserInput as ConversationUserInput;
 use omini_domain::input::{AttachmentMetadata, UserInputIntent};
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_runtime_contract::{self as runtime_contract, thread::ResolvedAttachment};
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub(crate) fn cwd(&self) -> &std::path::Path {
         &self.settings.cwd
     }
@@ -137,87 +137,183 @@ impl ThreadRuntime {
     }
 
     pub async fn reload_subagent_registry(&self) -> Result<(), CoreError> {
-        self.core.reload_subagent_registry().await
+        self.handle.reload_subagent_registry().await
     }
 
-    pub async fn shutdown(&self) -> Result<(), CoreError> {
-        self.core.shutdown().await
+    /// 发起会话关闭：停止接收新工作，取消前台运行与任务树并收尾。幂等。
+    ///
+    /// 实例收尾完成后消费者任务自然退出；缓存摘除由 manager 完成。
+    pub async fn close(&self) -> Result<(), CoreError> {
+        self.handle.close().await?;
+        self.consumer_finished
+            .clone()
+            .wait_for(|finished| *finished)
+            .await
+            .map(|_| ())
+            .map_err(|_| CoreError::RuntimeClosed)
+    }
+
+    /// 最后连接断开与空闲回收共用原子资格检查，避免关闭新受理的工作。
+    pub fn begin_idle_close(&self) -> bool {
+        let presence = self.presence.lock().expect("presence lock poisoned");
+        presence.connection_counts.is_empty() && self.handle.begin_idle_close()
+    }
+
+    pub fn matches_instance(&self, handle: &omini_core::execution::AgentHandle) -> bool {
+        self.handle.same_instance(handle)
+    }
+
+    /// 测试专用：预留一次运行，使会话处于不可回收的忙碌状态。
+    #[cfg(test)]
+    pub(crate) fn reserve_run_for_test(
+        &self,
+    ) -> Result<omini_core::execution::RunReservation, CoreError> {
+        self.handle.reserve_run()
     }
 
     pub async fn set_model(
         &self,
         command: runtime_contract::thread::SetModelCommand,
     ) -> Result<(), CoreError> {
-        self.core.set_model(command).await
+        self.handle.set_model(command).await
     }
 
     pub fn list_models(&self) -> runtime_contract::thread::ModelsSnapshot {
-        self.core.list_models()
+        self.handle.list_models()
     }
 
     pub async fn toggle_active_profile(&self) -> Result<(), CoreError> {
-        self.core.toggle_active_profile().await
+        self.handle.toggle_active_profile().await
     }
 
     pub async fn set_active_profile(
         &self,
         command: runtime_contract::thread::SetActiveProfileCommand,
     ) -> Result<(), CoreError> {
-        self.core.set_active_profile(command).await
+        self.handle.set_active_profile(command.profile).await
     }
 
     pub async fn compact_context(&self, instructions: Option<String>) -> Result<(), CoreError> {
-        self.core.compact_context(instructions).await
+        self.handle.compact_context(instructions).await
     }
 
+    /// 向当前线程提交一次新的运行请求。
+    ///
+    /// 预留/提交流程：先原子预留运行资格（忙碌时返回 `run_busy`，被拒绝的
+    /// 输入不落库），预留成功后持久化展示行与初始 Run 记录、广播 echo，最后
+    /// 提交实例执行。持久化失败时丢弃预留即可，实例不执行任何运行。
     pub async fn submit_run(
-        &self,
+        self: &std::sync::Arc<Self>,
         command: runtime_contract::thread::SubmitRunCommand,
     ) -> Result<runtime_contract::thread::RunSubmitted, CoreError> {
-        self.core.submit_run(command).await
+        let prepared = self.handle.prepare_run(command)?;
+        self.submit_prepared_run(prepared).await
     }
 
     pub fn prepare_run(
         &self,
         command: runtime_contract::thread::SubmitRunCommand,
     ) -> Result<runtime_contract::thread::PreparedRunCommand, CoreError> {
-        self.core.prepare_run(command)
+        self.handle.prepare_run(command)
     }
 
     pub async fn submit_prepared_run(
-        &self,
+        self: &std::sync::Arc<Self>,
         command: runtime_contract::thread::PreparedRunCommand,
     ) -> Result<runtime_contract::thread::RunSubmitted, CoreError> {
-        self.commit_user_input_display(&command).await?;
-        self.core.submit_prepared_run(command).await
+        // InterveneMessage intent 在持久化展示前先确认当前确有运行，
+        // 避免把"干预"错存成新输入。
+        if matches!(
+            command.intent,
+            runtime_contract::thread::RunIntent::InterveneMessage
+        ) {
+            let snapshot = self.handle.snapshot();
+            if snapshot.current_run.is_none() {
+                return Err(CoreError::invalid_input(
+                    "no_active_run",
+                    "Cannot intervene because no run is active",
+                ));
+            }
+            self.commit_user_input_display(&command).await?;
+            self.handle.intervene(command.message).await.map(|_| {
+                runtime_contract::thread::RunSubmitted {
+                    run_id: "current".to_string(),
+                }
+            })
+        } else {
+            let reservation = self.handle.reserve_run()?;
+            let acceptance = self.acceptances.begin();
+            let session = std::sync::Arc::clone(self);
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            // 受理任务由 server 持有：事务一旦开始就完成提交或回滚，HTTP future
+            // 消失不会在已提交输入与启动确认之间丢弃预留。尚未开始时可直接释放。
+            tokio::spawn(async move {
+                let _acceptance = acceptance;
+                if result_tx.is_closed() {
+                    return;
+                }
+                let result = async {
+                    let run_id = reservation.run_id().to_string();
+                    let input = display_input(&command);
+                    session
+                        .db
+                        .accept_run_input(
+                            &domain_agent_run_snapshot(&run_id, &session.thread_id),
+                            &input,
+                            &session.thread_dir(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            CoreError::persistence("failed to accept user input", error.to_string())
+                        })?;
+                    session.broadcast_server_local_event(omini_protocol::RuntimeEvent::new(
+                        omini_protocol::TypedRuntimeEvent::UserMessageInjected {
+                            item: omini_protocol::HistoryItem::UserInput(input),
+                            client_echo_id: command.client_echo_id,
+                        },
+                    ));
+                    if let Err(error) = reservation.commit(command.message).await {
+                        // 输入已经受理；实例同时关闭等启动失败需明确结算运行，
+                        // 保留已接受的用户历史，而不能留下永远 Running 的记录。
+                        session
+                            .db
+                            .update_agent_run(
+                                &run_id,
+                                omini_domain::agent_run::AgentRunStatus::Failed,
+                                None,
+                                Some(Timestamp::now()),
+                                0,
+                            )
+                            .await
+                            .map_err(|failure| {
+                                CoreError::persistence(
+                                    "failed to settle unstarted run",
+                                    failure.to_string(),
+                                )
+                            })?;
+                        return Err(error);
+                    }
+                    Ok(runtime_contract::thread::RunSubmitted {
+                        run_id: "current".to_string(),
+                    })
+                }
+                .await;
+                let _ = result_tx.send(result);
+            });
+            result_rx
+                .await
+                .map_err(|_| CoreError::new("run acceptance task failed"))?
+        }
     }
 
     /// 用户输入生命周期中属于 server 的部分：展示行立即落库（时间戳 = 发言时刻，
     /// 因此 replay 呈现发言时间视角），echo 随后在本地事件通道广播，两者都先于
-    /// core 派发完成。core 只在安全输入边界提交 LLM 上下文行。
+    /// 提交实例执行。core 只在安全输入边界提交 LLM 上下文行。
     async fn commit_user_input_display(
         &self,
         command: &runtime_contract::thread::PreparedRunCommand,
     ) -> Result<(), CoreError> {
-        let intent = match command.intent {
-            runtime_contract::thread::RunIntent::SubmitMessage
-            | runtime_contract::thread::RunIntent::InterveneMessage => UserInputIntent::Message,
-            runtime_contract::thread::RunIntent::ExecuteCommand(command) => {
-                UserInputIntent::Command { command }
-            }
-        };
-        let mut attachments = command
-            .input
-            .attachments
-            .iter()
-            .map(|attachment| attachment.metadata.clone())
-            .collect::<Vec<_>>();
-        attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
-        let input = ConversationUserInput {
-            intent,
-            parts: command.input.parts.clone(),
-            attachments,
-        };
+        let input = display_input(command);
         self.db
             .insert_user_input(
                 &self.thread_id,
@@ -240,11 +336,11 @@ impl ThreadRuntime {
     }
 
     pub async fn cancel_run(&self) -> Result<(), CoreError> {
-        self.core.cancel_run().await
+        self.handle.cancel_current().await
     }
 
     pub async fn cancel_agent_run(&self, run_id: String) -> Result<(), CoreError> {
-        self.core.cancel_agent_run(run_id).await
+        self.handle.cancel_agent_run(run_id).await
     }
 
     /// 先持久化子会话展示消息，再将结构化输入投递到子任务队列。
@@ -255,7 +351,7 @@ impl ThreadRuntime {
         client_id: String,
         command: runtime_contract::thread::SubmitRunCommand,
     ) -> Result<(), CoreError> {
-        let prepared = self.core.prepare_run(command)?;
+        let prepared = self.handle.prepare_run(command)?;
         let source = client_message(&client_id, &prepared)?;
         let fresh = self
             .db
@@ -288,12 +384,20 @@ impl ThreadRuntime {
             },
         ));
         if let Err(error) = self
-            .core
-            .intervene_client_run(run_id.clone(), prepared.message, source.clone())
+            .handle
+            .intervene_agent_run(run_id.clone(), prepared.message, Some(source.clone()))
             .await
         {
+            // 受理语义在 DB 层（登记 + 展示历史 + 广播已成功）；实例侧注入
+            // 失败（任务已结束或不接受输入）不回滚受理，走既有投递失败结算，
+            // 数量随任务结果的 undelivered_messages 报告。
+            tracing::warn!(
+                error = %error,
+                task_id = %run_id,
+                "child user input accepted but not injected"
+            );
             self.db
-                .fail_client_message(&run_id, &source, "运行时未接收消息")
+                .fail_client_message(&run_id, &source, "子任务已结束，客户端输入未能注入")
                 .await
                 .map_err(|store_error| {
                     CoreError::persistence(
@@ -301,7 +405,6 @@ impl ThreadRuntime {
                         store_error.to_string(),
                     )
                 })?;
-            return Err(error);
         }
         Ok(())
     }
@@ -313,7 +416,7 @@ impl ThreadRuntime {
         client_id: &str,
         command: &runtime_contract::thread::SubmitRunCommand,
     ) -> Result<bool, CoreError> {
-        let prepared = self.core.prepare_run(command.clone())?;
+        let prepared = self.handle.prepare_run(command.clone())?;
         let source = client_message(client_id, &prepared)?;
         let existing = self
             .db
@@ -346,25 +449,44 @@ impl ThreadRuntime {
         &self,
         command: runtime_contract::thread::ResolveToolPauseCommand,
     ) -> Result<(), CoreError> {
-        self.core.resolve_tool_pause(command).await
+        self.handle.resolve_tool_pause(command).await
     }
 
     pub async fn resolve_plan(
         &self,
         command: runtime_contract::thread::ResolvePlanCommand,
     ) -> Result<(), CoreError> {
-        self.core.resolve_plan(command).await
+        self.handle.resolve_plan(command).await
     }
 
     pub fn list_skills(&self) -> Vec<runtime_contract::thread::SkillSummarySnapshot> {
-        self.core.list_skills()
+        self.handle.list_skills()
     }
 
     pub async fn set_thinking_effort(
         &self,
         command: runtime_contract::thread::SetThinkingEffortCommand,
     ) -> Result<(), CoreError> {
-        self.core.set_thinking_effort(command).await
+        self.handle.set_thinking_effort(command).await
+    }
+}
+
+/// 外部提交的初始 Run 记录；预留 RunId 即数据库主键。
+fn domain_agent_run_snapshot(
+    run_id: &str,
+    thread_id: &str,
+) -> omini_domain::agent_run::AgentRunSnapshot {
+    let now = Timestamp::now();
+    omini_domain::agent_run::AgentRunSnapshot {
+        id: run_id.to_string(),
+        thread_id: thread_id.to_string(),
+        parent_run_id: None,
+        status: omini_domain::agent_run::AgentRunStatus::Running,
+        created_at: now,
+        started_at: Some(now),
+        finished_at: None,
+        total_tokens: 0,
+        archived_at: None,
     }
 }
 
@@ -398,4 +520,27 @@ fn client_message(
             attachments,
         },
     })
+}
+
+/// 从已校验输入构建展示历史，保持原始来源与稳定附件顺序。
+fn display_input(command: &runtime_contract::thread::PreparedRunCommand) -> ConversationUserInput {
+    let intent = match command.intent {
+        runtime_contract::thread::RunIntent::SubmitMessage
+        | runtime_contract::thread::RunIntent::InterveneMessage => UserInputIntent::Message,
+        runtime_contract::thread::RunIntent::ExecuteCommand(command) => {
+            UserInputIntent::Command { command }
+        }
+    };
+    let mut attachments = command
+        .input
+        .attachments
+        .iter()
+        .map(|attachment| attachment.metadata.clone())
+        .collect::<Vec<_>>();
+    attachments.sort_by(|left, right| left.attachment_id.cmp(&right.attachment_id));
+    ConversationUserInput {
+        intent,
+        parts: command.input.parts.clone(),
+        attachments,
+    }
 }

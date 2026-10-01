@@ -3,7 +3,6 @@
 use crate::{Thread, ThreadType};
 use jiff::Timestamp;
 use omini_domain::task::TaskStatus;
-use omini_runtime_contract::persistence::ThreadRecord;
 use omini_runtime_contract::thread_domain::{AgentTaskExecutionMode, AgentTaskInfo};
 use std::fs;
 use std::path::PathBuf;
@@ -72,9 +71,9 @@ pub fn test_thread(id: &str) -> Thread {
 }
 
 /// 子 Agent 线程的运行时记录样例。
-pub fn test_agent_thread(id: &str, parent_thread_id: &str) -> ThreadRecord {
+pub fn test_agent_thread(id: &str, parent_thread_id: &str) -> crate::NewThread {
     let now = fixed_time();
-    ThreadRecord {
+    crate::NewThread {
         id: id.to_string(),
         parent_thread_id: Some(parent_thread_id.to_string()),
         spawn_tool_use_id: Some(format!("tool_{id}")),

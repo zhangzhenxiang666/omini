@@ -388,11 +388,6 @@ impl RuntimeStatusProjection {
         self.active_profile
     }
 
-    /// 返回当前仍在运行中的子代理 thread_id 集合，供 snapshot 恢复真实状态用。
-    pub fn has_active_agent_tasks(&self) -> bool {
-        !self.agent_tasks.is_empty()
-    }
-
     fn pending_plan_matches(&self, event: &client_proto::RuntimeEvent) -> bool {
         let Some(pending) = &self.pending_plan_approval else {
             return false;

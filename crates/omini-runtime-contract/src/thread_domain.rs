@@ -569,3 +569,13 @@ pub struct UserInputOption {
     pub label: String,
     pub description: String,
 }
+
+/// TUI 输入的稳定来源；不同客户端允许提交相同正文。
+///
+/// 直接子 Run 的客户端投递以此来源键登记，并在安全输入边界完成持久化后注入。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientMessage {
+    pub client_id: String,
+    pub client_echo_id: String,
+    pub input: UserInput,
+}

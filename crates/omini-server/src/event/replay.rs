@@ -9,7 +9,7 @@ const MAX_TASK_REPLAY_COUNT: usize = 30;
 
 #[derive(Clone)]
 pub struct SequencedRuntimeEvent {
-    // seq 只在单个 ThreadRuntime 内单调递增，用来让 WebSocket replay 和订阅流去重。
+    // seq 只在单个 ThreadSession 内单调递增，用来让 WebSocket replay 和订阅流去重。
     pub seq: u64,
     pub event: client_proto::RuntimeEvent,
 }
@@ -207,38 +207,25 @@ impl RuntimeReplayBuffer {
         replay
     }
 
-    pub fn record_persistence(
-        &mut self,
-        owner_thread_id: &str,
-        event: &runtime_contract::RuntimePersistenceEvent,
-    ) {
-        // 持久化成功意味着对应 UI 片段下一次会从 snapshot 恢复，应从 replay 中裁掉。
-        match event {
-            runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
-                thread_id,
-                message,
-                ..
-            } if thread_id == owner_thread_id => {
-                if message.role == omini_model::message::Role::Assistant {
-                    self.drop_current_assistant_tail();
-                } else if message
-                    .content
-                    .iter()
-                    .any(omini_model::message::ContentBlock::is_tool_result)
-                {
-                    self.drop_persisted_tool_results();
-                } else {
-                    self.drop_pending_user_injection();
-                }
-            }
-            runtime_contract::RuntimePersistenceEvent::InsertCompactSummaryMessage {
-                thread_id,
-                ..
-            } if thread_id == owner_thread_id => {
-                self.drop_current_compact_summary_tail();
-            }
-            _ => {}
+    /// 本线程的一条 UI 展示行落库成功后调用：对应片段下一次会从 snapshot
+    /// 恢复，应从 replay 尾部裁掉，避免重连补发与快照重复。
+    pub fn record_persisted_ui_message(&mut self, message: &omini_model::message::Message) {
+        if message.role == omini_model::message::Role::Assistant {
+            self.drop_current_assistant_tail();
+        } else if message
+            .content
+            .iter()
+            .any(omini_model::message::ContentBlock::is_tool_result)
+        {
+            self.drop_persisted_tool_results();
+        } else {
+            self.drop_pending_user_injection();
         }
+    }
+
+    /// 本线程的压缩摘要落库成功后调用，裁掉 replay 中的摘要增量尾部。
+    pub fn record_persisted_compact_summary(&mut self) {
+        self.drop_current_compact_summary_tail();
     }
 
     pub fn record_snapshot(
@@ -968,16 +955,10 @@ mod tests {
     }
 
     fn persisted_message(
-        thread_id: &str,
         role: omini_model::message::Role,
         blocks: Vec<omini_model::message::ContentBlock>,
-    ) -> runtime_contract::RuntimePersistenceEvent {
-        runtime_contract::RuntimePersistenceEvent::UiMessageAppended {
-            thread_id: thread_id.to_string(),
-            message: omini_model::message::Message::new(role, blocks),
-            model_ref: (role == omini_model::message::Role::Assistant)
-                .then(|| "test/model".to_string()),
-        }
+    ) -> omini_model::message::Message {
+        omini_model::message::Message::new(role, blocks)
     }
 
     fn fixed_time() -> jiff::Timestamp {
@@ -1364,16 +1345,12 @@ mod tests {
         let mut buffer = RuntimeReplayBuffer::default();
 
         buffer.record(sequenced(1, "user_message_injected"));
-        buffer.record_persistence(
-            "s1",
-            &persisted_message(
-                "s1",
-                omini_model::message::Role::User,
-                vec![omini_model::message::ContentBlock::from_text(
-                    "hello".to_string(),
-                )],
-            ),
-        );
+        buffer.record_persisted_ui_message(&persisted_message(
+            omini_model::message::Role::User,
+            vec![omini_model::message::ContentBlock::from_text(
+                "hello".to_string(),
+            )],
+        ));
 
         assert!(buffer.replay().is_empty());
     }
@@ -1389,22 +1366,18 @@ mod tests {
         buffer.record(sequenced(5, "tool_use"));
         buffer.record(sequenced(6, "tool_pause_requested"));
 
-        buffer.record_persistence(
-            "s1",
-            &persisted_message(
-                "s1",
-                omini_model::message::Role::Assistant,
-                vec![
-                    omini_model::message::ContentBlock::from_thinking("thinking".to_string()),
-                    omini_model::message::ContentBlock::from_text("answer".to_string()),
-                    omini_model::message::ContentBlock::from_tool_use(
-                        "tool_1".to_string(),
-                        "read".to_string(),
-                        HashMap::new(),
-                    ),
-                ],
-            ),
-        );
+        buffer.record_persisted_ui_message(&persisted_message(
+            omini_model::message::Role::Assistant,
+            vec![
+                omini_model::message::ContentBlock::from_thinking("thinking".to_string()),
+                omini_model::message::ContentBlock::from_text("answer".to_string()),
+                omini_model::message::ContentBlock::from_tool_use(
+                    "tool_1".to_string(),
+                    "read".to_string(),
+                    HashMap::new(),
+                ),
+            ],
+        ));
 
         assert_eq!(
             replay_kinds(&buffer),
@@ -1485,18 +1458,14 @@ mod tests {
         buffer.record(sequenced(2, "turn_started"));
         buffer.record(sequenced(3, "tool_result"));
 
-        buffer.record_persistence(
-            "s1",
-            &persisted_message(
-                "s1",
-                omini_model::message::Role::User,
-                vec![omini_model::message::ContentBlock::from_tool_result(
-                    "tool_1".to_string(),
-                    false,
-                    "done".to_string(),
-                )],
-            ),
-        );
+        buffer.record_persisted_ui_message(&persisted_message(
+            omini_model::message::Role::User,
+            vec![omini_model::message::ContentBlock::from_tool_result(
+                "tool_1".to_string(),
+                false,
+                "done".to_string(),
+            )],
+        ));
 
         assert_eq!(replay_kinds(&buffer), vec!["run_started", "turn_started"]);
     }

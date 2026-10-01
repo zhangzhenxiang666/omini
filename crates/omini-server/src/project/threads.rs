@@ -2,8 +2,8 @@ use crate::event::bridge::thread_summary_from_store_record;
 use crate::project::model_selection::{EffortSelection, ModelSelection};
 use crate::project::{ProjectManager, ThreadError};
 use crate::store::{self as store_model, Store};
-use crate::thread::ThreadRuntime;
-use crate::thread::ThreadRuntimeInputs;
+use crate::thread::ThreadSession;
+use crate::thread::ThreadSessionInputs;
 use jiff::Timestamp;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
@@ -13,8 +13,6 @@ use omini_protocol as client_proto;
 use omini_runtime_contract as runtime_contract;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tracing::Instrument;
 
 impl ProjectManager {
     pub async fn list_threads(&self) -> Result<client_proto::ThreadsResponse, CoreError> {
@@ -115,7 +113,7 @@ impl ProjectManager {
             &thread,
         )
         .await?;
-        let runtime = Arc::new(ThreadRuntime::build(
+        let session = ThreadSession::build(
             self.project_id.clone(),
             settings,
             self.project.clone(),
@@ -123,20 +121,21 @@ impl ProjectManager {
             Arc::clone(&self.db),
             active_profile,
             loaded,
-        )?);
+            self.idle_reclaim_sender(),
+        )?;
         self.threads
             .lock()
             .expect("threads lock poisoned")
-            .insert(thread_id.clone(), runtime);
+            .insert(thread_id.clone(), session);
         Ok(client_proto::CreateThreadResponse { thread_id })
     }
 
     /// 「在新线程中执行计划」审批通过后由 client 调用的 HTTP 路由触发的真正
-    /// fork 路径：读 plan 文件 → 构造新 `ThreadRuntime` → 把 plan 包装为
+    /// fork 路径：读 plan 文件 → 构造新 `ThreadSession` → 把 plan 包装为
     /// user message 推给新 core → 向原 thread 广播外部 `ThreadSwitched`。
     ///
-    /// 原 `ThreadRuntime` 不会被强制 shutdown；它由现有 reclaim 机制在所有 client
-    /// 断开 + 投影 Idle 后自然回收。
+    /// 原 `ThreadSession` 不会被强制 shutdown；它由现有 reclaim 机制在所有 client
+    /// 断开且 core 确认可回收后自然回收。
     pub async fn fork_thread_for_plan(
         &self,
         from_thread_id: &str,
@@ -200,7 +199,7 @@ impl ProjectManager {
         self.db.create_thread(&thread).await.map_err(|error| {
             CoreError::persistence("failed to persist forked thread", error.to_string())
         })?;
-        // 4. 构造新 `ThreadRuntime`，active_profile 来自 approval。
+        // 4. 构造新 `ThreadSession`，active_profile 来自 approval。
         let profile: runtime_contract::thread_domain::PlanExecutionProfile = profile.into();
         let active_profile = profile.active_profile();
         let loaded = load_thread_snapshot(
@@ -212,7 +211,7 @@ impl ProjectManager {
             &thread,
         )
         .await?;
-        let runtime = Arc::new(ThreadRuntime::build(
+        let runtime = ThreadSession::build(
             self.project_id.clone(),
             settings,
             self.project.clone(),
@@ -220,7 +219,14 @@ impl ProjectManager {
             Arc::clone(&self.db),
             active_profile,
             loaded,
-        )?);
+            self.idle_reclaim_sender(),
+        )?;
+        // 先插入缓存再提交初始运行：提交窗口内并发的 get_or_load_thread
+        // 否则会为同一线程装配出第二个实例。
+        self.threads
+            .lock()
+            .expect("threads lock poisoned")
+            .insert(new_thread_id.clone(), Arc::clone(&runtime));
         // 5. 把 plan 作为新 thread 的初始 user message 推给新 core，
         // 走与普通 submit_run 完全相同的路径(包括 process_run 自动启动)。
         let plan_text = omini_core::compacted_plan_context(&plan_content);
@@ -240,10 +246,6 @@ impl ProjectManager {
                 "forked thread runtime failed to consume initial plan message"
             );
         }
-        self.threads
-            .lock()
-            .expect("threads lock poisoned")
-            .insert(new_thread_id.clone(), runtime);
         // 6. 通过原 thread 的 server_event_inbox_tx 广播外部 ThreadSwitched，
         // 走普通 runtime event 通道,所有 ws loop 会向自己的客户端转发
         // `TypedRuntimeEvent::ThreadSwitched`。原 thread 已被 reclaim
@@ -254,7 +256,7 @@ impl ProjectManager {
         Ok(new_thread_id)
     }
 
-    pub fn cached_thread(&self, thread_id: &str) -> Option<Arc<ThreadRuntime>> {
+    pub fn cached_thread(&self, thread_id: &str) -> Option<Arc<ThreadSession>> {
         self.threads
             .lock()
             .expect("threads lock poisoned")
@@ -265,7 +267,7 @@ impl ProjectManager {
     pub async fn get_or_load_thread(
         &self,
         thread_id: &str,
-    ) -> Result<Arc<ThreadRuntime>, ThreadError> {
+    ) -> Result<Arc<ThreadSession>, ThreadError> {
         let cached = {
             self.threads
                 .lock()
@@ -309,17 +311,12 @@ impl ProjectManager {
         .await?;
 
         // 数据库查询和 runtime 创建之间可能有并发请求，拿到锁后再检查一次缓存。
-        if let Some(thread) = self
-            .threads
-            .lock()
-            .expect("threads lock poisoned")
-            .get(thread_id)
-            .cloned()
-        {
+        let mut threads = self.threads.lock().expect("threads lock poisoned");
+        if let Some(thread) = threads.get(thread_id).cloned() {
             return Ok(thread);
         }
-        // `build` 本身无 I/O,锁只在 brief get / brief insert 时拿,future 保持 Send。
-        let thread = Arc::new(ThreadRuntime::build(
+        // 二次检查、同步装配与入缓存共用锁，不跨 await，避免装配出重复实例。
+        let thread = ThreadSession::build(
             self.project_id.clone(),
             settings,
             self.project.clone(),
@@ -327,70 +324,29 @@ impl ProjectManager {
             Arc::clone(&self.db),
             runtime_contract::thread_domain::ActiveProfile::Main,
             loaded,
-        )?);
-        self.threads
-            .lock()
-            .expect("threads lock poisoned")
-            .insert(thread_id.to_string(), Arc::clone(&thread));
+            self.idle_reclaim_sender(),
+        )?;
+        threads.insert(thread_id.to_string(), Arc::clone(&thread));
         Ok(thread)
     }
 
     pub async fn close_thread_if_idle(
         self: &Arc<Self>,
         thread_id: &str,
-        thread: &Arc<ThreadRuntime>,
+        thread: &Arc<ThreadSession>,
     ) {
-        async fn shutdown_thread(thread: &ThreadRuntime) {
-            if let Err(error) = thread.shutdown().await {
-                tracing::warn!(error = %error, "runtime thread shutdown failed");
-            }
-        }
-
-        let mut events = thread.subscribe();
-
+        // 最后一个客户端断开时立即检查：空闲则当场回收；仍在运行的会话不做
+        // 轮询等待——实例空闲公告（无运行、无预留、无任务）由会话消费者驱动
+        // 回收，无需延时推测。
         if self.remove_thread_if_reclaimable(thread_id, thread) {
-            shutdown_thread(thread).await;
-            return;
-        }
-
-        if !self.should_wait_for_reclaim(thread_id, thread) {
-            return;
-        }
-
-        let manager = Arc::clone(self);
-        let thread_id = thread_id.to_string();
-        let thread = Arc::clone(thread);
-        let watcher_thread_id = thread_id.clone();
-        tokio::spawn(
-            async move {
-                tracing::debug!("idle reclaim watcher started");
-                while matches!(
-                    events.recv().await,
-                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_))
-                ) {
-                    // RunFinished 后可能紧跟 PlanSubmitted。
-                    // 先等投影状态稳定，再判断 runtime 是否可回收。
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    if manager.remove_thread_if_reclaimable(&thread_id, &thread) {
-                        tracing::debug!("reclaiming idle runtime thread");
-                        shutdown_thread(&thread).await;
-                        break;
-                    }
-                    if !manager.should_wait_for_reclaim(&thread_id, &thread) {
-                        break;
-                    }
-                }
-                tracing::debug!("idle reclaim watcher stopped");
+            tracing::debug!("reclaiming idle session after last disconnect");
+            if let Err(error) = thread.close().await {
+                tracing::warn!(error = %error, "session close failed during reclaim");
             }
-            .instrument(tracing::debug_span!(
-                "thread",
-                thread_id = %watcher_thread_id,
-                task_kind = "idle_reclaim_watcher"
-            )),
-        );
+        }
     }
 
-    fn remove_thread_if_reclaimable(&self, thread_id: &str, thread: &Arc<ThreadRuntime>) -> bool {
+    fn remove_thread_if_reclaimable(&self, thread_id: &str, thread: &Arc<ThreadSession>) -> bool {
         if !thread.can_reclaim_without_clients() {
             return false;
         }
@@ -399,23 +355,13 @@ impl ProjectManager {
         let Some(current) = threads.get(thread_id) else {
             return false;
         };
-        // 只关闭当前缓存里的同一个 Arc，避免旧连接清理时误关掉新建 runtime。
-        if Arc::ptr_eq(current, thread) {
+        // 只回收当前缓存里的同一个 Arc，避免旧连接清理时误关掉新建会话。
+        if Arc::ptr_eq(current, thread) && thread.begin_idle_close() {
             threads.remove(thread_id);
             true
         } else {
             false
         }
-    }
-
-    fn should_wait_for_reclaim(&self, thread_id: &str, thread: &Arc<ThreadRuntime>) -> bool {
-        if !thread.should_wait_for_reclaim() {
-            return false;
-        }
-        let threads = self.threads.lock().expect("threads lock poisoned");
-        threads
-            .get(thread_id)
-            .is_some_and(|current| Arc::ptr_eq(current, thread))
     }
 }
 
@@ -430,7 +376,7 @@ async fn load_thread_snapshot(
     settings: &Settings,
     active_profile: runtime_contract::thread_domain::ActiveProfile,
     thread: &store_model::Thread,
-) -> Result<ThreadRuntimeInputs, CoreError> {
+) -> Result<ThreadSessionInputs, CoreError> {
     let thread_dir = project.thread(thread_id);
     // DB → UI:全套 HistoryItem(TUI 渲染 + user injection 去重要用)。
     let messages = crate::store::load_messages(db, thread_id, &thread_dir).await;
@@ -466,7 +412,7 @@ async fn load_thread_snapshot(
         CoreError::persistence("failed to load background tasks", error.to_string())
     })?;
     Ok(
-        ThreadRuntimeInputs::new(snapshot, thread_messages, llm_context_version)
+        ThreadSessionInputs::new(snapshot, thread_messages, llm_context_version)
             .with_background_tasks(background_tasks),
     )
 }
@@ -494,7 +440,6 @@ mod tests {
     };
     use omini_protocol as client_proto;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     #[test]
     fn thread_summaries_merge_loaded_runtime_states() {
@@ -542,6 +487,10 @@ mod tests {
             .get_or_load_thread(&old_thread_id)
             .await
             .expect("old runtime should be cached");
+        // 注册虚拟客户端阻止空闲回收；新语义下无客户端的空闲会话会被消费者回收。
+        old_runtime
+            .register_client_connection("test-client-old".to_string())
+            .await;
         assert!(!has_provider(
             &old_runtime.list_models().providers,
             "anthropic"
@@ -579,10 +528,7 @@ mod tests {
             .expect("threads lock poisoned")
             .remove(&old_thread_id)
             .expect("old runtime should be cached");
-        removed
-            .shutdown()
-            .await
-            .expect("old runtime should shut down");
+        removed.close().await.expect("old runtime should shut down");
 
         let restored = manager
             .get_or_load_thread(&old_thread_id)
@@ -594,7 +540,7 @@ mod tests {
         assert_eq!(restored_models.current_model, "fast");
 
         restored
-            .shutdown()
+            .close()
             .await
             .expect("restored runtime should shut down");
         let new_runtime = manager
@@ -602,7 +548,7 @@ mod tests {
             .await
             .expect("new runtime should be cached");
         new_runtime
-            .shutdown()
+            .close()
             .await
             .expect("new runtime should shut down");
     }
@@ -612,7 +558,6 @@ mod tests {
         let temp = unique_temp_root("idle-active-runtime");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
         let thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
@@ -622,7 +567,8 @@ mod tests {
             .get_or_load_thread(&thread_id)
             .await
             .expect("thread should load");
-        thread.record_runtime_event_for_test("run_started");
+        // 可回收判定来自 core 权威快照：以真实预留模拟忙碌，而非投影事件。
+        let _reservation = thread.reserve_run_for_test().expect("run should reserve");
 
         manager.close_thread_if_idle(&thread_id, &thread).await;
 
@@ -633,7 +579,9 @@ mod tests {
                 .expect("threads lock poisoned")
                 .contains_key(&thread_id)
         );
-        thread.shutdown().await.expect("thread should shut down");
+        // 关闭等待预留窗口结算；测试已验证保留行为，先释放模拟的受理资格。
+        drop(_reservation);
+        thread.close().await.expect("thread should shut down");
     }
 
     #[tokio::test]
@@ -641,7 +589,6 @@ mod tests {
         let temp = unique_temp_root("idle-active-runtime-reclaim");
         let cwd = temp.path.join("cwd");
         let (manager, _project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
         let thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
@@ -651,19 +598,40 @@ mod tests {
             .get_or_load_thread(&thread_id)
             .await
             .expect("thread should load");
-        thread.record_runtime_event_for_test("run_started");
-
+        // 会话必须服务过客户端才参与消费者回收：模拟最后一个客户端断开。
+        thread
+            .register_client_connection("test-client".to_string())
+            .await;
+        thread.unregister_client_connection("test-client").await;
+        // 预留期间（等价于运行提交前的窗口）会话不可回收。
+        let reservation = thread.reserve_run_for_test().expect("run should reserve");
         manager.close_thread_if_idle(&thread_id, &thread).await;
-        thread.record_runtime_event_for_test("run_finished");
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
         assert!(
-            !manager
+            manager
                 .threads
                 .lock()
                 .expect("threads lock poisoned")
                 .contains_key(&thread_id)
         );
+
+        // 运行资格释放（运行结束/预留丢弃）后实例重新公告空闲，
+        // 消费者在无客户端时自动回收会话。
+        drop(reservation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let cached = manager
+                    .threads
+                    .lock()
+                    .expect("threads lock poisoned")
+                    .contains_key(&thread_id);
+                if !cached {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session should be reclaimed after run eligibility is released");
     }
 
     #[tokio::test]
@@ -671,7 +639,6 @@ mod tests {
         let temp = unique_temp_root("fork-thread-for-plan");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
 
         let from_thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
@@ -691,6 +658,10 @@ mod tests {
             .get_or_load_thread(&from_thread_id)
             .await
             .expect("from thread should load");
+        // 有客户端连接的会话不会被空闲回收，ThreadSwitched 才有广播接收者。
+        from_thread
+            .register_client_connection("test-client".to_string())
+            .await;
         let mut events = from_thread.subscribe();
 
         let to_thread_id = manager
@@ -698,6 +669,11 @@ mod tests {
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
+        if let Some(to_thread) = manager.cached_thread(&to_thread_id) {
+            to_thread
+                .register_client_connection("test-client-to".to_string())
+                .await;
+        }
 
         {
             let threads = manager.threads.lock().expect("threads lock poisoned");
@@ -765,7 +741,6 @@ mod tests {
         let temp = unique_temp_root("fork-thread-for-plan-title");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
 
         let from_thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
@@ -804,13 +779,19 @@ mod tests {
         let temp = unique_temp_root("fork-thread-for-plan-missing");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
 
         let from_thread_id = manager
             .create_thread(client_proto::CreateThreadRequest::default())
             .await
             .expect("from thread should be created")
             .thread_id;
+        // 无客户端的空闲会话会被消费者回收；注册客户端保证缓存断言稳定。
+        manager
+            .get_or_load_thread(&from_thread_id)
+            .await
+            .expect("from thread should load")
+            .register_client_connection("test-client".to_string())
+            .await;
 
         let plans_dir = project.path().join("plans");
         std::fs::create_dir_all(&plans_dir).expect("plans dir should be created");
@@ -841,7 +822,6 @@ mod tests {
         let temp = unique_temp_root("fork-thread-for-plan-id");
         let cwd = temp.path.join("cwd");
         let (manager, project) = project_manager_for(&temp.path, &cwd).await;
-        let manager = Arc::new(manager);
         let project_id = manager.project_id.clone();
 
         let from_thread_id = manager
@@ -870,6 +850,12 @@ mod tests {
             .await
             .expect("fork should succeed");
         assert_ne!(to_thread_id, from_thread_id);
+        // 注册客户端避免新会话在初始运行结束后被空闲回收，缓存断言才有意义。
+        if let Some(to_thread) = manager.cached_thread(&to_thread_id) {
+            to_thread
+                .register_client_connection("test-client-to".to_string())
+                .await;
+        }
 
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
@@ -908,7 +894,7 @@ mod tests {
 
         assert!(
             manager.cached_thread(&to_thread_id).is_some(),
-            "new ThreadRuntime should be cached under the server-assigned id"
+            "new ThreadSession should be cached under the server-assigned id"
         );
     }
 }

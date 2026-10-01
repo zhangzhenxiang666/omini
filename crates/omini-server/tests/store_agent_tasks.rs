@@ -14,7 +14,7 @@ use omini_domain::input::{InputPart, UserInputIntent};
 use omini_domain::task::TaskStatus;
 use omini_entity::MessageKind;
 use omini_model::message::{ContentBlock, Message, Role};
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_runtime_contract::thread_domain::{AgentTaskResult, DeliveryKey};
 use omini_server::store::load_messages;
 
@@ -29,6 +29,7 @@ async fn agent_delivery_idempotency() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("child-agent", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("start".to_string())),
         &Message::from_user_text("start".to_string()),
     )
     .await
@@ -157,6 +158,7 @@ async fn client_delivery_recovery() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("child-client", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("start".to_string())),
         &Message::from_user_text("start".to_string()),
     )
     .await
@@ -334,6 +336,7 @@ async fn child_message_order() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("child-order", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("start".into())),
         &Message::from_user_text("start".into()),
     )
     .await
@@ -424,6 +427,7 @@ async fn delivery_cancel_failure() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("child-cancel", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("start".into())),
         &Message::from_user_text("start".into()),
     )
     .await
@@ -510,6 +514,7 @@ async fn agent_task_creation_and_recovery() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("agent_running", "owner"),
+        &crate::support::store::test_user_input(&initial),
         &initial,
     )
     .await
@@ -610,6 +615,7 @@ async fn agent_task_creation_and_recovery() {
         TEST_PROJECT_ID,
         &cancelling,
         &test_agent_thread("agent_cancelling", "owner"),
+        &crate::support::store::test_user_input(&initial),
         &initial,
     )
     .await
@@ -624,6 +630,7 @@ async fn agent_task_creation_and_recovery() {
             TEST_PROJECT_ID,
             &invalid,
             &test_agent_thread("agent_rolled_back", "owner"),
+            &crate::support::store::test_user_input(&initial),
             &initial,
         )
         .await
@@ -664,6 +671,7 @@ async fn task_notification_is_idempotent() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("agent_done", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("do work".to_string())),
         &Message::from_user_text("do work".to_string()),
     )
     .await
@@ -969,6 +977,7 @@ async fn recovery_keeps_terminal_tool_uses_and_approval_finish_time() {
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("child_recovery", "owner"),
+        &crate::support::store::test_user_input(&Message::from_user_text("start".into())),
         &Message::from_user_text("start".into()),
     )
     .await

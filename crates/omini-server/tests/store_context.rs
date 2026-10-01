@@ -43,12 +43,15 @@ async fn agent_compaction_preserves_ui_history() {
     let (db, project, _root) = temp_db().await;
     project.create_thread("owner").unwrap();
     db.create_thread(&test_thread("owner")).await.unwrap();
-    let initial = Message::from_user_text("do work".to_string());
+    // 展示输入独立于模型内部文本；压缩后也必须保留原始展示意图。
+    let initial = Message::from_user_text("INTERNAL EXPANDED TASK PROMPT".to_string());
+    let display = Message::from_user_text("do work".to_string());
     let task = test_agent_task("task_compact", "agent_compact", "owner");
     db.create_agent_task(
         TEST_PROJECT_ID,
         &task,
         &test_agent_thread("agent_compact", "owner"),
+        &crate::support::store::test_user_input(&display),
         &initial,
     )
     .await

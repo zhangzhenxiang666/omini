@@ -2,13 +2,13 @@ use std::{sync::Arc, time::Duration};
 
 use crate::{
     event::bridge::{fallback_thread_title_from_user_input, thread_title_changed_protocol_event},
-    thread::ThreadRuntime,
+    thread::ThreadSession,
 };
 use omini_core::CoreError;
 use omini_protocol as client_proto;
 use tracing::Instrument;
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub async fn rename_thread(&self, title: String) -> Result<(), CoreError> {
         self.db
             .update_thread_title(&self.thread_id, &title)

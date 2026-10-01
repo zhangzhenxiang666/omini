@@ -9,7 +9,7 @@ use omini_domain::task::TaskCompletion;
 use omini_model::message::Message;
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_runtime_contract::thread_domain::{ActiveProfile, ToolPauseResponse};
 use state::{FinalizationReason, QueryState, REPEAT_LIMIT, RepeatGuard, TurnOutcome};
 use std::collections::VecDeque;
@@ -91,6 +91,23 @@ impl QueryEngine {
         }
     }
 
+    /// 主实例引擎：暂停表与实例共享（供快照与监督器读取），同时保持
+    /// 运行开始清空遗留暂停点的语义。
+    pub fn with_shared_pauses_for_main(
+        pending_tool_pauses: PendingToolPauses,
+        permission_engine: Arc<PermissionEngine>,
+    ) -> Self {
+        Self {
+            tool_pause_resolver: ToolPauseResolver::new(pending_tool_pauses),
+            permission_engine,
+            cancel_notify: Arc::new(Notify::new()),
+            drain_pauses_on_start: true,
+            pending_user_messages: Arc::new(Mutex::new(VecDeque::new())),
+            preserve_pending_on_run_boundary: false,
+            pending_task_completions: Mutex::new(VecDeque::new()),
+        }
+    }
+
     pub fn with_shared_tool_controls(
         pending_tool_pauses: PendingToolPauses,
         permission_engine: Arc<PermissionEngine>,
@@ -160,14 +177,6 @@ impl QueryEngine {
         self.tool_pause_resolver.clone()
     }
 
-    pub fn pending_tool_pauses(&self) -> PendingToolPauses {
-        self.tool_pause_resolver.pending_tool_pauses()
-    }
-
-    pub fn permission_engine(&self) -> Arc<PermissionEngine> {
-        Arc::clone(&self.permission_engine)
-    }
-
     pub fn cancel_notify_arc(&self) -> Arc<Notify> {
         Arc::clone(&self.cancel_notify)
     }
@@ -225,6 +234,13 @@ impl QueryEngine {
         }
 
         loop {
+            // 无宿主上下文的纯引擎调用不要求落盘；生产主/子实例均带宿主上下文。
+            if ctx.runtime_context.is_some()
+                && let Err(error) = commit_events(&event_tx).await
+            {
+                state.fail(error);
+                break;
+            }
             if state.turn_limit_reached(ctx.settings.max_turns) {
                 state.finalize(FinalizationReason::MaxTurnsReached);
             }
@@ -255,6 +271,12 @@ impl QueryEngine {
                 )
                 .await;
 
+            if ctx.runtime_context.is_some()
+                && let Err(error) = commit_events(&event_tx).await
+            {
+                state.fail(error);
+                break;
+            }
             state.record_turn(outcome.finish_reason().clone());
 
             let TurnOutcome::Completed {
@@ -490,6 +512,17 @@ impl Default for QueryEngine {
             std::env::current_dir().unwrap_or_else(|_| ".".into()),
         )))
     }
+}
+
+/// 等待此前的关键持久化，失败时禁止继续依赖这些记录的执行。
+pub(crate) async fn commit_events(tx: &mpsc::Sender<EngineToRuntimeEvent>) -> Result<(), String> {
+    let (ack, result) = tokio::sync::oneshot::channel();
+    tx.send(EngineToRuntimeEvent::CommitBarrier { ack })
+        .await
+        .map_err(|_| "execution event consumer closed".to_string())?;
+    result
+        .await
+        .map_err(|_| "execution commit acknowledgement dropped".to_string())?
 }
 
 #[cfg(test)]
@@ -794,6 +827,10 @@ pub(crate) mod tests {
             let mut assistant_messages = 0;
             let mut notifications = 0;
             while let Some(event) = event_rx.recv().await {
+                if let EngineToRuntimeEvent::CommitBarrier { ack } = event {
+                    let _ = ack.send(Ok(()));
+                    continue;
+                }
                 match event {
                     EngineToRuntimeEvent::MessageProduced(_) => {
                         assistant_messages += 1;
@@ -862,6 +899,10 @@ pub(crate) mod tests {
         let observer = tokio::spawn(async move {
             let mut seen = Vec::new();
             while let Some(event) = event_rx.recv().await {
+                if let EngineToRuntimeEvent::CommitBarrier { ack } = event {
+                    let _ = ack.send(Ok(()));
+                    continue;
+                }
                 if let EngineToRuntimeEvent::TaskMessageProduced {
                     source: TaskMessageSource::Agent(source),
                     ack,
@@ -929,6 +970,10 @@ pub(crate) mod tests {
             let mut tool_uses = 0;
             let mut notifications = 0;
             while let Some(event) = event_rx.recv().await {
+                if let EngineToRuntimeEvent::CommitBarrier { ack } = event {
+                    let _ = ack.send(Ok(()));
+                    continue;
+                }
                 match event {
                     EngineToRuntimeEvent::ToolUse(_) => {
                         tool_uses += 1;

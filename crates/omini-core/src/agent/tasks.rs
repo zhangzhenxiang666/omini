@@ -1,6 +1,8 @@
+use crate::agent::{AgentSpec, AgentTaskRequest};
 use crate::engine::{PendingUserMessage, QueryContext, QueryEngine, SharedPendingUserMessages};
+use crate::execution::handle::OutputHandle;
+use crate::execution::host::{AgentHost, AgentSessionModel, AgentSessionRequest};
 use crate::skills::SkillSummary;
-use crate::subagents::{AgentSpec, AgentTaskRequest};
 use crate::tasks::{
     BackgroundTaskReservation, DEFAULT_MAX_BACKGROUND_TASKS, TaskCancellation, TaskManager,
 };
@@ -8,7 +10,6 @@ use crate::tools::{
     PendingToolPauses, ToolExecutionContext, ToolRegistry, ToolResult, ToolRuntimeContext,
     create_agent_registry_from_parent,
 };
-use crate::types::events::EngineToRuntimeEvent;
 use jiff::Timestamp;
 use omini_config::project::ThreadDir;
 use omini_config::{ModelSelection, Settings};
@@ -19,16 +20,15 @@ use omini_model::message::{ContentBlock, Message, Role};
 use omini_permissions::PermissionEngine;
 use omini_provider_api::{FinishReason, LlmClient};
 use omini_runtime_contract::RuntimeToServerEvent;
-use omini_runtime_contract::persistence::{RuntimePersistenceEvent, ThreadRecord};
 use omini_runtime_contract::thread_domain::{
     ActiveProfile, AgentTaskEvent, AgentTaskEventEnvelope, AgentTaskExecutionMode, AgentTaskInfo,
-    AgentTaskResult, MAX_AGENT_DEPTH, ThreadUsageSnapshot, ToolPauseKind, ToolPauseResponse,
+    AgentTaskResult, MAX_AGENT_DEPTH, ThreadUsageSnapshot,
 };
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -115,7 +115,7 @@ struct PreparedTask {
     tool_registry: Arc<ToolRegistry>,
     thread_dir: ThreadDir,
     project: omini_config::project::ProjectDir,
-    agent_registry: Arc<crate::subagents::AgentRegistry>,
+    agent_registry: Arc<crate::agent::AgentRegistry>,
     skill_registry: Arc<crate::skills::SkillRegistry>,
     initial_message: Message,
     llm_context_version: i64,
@@ -127,7 +127,11 @@ struct PreparedTask {
 }
 
 /// 归属于主线程的长期服务，管理后台根 task 及其同步后代。
+///
+/// 子会话与存储资源经 [`AgentHost`] 申请；领域事件经实例输出通道发布。
 pub struct AgentTaskSupervisor {
+    output: OutputHandle,
+    host: Arc<dyn AgentHost>,
     pending_tool_pauses: PendingToolPauses,
     permission_engine: Arc<PermissionEngine>,
     active_profile: Arc<RwLock<ActiveProfile>>,
@@ -153,8 +157,8 @@ impl std::fmt::Debug for AgentTaskSupervisor {
 impl AgentTaskSupervisor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        event_tx: mpsc::Sender<RuntimeToServerEvent>,
-        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+        output: OutputHandle,
+        host: Arc<dyn AgentHost>,
         completion_tx: mpsc::UnboundedSender<TaskCompletion>,
         pending_tool_pauses: PendingToolPauses,
         permission_engine: Arc<PermissionEngine>,
@@ -174,8 +178,8 @@ impl AgentTaskSupervisor {
             generic_initial.insert(task.task_id.clone(), task_info_from_agent(task));
         }
         let task_manager = TaskManager::new(
-            event_tx.clone(),
-            persistence_tx.clone(),
+            output.clone(),
+            Arc::clone(&host),
             generic_initial.into_values().collect(),
             DEFAULT_MAX_BACKGROUND_TASKS,
             completion_tx.clone(),
@@ -206,6 +210,8 @@ impl AgentTaskSupervisor {
             })
             .collect();
         let supervisor = Arc::new(Self {
+            output,
+            host,
             pending_tool_pauses,
             permission_engine,
             active_profile,
@@ -307,21 +313,15 @@ impl AgentTaskSupervisor {
             }
             task.info.clone()
         };
-        let (ack, receipt) = oneshot::channel();
-        self.task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::EnqueueAgentMessage {
-                task_id: info.task_id.clone(),
-                owner_thread_id: info.owner_thread_id.clone(),
-                agent_thread_id: info.thread_id.clone(),
-                message: source.clone(),
-                ack,
-            })
+        self.host
+            .enqueue_agent_message(
+                &info.task_id,
+                &info.owner_thread_id,
+                &info.thread_id,
+                &source,
+            )
             .await
-            .map_err(|_| "agent message persistence channel closed".to_string())?;
-        receipt
-            .await
-            .map_err(|_| "agent message enqueue acknowledgement dropped".to_string())??;
+            .map_err(|_| "agent message persistence failed".to_string())?;
         let accepted = {
             let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
             if let Some(task) = tasks.get_mut(target) {
@@ -363,7 +363,7 @@ impl AgentTaskSupervisor {
         &self,
         run_id: &str,
         message: Message,
-        client_source: Option<omini_runtime_contract::persistence::ClientMessage>,
+        client_source: Option<omini_runtime_contract::thread_domain::ClientMessage>,
     ) -> Result<(), String> {
         let from_client = client_source.is_some();
         let result = self.queue_agent_input(run_id, message, client_source);
@@ -379,7 +379,7 @@ impl AgentTaskSupervisor {
         &self,
         run_id: &str,
         message: Message,
-        client_source: Option<omini_runtime_contract::persistence::ClientMessage>,
+        client_source: Option<omini_runtime_contract::thread_domain::ClientMessage>,
     ) -> Result<(), String> {
         let tasks = self.tasks.lock().expect("agent task mutex poisoned");
         let task = tasks
@@ -406,19 +406,10 @@ impl AgentTaskSupervisor {
 
     /// 将已接受但未注入的子任务消息结算为失败，防止任务终止时静默丢弃。
     async fn fail_task_messages(&self, task_id: &str, reason: &str) -> Result<u32, String> {
-        let (ack, receipt) = oneshot::channel();
-        self.task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::FailPendingTaskMessages {
-                task_id: task_id.to_string(),
-                reason: reason.to_string(),
-                ack,
-            })
+        self.host
+            .fail_pending_task_messages(task_id, reason)
             .await
-            .map_err(|_| "agent message persistence channel closed".to_string())?;
-        receipt
-            .await
-            .map_err(|_| "agent message failure acknowledgement dropped".to_string())?
+            .map_err(|error| error.to_string())
     }
 
     pub async fn spawn_background(
@@ -556,17 +547,14 @@ impl AgentTaskSupervisor {
                     .iter()
                     .any(|thread_id| pause_id.starts_with(&format!("{thread_id}:")))
             });
-        let _ = self
-            .task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::SetAgentTasksCancelling {
-                task_ids: cancelling_ids,
-            })
-            .await;
+        if let Err(error) = self.host.set_agent_tasks_cancelling(&cancelling_ids).await {
+            tracing::warn!(error = %error, "failed to persist cancelling agent tasks");
+        }
         ToolResult::ok(response)
     }
 
     pub async fn cancel_all(&self) {
+        self.task_manager.cancel_all();
         let root_ids = {
             let tasks = self.tasks.lock().expect("agent task mutex poisoned");
             tasks
@@ -583,6 +571,10 @@ impl AgentTaskSupervisor {
     }
 
     pub fn has_active_tasks(&self) -> bool {
+        self.task_manager.has_active_tasks() || self.has_running_agents()
+    }
+
+    fn has_running_agents(&self) -> bool {
         self.tasks
             .lock()
             .expect("agent task mutex poisoned")
@@ -591,6 +583,7 @@ impl AgentTaskSupervisor {
     }
 
     pub fn mark_notifications_delivered(&self, task_ids: &[String]) {
+        self.task_manager.mark_notifications_delivered(task_ids);
         let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
         for task_id in task_ids {
             if let Some(task) = tasks.get_mut(task_id) {
@@ -605,7 +598,8 @@ impl AgentTaskSupervisor {
             let notified = self.idle_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if !self.has_active_tasks() {
+            if !self.has_running_agents() {
+                self.task_manager.wait_until_idle().await;
                 return;
             }
             notified.await;
@@ -674,13 +668,44 @@ impl AgentTaskSupervisor {
         let slot = self.reserve_task_slot(execution_mode)?;
 
         let task_id = Uuid::new_v4().to_string();
-        let thread_id = Uuid::new_v4().to_string();
-        let thread_dir = runtime
-            .project
-            .create_thread(&thread_id)
-            .map_err(|error| format!("failed to create agent thread: {error}"))?;
         let now = Timestamp::now();
         let initial_context_version = 1;
+        let initial_prompt = UserInput {
+            intent: UserInputIntent::Message,
+            parts: vec![InputPart::Text {
+                text: request.prompt.clone(),
+            }],
+            attachments: Vec::new(),
+        };
+        let initial_message = Message::from_user_text(request.prompt.clone());
+        let model = settings.active_model();
+        // 子会话（子线程、任务、初始历史）由宿主原子建立；失败即未生效，
+        // core 不再自建 thread 目录或组装线程行，也就没有本地清理路径。
+        let session = self
+            .host
+            .create_agent_session(AgentSessionRequest {
+                task_id: task_id.clone(),
+                parent_run_id: runtime.run_id.clone().or_else(|| runtime.task_id.clone()),
+                parent_task_id: runtime.task_id.clone(),
+                owner_thread_id: runtime.owner_thread_id.clone(),
+                parent_thread_id: runtime.thread_id.clone(),
+                spawn_tool_use_id: ctx.tool_use_id.clone(),
+                agent: spec.name.clone(),
+                title: request.title.clone(),
+                depth,
+                execution_mode,
+                initial_prompt: initial_prompt.clone(),
+                initial_message: initial_message.clone(),
+                model: AgentSessionModel {
+                    provider: model.provider_id.clone(),
+                    model: model.model_id.clone(),
+                    thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
+                },
+            })
+            .await
+            .map_err(|error| format!("failed to create agent session: {error}"))?;
+        let thread_id = session.thread_id;
+        let thread_dir = session.thread_dir;
         let info = AgentTaskInfo {
             task_id: task_id.clone(),
             thread_id: thread_id.clone(),
@@ -700,61 +725,6 @@ impl AgentTaskSupervisor {
             completed_at: None,
             notification_delivered: false,
         };
-        let model = settings.active_model();
-        let thread = ThreadRecord {
-            id: thread_id,
-            parent_thread_id: Some(runtime.thread_id.clone()),
-            spawn_tool_use_id: Some(ctx.tool_use_id),
-            thread_type: "agent".to_string(),
-            agent_label: Some(spec.name),
-            provider: model.provider_id.clone(),
-            model: model.model_id.clone(),
-            thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
-            title: Some(info.title.clone()),
-            current_context_tokens: 0,
-            total_tokens: 0,
-            total_cached_tokens: 0,
-            llm_context_version: initial_context_version,
-            created_at: now,
-            updated_at: now,
-        };
-        let initial_prompt = UserInput {
-            intent: UserInputIntent::Message,
-            parts: vec![InputPart::Text {
-                text: request.prompt.clone(),
-            }],
-            attachments: Vec::new(),
-        };
-        let initial_message = Message::from_user_text(request.prompt);
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let creation_result = self
-            .task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::CreateAgentTask {
-                task: Box::new(info.clone()),
-                thread,
-                initial_message: initial_message.clone(),
-                ack: ack_tx,
-            })
-            .await
-            .map_err(|_| "agent task persistence channel closed".to_string());
-        let creation_result = match creation_result {
-            Ok(()) => ack_rx
-                .await
-                .map_err(|_| "agent task creation acknowledgement dropped".to_string())
-                .and_then(|result| result),
-            Err(error) => Err(error),
-        };
-        if let Err(error) = creation_result {
-            if let Err(cleanup_error) = std::fs::remove_dir_all(thread_dir.path()) {
-                tracing::warn!(
-                    path = %thread_dir.path().display(),
-                    %cleanup_error,
-                    "failed to clean up uncommitted agent thread directory"
-                );
-            }
-            return Err(error);
-        }
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel_notify = Arc::new(Notify::new());
@@ -880,16 +850,20 @@ impl AgentTaskSupervisor {
         });
         let mut messages = vec![initial_message];
         let (child_tx, child_rx) = mpsc::channel(256);
-        let bridge = {
-            let supervisor = Arc::clone(&self);
-            let bridge_info = info.clone();
-            let model_ref = format!("{}/{}", model.provider_id, model.model_id);
-            tokio::spawn(async move {
-                supervisor
-                    .bridge_engine_events(child_rx, &bridge_info, &model_ref)
-                    .await
-            })
-        };
+        // 子任务与主 Run 共用同一执行事件接收端（子任务投影）。
+        let model_ref = format!("{}/{}", model.provider_id, model.model_id);
+        let bridge = crate::runtime::event_sink::spawn_child_sink(
+            crate::runtime::event_sink::ChildSinkConfig {
+                host: Arc::clone(&self.host),
+                output: self.output.clone(),
+                active_profile_handle: Arc::clone(&self.active_profile),
+                pending_tool_pauses: Arc::clone(&self.pending_tool_pauses),
+                info: info.clone(),
+                model_ref,
+                owner_usage: Arc::clone(&self.owner_usage),
+            },
+            child_rx,
+        );
         let engine = QueryEngine::with_shared_user_messages(
             Arc::clone(&self.pending_tool_pauses),
             Arc::clone(&self.permission_engine),
@@ -961,376 +935,6 @@ impl AgentTaskSupervisor {
         self.finish_task(&info.task_id, status, task_result).await
     }
 
-    async fn bridge_engine_events(
-        &self,
-        mut rx: mpsc::Receiver<EngineToRuntimeEvent>,
-        info: &AgentTaskInfo,
-        model_ref: &str,
-    ) -> Vec<String> {
-        let mut warnings = Vec::new();
-        let mut next_step_no = 0_u32;
-        let mut active_step_id: Option<String> = None;
-        let mut tool_uses = HashMap::new();
-        while let Some(event) = rx.recv().await {
-            match event {
-                EngineToRuntimeEvent::TurnStarted => {
-                    next_step_no += 1;
-                    let step_id = Uuid::new_v4().to_string();
-                    active_step_id = Some(step_id.clone());
-                    let _ = self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::UpsertAgentStep {
-                            step: omini_domain::agent_run::AgentStepSnapshot {
-                                id: step_id,
-                                run_id: info.task_id.clone(),
-                                step_no: next_step_no,
-                                status: omini_domain::agent_run::AgentStepStatus::Running,
-                                started_at: Timestamp::now(),
-                                finished_at: None,
-                                input_tokens: 0,
-                                output_tokens: 0,
-                            },
-                        })
-                        .await;
-                    self.emit(info, AgentTaskEvent::TurnStarted).await
-                }
-                EngineToRuntimeEvent::TurnEnded => {
-                    if let Some(step_id) = active_step_id.take() {
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpdateAgentStep {
-                                step_id,
-                                status: omini_domain::agent_run::AgentStepStatus::Completed,
-                                finished_at: Some(Timestamp::now()),
-                                add_input_tokens: 0,
-                                add_output_tokens: 0,
-                            })
-                            .await;
-                    }
-                    self.emit(info, AgentTaskEvent::TurnEnded).await
-                }
-                EngineToRuntimeEvent::ThinkingDelta(delta) => {
-                    self.emit(info, AgentTaskEvent::ThinkingDelta { delta })
-                        .await
-                }
-                EngineToRuntimeEvent::TextDelta(delta) => {
-                    self.emit(info, AgentTaskEvent::TextDelta { delta }).await
-                }
-                EngineToRuntimeEvent::ToolUse(tool_use) => {
-                    if let Some(step_id) = active_step_id.as_ref() {
-                        let record = omini_domain::agent_run::ToolUseExecutionSnapshot {
-                            id: tool_use.id.clone(),
-                            step_id: step_id.clone(),
-                            name: tool_use.name.clone(),
-                            input: serde_json::to_value(&tool_use.input)
-                                .unwrap_or(serde_json::Value::Null),
-                            status: omini_domain::agent_run::ToolUseStatus::Running,
-                            updated_at: Timestamp::now(),
-                        };
-                        tool_uses.insert(tool_use.id.clone(), record.clone());
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
-                                tool_use: record,
-                                status: omini_domain::agent_run::ToolUseStatus::Running,
-                            })
-                            .await;
-                    }
-                    self.emit(info, AgentTaskEvent::ToolUse { tool_use }).await
-                }
-                EngineToRuntimeEvent::ToolResult(tool_result) => {
-                    if let Some(mut record) = tool_uses.get(&tool_result.tool_use_id).cloned() {
-                        record.updated_at = Timestamp::now();
-                        let status = if tool_result.is_error {
-                            omini_domain::agent_run::ToolUseStatus::Failed
-                        } else {
-                            omini_domain::agent_run::ToolUseStatus::Completed
-                        };
-                        record.status = status;
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
-                                tool_use: record,
-                                status,
-                            })
-                            .await;
-                    }
-                    self.emit(info, AgentTaskEvent::ToolResult { tool_result })
-                        .await
-                }
-                EngineToRuntimeEvent::MessageProduced(message)
-                | EngineToRuntimeEvent::ToolResultsProduced(message) => {
-                    if let Err(error) = self
-                        .persist_agent_message(info, message, Some(model_ref), true, true)
-                        .await
-                    {
-                        warnings.push(error);
-                    }
-                }
-                EngineToRuntimeEvent::UserMessageProduced(message) => {
-                    if let Err(error) = self
-                        .persist_agent_message(info, message, Some(model_ref), true, true)
-                        .await
-                    {
-                        warnings.push(error);
-                    }
-                }
-                EngineToRuntimeEvent::TaskMessageProduced {
-                    message,
-                    source,
-                    ack,
-                } => {
-                    let (persistence_ack, receipt) = oneshot::channel();
-                    let result = match self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::InjectTaskMessage {
-                            key: source.delivery_key(&info.task_id),
-                            agent_thread_id: info.thread_id.clone(),
-                            model_message: message,
-                            ack: persistence_ack,
-                        })
-                        .await
-                    {
-                        Ok(()) => receipt
-                            .await
-                            .map_err(|error| error.to_string())
-                            .and_then(|value| value),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    if let Err(error) = &result {
-                        warnings.push(error.clone());
-                    }
-                    let _ = ack.send(result);
-                }
-                EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
-                    let _ = ack.send(Err(
-                        "background task notifications are only supported by the main engine"
-                            .to_string(),
-                    ));
-                }
-                EngineToRuntimeEvent::ToolResultsDisplayProduced(message) => {
-                    if let Err(error) = self
-                        .persist_agent_message(info, message, Some(model_ref), false, true)
-                        .await
-                    {
-                        warnings.push(error);
-                    }
-                }
-                EngineToRuntimeEvent::LlmHistoryProduced(message) => {
-                    if let Err(error) = self
-                        .persist_agent_message(info, message, None, true, false)
-                        .await
-                    {
-                        warnings.push(error);
-                    }
-                }
-                EngineToRuntimeEvent::ReplaceLlmContext {
-                    thread_id,
-                    expected_version,
-                    messages,
-                    ack,
-                } => {
-                    let _ = self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::ReplaceLlmContext {
-                            thread_id,
-                            expected_version,
-                            messages,
-                            ack,
-                        })
-                        .await;
-                }
-                EngineToRuntimeEvent::ToolPauseRequested(request) => {
-                    if matches!(request.kind, ToolPauseKind::Permission(_))
-                        && let Some(mut record) = tool_uses.get(&request.tool_use_id).cloned()
-                    {
-                        record.updated_at = Timestamp::now();
-                        record.status = omini_domain::agent_run::ToolUseStatus::WaitingApproval;
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpsertToolUseExecution {
-                                tool_use: record,
-                                status: omini_domain::agent_run::ToolUseStatus::WaitingApproval,
-                            })
-                            .await;
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpdateAgentRun {
-                                run_id: info.task_id.clone(),
-                                status: omini_domain::agent_run::AgentRunStatus::WaitingApproval,
-                                started_at: None,
-                                finished_at: None,
-                                add_tokens: 0,
-                            })
-                            .await;
-                    }
-                    let active_profile = *self
-                        .active_profile
-                        .read()
-                        .expect("active profile lock poisoned");
-                    if active_profile == ActiveProfile::Auto
-                        && matches!(request.kind, ToolPauseKind::Permission(_))
-                    {
-                        let resolver = crate::engine::ToolPauseResolver::new(Arc::clone(
-                            &self.pending_tool_pauses,
-                        ));
-                        if let Err(error) = resolver.resolve_tool_pause(
-                            &request.tool_use_id,
-                            ToolPauseResponse::Permission {
-                                approved: true,
-                                note: None,
-                            },
-                        ) {
-                            warnings.push(error.to_string());
-                        }
-                        continue;
-                    }
-                    let _ = self
-                        .task_manager
-                        .event_sender()
-                        .send(RuntimeToServerEvent::ToolPauseRequested(*request))
-                        .await;
-                }
-                EngineToRuntimeEvent::UsageRecorded(usage) => {
-                    let _ = self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::RecordThreadUsage {
-                            thread_id: info.thread_id.clone(),
-                            usage,
-                        })
-                        .await;
-                    let _ = self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::UpdateAgentRun {
-                            run_id: info.task_id.clone(),
-                            status: omini_domain::agent_run::AgentRunStatus::Running,
-                            started_at: None,
-                            finished_at: None,
-                            add_tokens: usage.total_tokens() as i64,
-                        })
-                        .await;
-                    if let Some(step_id) = &active_step_id {
-                        let _ = self
-                            .task_manager
-                            .persistence_sender()
-                            .send(RuntimePersistenceEvent::UpdateAgentStep {
-                                step_id: step_id.clone(),
-                                status: omini_domain::agent_run::AgentStepStatus::Running,
-                                finished_at: None,
-                                add_input_tokens: usage.prompt_tokens as i64,
-                                add_output_tokens: usage.completion_tokens as i64,
-                            })
-                            .await;
-                    }
-                    self.record_owner_agent_usage(info, usage).await;
-                }
-                EngineToRuntimeEvent::Warning(warning) => warnings.push(warning),
-                EngineToRuntimeEvent::Error(error) => warnings.push(error),
-                EngineToRuntimeEvent::CompactShrinkStarted(_)
-                | EngineToRuntimeEvent::CompactShrinkFinished(_)
-                | EngineToRuntimeEvent::CompactShrinkFailed(_)
-                | EngineToRuntimeEvent::CompactSummaryStarted(_)
-                | EngineToRuntimeEvent::CompactSummaryDelta(_)
-                | EngineToRuntimeEvent::CompactSummaryFinished(_)
-                | EngineToRuntimeEvent::CompactSummaryFailed(_) => {}
-                EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
-                    let _ = self
-                        .task_manager
-                        .persistence_sender()
-                        .send(RuntimePersistenceEvent::RecordThreadTotalUsage {
-                            thread_id: info.thread_id.clone(),
-                            usage,
-                        })
-                        .await;
-                    self.record_owner_agent_usage(info, usage).await;
-                }
-            }
-        }
-        warnings
-    }
-
-    async fn record_owner_agent_usage(
-        &self,
-        info: &AgentTaskInfo,
-        usage: omini_domain::usage::Usage,
-    ) {
-        let _ = self
-            .task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::RecordOwnerAgentUsage {
-                thread_id: info.owner_thread_id.clone(),
-                usage,
-            })
-            .await;
-        let (total_tokens, total_cached_tokens) = {
-            let mut snapshot = self.owner_usage.lock().expect("owner usage lock poisoned");
-            snapshot.total_tokens = snapshot
-                .total_tokens
-                .saturating_add(i64::try_from(usage.total_tokens()).unwrap_or(i64::MAX));
-            snapshot.total_cached_tokens = snapshot
-                .total_cached_tokens
-                .saturating_add(i64::try_from(usage.cached_tokens).unwrap_or(i64::MAX));
-            (snapshot.total_tokens, snapshot.total_cached_tokens)
-        };
-        let _ = self
-            .task_manager
-            .event_sender()
-            .send(RuntimeToServerEvent::UsageTotalsChanged {
-                total_tokens,
-                total_cached_tokens,
-            })
-            .await;
-    }
-
-    async fn persist_agent_message(
-        &self,
-        info: &AgentTaskInfo,
-        message: Message,
-        model_ref: Option<&str>,
-        persist_llm_history: bool,
-        display_in_ui: bool,
-    ) -> Result<(), String> {
-        let (ack_tx, ack_rx) = oneshot::channel();
-        self.task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::PersistAgentMessage {
-                thread_id: info.thread_id.clone(),
-                message: message.clone(),
-                model_ref: (message.role == Role::Assistant)
-                    .then(|| model_ref.map(str::to_string))
-                    .flatten(),
-                persist_llm_history,
-                display_in_ui,
-                ack: ack_tx,
-            })
-            .await
-            .map_err(|_| "agent message persistence channel closed".to_string())?;
-        ack_rx
-            .await
-            .map_err(|_| "agent message acknowledgement dropped".to_string())??;
-        if display_in_ui {
-            self.emit(
-                info,
-                AgentTaskEvent::MessageCommitted {
-                    message,
-                    persist_llm_history,
-                },
-            )
-            .await;
-        }
-        Ok(())
-    }
-
     async fn finish_task(
         &self,
         task_id: &str,
@@ -1366,26 +970,11 @@ impl AgentTaskSupervisor {
             }
         }
         let completed_at = Timestamp::now();
-        let (ack_tx, ack_rx) = oneshot::channel();
         let persistence_result = self
-            .task_manager
-            .persistence_sender()
-            .send(RuntimePersistenceEvent::FinishAgentTask {
-                task_id: task_id.to_string(),
-                status,
-                result: result.clone(),
-                completed_at,
-                ack: ack_tx,
-            })
+            .host
+            .finish_agent_task(task_id, status, &result, completed_at)
             .await
-            .map_err(|_| "agent task persistence channel closed".to_string());
-        let persistence_result = match persistence_result {
-            Ok(()) => ack_rx
-                .await
-                .map_err(|_| "agent task finish acknowledgement dropped".to_string())
-                .and_then(|result| result),
-            Err(error) => Err(error),
-        };
+            .map_err(|error| error.to_string());
         let (info, notify_owner) = {
             let mut tasks = self.tasks.lock().expect("agent task mutex poisoned");
             let entry = tasks
@@ -1463,9 +1052,8 @@ impl AgentTaskSupervisor {
 
     async fn emit(&self, info: &AgentTaskInfo, payload: AgentTaskEvent) {
         let _ = self
-            .task_manager
-            .event_sender()
-            .send(RuntimeToServerEvent::AgentTaskEvent(
+            .output
+            .send_event(RuntimeToServerEvent::AgentTaskEvent(
                 AgentTaskEventEnvelope {
                     task_id: info.task_id.clone(),
                     thread_id: info.thread_id.clone(),
@@ -1668,15 +1256,20 @@ fn extract_final_text(messages: &[Message]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::execution::handle::OutputHandle;
+    use crate::runtime::event_sink;
+    use crate::test_support::RecordingHost;
     use crate::tools::read_task_tool::{ReadTaskInput, ReadTaskTool};
     use crate::tools::{PendingToolPause, PendingToolPauses, Tool};
+    use crate::types::events::EngineToRuntimeEvent;
     use jiff::SignedDuration;
     use omini_domain::usage::Usage;
     use omini_model::message::{ToolResultBlock, ToolUseBlock};
     use omini_runtime_contract::thread_domain::{
-        PermissionPreview, ThreadUsageSnapshot, ToolPauseRequest,
+        PermissionPreview, ThreadUsageSnapshot, ToolPauseKind, ToolPauseRequest, ToolPauseResponse,
     };
     use std::collections::HashMap;
+    use tokio::sync::oneshot;
 
     use super::*;
 
@@ -1713,18 +1306,18 @@ mod tests {
     ) -> (
         Arc<AgentTaskSupervisor>,
         mpsc::Receiver<RuntimeToServerEvent>,
-        mpsc::Receiver<RuntimePersistenceEvent>,
+        Arc<RecordingHost>,
         PendingToolPauses,
         Arc<RwLock<ActiveProfile>>,
     ) {
-        let (event_tx, event_rx) = mpsc::channel(32);
-        let (persistence_tx, persistence_rx) = mpsc::channel(32);
+        let (output, events) = OutputHandle::new(32);
+        let host = Arc::new(RecordingHost::default());
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         let pending_pauses: PendingToolPauses = Arc::new(Mutex::new(HashMap::new()));
         let active_profile = Arc::new(RwLock::new(ActiveProfile::Main));
         let supervisor = AgentTaskSupervisor::new(
-            event_tx,
-            persistence_tx,
+            output,
+            host.clone(),
             completion_tx,
             Arc::clone(&pending_pauses),
             Arc::new(PermissionEngine::empty("/tmp")),
@@ -1735,11 +1328,24 @@ mod tests {
         );
         (
             supervisor,
-            event_rx,
-            persistence_rx,
+            events_into_runtime_events(events),
+            host,
             pending_pauses,
             active_profile,
         )
+    }
+
+    /// 把输出流裁剪成纯事件流，供现有断言复用。
+    fn events_into_runtime_events(
+        mut events: crate::execution::AgentEvents,
+    ) -> mpsc::Receiver<RuntimeToServerEvent> {
+        let (tx, rx) = mpsc::channel(32);
+        tokio::spawn(async move {
+            while let Some(crate::execution::AgentOutput::Event(event)) = events.recv().await {
+                let _ = tx.send(*event).await;
+            }
+        });
+        rx
     }
 
     /// 构造主 Agent 工具上下文，使用真实任务管理器和 Supervisor 的查询路径。
@@ -1756,7 +1362,7 @@ mod tests {
             agent_depth: 0,
             task_id: None,
             owner_thread_id: "owner".into(),
-            agent_registry: Arc::new(crate::subagents::AgentRegistry {
+            agent_registry: Arc::new(crate::agent::AgentRegistry {
                 agents: HashMap::new(),
                 diagnostics: Vec::new(),
             }),
@@ -1772,6 +1378,51 @@ mod tests {
     }
 
     /// 两类任务的读取均立即返回，仅未结束状态附带提示，并保留原有终态结果。
+
+    #[tokio::test]
+    async fn reject_uncommitted_message() {
+        // 给定子消息持久化失败，当引擎等待提交确认，则返回错误且不发布已提交消息。
+        let host = Arc::new(RecordingHost::default());
+        host.fail_operation("persist_agent_message", "storage unavailable");
+        let (output, mut events) = OutputHandle::new(16);
+        let (engine_tx, engine_rx) = mpsc::channel(16);
+        let sink = crate::runtime::event_sink::spawn_child_sink(
+            crate::runtime::event_sink::ChildSinkConfig {
+                host,
+                output,
+                active_profile_handle: Arc::new(RwLock::new(ActiveProfile::Main)),
+                pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
+                info: task_info(1),
+                model_ref: "test/model".into(),
+                owner_usage: Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
+            },
+            engine_rx,
+        );
+        engine_tx
+            .send(EngineToRuntimeEvent::MessageProduced(
+                Message::from_user_text("uncommitted".into()),
+            ))
+            .await
+            .unwrap();
+        let error = crate::engine::commit_events(&engine_tx).await.unwrap_err();
+        assert!(error.contains("storage unavailable"));
+        drop(engine_tx);
+        assert!(!sink.await.unwrap().is_empty());
+        while let Some(output) = events.recv().await {
+            if let crate::execution::AgentOutput::Event(event) = output {
+                assert!(!matches!(
+                    *event,
+                    RuntimeToServerEvent::AgentTaskEvent(
+                        omini_runtime_contract::thread_domain::AgentTaskEventEnvelope {
+                            payload: AgentTaskEvent::MessageCommitted { .. },
+                            ..
+                        }
+                    )
+                ));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn read_task_guidance() {
         for status in [
@@ -1792,7 +1443,7 @@ mod tests {
                     undelivered_messages: None,
                 });
             }
-            let (supervisor, _events, _persistence, _pauses, _profile) =
+            let (supervisor, _events, _host, _pauses, _profile) =
                 test_supervisor(vec![agent.clone()]);
             let mut bash = task_info_from_agent(&agent);
             bash.task_id = "bash_1".into();
@@ -1840,8 +1491,7 @@ mod tests {
     /// 读取提示不能绕过任务归属、主 Agent 权限或未知任务检查。
     #[tokio::test]
     async fn read_task_boundaries() {
-        let (supervisor, _events, _persistence, _pauses, _profile) =
-            test_supervisor(vec![task_info(1)]);
+        let (supervisor, _events, _host, _pauses, _profile) = test_supervisor(vec![task_info(1)]);
         for (task_id, owner, depth) in [
             ("missing", "owner", 0),
             ("task_1", "other", 0),
@@ -1864,9 +1514,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn task_slots_enforce_per_mode_limits_and_release_after_drop() {
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+    #[tokio::test]
+    async fn task_slots_enforce_per_mode_limits_and_release_after_drop() {
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(Vec::new());
         let mut background_slots = Vec::new();
         for _ in 0..DEFAULT_MAX_BACKGROUND_TASKS {
@@ -1955,30 +1605,11 @@ mod tests {
         // 给定子任务正常结束时仍有一条已入队、未注入的消息。
         let initial = task_info(1);
         let task_id = initial.task_id.clone();
-        let (supervisor, _events, mut persistence, _pauses, _profile) =
-            test_supervisor(vec![initial]);
-        let responder = tokio::spawn(async move {
-            let Some(RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. }) =
-                persistence.recv().await
-            else {
-                panic!("expected delivery settlement");
-            };
-            ack.send(Ok(1)).unwrap();
-            let Some(RuntimePersistenceEvent::FinishAgentTask {
-                status,
-                result,
-                ack,
-                ..
-            }) = persistence.recv().await
-            else {
-                panic!("expected task finish");
-            };
-            assert_eq!(status, TaskStatus::Failed);
-            assert_eq!(result.undelivered_messages, Some(1));
-            ack.send(Ok(())).unwrap();
-        });
+        let (supervisor, _events, host, _pauses, _profile) = test_supervisor(vec![initial]);
+        host.set_failed_message_count(1);
 
-        // 当终态提交后，结果必须标记失败并携带未送达数量。
+        // 当终态提交后，结果必须标记失败并携带未送达数量；
+        // 且先结算待投递消息、再写入任务终态。
         let finished = supervisor
             .finish_task(
                 &task_id,
@@ -1991,16 +1622,22 @@ mod tests {
                 },
             )
             .await;
-        responder.await.unwrap();
         assert_eq!(finished.status, TaskStatus::Failed);
         assert_eq!(finished.result.unwrap().undelivered_messages, Some(1));
+        assert_eq!(host.call_count("fail_pending_task_messages"), 1);
+        assert_eq!(host.call_count("finish_agent_task"), 1);
+        let calls = host.calls();
+        assert!(
+            calls.iter().position(|c| c == "fail_pending_task_messages")
+                < calls.iter().position(|c| c == "finish_agent_task")
+        );
     }
 
     #[tokio::test]
     async fn terminal_cancel_is_idempotent_and_returns_only_status() {
         let mut info = task_info(1);
         info.status = TaskStatus::Failed;
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(vec![info]);
 
         let response = supervisor.cancel_task("task_1").await;
@@ -2012,22 +1649,22 @@ mod tests {
         assert_eq!(payload.as_object().unwrap().len(), 2);
     }
 
-    #[test]
-    fn recovery_keeps_background_history_but_drops_terminal_synchronous_tasks() {
+    #[tokio::test]
+    async fn recovery_keeps_background_history_but_drops_terminal_synchronous_tasks() {
         let mut background = task_info(1);
         background.status = TaskStatus::Completed;
         background.notification_delivered = true;
         let mut synchronous = task_info(2);
         synchronous.status = TaskStatus::Failed;
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(vec![background, synchronous]);
 
         assert!(!supervisor.read_task("task_1").is_error);
         assert!(supervisor.read_task("task_2").is_error);
     }
 
-    #[test]
-    fn recovery_keeps_recent_delivered_background_history_limit() {
+    #[tokio::test]
+    async fn recovery_keeps_recent_delivered_background_history_limit() {
         let now = Timestamp::now();
         let mut tasks = Vec::new();
         for index in 0..35 {
@@ -2042,7 +1679,7 @@ mod tests {
             tasks.push(task);
         }
 
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(tasks);
 
         for index in 0..5 {
@@ -2053,8 +1690,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn recovery_keeps_running_and_undelivered_background_tasks_beyond_limit() {
+    #[tokio::test]
+    async fn recovery_keeps_running_and_undelivered_background_tasks_beyond_limit() {
         let now = Timestamp::now();
         let mut tasks = Vec::new();
         for index in 0..35 {
@@ -2084,7 +1721,7 @@ mod tests {
         undelivered.completed_at = Some(undelivered.updated_at);
         tasks.push(undelivered);
 
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(tasks);
 
         assert!(!supervisor.read_task("running_old").is_error);
@@ -2092,8 +1729,8 @@ mod tests {
         assert!(supervisor.read_task("done_00").is_error);
     }
 
-    #[test]
-    fn mark_notifications_delivered_prunes_old_delivered_background_tasks() {
+    #[tokio::test]
+    async fn mark_notifications_delivered_prunes_old_delivered_background_tasks() {
         let now = Timestamp::now();
         let mut tasks = Vec::new();
         let mut delivered_ids = Vec::new();
@@ -2110,7 +1747,7 @@ mod tests {
             tasks.push(task);
         }
 
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(tasks);
 
         supervisor.mark_notifications_delivered(&delivered_ids);
@@ -2121,8 +1758,8 @@ mod tests {
         assert!(!supervisor.read_task("task_31").is_error);
     }
 
-    #[test]
-    fn mark_notifications_delivered_does_not_prune_running_or_undelivered_tasks() {
+    #[tokio::test]
+    async fn mark_notifications_delivered_does_not_prune_running_or_undelivered_tasks() {
         let now = Timestamp::now();
         let mut tasks = Vec::new();
         let mut delivered_ids = Vec::new();
@@ -2154,7 +1791,7 @@ mod tests {
         undelivered.completed_at = Some(undelivered.updated_at);
         tasks.push(undelivered);
 
-        let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
             test_supervisor(tasks);
 
         supervisor.mark_notifications_delivered(&delivered_ids);
@@ -2169,7 +1806,7 @@ mod tests {
         for status in [TaskStatus::Completed, TaskStatus::Failed] {
             let initial = task_info(2);
             let task_id = initial.task_id.clone();
-            let (supervisor, _event_rx, _persistence_rx, _pending_pauses, _active_profile) =
+            let (supervisor, _event_rx, _host, _pending_pauses, _active_profile) =
                 test_supervisor(vec![initial.clone()]);
             let mut finished = initial;
             finished.status = status;
@@ -2193,23 +1830,8 @@ mod tests {
 
         let initial = task_info(2);
         let task_id = initial.task_id.clone();
-        let (supervisor, _event_rx, mut persistence_rx, _pending_pauses, _active_profile) =
+        let (supervisor, _event_rx, host, _pending_pauses, _active_profile) =
             test_supervisor(vec![initial]);
-        let persistence = tokio::spawn(async move {
-            // 给定 panic 收尾会先结算待投递消息，再写入任务终态。
-            let Some(RuntimePersistenceEvent::FailPendingTaskMessages { ack, .. }) =
-                persistence_rx.recv().await
-            else {
-                panic!("expected delivery settlement event");
-            };
-            ack.send(Ok(0)).unwrap();
-            let Some(RuntimePersistenceEvent::FinishAgentTask { ack, .. }) =
-                persistence_rx.recv().await
-            else {
-                panic!("expected finish persistence event");
-            };
-            ack.send(Ok(())).unwrap();
-        });
         let response = supervisor
             .finish_synchronous_execution(
                 &task_id,
@@ -2217,7 +1839,9 @@ mod tests {
             )
             .await;
 
-        persistence.await.unwrap();
+        // 给定 panic 收尾会先结算待投递消息，再写入任务终态。
+        assert_eq!(host.call_count("fail_pending_task_messages"), 1);
+        assert_eq!(host.call_count("finish_agent_task"), 1);
         assert!(response.is_error);
         let payload: serde_json::Value = serde_json::from_str(&response.output).unwrap();
         assert_eq!(payload["task_id"], task_id);
@@ -2232,20 +1856,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_bridge_reads_current_profile_for_each_permission_request() {
-        let (supervisor, mut event_rx, _persistence_rx, pending_pauses, active_profile) =
+    async fn child_sink_reads_current_profile_for_each_permission_request() {
+        let (_supervisor, _event_rx, host, pending_pauses, active_profile) =
             test_supervisor(Vec::new());
+        let (sink_output, sink_events) = OutputHandle::new(8);
+        let mut event_rx = events_into_runtime_events(sink_events);
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let info = task_info(1);
-        let bridge = {
-            let supervisor = Arc::clone(&supervisor);
-            let info = info.clone();
-            tokio::spawn(async move {
-                supervisor
-                    .bridge_engine_events(engine_rx, &info, "openai/test")
-                    .await
-            })
-        };
+        let bridge = event_sink::spawn_child_sink(
+            crate::runtime::event_sink::ChildSinkConfig {
+                host: host.clone(),
+                output: sink_output,
+                active_profile_handle: Arc::clone(&active_profile),
+                pending_tool_pauses: Arc::clone(&pending_pauses),
+                info,
+                model_ref: "openai/test".to_string(),
+                owner_usage: Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
+            },
+            engine_rx,
+        );
 
         for (index, profile) in [
             ActiveProfile::Auto,
@@ -2315,31 +1944,24 @@ mod tests {
             total_cached_tokens: 10,
             context_window: Some(1_000),
         };
-        let (event_tx, mut event_rx) = mpsc::channel(8);
-        let (persistence_tx, mut persistence_rx) = mpsc::channel(8);
-        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
-        let supervisor = AgentTaskSupervisor::new(
-            event_tx,
-            persistence_tx,
-            completion_tx,
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(PermissionEngine::empty("/tmp")),
-            Arc::new(RwLock::new(ActiveProfile::Main)),
-            Arc::new(Mutex::new(owner_usage)),
-            Vec::new(),
-            Vec::new(),
-        );
+        let (_supervisor, _event_rx, host, _pending_pauses, active_profile) =
+            test_supervisor(Vec::new());
+        let (sink_output, sink_events) = OutputHandle::new(8);
+        let mut event_rx = events_into_runtime_events(sink_events);
         let (engine_tx, engine_rx) = mpsc::channel(4);
         let info = task_info(1);
-        let bridge = {
-            let supervisor = Arc::clone(&supervisor);
-            let info = info.clone();
-            tokio::spawn(async move {
-                supervisor
-                    .bridge_engine_events(engine_rx, &info, "openai/test")
-                    .await
-            })
-        };
+        let bridge = event_sink::spawn_child_sink(
+            crate::runtime::event_sink::ChildSinkConfig {
+                host: host.clone(),
+                output: sink_output,
+                active_profile_handle: Arc::clone(&active_profile),
+                pending_tool_pauses: Arc::new(Mutex::new(HashMap::new())),
+                info,
+                model_ref: "openai/test".to_string(),
+                owner_usage: Arc::new(Mutex::new(owner_usage)),
+            },
+            engine_rx,
+        );
         let usage = Usage {
             prompt_tokens: 4,
             completion_tokens: 2,
@@ -2352,16 +1974,9 @@ mod tests {
         drop(engine_tx);
         assert!(bridge.await.unwrap().is_empty());
 
-        assert!(matches!(
-            persistence_rx.recv().await,
-            Some(RuntimePersistenceEvent::RecordThreadTotalUsage { thread_id, usage: saved })
-                if thread_id == "thread_1" && saved == usage
-        ));
-        assert!(matches!(
-            persistence_rx.recv().await,
-            Some(RuntimePersistenceEvent::RecordOwnerAgentUsage { thread_id, usage: saved })
-                if thread_id == "owner" && saved == usage
-        ));
+        // 子线程总量与 owner 归属各记录一次，且不产生 compact UI 事件。
+        assert_eq!(host.call_count("record_thread_total_usage"), 1);
+        assert_eq!(host.call_count("record_owner_agent_usage"), 1);
         assert!(matches!(
             event_rx.recv().await,
             Some(RuntimeToServerEvent::UsageTotalsChanged {
@@ -2369,44 +1984,30 @@ mod tests {
                 total_cached_tokens: 11,
             })
         ));
+        assert!(event_rx.try_recv().is_err());
     }
 
     #[tokio::test]
     async fn depth_one_and_two_bridge_preserve_stream_event_order() {
         for depth in [1, 2] {
-            let (event_tx, mut event_rx) = mpsc::channel(16);
-            let (persistence_tx, mut persistence_rx) = mpsc::channel(4);
-            let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
-            let pending_pauses: PendingToolPauses = Arc::new(Mutex::new(HashMap::new()));
-            let supervisor = AgentTaskSupervisor::new(
-                event_tx,
-                persistence_tx,
-                completion_tx,
-                pending_pauses,
-                Arc::new(PermissionEngine::empty("/tmp")),
-                Arc::new(RwLock::new(ActiveProfile::Main)),
-                Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
-                Vec::new(),
-                Vec::new(),
-            );
-            let persistence = tokio::spawn(async move {
-                while let Some(event) = persistence_rx.recv().await {
-                    if let RuntimePersistenceEvent::PersistAgentMessage { ack, .. } = event {
-                        let _ = ack.send(Ok(()));
-                    }
-                }
-            });
+            let (_supervisor, _event_rx, host, pending_pauses, active_profile) =
+                test_supervisor(Vec::new());
+            let (sink_output, sink_events) = OutputHandle::new(16);
+            let mut event_rx = events_into_runtime_events(sink_events);
             let (engine_tx, engine_rx) = mpsc::channel(16);
             let info = task_info(depth);
-            let bridge = {
-                let supervisor = Arc::clone(&supervisor);
-                let info = info.clone();
-                tokio::spawn(async move {
-                    supervisor
-                        .bridge_engine_events(engine_rx, &info, "openai/test")
-                        .await
-                })
-            };
+            let bridge = event_sink::spawn_child_sink(
+                crate::runtime::event_sink::ChildSinkConfig {
+                    host: host.clone(),
+                    output: sink_output,
+                    active_profile_handle: Arc::clone(&active_profile),
+                    pending_tool_pauses: pending_pauses,
+                    info,
+                    model_ref: "openai/test".to_string(),
+                    owner_usage: Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
+                },
+                engine_rx,
+            );
             engine_tx
                 .send(EngineToRuntimeEvent::TurnStarted)
                 .await
@@ -2450,8 +2051,6 @@ mod tests {
             drop(engine_tx);
 
             assert!(bridge.await.unwrap().is_empty());
-            drop(supervisor);
-            persistence.await.unwrap();
             let mut payloads = Vec::new();
             while let Ok(RuntimeToServerEvent::AgentTaskEvent(event)) = event_rx.try_recv() {
                 payloads.push(event.payload);

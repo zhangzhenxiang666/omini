@@ -1,7 +1,8 @@
+use crate::execution::handle::OutputHandle;
+use crate::execution::host::AgentHost;
 use jiff::Timestamp;
 use omini_domain::task::{TaskChangedEvent, TaskCompletion, TaskInfo, TaskOutputDelta, TaskStatus};
 use omini_runtime_contract::RuntimeToServerEvent;
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,9 +17,11 @@ pub(crate) struct TaskManager {
     cancellation: Mutex<HashMap<String, TaskCancellation>>,
     active_background: Mutex<usize>,
     max_background: usize,
-    event_tx: mpsc::Sender<RuntimeToServerEvent>,
-    persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+    output: OutputHandle,
+    host: Arc<dyn AgentHost>,
     completion_tx: mpsc::UnboundedSender<TaskCompletion>,
+    pending_notifications: Mutex<std::collections::HashSet<String>>,
+    idle: Notify,
 }
 
 impl std::fmt::Debug for TaskManager {
@@ -35,8 +38,8 @@ impl std::fmt::Debug for TaskManager {
 
 impl TaskManager {
     pub fn new(
-        event_tx: mpsc::Sender<RuntimeToServerEvent>,
-        persistence_tx: mpsc::Sender<RuntimePersistenceEvent>,
+        output: OutputHandle,
+        host: Arc<dyn AgentHost>,
         initial: Vec<TaskInfo>,
         max_background: usize,
         completion_tx: mpsc::UnboundedSender<TaskCompletion>,
@@ -55,9 +58,11 @@ impl TaskManager {
             cancellation: Mutex::new(HashMap::new()),
             active_background: Mutex::new(active_background),
             max_background,
-            event_tx,
-            persistence_tx,
+            output,
+            host,
             completion_tx,
+            pending_notifications: Mutex::new(std::collections::HashSet::new()),
+            idle: Notify::new(),
         })
     }
 
@@ -105,14 +110,6 @@ impl TaskManager {
             .cloned()
     }
 
-    pub fn event_sender(&self) -> &mpsc::Sender<RuntimeToServerEvent> {
-        &self.event_tx
-    }
-
-    pub fn persistence_sender(&self) -> &mpsc::Sender<RuntimePersistenceEvent> {
-        &self.persistence_tx
-    }
-
     pub async fn register(
         &self,
         task: TaskInfo,
@@ -137,26 +134,30 @@ impl TaskManager {
         self.publish(task).await
     }
 
+    /// 任务索引先落库、成功后广播；失败不广播，调用方按错误处理。
     async fn publish(&self, task: TaskInfo) -> Result<(), String> {
         self.records
             .lock()
             .expect("task lock poisoned")
             .insert(task.task_id.clone(), task.clone());
-        self.persistence_tx
-            .send(RuntimePersistenceEvent::UpsertTask { task: task.clone() })
+        self.host
+            .upsert_background_task(&task)
             .await
-            .map_err(|_| "task persistence channel closed".to_string())?;
-        self.event_tx
-            .send(RuntimeToServerEvent::TaskChanged(TaskChangedEvent { task }))
+            .map_err(|error| error.to_string())?;
+        if !self
+            .output
+            .send_event(RuntimeToServerEvent::TaskChanged(TaskChangedEvent { task }))
             .await
-            .map_err(|_| "task event channel closed".to_string())?;
+        {
+            return Err("agent output closed".to_string());
+        }
         Ok(())
     }
 
     pub async fn output(&self, output: TaskOutputDelta) {
         let _ = self
-            .event_tx
-            .send(RuntimeToServerEvent::TaskOutputDelta(output))
+            .output
+            .send_event(RuntimeToServerEvent::TaskOutputDelta(output))
             .await;
     }
 
@@ -207,7 +208,62 @@ impl TaskManager {
     }
 
     pub fn notify_completed(&self, completion: TaskCompletion) {
+        self.pending_notifications
+            .lock()
+            .expect("notification lock poisoned")
+            .insert(completion.task_id.clone());
         let _ = self.completion_tx.send(completion);
+    }
+
+    pub(crate) fn has_pending_notifications(&self) -> bool {
+        !self
+            .pending_notifications
+            .lock()
+            .expect("notification lock poisoned")
+            .is_empty()
+    }
+
+    pub(crate) fn mark_notifications_delivered(&self, ids: &[String]) {
+        let mut pending = self
+            .pending_notifications
+            .lock()
+            .expect("notification lock poisoned");
+        for id in ids {
+            pending.remove(id);
+        }
+    }
+
+    pub(crate) fn has_active_tasks(&self) -> bool {
+        *self
+            .active_background
+            .lock()
+            .expect("background slot lock poisoned")
+            > 0
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        let signals = self
+            .cancellation
+            .lock()
+            .expect("task cancellation lock poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for signal in signals {
+            signal.cancel();
+        }
+    }
+
+    pub(crate) async fn wait_until_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.has_active_tasks() {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn release_background(&self) {
@@ -218,6 +274,7 @@ impl TaskManager {
         *active = active
             .checked_sub(1)
             .expect("releasing an unreserved background task slot");
+        self.idle.notify_waiters();
     }
 }
 
@@ -265,6 +322,7 @@ impl Drop for BackgroundTaskReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::RecordingHost;
     use omini_domain::task::TaskKind;
 
     fn task(task_id: &str, owner: &str, status: TaskStatus) -> TaskInfo {
@@ -287,22 +345,35 @@ mod tests {
     ) -> (
         Arc<TaskManager>,
         mpsc::Receiver<RuntimeToServerEvent>,
-        mpsc::Receiver<RuntimePersistenceEvent>,
+        Arc<RecordingHost>,
     ) {
-        let (event_tx, event_rx) = mpsc::channel(16);
-        let (persistence_tx, persistence_rx) = mpsc::channel(16);
+        let (output, events) = crate::execution::handle::OutputHandle::new(16);
+        let host = Arc::new(crate::test_support::RecordingHost::default());
         let (completion_tx, _) = mpsc::unbounded_channel();
         (
             TaskManager::new(
-                event_tx,
-                persistence_tx,
+                output,
+                host.clone(),
                 Vec::new(),
                 max_background,
                 completion_tx,
             ),
-            event_rx,
-            persistence_rx,
+            events_into_runtime_events(events),
+            host,
         )
+    }
+
+    /// 把输出流裁剪成纯事件流，供现有断言复用。
+    fn events_into_runtime_events(
+        mut events: crate::execution::AgentEvents,
+    ) -> mpsc::Receiver<RuntimeToServerEvent> {
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(crate::execution::AgentOutput::Event(event)) = events.recv().await {
+                let _ = tx.send(*event).await;
+            }
+        });
+        rx
     }
 
     #[tokio::test]

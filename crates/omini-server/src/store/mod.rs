@@ -12,18 +12,17 @@ mod attachments;
 mod context;
 mod history;
 mod messages;
-mod persistence;
 mod projects;
 mod recovery;
 mod task_store;
 mod threads;
 
 pub use history::{load_agent_tasks, load_messages};
-pub use messages::NewMessage;
+pub use messages::{AgentMessageCommit, NewMessage};
 pub use omini_entity::{
     AgentRun, AgentStep, AgentTask, Attachment, BackgroundTask, DeliveryStatus, LlmMessage,
     Message, MessageKind, Project, SourceKind, StoreError, Thread, ThreadType, ToolUseExecution,
-    load_asset, persist_staged_asset, stored_asset_path, thread_from_runtime,
+    load_asset, persist_staged_asset, stored_asset_path, thread_from_parts,
 };
 
 use std::path::Path;

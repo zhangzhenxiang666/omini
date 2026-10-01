@@ -1,7 +1,7 @@
 //! HTTP 输入提取器：将 Axum 默认拒绝响应转换为协议错误。
 
 use crate::routes::{ApiError, api_error};
-use crate::thread::ThreadRuntime;
+use crate::thread::ThreadSession;
 use axum::Json;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::extract::{FromRequest, FromRequestParts, Multipart, Path, Query, Request};
@@ -117,7 +117,7 @@ impl ClientId {
     }
 
     /// 严格命令只允许当前 controller 执行，不隐式转移控制权。
-    pub(crate) async fn require_controller(&self, thread: &ThreadRuntime) -> Result<(), ApiError> {
+    pub(crate) async fn require_controller(&self, thread: &ThreadSession) -> Result<(), ApiError> {
         if thread.is_controller(self.as_str()).await {
             Ok(())
         } else {
@@ -130,7 +130,7 @@ impl ClientId {
     }
 
     /// 运行命令要求已有 WebSocket 连接，并允许连接中的客户端接管控制权。
-    pub(crate) async fn take_control(&self, thread: &ThreadRuntime) -> Result<(), ApiError> {
+    pub(crate) async fn take_control(&self, thread: &ThreadSession) -> Result<(), ApiError> {
         if !thread.is_client_connected(self.as_str()).await
             || thread.takeover_controller(self.0.clone()).await.is_none()
         {

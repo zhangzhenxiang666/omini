@@ -7,7 +7,6 @@ use omini_config::project::ThreadDir;
 use omini_domain::conversation::CompactionSummary;
 use omini_entity::prepare_blocks;
 use omini_model::message::{ContentBlock, ImageSource, ImageSourceType, Message, Role, TextBlock};
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_server::store::*;
 use std::fs;
 
@@ -95,17 +94,9 @@ async fn large_summary_uses_sidecar() {
         markdown: "x".repeat(CONTENT_SIZE_THRESHOLD + 1),
         created_at: fixed_time(),
     };
-    db.apply_persistence_event(
-        &RuntimePersistenceEvent::InsertCompactSummaryMessage {
-            thread_id: "t1".to_string(),
-            summary: summary.clone(),
-            model_ref: "provider/model".to_string(),
-        },
-        TEST_PROJECT_ID,
-        &project,
-    )
-    .await
-    .unwrap();
+    db.insert_compact_summary_message("t1", &summary, "provider/model", &project.thread("t1"))
+        .await
+        .unwrap();
 
     let stored = db.get_messages("t1").await.unwrap();
     assert_eq!(stored.len(), 1);

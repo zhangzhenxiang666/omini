@@ -9,6 +9,9 @@ pub enum CoreError {
     Internal { message: String },
     #[error("runtime thread is closed")]
     RuntimeClosed,
+    /// 已存在运行预留或活跃运行，新运行提交被拒绝且输入不会被保存。
+    #[error("a run is already reserved or active")]
+    RunBusy,
     #[error("runtime thread loading was interrupted")]
     RuntimeLoadInterrupted,
     #[error("thread does not exist")]
@@ -56,6 +59,10 @@ impl CoreError {
         }
     }
 
+    pub fn run_busy() -> Self {
+        Self::RunBusy
+    }
+
     pub fn invalid_input(code: &'static str, message: impl Into<String>) -> Self {
         Self::InvalidInput {
             code,
@@ -94,6 +101,7 @@ impl CoreError {
         match self {
             Self::Internal { .. } => "core_error",
             Self::RuntimeClosed => "runtime_closed",
+            Self::RunBusy => "run_busy",
             Self::RuntimeLoadInterrupted => "runtime_load_interrupted",
             Self::ThreadNotFound => "thread_not_found",
             Self::InvalidModelSelection { .. } => "invalid_model_selection",

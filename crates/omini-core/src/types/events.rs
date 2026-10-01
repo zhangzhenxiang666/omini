@@ -1,7 +1,7 @@
 use omini_domain::conversation::{AgentMessage, TaskNotification};
 use omini_domain::usage::Usage;
 use omini_model::message::{Message, ToolResultBlock, ToolUseBlock};
-use omini_runtime_contract::persistence::ClientMessage;
+use omini_runtime_contract::thread_domain::ClientMessage;
 use omini_runtime_contract::thread_domain::DeliveryKey;
 use omini_runtime_contract::thread_domain::{
     CompactEvent, CompactShrinkFailedEvent, CompactShrinkFinishedEvent, CompactSummaryDeltaEvent,
@@ -35,6 +35,10 @@ impl TaskMessageSource {
 /// `omini_runtime_contract::RuntimeToServerEvent`。
 #[derive(Debug)]
 pub enum EngineToRuntimeEvent {
+    /// 引擎在依赖此前提交的边界等待确认；消息处理与确认在同一 FIFO 中。
+    CommitBarrier {
+        ack: oneshot::Sender<Result<(), String>>,
+    },
     /// 一条主线程用户消息在安全输入边界提交进 LLM 上下文。
     /// 主线程展示行与 echo 由 server 在接收输入时处理。
     UserMessageProduced(Message),

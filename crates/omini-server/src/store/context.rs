@@ -209,7 +209,7 @@ impl Store {
 }
 
 /// 读取线程当前上下文版本;线程必须存在,缺行按内部错误处理。
-async fn current_context_version(
+pub(super) async fn current_context_version(
     executor: &mut impl Executor,
     thread_id: &str,
 ) -> Result<i64, StoreError> {

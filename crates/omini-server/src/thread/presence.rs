@@ -7,12 +7,17 @@ pub struct ClientPresence {
     pub connection_counts: HashMap<String, usize>,
     // controller 永远只能是在线客户端；释放/断开时会自动转给其它在线客户端。
     pub controller_id: Option<String>,
+    // 本会话是否服务过至少一个客户端连接。从未有过连接的会话可能正处在
+    // 「创建线程 → 客户端连入」的过渡窗口，不参与消费者驱动的空闲回收，
+    // 避免 create 与首连之间的竞态把会话拆掉。
+    pub has_ever_connected: bool,
 }
 
 impl ClientPresence {
     pub fn register(&mut self, client_id: String) -> (Option<String>, bool) {
         let before = self.controller_id.clone();
         *self.connection_counts.entry(client_id.clone()).or_insert(0) += 1;
+        self.has_ever_connected = true;
         if self.controller_id.is_none() {
             self.controller_id = Some(client_id);
         }

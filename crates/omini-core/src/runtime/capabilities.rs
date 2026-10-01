@@ -9,9 +9,7 @@ pub struct CapabilityStore {
 impl CapabilityStore {
     pub fn load(settings: &Settings) -> Self {
         Self {
-            subagents: RwLock::new(Arc::new(crate::subagents::load_agent_registry(
-                &settings.cwd,
-            ))),
+            subagents: RwLock::new(Arc::new(crate::agent::load_agent_registry(&settings.cwd))),
             skills: RwLock::new(Arc::new(crate::skills::load_skill_registry(&settings.cwd))),
         }
     }
@@ -24,7 +22,7 @@ impl CapabilityStore {
     }
 
     pub fn reload_subagents(&self, settings: &Settings) -> Arc<AgentRegistry> {
-        let registry = Arc::new(crate::subagents::load_agent_registry(&settings.cwd));
+        let registry = Arc::new(crate::agent::load_agent_registry(&settings.cwd));
         *self
             .subagents
             .write()

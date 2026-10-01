@@ -1,20 +1,21 @@
+use crate::error::CoreError;
+use crate::execution::host::AgentHost;
 use omini_config::Settings;
 use omini_config::project::ProjectDir;
 use omini_domain::config::ThinkingEffort;
 use omini_provider_api::LlmClient;
 use omini_runtime_contract::RuntimeToServerEvent;
-use omini_runtime_contract::persistence::RuntimePersistenceEvent;
 use omini_runtime_contract::thread_domain::{ActiveProfile, ThreadUsageSnapshot};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 use super::capabilities::CapabilityStore;
+use crate::execution::handle::OutputHandle;
 
 pub async fn toggle_active_profile(
     active_profile: &mut ActiveProfile,
     settings: &mut Settings,
     capabilities: &CapabilityStore,
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
+    output: &OutputHandle,
 ) {
     let next = match *active_profile {
         ActiveProfile::Main => ActiveProfile::Auto,
@@ -23,16 +24,8 @@ pub async fn toggle_active_profile(
     };
     *active_profile = next;
     rebuild_system_prompt(settings, capabilities, next);
-    let _ = event_tx
-        .send(RuntimeToServerEvent::ActiveProfileChanged(next))
-        .await;
-}
-
-pub async fn reject_request(event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
-    let _ = event_tx
-        .send(RuntimeToServerEvent::error(
-            "Cannot handle this request while a run is active".to_string(),
-        ))
+    let _ = output
+        .send_event(RuntimeToServerEvent::ActiveProfileChanged(next))
         .await;
 }
 
@@ -62,11 +55,14 @@ pub struct ModelSelection<'a> {
 }
 
 pub struct RuntimeSinks<'a> {
-    pub event_tx: &'a mpsc::Sender<RuntimeToServerEvent>,
-    pub persistence_tx: &'a mpsc::Sender<RuntimePersistenceEvent>,
+    pub output: &'a OutputHandle,
+    pub host: &'a dyn AgentHost,
     pub usage_state: &'a Arc<Mutex<ThreadUsageSnapshot>>,
 }
 
+/// 应用模型切换：先校验并持久化线程配置，成功后才改运行时配置。
+///
+/// 失败返回错误且有效配置不变（确认语义：已应用且必要持久化完成）。
 pub async fn apply_model_selection(
     settings: &mut Settings,
     llm_client: &mut LlmClient,
@@ -74,21 +70,49 @@ pub async fn apply_model_selection(
     thread_id: Option<&str>,
     selection: ModelSelection<'_>,
     sinks: RuntimeSinks<'_>,
-) {
+) -> Result<(), CoreError> {
     let requested = omini_config::ModelSelection {
         active_provider: selection.provider.to_string(),
         model: selection.model.to_string(),
         thinking_effort: selection.thinking_effort,
     };
-    if let Err(error) = settings.select_model(requested) {
-        let _ = sinks
-            .event_tx
-            .send(RuntimeToServerEvent::error(error.to_string()))
-            .await;
-        return;
+    // 在副本上先完成校验，避免半应用状态。
+    let mut candidate = settings.clone();
+    candidate
+        .select_model(requested)
+        .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
+    // 取 owned 快照，避免后续把 candidate 移回 settings 时悬挂借用。
+    let model = candidate.active_model().clone();
+
+    if let Some(thread_id) = thread_id {
+        sinks
+            .host
+            .update_thread_config(
+                thread_id,
+                &model.provider_id,
+                &model.model_id,
+                model
+                    .thinking_effort
+                    .map(|effort| effort.to_string())
+                    .as_deref(),
+            )
+            .await
+            .map_err(CoreError::from)?;
+    } else {
+        // 非线程场景（项目默认）沿用文件状态；失败不应用。
+        let mut state = project
+            .load_state()
+            .map_err(|error| CoreError::project_state("读取项目状态失败", error))?;
+        state.default_provider = Some(model.provider_id.clone());
+        state.default_model = Some(model.model_id.clone());
+        state.thinking_effort = model.thinking_effort;
+        project
+            .save_state(&state)
+            .map_err(|error| CoreError::project_state("保存项目状态失败", error))?;
     }
 
-    let model = settings.active_model();
+    // 持久化成功后应用运行时配置。
+    *settings = candidate;
     *llm_client = LlmClient::new(
         model.protocol,
         model
@@ -99,52 +123,34 @@ pub async fn apply_model_selection(
         model.base_url.clone(),
     );
 
-    if let Some(thread_id) = thread_id {
-        let _ = sinks
-            .persistence_tx
-            .send(RuntimePersistenceEvent::UpdateThreadConfig {
-                thread_id: thread_id.to_string(),
-                provider: model.provider_id.clone(),
-                model: model.model_id.clone(),
-                thinking_effort: model.thinking_effort.map(|effort| effort.to_string()),
-            })
-            .await;
-    } else if let Ok(mut state) = project.load_state() {
-        state.default_provider = Some(model.provider_id.clone());
-        state.default_model = Some(model.model_id.clone());
-        state.thinking_effort = model.thinking_effort;
-        let _ = project.save_state(&state);
-    }
-
     let _ = sinks
-        .event_tx
-        .send(RuntimeToServerEvent::ModelChanged {
+        .output
+        .send_event(RuntimeToServerEvent::ModelChanged {
             provider: model.provider_id.clone(),
             model: model.model_id.clone(),
             thinking_effort: model.thinking_effort,
             context_window: Some(model.context_window),
         })
         .await;
-    send_usage_snapshot(sinks.event_tx, sinks.usage_state, settings).await;
+    send_usage_snapshot(sinks.output, sinks.usage_state, settings).await;
+    Ok(())
 }
 
+/// 应用思考强度：持久化成功后才改配置；失败返回错误且快照不变。
 pub async fn apply_thinking_effort(
     settings: &mut Settings,
     project: &ProjectDir,
     thread_id: Option<&str>,
     effort: ThinkingEffort,
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
-) {
+    output: &OutputHandle,
+    host: &dyn AgentHost,
+) -> Result<(), CoreError> {
     let current = settings.active_model();
     if effort != ThinkingEffort::None && !current.capabilities.thinking {
-        let _ = event_tx
-            .send(RuntimeToServerEvent::error(format!(
-                "当前模型 '{}' 不支持思考模式",
-                current.model_id
-            )))
-            .await;
-        return;
+        return Err(CoreError::invalid_model_selection(format!(
+            "当前模型 '{}' 不支持思考模式",
+            current.model_id
+        )));
     }
 
     let selection = omini_config::ModelSelection {
@@ -152,71 +158,46 @@ pub async fn apply_thinking_effort(
         model: current.model_id.clone(),
         thinking_effort: Some(effort),
     };
-    let effective_effort = match settings.resolve_model(&selection) {
-        Ok(model) => model.thinking_effort,
-        Err(error) => {
-            let _ = event_tx
-                .send(RuntimeToServerEvent::error(error.to_string()))
-                .await;
-            return;
-        }
-    };
+    let effective_effort = settings
+        .resolve_model(&selection)
+        .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?
+        .thinking_effort;
     if let Some(thread_id) = thread_id {
-        if persistence_tx
-            .send(RuntimePersistenceEvent::UpdateThreadThinkingEffort {
-                thread_id: thread_id.to_string(),
-                thinking_effort: effective_effort.map(|effort| effort.to_string()),
-            })
-            .await
-            .is_err()
-        {
-            let _ = event_tx
-                .send(RuntimeToServerEvent::error("更新思考程度失败".to_string()))
-                .await;
-            return;
-        }
+        host.update_thread_thinking_effort(
+            thread_id,
+            effective_effort.map(|effort| effort.to_string()).as_deref(),
+        )
+        .await
+        .map_err(CoreError::from)?;
     } else {
-        let mut state = match project.load_state() {
-            Ok(state) => state,
-            Err(e) => {
-                let _ = event_tx
-                    .send(RuntimeToServerEvent::error(format!(
-                        "读取项目状态失败: {e}"
-                    )))
-                    .await;
-                return;
-            }
-        };
+        let mut state = project
+            .load_state()
+            .map_err(|error| CoreError::project_state("读取项目状态失败", error))?;
         state.thinking_effort = effective_effort;
-        if let Err(e) = project.save_state(&state) {
-            let _ = event_tx
-                .send(RuntimeToServerEvent::error(format!(
-                    "保存项目状态失败: {e}"
-                )))
-                .await;
-            return;
-        }
+        project
+            .save_state(&state)
+            .map_err(|error| CoreError::project_state("保存项目状态失败", error))?;
     }
 
-    if let Err(error) = settings.select_model(selection) {
-        let _ = event_tx
-            .send(RuntimeToServerEvent::error(error.to_string()))
-            .await;
-        return;
-    }
+    let mut candidate = settings.clone();
+    candidate
+        .select_model(selection)
+        .map_err(|error| CoreError::invalid_model_selection(error.to_string()))?;
+    *settings = candidate;
     let model = settings.active_model();
-    let _ = event_tx
-        .send(RuntimeToServerEvent::ModelChanged {
+    let _ = output
+        .send_event(RuntimeToServerEvent::ModelChanged {
             provider: model.provider_id.clone(),
             model: model.model_id.clone(),
             thinking_effort: model.thinking_effort,
             context_window: Some(model.context_window),
         })
         .await;
+    Ok(())
 }
 
 async fn send_usage_snapshot(
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
+    output: &OutputHandle,
     usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     settings: &Settings,
 ) {
@@ -226,5 +207,5 @@ async fn send_usage_snapshot(
         snapshot.context_window = context_window;
         RuntimeToServerEvent::UsageChanged(*snapshot)
     };
-    let _ = event_tx.send(event).await;
+    let _ = output.send_event(event).await;
 }

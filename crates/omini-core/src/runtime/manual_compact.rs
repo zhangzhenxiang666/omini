@@ -1,6 +1,7 @@
 use super::usage::record_total_usage_and_notify;
 use super::*;
-use crate::error::RuntimeError;
+use crate::error::CoreError;
+use crate::runtime::command::AgentCommand;
 use crate::runtime::compact::{self, CompactRequestContext};
 use omini_provider_api::LlmClient;
 use omini_provider_api::ToolDefinition;
@@ -10,6 +11,8 @@ use tracing::Instrument;
 
 impl AgentRuntime {
     /// 处理手动 compact 请求：构建上下文、执行压缩、处理取消和结果。
+    ///
+    /// 压缩期间仍接受取消、子 Run 干预与关闭；其余命令在压缩边界后重试。
     pub async fn handle_compact_context(&mut self, instructions: Option<String>) {
         if self.messages.is_empty() {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
@@ -40,7 +43,7 @@ impl AgentRuntime {
         let tool_definitions = self.tool_registry_snapshot().definitions();
         let cancelled = Arc::clone(&self.cancelled);
         let cancel_notify = self.query_engine.cancel_notify_arc();
-        let event_tx = self.event_tx.clone();
+        let output = self.output.clone();
 
         let input = ManualCompactInput {
             settings: &self.settings,
@@ -51,12 +54,14 @@ impl AgentRuntime {
         };
         let cancel_token = compact::CompactCancelToken::new(&cancelled, cancel_notify.as_ref());
 
+        let host = Arc::clone(&self.host);
+        let usage_state = Arc::clone(&self.thread_usage);
         let compact_fut = execute_manual_compact(
             &mut self.messages,
             input,
-            &event_tx,
-            &self.persistence_tx,
-            &self.thread_usage,
+            &output,
+            host,
+            &usage_state,
             cancel_token,
         );
         tokio::pin!(compact_fut);
@@ -68,46 +73,98 @@ impl AgentRuntime {
                         Ok(outcome) => {
                             tracing::debug!(outcome = ?outcome, "manual compact finished");
                             if compact_outcome_is_noop(&outcome) {
-                                let _ = event_tx.send(RuntimeToServerEvent::warning(
+                                let _ = output.send_event(RuntimeToServerEvent::warning(
                                     "当前线程历史还不需要压缩".to_string(),
                                 )).await;
                             }
                         }
                         Err(error) => {
                             tracing::warn!(error = %error, "manual compact failed");
-                            let _ = event_tx.send(RuntimeToServerEvent::Notification(
+                            let _ = output.send_event(RuntimeToServerEvent::Notification(
                                 Notification::warning(error.to_string()),
                             )).await;
                         }
                     }
                     break;
                 }
-                Some(req) = self.request_rx.recv() => {
-                    match req {
-                        ServerToRuntimeEvent::CancelRun { run_id: None } => {
+                () = self.gate.wait_close_requested() => {
+                    self.cancelled.store(true, Ordering::Relaxed);
+                    self.query_engine.notify_cancel_waiters();
+                    break;
+                }
+                command = self.cmd_rx.recv() => {
+                    let Some(command) = command else { break };
+                    match command {
+                        AgentCommand::Cancel { run_id: None, ack } => {
                             tracing::debug!("manual compact cancellation requested");
                             self.cancelled.store(true, Ordering::Relaxed);
                             self.query_engine.notify_cancel_waiters();
+                            let _ = ack.send(Ok(()));
                         }
-                        ServerToRuntimeEvent::CancelRun {
+                        AgentCommand::Cancel {
                             run_id: Some(run_id),
+                            ack,
                         } => {
-                            self.task_supervisor.cancel_task(&run_id).await;
+                            // cancel_task 以 ToolResult 表达成败：错误时把输出作为原因返回。
+                            let result = self.task_supervisor.cancel_task(&run_id).await;
+                            let _ = ack.send(if result.is_error {
+                                Err(CoreError::new(result.output))
+                            } else {
+                                Ok(())
+                            });
                         }
-                        ServerToRuntimeEvent::InterveneMessage {
+                        AgentCommand::Intervene {
                             run_id: Some(run_id),
                             message,
                             client_source,
+                            ack,
                         } => {
-                            if let Err(error) = self.task_supervisor.intervene_agent_run(&run_id, message, client_source).await {
-                                let _ = event_tx.send(RuntimeToServerEvent::error(error)).await;
-                            }
+                            let _ = ack.send(
+                                self.task_supervisor
+                                    .intervene_agent_run(&run_id, message, client_source)
+                                    .await
+                                    .map_err(CoreError::new),
+                            );
                         }
-                        _ => {
-                            tracing::debug!("request ignored during manual compact");
+                        AgentCommand::Close { ack } => {
+                            // 压缩中不拒绝关闭：标记收尾并取消压缩。
+                            self.state
+                                .set_lifecycle(crate::execution::snapshot::AgentLifecycle::Closing);
+                            self.cancelled.store(true, Ordering::Relaxed);
+                            self.query_engine.notify_cancel_waiters();
+                            let _ = ack.send(Ok(()));
+                        }
+                        other => {
+                            // 其余命令（模型/配置/提交等）在压缩期间不接受。
+                            let _ = AgentRuntime::reject_during_compact(other).await;
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// 压缩期间拒绝的命令统一确认失败；请求方可稍后重试。
+    async fn reject_during_compact(command: AgentCommand) {
+        let error = CoreError::new("Cannot handle this request while a compact is running");
+        match command {
+            AgentCommand::CommitRun { ack, .. }
+            | AgentCommand::Intervene { ack, .. }
+            | AgentCommand::CompactContext { ack, .. }
+            | AgentCommand::SetModel { ack, .. }
+            | AgentCommand::SetThinkingEffort { ack, .. }
+            | AgentCommand::SetActiveProfile { ack, .. }
+            | AgentCommand::ToggleActiveProfile { ack }
+            | AgentCommand::ResolvePlanApproval { ack, .. }
+            | AgentCommand::ReloadSubagentRegistry { ack } => {
+                let _ = ack.send(Err(error));
+            }
+            // 取消类已单独处理；ResolveToolPause 属于陈旧暂停点，静默忽略即可。
+            AgentCommand::ResolveToolPause { ack, .. } => {
+                let _ = ack.send(Err(error));
+            }
+            AgentCommand::Cancel { ack, .. } | AgentCommand::Close { ack } => {
+                let _ = ack.send(Ok(()));
             }
         }
     }
@@ -123,11 +180,12 @@ pub struct ManualCompactInput<'a> {
 
 /// 执行手动 compact，不借用 `&mut AgentRuntime`，
 /// 使调用方可以在 `tokio::select!` 中同时访问 runtime 的其他字段。
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_manual_compact(
     messages: &mut Vec<Message>,
     input: ManualCompactInput<'_>,
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
+    output: &crate::execution::handle::OutputHandle,
+    host: std::sync::Arc<dyn crate::execution::host::AgentHost>,
     usage_state: &Arc<Mutex<ThreadUsageSnapshot>>,
     cancel_token: compact::CompactCancelToken<'_>,
 ) -> Result<crate::runtime::compact::CompactOutcome, RuntimeError> {
@@ -138,8 +196,8 @@ pub async fn execute_manual_compact(
     }
 
     let (compact_tx, mut compact_rx) = mpsc::channel(16);
-    let forwarder_event_tx = event_tx.clone();
-    let forwarder_persistence_tx = persistence_tx.clone();
+    let forwarder_output = output.clone();
+    let forwarder_host = Arc::clone(&host);
     let forwarder_usage_state = Arc::clone(usage_state);
     let forwarder_thread_id = input.runtime_context.thread_id.clone();
     let model = input.settings.active_model();
@@ -161,13 +219,13 @@ pub async fn execute_manual_compact(
                             agent_label = ?event.agent_label,
                             "manual compact summary started"
                         );
-                        let _ = forwarder_event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryStarted(event))
+                        let _ = forwarder_output
+                            .send_event(RuntimeToServerEvent::CompactSummaryStarted(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryDelta(event) => {
-                        let _ = forwarder_event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryDelta(event))
+                        let _ = forwarder_output
+                            .send_event(RuntimeToServerEvent::CompactSummaryDelta(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFinished(event) => {
@@ -183,11 +241,11 @@ pub async fn execute_manual_compact(
                             &forwarder_thread_id,
                             &event,
                             &forwarder_model_ref,
-                            &forwarder_persistence_tx,
+                            forwarder_host.as_ref(),
                         )
                         .await;
-                        let _ = forwarder_event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryFinished(event))
+                        let _ = forwarder_output
+                            .send_event(RuntimeToServerEvent::CompactSummaryFinished(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryFailed(event) => {
@@ -198,8 +256,8 @@ pub async fn execute_manual_compact(
                             message = %event.message,
                             "manual compact summary failed"
                         );
-                        let _ = forwarder_event_tx
-                            .send(RuntimeToServerEvent::CompactSummaryFailed(event))
+                        let _ = forwarder_output
+                            .send_event(RuntimeToServerEvent::CompactSummaryFailed(event))
                             .await;
                     }
                     EngineToRuntimeEvent::CompactSummaryUsageRecorded(usage) => {
@@ -212,8 +270,8 @@ pub async fn execute_manual_compact(
                         record_total_usage_and_notify(
                             &forwarder_thread_id,
                             usage,
-                            &forwarder_event_tx,
-                            &forwarder_persistence_tx,
+                            &forwarder_output,
+                            forwarder_host.as_ref(),
                             &forwarder_usage_state,
                         )
                         .await;
@@ -224,14 +282,14 @@ pub async fn execute_manual_compact(
                         messages,
                         ack,
                     } => {
-                        let _ = forwarder_persistence_tx
-                            .send(RuntimePersistenceEvent::ReplaceLlmContext {
-                                thread_id: compacted_thread_id,
-                                expected_version,
-                                messages,
-                                ack,
-                            })
-                            .await;
+                        let result = match forwarder_host
+                            .replace_llm_context(&compacted_thread_id, expected_version, messages)
+                            .await
+                        {
+                            Ok(version) => Ok(version),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        let _ = ack.send(result);
                     }
                     _ => {}
                 }
@@ -266,7 +324,7 @@ pub async fn persist_compact_summary_event(
     thread_id: &str,
     event: &omini_runtime_contract::thread_domain::CompactSummaryFinishedEvent,
     model_ref: &str,
-    persistence_tx: &mpsc::Sender<RuntimePersistenceEvent>,
+    host: &dyn crate::execution::host::AgentHost,
 ) {
     let summary = CompactionSummary {
         id: Uuid::new_v4().to_string(),
@@ -274,8 +332,7 @@ pub async fn persist_compact_summary_event(
         markdown: event.summary.clone(),
         created_at: Timestamp::now(),
     };
-    history::persist_compact_summary_ui_message(thread_id, &summary, model_ref, persistence_tx)
-        .await;
+    history::persist_compact_summary_ui_message(thread_id, &summary, model_ref, host).await;
 }
 
 pub fn compact_outcome_is_noop(outcome: &crate::runtime::compact::CompactOutcome) -> bool {

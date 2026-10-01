@@ -1,7 +1,6 @@
 use crate::StoreError;
 use jiff::Timestamp;
 use omini_domain::config::ThinkingEffort;
-use omini_runtime_contract::persistence::ThreadRecord;
 use std::str::FromStr;
 use toasty::Deferred;
 
@@ -73,9 +72,30 @@ pub struct Thread {
     pub messages: Deferred<Vec<Message>>,
 }
 
-/// 运行时线程记录到模型实例的映射;`thread_type` 字符串在此解析,
+/// 新建线程的参数集:主线与子 Agent 线程共用,由调用方(server)组装。
+#[derive(Debug, Clone)]
+pub struct NewThread {
+    pub id: String,
+    pub parent_thread_id: Option<String>,
+    pub spawn_tool_use_id: Option<String>,
+    /// 线程类型字符串("main"/"agent");在此解析,未知形态按数据损坏拒绝。
+    pub thread_type: String,
+    pub agent_label: Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub thinking_effort: Option<String>,
+    pub title: Option<String>,
+    pub current_context_tokens: i64,
+    pub total_tokens: i64,
+    pub total_cached_tokens: i64,
+    pub llm_context_version: i64,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+/// 新线程参数到模型实例的映射;`thread_type` 字符串在此解析,
 /// 未知形态按数据损坏拒绝而非静默默认。
-pub fn thread_from_runtime(project_id: &str, thread: &ThreadRecord) -> Result<Thread, StoreError> {
+pub fn thread_from_parts(project_id: &str, thread: &NewThread) -> Result<Thread, StoreError> {
     Ok(Thread {
         id: thread.id.clone(),
         project_id: project_id.to_string(),

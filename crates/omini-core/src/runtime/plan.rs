@@ -1,10 +1,10 @@
+use crate::execution::handle::OutputHandle;
 use crate::proposed_plan::{ProposedPlanParser, ProposedPlanSegment, extract_proposed_plan_text};
 use jiff::Timestamp;
 use omini_config::project::ProjectDir;
 use omini_model::message::{ContentBlock, Message, Role};
 use omini_runtime_contract::RuntimeToServerEvent;
 use omini_runtime_contract::thread_domain::{ActiveProfile, SubmittedPlan};
-use tokio::sync::mpsc;
 
 const CURRENT_PLAN_ID: &str = "plan";
 const CURRENT_PLAN_FILE: &str = "plan.md";
@@ -20,39 +20,36 @@ impl ProposedPlanForwarder {
         }
     }
 
-    pub async fn forward_text_delta(
-        &mut self,
-        event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-        delta: String,
-    ) {
+    pub async fn forward_text_delta(&mut self, output: &OutputHandle, delta: String) {
         let Some(parser) = self.parser.as_mut() else {
-            let _ = event_tx.send(RuntimeToServerEvent::TextDelta(delta)).await;
+            let _ = output
+                .send_event(RuntimeToServerEvent::TextDelta(delta))
+                .await;
             return;
         };
 
-        forward_segments(event_tx, parser.push_str(&delta)).await;
+        forward_segments(output, parser.push_str(&delta)).await;
     }
 
-    pub async fn flush(&mut self, event_tx: &mpsc::Sender<RuntimeToServerEvent>) {
+    pub async fn flush(&mut self, output: &OutputHandle) {
         let Some(parser) = self.parser.as_mut() else {
             return;
         };
-        forward_segments(event_tx, parser.finish()).await;
+        forward_segments(output, parser.finish()).await;
     }
 }
 
-async fn forward_segments(
-    event_tx: &mpsc::Sender<RuntimeToServerEvent>,
-    segments: Vec<ProposedPlanSegment>,
-) {
+async fn forward_segments(output: &OutputHandle, segments: Vec<ProposedPlanSegment>) {
     for segment in segments {
         match segment {
             ProposedPlanSegment::Normal(text) if !text.is_empty() => {
-                let _ = event_tx.send(RuntimeToServerEvent::TextDelta(text)).await;
+                let _ = output
+                    .send_event(RuntimeToServerEvent::TextDelta(text))
+                    .await;
             }
             ProposedPlanSegment::ProposedPlanDelta(delta) if !delta.is_empty() => {
-                let _ = event_tx
-                    .send(RuntimeToServerEvent::ProposedPlanDelta(delta))
+                let _ = output
+                    .send_event(RuntimeToServerEvent::ProposedPlanDelta(delta))
                     .await;
             }
             ProposedPlanSegment::Normal(_)

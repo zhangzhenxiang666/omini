@@ -1,5 +1,5 @@
 use crate::store as store_model;
-use crate::thread::ThreadRuntime;
+use crate::thread::ThreadSession;
 use omini_config::Settings;
 use omini_core::CoreError;
 use omini_domain as domain;
@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 
 pub async fn submit_run_command_from_protocol_request_for_thread(
     request: client_proto::SubmitRunRequest,
-    thread: &ThreadRuntime,
+    thread: &ThreadSession,
 ) -> Result<runtime_contract::thread::SubmitRunCommand, CoreError> {
     let (mut input, client_echo_id, intent) = match request {
         client_proto::SubmitRunRequest::SubmitMessage {

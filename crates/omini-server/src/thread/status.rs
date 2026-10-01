@@ -1,8 +1,8 @@
-use crate::{event::status::RuntimeStatusSnapshotContext, thread::ThreadRuntime};
+use crate::{event::status::RuntimeStatusSnapshotContext, thread::ThreadSession};
 use jiff::Timestamp;
 use omini_protocol as client_proto;
 
-impl ThreadRuntime {
+impl ThreadSession {
     pub fn runtime_state(&self) -> client_proto::ThreadRuntimeState {
         self.status_projection
             .lock()
@@ -18,13 +18,11 @@ impl ThreadRuntime {
                 presence.connection_counts.len(),
             )
         };
-        // 新架构下 runtime 启动即加载，ThreadRuntime 暴露给上层时一定处于
-        // "已加载" 状态,这里直接告诉 status 模块;老架构下的 RuntimeLoadGate
-        // 已经不需要再判断。
+        // 会话构建即实例启动，暴露给上层时一定处于"已加载"状态。
         let loaded = true;
-        let skills = self.core.runtime_skills();
-        let mcp_servers = self.core.runtime_mcp_servers();
-        let subagent_threads = self.core.runtime_subagents();
+        let skills = self.handle.runtime_skills();
+        let mcp_servers = self.handle.runtime_mcp_servers();
+        let subagent_threads = self.handle.runtime_subagents();
         let git_branch = self
             .git_branch
             .lock()
@@ -48,47 +46,16 @@ impl ThreadRuntime {
             )
     }
 
+    /// 以 core 权威快照判断可回收性：无运行、无预留、无未完成任务。
     pub fn is_reclaimable(&self) -> bool {
-        self.runtime_state() == client_proto::ThreadRuntimeState::Idle
-            && !self
-                .status_projection
-                .lock()
-                .expect("status projection lock poisoned")
-                .has_active_agent_tasks()
+        self.handle.snapshot().is_reclaimable()
     }
 
     pub fn can_reclaim_without_clients(&self) -> bool {
         !self.has_connected_clients() && self.is_reclaimable()
     }
 
-    pub fn should_wait_for_reclaim(&self) -> bool {
-        !self.has_connected_clients() && !self.is_reclaimable()
-    }
-
     pub fn thread_id(&self) -> &str {
         &self.thread_id
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_runtime_event_for_test(&self, kind: &str) {
-        use crate::event::replay::SequencedRuntimeEvent;
-
-        let event = client_proto::RuntimeEvent::new(match kind {
-            "run_started" => client_proto::TypedRuntimeEvent::RunStarted,
-            "run_finished" => client_proto::TypedRuntimeEvent::RunFinished,
-            _ => panic!("unsupported test runtime event kind: {kind}"),
-        });
-        self.status_projection
-            .lock()
-            .expect("status projection lock poisoned")
-            .record_event(
-                &event,
-                "2026-08-20T00:00:00Z"
-                    .parse()
-                    .expect("fixed test time should be valid"),
-            );
-        let _ = self
-            .runtime_event_tx
-            .send(SequencedRuntimeEvent { seq: 0, event });
     }
 }
