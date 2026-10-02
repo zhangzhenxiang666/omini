@@ -1,8 +1,6 @@
 # 主配置文件（config.toml）
 
-Omini 使用新的、破坏性的配置 schema：没有 `version` 字段，也不支持旧字段名或旧配置布局。
-
-配置有两层：`~/.omini/config.toml` 是全局配置，`<project>/.omini/config.toml` 是可选的项目覆盖层。两者使用同一 schema；项目层只需写要覆盖的字段。
+用 `config.toml` 配置模型服务、自动压缩、MCP 和工具权限。`~/.omini/config.toml` 是全局配置，`<project>/.omini/config.toml` 是可选的项目覆盖层；项目配置只需写要覆盖的字段。
 
 ## 最小可运行配置
 
@@ -19,11 +17,8 @@ api_key = { env = "OPENAI_API_KEY" }
 
 `name`、`context_window`、`thinking`、`input`、routing、MCP 和权限均为可选配置。
 
-如果用户级配置缺失，或某个 provider 尚未配置 model，omini 会把对应项目标为
-“需要配置”，并在 TUI 中提供服务端驱动的首次引导。配置 TOML 语法错误、provider
-缺少 `protocol`/`base_url` 或凭据无法解析时则显示只读诊断，需手动修复文件。
-引导表单使用 `Tab`/上下键切换字段；文本字段支持左右键、`Home`、`End`、
-`Backspace`、`Delete` 和在当前光标处粘贴，protocol 字段使用左右键切换类型。
+未配置 Provider 或模型时，首次启动会引导补充配置。若 TOML 语法错误、缺少
+`protocol`/`base_url` 或找不到指定凭据，需要按错误信息修改配置文件。
 
 ## 认证存储（auth.json）
 
@@ -43,17 +38,9 @@ api_key = { env = "OPENAI_API_KEY" }
 api_key = { env = "OPENAI_API_KEY" }
 ```
 
-daemon 每次打开项目或创建 runtime 都读取最新 `auth.json`；启动 omini-server 的真实
-环境变量优先于该文件。`auth.json` 目前只为模型 provider 提供凭据，不会注入 MCP 或其
-子进程。
-
-## 内置工具状态
-
-`rg` 是 omini-server 管理的内置依赖，而非 TUI/CLI 的依赖。安装器负责首次放置它；
-server 启动时会异步校验并在缺失时下载与自身版本匹配的 Release 资产。`GET /v1/health`
-中的 `bundled_rg.state` 为 `ready`、`restoring` 或 `unavailable`，所有客户端（包括未来的
-Web）都应消费此状态。daemon 即使 `unavailable` 仍可用于配置和项目管理，但提交新的
-agent run 会返回 `bundled_tool_unavailable`，直到恢复成功。
+凭据在打开项目或创建运行环境时重新读取。服务端进程的环境变量优先于
+`auth.json` 中的同名值。`auth.json` 只为模型 Provider 提供凭据；MCP 需要通过自身的
+`env`、`bearer_token_env_var` 或 `http_headers` 配置认证。
 
 ## 完整配置示例
 
@@ -204,4 +191,6 @@ temperature = 0.5
 standard = { provider = "openai", model = "gpt-5-mini" }
 ```
 
-项目层可覆盖 provider、模型、routing、context、MCP 与 permissions。目前它与全局配置有同等能力；不要把不信任仓库中的 `.omini/config.toml` 当作安全边界。项目配置的信任确认将在后续单独设计。
+项目层可覆盖 Provider、模型、routing、context、MCP 与 permissions，与全局配置有同等能力。使用其他仓库的项目配置前，应检查其中的命令、请求覆盖和权限设置。
+
+[返回文档索引](index.md)

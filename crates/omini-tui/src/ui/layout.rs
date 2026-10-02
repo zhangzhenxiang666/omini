@@ -27,6 +27,25 @@ pub fn render(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame) {
     render_background(frame, area);
 
     let focus = crate::app::focus::current(state);
+    if focus == crate::app::focus::Focus::StopConfirmation {
+        let desired_height = crate::features::dialogs::view::stop_drawer_height(area);
+        // 小终端优先保留抽屉操作，只在高度充足时给消息区留上下空白。
+        let spacer_height = u16::from(area.height >= desired_height.saturating_add(3));
+        let reserved_height = 1 + spacer_height * 2;
+        let drawer_height = desired_height.min(area.height.saturating_sub(reserved_height).max(1));
+        let chunks = Layout::vertical([
+            Constraint::Length(spacer_height),
+            Constraint::Min(1),
+            Constraint::Length(spacer_height),
+            Constraint::Length(drawer_height),
+        ])
+        .split(area);
+        state.geometry.messages_area = chunks[1];
+        render_conversation(state, frame, chunks[1]);
+        crate::features::dialogs::view::render_stop_drawer(state, frame, chunks[3]);
+        crate::ui::selection::apply_selection_overlay(state, frame.buffer_mut());
+        return;
+    }
     if let Some(InteractionStep::Thread { .. }) = &state.dialogs.interaction_step {
         crate::ui::prelude::render_thread_list(state, frame, area);
         crate::ui::selection::apply_selection_overlay(state, frame.buffer_mut());

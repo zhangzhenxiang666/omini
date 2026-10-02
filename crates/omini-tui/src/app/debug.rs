@@ -56,6 +56,8 @@ pub const SCREEN_NAMES: &[&str] = &[
     "子会话终态",
     "空闲且有任务",
     "空输入框",
+    "停止确认（否）",
+    "停止确认（是）",
 ];
 const STATE_NAMES: &[&str] = &["仅调用", "返回结果", "失败结果", "取消结果", "中断结果"];
 
@@ -306,7 +308,7 @@ fn sample_screen(screen: usize) -> AppState {
     state.project.status_bar.cwd = std::path::PathBuf::from("/project");
     state.project.status_bar.model = "sample-model".into();
     state.project.status_bar.active_provider = "Example".into();
-    if matches!(screen, 2..=11 | 13..=17) {
+    if matches!(screen, 2..=11 | 13..=17 | 23..=24) {
         state.sessions.views["main"]
             .messages
             .push(UiMessage::SystemEvent(
@@ -581,6 +583,16 @@ fn sample_screen(screen: usize) -> AppState {
                 omini_domain::task::TaskStatus::Running,
             );
         }
+        23 | 24 => {
+            state.track_background_task(
+                "debug-child".into(),
+                omini_domain::task::TaskStatus::Running,
+            );
+            state.dialogs.stop_confirmation =
+                Some(crate::features::dialogs::state::StopConfirmation {
+                    stop_selected: screen == 24,
+                });
+        }
         _ => {}
     }
     state
@@ -651,7 +663,11 @@ mod tests {
 
     #[test]
     fn empty_input_has_reference_lines_and_dim_suggestion() {
-        let scene = TOOL_NAMES.len() + SCREEN_NAMES.len() - 1;
+        let scene = TOOL_NAMES.len()
+            + SCREEN_NAMES
+                .iter()
+                .position(|name| *name == "空输入框")
+                .unwrap();
         for (width, height) in [(120, 36), (80, 24)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal
@@ -667,6 +683,41 @@ mod tests {
             assert_eq!(buffer[(3, y)].symbol(), "用");
             assert_eq!(buffer[(3, y)].fg, theme::MUTED);
             assert!(buffer[(3, y)].modifier.contains(Modifier::DIM));
+        }
+    }
+
+    /// 预览复用生产布局，展示两种高亮状态，并保留停止范围与上方对话。
+    #[test]
+    fn render_stop_previews() {
+        for name in ["停止确认（否）", "停止确认（是）"] {
+            let screen = SCREEN_NAMES
+                .iter()
+                .position(|candidate| *candidate == name)
+                .unwrap();
+            let scene = TOOL_NAMES.len() + screen;
+            for (width, height) in [(120, 36), (80, 24), (40, 12)] {
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal
+                    .draw(|frame| render(frame, Gallery { scene, scroll: 0 }))
+                    .unwrap();
+                let text: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
+                let compact: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+                assert!(compact.contains("是否停止当前运行及全部后台任务（含子任务）？"));
+                assert!(compact.contains(if name == "停止确认（是）" {
+                    "❯是"
+                } else {
+                    "❯否"
+                }));
+                assert!(compact.contains("Enter确认"));
+                assert!(compact.contains("Esc返回"));
+                assert!(compact.contains("对照抽屉"));
+            }
         }
     }
 

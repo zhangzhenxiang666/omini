@@ -199,7 +199,7 @@ fn handle_key_event(
     handle_composer_key(state, code, modifiers, request_tx)
 }
 
-/// 确认操作只在 Enter 时提交一次；关闭与“不停止”均不改变现有工作。
+/// 确认操作只在 Enter 时提交一次；关闭与选择“否”均不改变现有工作。
 fn handle_stop_confirmation(state: &mut AppState, code: KeyCode, request_tx: &mut Effects) {
     match code {
         KeyCode::Esc => state.dialogs.stop_confirmation = None,
@@ -566,6 +566,7 @@ mod tests {
             AgentStatus::Working,
         ] {
             let mut state = AppState::new();
+            state.composer.input = "draft".into();
             state.sessions.views["main"].agent_status = status.clone();
             state.track_background_task("bash".into(), TaskStatus::Running);
             let mut tx = Effects::default();
@@ -587,6 +588,21 @@ mod tests {
             assert!(tx.requests.is_empty());
             assert_eq!(state.sessions.views["main"].agent_status, status);
             assert_eq!(state.sessions.background_tasks["bash"], TaskStatus::Running);
+            assert_eq!(state.composer.input, "draft");
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| crate::app::draw(&mut state, frame))
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains("draft"));
+            assert!(!screen.replace(' ', "").contains("是否停止"));
         }
     }
 
@@ -609,7 +625,7 @@ mod tests {
         assert!(state.dialogs.stop_confirmation.is_none());
     }
 
-    /// 弹窗独占输入，后台新到的权限请求不能抢走确认焦点。
+    /// 抽屉独占输入，后台新到的权限请求不能抢走确认焦点。
     #[test]
     fn isolate_stop_confirmation() {
         let mut state = AppState::new();
@@ -626,11 +642,29 @@ mod tests {
         assert_eq!(state.composer.input, "draft");
         assert!(state.dialogs.permission.note.text.is_empty());
         assert!(tx.requests.is_empty());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::app::draw(&mut state, frame))
+            .unwrap();
+        assert_eq!(state.geometry.permission_drawer_area.height, 0);
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.replace(' ', "").contains("是否停止"));
         handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
         assert_eq!(
             crate::app::focus::current(&state),
             crate::app::focus::Focus::Pause
         );
+        terminal
+            .draw(|frame| crate::app::draw(&mut state, frame))
+            .unwrap();
+        assert!(state.geometry.permission_drawer_area.height > 0);
     }
 
     /// 无后台工作直接中断主 Run，终态后台记录不会触发确认。

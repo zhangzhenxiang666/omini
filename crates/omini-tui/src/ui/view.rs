@@ -2,7 +2,6 @@ use crate::ui::prelude::*;
 pub fn render(state: &AppState, frame: &mut ratatui::Frame) -> crate::ui::context::FrameState {
     let mut context = crate::ui::context::ViewContext::new(state);
     layout::render(&mut context, frame);
-    crate::features::dialogs::view::render_stop_confirmation(state, frame);
     context.finish()
 }
 
