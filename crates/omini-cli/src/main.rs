@@ -38,6 +38,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum CliCommand {
+    // 样式图鉴仅供开发调试，release 构建不注册该子命令（配合 omini-tui 侧的同款门控）。
+    #[cfg(debug_assertions)]
     #[command(about = "离线预览 TUI 的全部组件与状态")]
     TuiDebug,
     #[command(about = "管理本地 omini-server daemon")]
@@ -115,6 +117,7 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
             Ok(ExitCode::SUCCESS)
         }
         Some(CliCommand::Server { command }) => run_server_command(command),
+        #[cfg(debug_assertions)]
         Some(CliCommand::TuiDebug) => {
             omini_tui::run_debug_ui()?;
             Ok(ExitCode::SUCCESS)
@@ -545,5 +548,20 @@ mod tests {
     #[test]
     fn cli_rejects_old_daemon_runner_command() {
         assert!(Cli::try_parse_from(["omini", "__daemon"]).is_err());
+    }
+
+    // tui-debug 子命令只在 debug 构建注册，release 构建应拒绝解析。
+    #[test]
+    #[cfg(debug_assertions)]
+    fn cli_parses_tui_debug_in_debug_builds() {
+        let cli = Cli::try_parse_from(["omini", "tui-debug"]).unwrap();
+
+        assert!(matches!(cli.command, Some(CliCommand::TuiDebug)));
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn cli_rejects_tui_debug_in_release_builds() {
+        assert!(Cli::try_parse_from(["omini", "tui-debug"]).is_err());
     }
 }

@@ -1,3 +1,5 @@
+// 样式图鉴（tui-debug）仅供开发调试，release 构建整体不参与编译。
+#[cfg(debug_assertions)]
 pub mod debug;
 pub mod effect;
 pub mod event;

@@ -28,7 +28,7 @@ OMINI_SERVER_BIN="$PWD/target/debug/omini-server" cargo run -p omini
 cargo run -p omini -- tui-debug
 ```
 
-左右方向键切换场景，上下方向键滚动，Home/End 跳转首末场景，q 退出。预览复用正式组件与布局，适合检查不同终端尺寸下的显示。
+左右方向键切换场景，上下方向键滚动，Home/End 跳转首末场景，q 退出。预览复用正式组件与布局，适合检查不同终端尺寸下的显示。该子命令由 `#[cfg(debug_assertions)]` 门控，仅 debug 构建注册并编译，release 二进制会拒绝该命令，图鉴代码也不参与编译；`cargo run -p omini-tui --example debug_snapshot` 截图导出同样仅限 debug 构建。
 
 ## 验证
 
