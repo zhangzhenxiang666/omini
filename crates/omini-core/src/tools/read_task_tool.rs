@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReadTaskInput {
-    /// 后台任务启动时返回的任务 ID。
+    /// Task ID returned when a background task starts.
     pub task_id: String,
 }
 

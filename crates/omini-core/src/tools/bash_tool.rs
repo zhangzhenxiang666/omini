@@ -28,6 +28,10 @@ pub struct BashInput {
     /// Optional working directory. Use this instead of `cd` in the command.
     #[serde(default)]
     pub workdir: Option<String>,
+    /// Start in the background immediately (default: false). Main agent only; use for expected long operations.
+    /// False or omission retains automatic backgrounding after 30 seconds when capacity is available.
+    #[serde(default)]
+    pub background: bool,
 }
 
 pub struct BashTool;
@@ -63,29 +67,52 @@ impl Tool for BashTool {
 
     fn description(&self) -> &str {
         concat!(
-            "Execute a shell command and return its output. Main-agent commands that run longer than 30 seconds are automatically continued as background tasks when capacity is available. Background task management is only available to the main agent.\n",
-            "The working directory persists between commands, but shell state does not.\n",
-            "\n",
-            "Best for: running build tools (cargo, make), git operations, package managers,\n",
-            "test commands, dev servers, and external CLIs that are not covered by a dedicated tool.\n",
-            "\n",
-            "Not for local project search. Do not use this tool to run `rg`, `grep`, `find`,\n",
-            "or `ls` when the goal is finding files or matching code. Use `search` instead.\n",
-            "\n",
-            "For file operations, prefer these dedicated tools instead of using shell commands:\n",
-            "  search       Search file contents or file paths using ripgrep\n",
-            "  read         Read file contents (with line numbers and offset/limit support)\n",
-            "  edit         Edit an existing text file by exact string replacement\n",
-            "  write        Create a new text file or fully overwrite an existing file\n",
-            "\n",
-            "Avoid using grep/find/rg for normal project search — use the `search` tool instead.\n",
-            "Avoid using cat/head/tail/sed/awk for file reads — use the `read` tool instead.\n",
-            "Avoid using sed/echo/redirect for file edits — use the `edit` or `write` tool instead."
+            "Execute shell commands with sh -c. Use workdir to select a directory; shell state does not persist. Prefer search/read/edit/write for project files.\n",
+            "Only the main agent may set background=true, for expected long operations. False or omission keeps automatic backgrounding after 30 seconds when capacity permits. Explicit background requests fail before execution if unavailable; timeout covers total runtime.\n",
+            "A task_id is not a final result. Continue independent work or end the turn; completion notifies automatically. Do not poll or sleep to wait. Wait for completion before dependent actions; use read_task afterward for full output."
         )
     }
 
     async fn call(&self, input: BashInput, ctx: ToolExecutionContext) -> ToolResult {
         let timeout = Duration::from_millis(input.timeout.unwrap_or(120_000).min(600_000));
+        let manager = ctx
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.task_manager.clone());
+        let is_main = ctx
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.agent_depth == 0);
+        // 显式请求必须在启动进程前取得槽位，不能悄悄退回阻塞的前台执行。
+        let mut reservation = if input.background {
+            let Some(runtime) = &ctx.runtime else {
+                return ToolResult::error(
+                    "background=true requires runtime context; command was not started",
+                );
+            };
+            if runtime.agent_depth != 0 {
+                return ToolResult::error(
+                    "Only the main agent can use background=true; command was not started",
+                );
+            }
+            let Some(manager) = &manager else {
+                return ToolResult::error(
+                    "Background task manager is not available; command was not started",
+                );
+            };
+            if ctx.cancelled.load(Ordering::Relaxed) {
+                return ToolResult::error("Command cancelled; command was not started");
+            }
+            match manager.reserve_background() {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    return ToolResult::error(format!("{error}; command was not started"));
+                }
+            }
+        } else {
+            None
+        };
+        let stop_generation = manager.as_ref().map(|manager| manager.stop_generation());
         let mut command = Command::new("sh");
         command
             .arg("-c")
@@ -97,6 +124,11 @@ impl Tool for BashTool {
         if let Some(workdir) = &input.workdir {
             command.current_dir(workdir);
         }
+        // 将 shell 及其子命令隔离成进程组，取消时一并关闭继承的输出管道。
+        #[cfg(unix)]
+        command.process_group(0);
+        let started_at = Instant::now();
+        let started_at_utc = Timestamp::now();
         let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return ToolResult::error(format!("Failed to spawn shell: {error}")),
@@ -113,23 +145,85 @@ impl Tool for BashTool {
             Arc::clone(&task_cancel_notify),
         );
         let mut process = Some(process);
-        let manager = ctx
-            .runtime
-            .as_ref()
-            .and_then(|runtime| runtime.task_manager.clone());
-        let can_background = ctx
-            .runtime
-            .as_ref()
-            .is_some_and(|runtime| runtime.agent_depth == 0)
-            && manager.is_some();
+        let can_background = is_main && manager.is_some();
         let task_id = ctx.tool_use_id.clone();
-        let started_at = Instant::now();
-        let started_at_utc = Timestamp::now();
         let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(30)));
         let mut background_attempted = false;
         let mut output = OutputTail::default();
 
         loop {
+            // 两种入口共用注册和移交；显式请求在读取输出或检查退出前注册，
+            // 即便命令很快完成，也按后台任务交付一次结果。
+            if let Some(reservation) = reservation.take() {
+                let manager = manager.clone().expect("background manager was checked");
+                let task = TaskInfo {
+                    task_id: task_id.clone(),
+                    owner_thread_id: ctx
+                        .runtime
+                        .as_ref()
+                        .expect("checked runtime")
+                        .owner_thread_id
+                        .clone(),
+                    kind: TaskKind::Bash,
+                    title: task_title(&input),
+                    status: TaskStatus::Running,
+                    created_at: started_at_utc,
+                    updated_at: Timestamp::now(),
+                    completed_at: None,
+                    result_summary: None,
+                };
+                let cancellation = TaskCancellation::new(
+                    Arc::clone(&task_cancelled),
+                    Arc::clone(&task_cancel_notify),
+                );
+                // 跨等待期间发生过停止，即使新输入已关闭边界，旧命令也
+                // 不能重新取得完成通知的唤醒资格。
+                let inherit_stop = ctx.cancelled.load(Ordering::Relaxed)
+                    || stop_generation != Some(manager.stop_generation());
+                if let Err(error) = manager
+                    .register(task.clone(), Some(cancellation.clone()), inherit_stop)
+                    .await
+                {
+                    cancellation.cancel();
+                    // 先排空有界输出通道，避免回收进程时被输出读取器反压卡住。
+                    while output_rx.recv().await.is_some() {}
+                    let _ = process.take().expect("process handle is present").await;
+                    let mut task = task;
+                    task.status = TaskStatus::Failed;
+                    task.updated_at = Timestamp::now();
+                    task.completed_at = Some(task.updated_at);
+                    let mut message = format!(
+                        "Failed to register background task: {error}. The command may have started and was stopped; check side effects before retrying."
+                    );
+                    task.result_summary = Some(message.clone());
+                    // 注册失败可能已写入内存或持久层；收敛终态但不再投递
+                    // 完成通知，调用方会通过当前工具错误获知失败。
+                    if let Err(cleanup_error) = manager.update(task).await {
+                        tracing::warn!(task_id = %task_id, %cleanup_error, "failed to persist Bash registration failure");
+                        message
+                            .push_str(&format!(" Failed to persist task failure: {cleanup_error}"));
+                    }
+                    return ToolResult::error(message);
+                }
+                tokio::spawn(continue_background(
+                    manager,
+                    task,
+                    output_rx,
+                    process.take().expect("process handle is present"),
+                    output,
+                    timeout,
+                    reservation,
+                ));
+                return ToolResult::ok(
+                    serde_json::json!({
+                        "task_id": task_id,
+                        "status": "running",
+                        "background": true,
+                        "elapsed_ms": started_at.elapsed().as_millis(),
+                    })
+                    .to_string(),
+                );
+            }
             tokio::select! {
                 biased;
                 chunk = output_rx.recv() => match chunk {
@@ -157,55 +251,7 @@ impl Tool for BashTool {
                     let Some(manager) = manager.clone() else {
                         continue;
                     };
-                    let reservation = match manager.reserve_background() {
-                        Ok(reservation) => reservation,
-                        Err(_) => continue,
-                    };
-                    let task = TaskInfo {
-                        task_id: task_id.clone(),
-                        owner_thread_id: ctx.runtime.as_ref().expect("checked runtime").owner_thread_id.clone(),
-                        kind: TaskKind::Bash,
-                        title: task_title(&input),
-                        status: TaskStatus::Running,
-                        created_at: started_at_utc,
-                        updated_at: Timestamp::now(),
-                        completed_at: None,
-                        result_summary: None,
-                    };
-                    if manager
-                        .register(
-                            task.clone(),
-                            Some(TaskCancellation::new(
-                                Arc::clone(&task_cancelled),
-                                Arc::clone(&task_cancel_notify),
-                            )),
-                            // 仅主 Agent 能转后台，停止边界由管理器统一判定。
-                            false,
-                        )
-                        .await
-                        .is_err()
-                    {
-                        drop(reservation);
-                        continue;
-                    }
-                    tokio::spawn(continue_background(
-                        manager,
-                        task,
-                        output_rx,
-                        process.take().expect("process handle is present"),
-                        output,
-                        timeout,
-                        reservation,
-                    ));
-                    return ToolResult::ok(
-                        serde_json::json!({
-                            "task_id": task_id,
-                            "status": "running",
-                            "background": true,
-                            "elapsed_ms": started_at.elapsed().as_millis(),
-                        })
-                        .to_string(),
-                    );
+                    reservation = manager.reserve_background().ok();
                 }
             }
         }
@@ -232,6 +278,7 @@ fn start_process(
     task_cancelled: Arc<AtomicBool>,
     task_cancel_notify: Arc<Notify>,
 ) -> (mpsc::Receiver<OutputChunk>, JoinHandle<ProcessResult>) {
+    let process_id = child.id();
     let (output_tx, output_rx) = mpsc::channel(64);
     let (stdout_tx, stderr_tx) = (output_tx.clone(), output_tx.clone());
     let mut readers = Vec::new();
@@ -260,7 +307,7 @@ fn start_process(
                 Err(error) => (None, false, false, Some(error.to_string())),
             },
             _ = wait_for_cancel(&run_cancelled, &run_cancel_notify), if !task_cancelled.load(Ordering::Relaxed) => {
-                let _ = child.kill().await;
+                kill_process(&mut child, process_id).await;
                 let result = child.wait().await;
                 match result {
                     Ok(status) => (Some(status), false, true, None),
@@ -268,7 +315,7 @@ fn start_process(
                 }
             }
             _ = wait_for_cancel(&task_cancelled, &task_cancel_notify) => {
-                let _ = child.kill().await;
+                kill_process(&mut child, process_id).await;
                 let result = child.wait().await;
                 match result {
                     Ok(status) => (Some(status), false, true, None),
@@ -276,7 +323,7 @@ fn start_process(
                 }
             }
             _ = &mut timeout_sleep => {
-                let _ = child.kill().await;
+                kill_process(&mut child, process_id).await;
                 let result = child.wait().await;
                 match result {
                     Ok(status) => (Some(status), true, false, None),
@@ -299,6 +346,23 @@ fn start_process(
         }
     });
     (output_rx, process)
+}
+
+/// 取消整个 shell 进程组并回收直接子进程，避免后代仍持有输出管道使任务悬挂。
+/// 非 Unix 平台沿用直接子进程取消；主动脱离进程组的程序不在此回收范围内。
+async fn kill_process(child: &mut Child, process_id: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(process_id) = process_id
+        && let Ok(process_id) = i32::try_from(process_id)
+    {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(process_id),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = process_id;
+    let _ = child.kill().await;
 }
 
 async fn wait_for_cancel(cancelled: &AtomicBool, notify: &Notify) {
@@ -532,6 +596,10 @@ impl OutputTail {
 
 /// 每个输出流在最终结果和内存快照中保留的最大字节数。
 const OUTPUT_BYTE_LIMIT: usize = 256 * 1024;
+
+#[cfg(test)]
+#[path = "bash_tests.rs"]
+mod execution_tests;
 
 #[cfg(test)]
 mod tests {

@@ -2825,6 +2825,7 @@ dependencies = [
  "bon",
  "dirs",
  "jiff",
+ "nix 0.31.3",
  "omini-config",
  "omini-domain",
  "omini-mcp-client",

@@ -41,7 +41,10 @@ impl ToolPolicy<BashProbe> for ProbePolicy {
 }
 
 fn probe_input(command: &str) -> HashMap<String, Value> {
-    HashMap::from([("command".into(), Value::String(command.into()))])
+    HashMap::from([
+        ("command".into(), Value::String(command.into())),
+        ("background".into(), Value::Bool(true)),
+    ])
 }
 
 /// 审批前不执行；批准只释放当前一次调用，重复响应也不会重复执行。

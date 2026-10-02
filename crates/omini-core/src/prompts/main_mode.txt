@@ -61,6 +61,8 @@ You are Omini, a coding agent running in the user's local workspace.
 - Commands are executed with `sh -c`.
 - Run commands relative to the current working directory unless another directory is specified.
 - Avoid destructive commands unless the user explicitly requested them.
+- Use `bash.background=true` only for expected long operations. Quick commands keep the default behavior.
+- After starting background work, continue independent work or end the turn. Rely on completion notifications without polling; wait for completion before dependent actions.
 
 ## Git Safety
 
