@@ -69,6 +69,17 @@ pub struct TaskNotification {
     pub created_at: Timestamp,
 }
 
+/// 后台任务完成通知进入模型上下文的 User 消息文本。
+///
+/// core 的运行内注入、停止边界的立即结算与 server 的持久化过滤共用此构造，
+/// 保证内存上下文与落库行内容一致；部分重叠去重后也以过滤后的任务集调用。
+pub fn task_notification_text(completions: &[TaskCompletion]) -> String {
+    format!(
+        "<task_notifications>{}</task_notifications>",
+        serde_json::to_string(completions).unwrap_or_else(|_| "[]".to_string())
+    )
+}
+
 /// 系统执行工具后产生的结果；在模型上下文中对应 User 角色消息。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ToolResultRecord {

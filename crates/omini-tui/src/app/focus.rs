@@ -1,6 +1,7 @@
 use crate::app::state::{AppState, InteractionStep};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
+    StopConfirmation,
     Page,
     Plan,
     Pause,
@@ -9,9 +10,11 @@ pub enum Focus {
     SessionSelector,
     Composer,
 }
-/// 页面、计划和暂停请求拥有稳定优先级；关闭后恢复原来的局部交互。
+/// 停止确认独占输入；其余页面、计划和暂停请求保持原有优先级。
 pub fn current(state: &AppState) -> Focus {
-    if matches!(
+    if state.dialogs.stop_confirmation.is_some() {
+        Focus::StopConfirmation
+    } else if matches!(
         state.dialogs.interaction_step,
         Some(InteractionStep::Thread { .. } | InteractionStep::Agents(_))
     ) {

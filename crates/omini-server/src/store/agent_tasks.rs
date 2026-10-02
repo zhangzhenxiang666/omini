@@ -277,33 +277,64 @@ impl Store {
         Ok(())
     }
 
-    /// 任务完成通知幂等落库:仅在存在未投递通知的任务时写入 UI 与模型上下文。
-    /// 闸门判定、两条插入与置位在同一事务内完成。
+    /// 任务完成通知幂等落库：仅写入尚未投递的任务，返回实际写入的新通知。
+    ///
+    /// 部分重叠请求（部分任务此前已投递）只落库未投递部分；全部已投递时
+    /// 不写任何行并返回 `None`，调用方据此跳过 UI 广播。闸门判定、按新
+    /// 内容过滤的 UI 与模型上下文插入、置位在同一事务内完成。
     pub async fn insert_task_notification(
         &self,
         owner_thread_id: &str,
         notification: &omini_domain::conversation::TaskNotification,
-        llm_message: &omini_model::message::Message,
-        task_ids: &[String],
         created_at: Timestamp,
         thread_dir: &ThreadDir,
-    ) -> Result<(), StoreError> {
+    ) -> Result<Option<omini_domain::conversation::TaskNotification>, StoreError> {
         let mut conn = self.conn();
         let mut tx = conn.transaction().await?;
-        let has_pending_task = BackgroundTask::filter(
+        let task_ids = notification
+            .tasks
+            .iter()
+            .map(|completion| completion.task_id.clone())
+            .collect::<Vec<_>>();
+        // 查询限定归属线程：跨线程同名任务 ID 不得被本线程的通知误标交付。
+        let fresh_tasks = BackgroundTask::filter(
             BackgroundTask::fields()
                 .task_id()
-                .in_list(task_ids.to_vec())
+                .in_list(task_ids)
+                .and(
+                    BackgroundTask::fields()
+                        .owner_thread_id()
+                        .eq(owner_thread_id.to_string()),
+                )
                 .and(BackgroundTask::fields().notification_delivered().eq(false)),
         )
-        .first()
         .exec(&mut tx)
-        .await?
-        .is_some();
-        if !has_pending_task {
+        .await?;
+        // 已投递任务从通知内容中剔除；单批内重复出现的任务 ID 亦按首份
+        // 去重。去重后的任务集同时决定 UI 行、模型上下文行与置位范围，
+        // 三条写入始终针对同一批新任务。
+        let fresh_ids: std::collections::HashSet<&str> = fresh_tasks
+            .iter()
+            .map(|task| task.task_id.as_str())
+            .collect();
+        let mut seen_ids: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let fresh_completions: Vec<_> = notification
+            .tasks
+            .iter()
+            .filter(|completion| {
+                fresh_ids.contains(completion.task_id.as_str())
+                    && seen_ids.insert(completion.task_id.as_str())
+            })
+            .cloned()
+            .collect();
+        if fresh_completions.is_empty() {
             tx.commit().await?;
-            return Ok(());
+            return Ok(None);
         }
+        let fresh_notification = omini_domain::conversation::TaskNotification {
+            tasks: fresh_completions,
+            created_at: notification.created_at,
+        };
 
         let owner = Thread::filter_by_id(owner_thread_id)
             .first()
@@ -312,7 +343,7 @@ impl Store {
             .ok_or_else(|| StoreError::MissingRow(format!("thread '{owner_thread_id}'")))?;
         let model_ref = format!("{}/{}", owner.provider, owner.model);
         let notification_json = serde_json::to_string(&ConversationEntry::SystemEvent(
-            omini_domain::conversation::SystemEvent::TaskNotification(notification.clone()),
+            omini_domain::conversation::SystemEvent::TaskNotification(fresh_notification.clone()),
         ))?;
         // UI 消息经统一的 sidecar 路径写入,与其它会话条目一致;
         // 与后续插入、置位同事务,保持闸门原子性。
@@ -331,7 +362,12 @@ impl Store {
         .await?;
         let version = owner.llm_context_version;
         let ordinal = next_llm_ordinal(&mut tx, owner_thread_id, version).await?;
-        let llm_json = serde_json::to_string(&llm_message.content)?;
+        // 模型上下文行与 UI 行使用同一去重后任务集,保证后续按版本重放
+        // 时两条历史一致;文本构造与 core 的运行内注入共用 domain 函数。
+        let llm_json = omini_model::message::Message::from_user_text(
+            omini_domain::conversation::task_notification_text(&fresh_notification.tasks),
+        );
+        let llm_json = serde_json::to_string(&llm_json.content)?;
         toasty::create!(LlmMessage {
             thread_id: owner_thread_id.to_string(),
             context_version: version,
@@ -342,8 +378,17 @@ impl Store {
         })
         .exec(&mut tx)
         .await?;
-        for task_id in task_ids {
-            if let Some(mut background) = BackgroundTask::filter_by_task_id(task_id)
+        // 置位范围与写入内容严格一致:请求的 task_ids 可能是通知内容的
+        // 超集(调用方重复/重叠请求),不在本通知内的任务即使数据库仍
+        // 未交付,其交付也不由本次写入确认——留给真正包含它的插入。
+        let delivered_ids: std::collections::HashSet<&str> = fresh_notification
+            .tasks
+            .iter()
+            .map(|completion| completion.task_id.as_str())
+            .collect();
+        for task_id in delivered_ids {
+            let task_id = task_id.to_string();
+            if let Some(mut background) = BackgroundTask::filter_by_task_id(&task_id)
                 .first()
                 .exec(&mut tx)
                 .await?
@@ -371,7 +416,7 @@ impl Store {
             }
         }
         tx.commit().await?;
-        Ok(())
+        Ok(Some(fresh_notification))
     }
 }
 

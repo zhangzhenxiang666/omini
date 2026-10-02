@@ -708,19 +708,23 @@ async fn task_notification_is_idempotent() {
         }],
         created_at: completed_at,
     };
-    let llm_message = Message::from_user_text("agent task completed".to_string());
-    for _ in 0..2 {
-        db.insert_task_notification(
-            "owner",
-            &notification,
-            &llm_message,
-            &["task_done".to_string()],
-            completed_at,
-            &project.thread("owner"),
-        )
-        .await
-        .unwrap();
+    for round in 0..2 {
+        let inserted = db
+            .insert_task_notification(
+                "owner",
+                &notification,
+                completed_at,
+                &project.thread("owner"),
+            )
+            .await
+            .unwrap();
+        // 首次返回实际写入的新通知;重复请求没有新任务,返回 None。
+        assert_eq!(inserted.is_some(), round == 0);
     }
+    // 落库行内容按 domain 共享构造重建,与 core 的运行内注入一致。
+    let llm_message = Message::from_user_text(omini_domain::conversation::task_notification_text(
+        &notification.tasks,
+    ));
     let after = Message::new(
         Role::Assistant,
         vec![ContentBlock::from_text("after notification".to_string())],
@@ -748,6 +752,94 @@ async fn task_notification_is_idempotent() {
             omini_domain::conversation::SystemEvent::TaskNotification(restored)
         )] if restored == &notification
     ));
+}
+
+/// 回归：同线程的其它任务可能也等待通知。置位必须只覆盖实际写入的任务，缺席任务保持
+/// 未交付，其后的正规插入仍能写入新通知。
+#[tokio::test]
+async fn payload_keeps_gate() {
+    let (db, project, _root) = temp_db().await;
+    project.create_thread("owner").unwrap();
+    db.create_thread(&test_thread("owner")).await.unwrap();
+    for (task_id, agent_id) in [("task_done", "agent_done"), ("task_extra", "agent_extra")] {
+        let task = test_agent_task(task_id, agent_id, "owner");
+        db.create_agent_task(
+            TEST_PROJECT_ID,
+            &task,
+            &test_agent_thread(agent_id, "owner"),
+            &crate::support::store::test_user_input(&Message::from_user_text(
+                "do work".to_string(),
+            )),
+            &Message::from_user_text("do work".to_string()),
+        )
+        .await
+        .unwrap();
+        db.finish_agent_task(
+            task_id,
+            TaskStatus::Completed,
+            &AgentTaskResult {
+                output: Some("done".to_string()),
+                error: None,
+                warnings: Vec::new(),
+                undelivered_messages: None,
+            },
+            fixed_time(),
+        )
+        .await
+        .unwrap();
+    }
+    let completion = |task_id: &str| omini_domain::task::TaskCompletion {
+        task_id: task_id.to_string(),
+        kind: omini_domain::task::TaskKind::SubAgent,
+        label: "general".to_string(),
+        title: "Test agent".to_string(),
+        status: TaskStatus::Completed,
+        summary: None,
+    };
+    // 通知只包含 task_done，数据库中同属 owner 的 task_extra 仍未交付。
+    let inserted = db
+        .insert_task_notification(
+            "owner",
+            &omini_domain::conversation::TaskNotification {
+                tasks: vec![completion("task_done")],
+                created_at: fixed_time(),
+            },
+            fixed_time(),
+            &project.thread("owner"),
+        )
+        .await
+        .unwrap();
+    assert!(inserted.is_some());
+    let tasks = db.list_agent_tasks("owner").await.unwrap();
+    let delivered: std::collections::HashMap<&str, bool> = tasks
+        .iter()
+        .map(|task| (task.task_id.as_str(), task.notification_delivered))
+        .collect();
+    assert!(delivered["task_done"], "present task is delivered");
+    assert!(
+        !delivered["task_extra"],
+        "task absent from the notification must stay undelivered"
+    );
+
+    // 缺席任务随后的正规插入照常写入新通知。
+    let later = db
+        .insert_task_notification(
+            "owner",
+            &omini_domain::conversation::TaskNotification {
+                tasks: vec![completion("task_extra")],
+                created_at: fixed_time(),
+            },
+            fixed_time(),
+            &project.thread("owner"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        later.is_some(),
+        "later insertion of the absent task succeeds"
+    );
+    let tasks = db.list_agent_tasks("owner").await.unwrap();
+    assert!(tasks.iter().all(|task| task.notification_delivered));
 }
 
 /// 回归：模型路径写入的时间列必须无损往返且保持时间序。
@@ -864,16 +956,9 @@ async fn upsert_task_replay_keeps_delivery_gate_and_creation_time() {
         }],
         created_at: now,
     };
-    db.insert_task_notification(
-        "owner",
-        &notification,
-        &Message::from_user_text("bash task completed".to_string()),
-        &["bash_task".to_string()],
-        now,
-        &project.thread("owner"),
-    )
-    .await
-    .unwrap();
+    db.insert_task_notification("owner", &notification, now, &project.thread("owner"))
+        .await
+        .unwrap();
 
     // 投递完成后，以更晚的 created_at/updated_at 重放同键 UpsertTask。
     let later = now + SignedDuration::from_hours(1);
@@ -894,16 +979,14 @@ async fn upsert_task_replay_keeps_delivery_gate_and_creation_time() {
         "conflict update must keep the first creation time"
     );
     // 幂等闸门保持后，重复的通知插入不应再写入第二条时间线记录。
-    db.insert_task_notification(
-        "owner",
-        &notification,
-        &Message::from_user_text("bash task completed again".to_string()),
-        &["bash_task".to_string()],
-        later,
-        &project.thread("owner"),
-    )
-    .await
-    .unwrap();
+    let replayed = db
+        .insert_task_notification("owner", &notification, later, &project.thread("owner"))
+        .await
+        .unwrap();
+    assert!(
+        replayed.is_none(),
+        "fully delivered replay must report no new content"
+    );
     let count = count_thread_messages(&db, "owner", MessageKind::ConversationEntry).await;
     assert_eq!(count, 1);
 }
@@ -939,16 +1022,11 @@ async fn bash_task_notification_is_persisted_as_a_generic_task_event() {
         created_at: now,
     };
 
-    db.insert_task_notification(
-        "owner",
-        &notification,
-        &Message::from_user_text("bash task completed".to_string()),
-        &["bash_task".to_string()],
-        now,
-        &project.thread("owner"),
-    )
-    .await
-    .unwrap();
+    let inserted = db
+        .insert_task_notification("owner", &notification, now, &project.thread("owner"))
+        .await
+        .unwrap();
+    assert!(inserted.is_some());
 
     let history = load_messages(&db, "owner", &project.thread("owner")).await;
     assert!(matches!(

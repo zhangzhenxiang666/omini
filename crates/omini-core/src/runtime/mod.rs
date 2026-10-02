@@ -8,6 +8,8 @@ pub(crate) mod manual_compact;
 pub(crate) mod plan;
 pub(crate) mod plan_approval;
 pub(crate) mod run_loop;
+#[cfg(test)]
+mod run_loop_tests;
 pub(crate) mod service;
 pub(crate) mod usage;
 pub(crate) mod user_input;

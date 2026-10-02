@@ -52,9 +52,9 @@ pub enum EngineToRuntimeEvent {
     /// 后台任务完成通知已到达安全输入边界，等待原子持久化后进入内存历史。
     TaskNotificationsProduced {
         notification: TaskNotification,
-        llm_message: Message,
-        task_ids: Vec<String>,
-        ack: oneshot::Sender<Result<(), String>>,
+        /// 持久化结果回带实际新交付的任务 ID；`None` 表示请求任务全部
+        /// 已交付，没有写入任何新内容，引擎不得再注入模型上下文。
+        ack: oneshot::Sender<Result<Option<Vec<String>>, String>>,
     },
 
     /// 引擎完成一轮流式输出，产出一条完整的 Assistant Message。

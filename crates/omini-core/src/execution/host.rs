@@ -202,14 +202,16 @@ pub trait AgentHost: Send + Sync {
     /// 创建或更新通用后台任务索引。
     async fn upsert_background_task(&self, task: &TaskInfo) -> Result<(), HostError>;
 
-    /// 持久化任务完成通知；成功后宿主负责投影，core 才继续后续运行。
+    /// 持久化任务完成通知；返回本次实际写入的新通知内容。
+    ///
+    /// 幂等语义：通知中的已交付任务会被过滤，仅未交付
+    /// 部分写入 UI 与模型上下文历史并出现在返回值中；没有新任务时返回
+    /// `None` 且不落库、不广播，调用方不得据此再次投影 UI。
     async fn insert_task_notification(
         &self,
         owner_thread_id: &str,
         notification: &TaskNotification,
-        llm_message: &Message,
-        task_ids: &[String],
-    ) -> Result<(), HostError>;
+    ) -> Result<Option<TaskNotification>, HostError>;
 
     // ===== 子 Agent 会话与消息 =====
 

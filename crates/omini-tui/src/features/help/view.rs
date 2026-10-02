@@ -162,7 +162,10 @@ fn general_lines(content_width: usize, selected: usize, max_lines: usize) -> Vec
         ("列表 Enter / Esc", "确认切换 / 不切换，随后返回输入框"),
         ("PageUp / PageDown", "滚动消息"),
         ("Ctrl+Home / Ctrl+End", "跳到顶部或底部"),
-        ("Esc", "输入框焦点下取消运行；补全或 Help 中关闭当前面板"),
+        (
+            "Esc",
+            "输入框焦点下取消运行；有后台任务先确认；Help 中关闭面板",
+        ),
         ("Alt+Enter", "运行中立即提交排队输入"),
         ("Ctrl+C", "清空输入"),
     ];

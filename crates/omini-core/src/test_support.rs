@@ -119,6 +119,11 @@ struct RecordingHostInner {
     /// fail_pending_task_messages 返回的结算条数。
     failed_message_count: Mutex<u32>,
     append_pause: Mutex<Option<Arc<OperationPause>>>,
+    /// create_agent_session 的受控暂停点，用于测试跨宿主会话建立的
+    /// 注册竞态（停止边界在等待期间建立）。
+    create_session_pause: Mutex<Option<Arc<OperationPause>>>,
+    /// insert_task_notification 已交付的任务 ID，用于模拟持久化闸门。
+    delivered_tasks: Mutex<std::collections::HashSet<String>>,
 }
 
 pub struct OperationPause {
@@ -147,6 +152,30 @@ impl RecordingHost {
             .lock()
             .expect("append pause lock poisoned") = Some(Arc::clone(&pause));
         pause
+    }
+
+    /// 在下一次 create_agent_session 处暂停,供测试控制注册时序。
+    pub fn pause_create_session(&self) -> Arc<OperationPause> {
+        let pause = Arc::new(OperationPause {
+            entered: Notify::new(),
+            released: Notify::new(),
+        });
+        *self
+            .inner
+            .create_session_pause
+            .lock()
+            .expect("create session pause lock poisoned") = Some(Arc::clone(&pause));
+        pause
+    }
+
+    /// 预置宿主闸门中已交付的任务,模拟持久层交付位早于内存账本同步
+    /// 的不一致窗口(重复/部分重叠请求由此产生 Ok(None) 或部分 fresh)。
+    pub fn preset_delivered(&self, task_id: &str) {
+        self.inner
+            .delivered_tasks
+            .lock()
+            .expect("delivered tasks lock poisoned")
+            .insert(task_id.to_string());
     }
 
     pub fn record_call(&self, name: &str) {
@@ -349,11 +378,40 @@ impl AgentHost for RecordingHost {
     async fn insert_task_notification(
         &self,
         _owner_thread_id: &str,
-        _notification: &TaskNotification,
-        _llm_message: &Message,
-        _task_ids: &[String],
-    ) -> Result<(), HostError> {
-        self.result("insert_task_notification")
+        notification: &TaskNotification,
+    ) -> Result<Option<TaskNotification>, HostError> {
+        self.result("insert_task_notification")?;
+        // 模拟 store 的交付闸门：仅未交付的任务构成新通知，重复与部分
+        // 重叠请求只返回真正新增的内容。
+        let fresh: Vec<_> = notification
+            .tasks
+            .iter()
+            .filter(|completion| {
+                !self
+                    .inner
+                    .delivered_tasks
+                    .lock()
+                    .expect("delivered tasks lock poisoned")
+                    .contains(&completion.task_id)
+            })
+            .cloned()
+            .collect();
+        if fresh.is_empty() {
+            return Ok(None);
+        }
+        let mut delivered = self
+            .inner
+            .delivered_tasks
+            .lock()
+            .expect("delivered tasks lock poisoned");
+        for completion in &fresh {
+            delivered.insert(completion.task_id.clone());
+        }
+        drop(delivered);
+        Ok(Some(TaskNotification {
+            tasks: fresh,
+            created_at: notification.created_at,
+        }))
     }
 
     async fn create_agent_session(
@@ -361,6 +419,16 @@ impl AgentHost for RecordingHost {
         request: AgentSessionRequest,
     ) -> Result<AgentSession, HostError> {
         self.result("create_agent_session")?;
+        let pause = self
+            .inner
+            .create_session_pause
+            .lock()
+            .expect("create session pause lock poisoned")
+            .take();
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.released.notified().await;
+        }
         let thread_dir = omini_config::project::ThreadDir::from_path(
             std::env::temp_dir().join(format!("omini-recording-host-{}", request.task_id)),
         );

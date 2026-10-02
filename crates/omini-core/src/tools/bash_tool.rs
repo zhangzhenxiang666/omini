@@ -179,6 +179,8 @@ impl Tool for BashTool {
                                 Arc::clone(&task_cancelled),
                                 Arc::clone(&task_cancel_notify),
                             )),
+                            // 仅主 Agent 能转后台，停止边界由管理器统一判定。
+                            false,
                         )
                         .await
                         .is_err()

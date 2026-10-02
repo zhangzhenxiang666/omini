@@ -255,36 +255,53 @@ impl EngineEventSink {
                     let _ = ack.send(result);
                 }
             },
-            EngineToRuntimeEvent::TaskNotificationsProduced {
-                notification,
-                llm_message,
-                task_ids,
-                ack,
-            } => match &self.projection {
-                // 完成通知先持久化，成功后才标记送达并允许后续运行继续。
-                Projection::Main(main) => {
-                    let result = self
-                        .host
-                        .insert_task_notification(
-                            &main.thread_id,
-                            &notification,
-                            &llm_message,
-                            &task_ids,
-                        )
-                        .await
-                        .map_err(|error| error.to_string());
-                    if result.is_ok() {
-                        main.task_supervisor.mark_notifications_delivered(&task_ids);
+            EngineToRuntimeEvent::TaskNotificationsProduced { notification, ack } => {
+                match &self.projection {
+                    // 完成通知先持久化，成功后才标记送达并允许后续运行继续。
+                    Projection::Main(main) => {
+                        let result = self
+                            .host
+                            .insert_task_notification(&main.thread_id, &notification)
+                            .await
+                            .map_err(|error| error.to_string());
+                        match &result {
+                            Ok(_) => {
+                                let task_ids = notification
+                                    .tasks
+                                    .iter()
+                                    .map(|completion| completion.task_id.clone())
+                                    .collect::<Vec<_>>();
+                                // 成功确认即提交的全部任务已交付：新内容本次写入，
+                                // 其余任务此前已写入。把全部提交身份从在途集合
+                                // 退役，否则部分重叠/重复请求会在待交付集合中
+                                // 留下永不清理的身份，实例无法回到可回收空闲态。
+                                // ack 回传与注入仍只携带 fresh 部分。
+                                main.task_supervisor.mark_notifications_delivered(&task_ids);
+                            }
+                            Err(_) => {
+                                // 失败保留在途身份，由引擎重试。
+                            }
+                        }
+                        // 回带实际新交付的任务 ID：引擎据此只注入新内容，
+                        // 全部已交付时不注入，避免模型上下文出现重复通知。
+                        let _ = ack.send(result.map(|fresh| {
+                            fresh.map(|notification| {
+                                notification
+                                    .tasks
+                                    .into_iter()
+                                    .map(|completion| completion.task_id)
+                                    .collect::<Vec<String>>()
+                            })
+                        }));
                     }
-                    let _ = ack.send(result);
+                    Projection::Child(..) => {
+                        let _ = ack.send(Err(
+                            "background task notifications are only supported by the main engine"
+                                .to_string(),
+                        ));
+                    }
                 }
-                Projection::Child(..) => {
-                    let _ = ack.send(Err(
-                        "background task notifications are only supported by the main engine"
-                            .to_string(),
-                    ));
-                }
-            },
+            }
             EngineToRuntimeEvent::LlmHistoryProduced(msg) => match &self.projection {
                 Projection::Main(main) => {
                     self.append_llm(&main.thread_id, &msg).await;

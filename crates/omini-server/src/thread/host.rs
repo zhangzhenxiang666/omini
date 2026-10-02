@@ -412,32 +412,32 @@ impl AgentHost for SessionHost {
         &self,
         owner_thread_id: &str,
         notification: &domain::conversation::TaskNotification,
-        llm_message: &omini_model::message::Message,
-        task_ids: &[String],
-    ) -> Result<(), HostError> {
-        self.db
+    ) -> Result<Option<domain::conversation::TaskNotification>, HostError> {
+        let inserted = self
+            .db
             .insert_task_notification(
                 owner_thread_id,
                 notification,
-                llm_message,
-                task_ids,
                 Timestamp::now(),
                 &self.thread_dir(owner_thread_id),
             )
             .await
             .map_err(Self::store_error("insert task notification"))?;
-        // 完成通知已落库：投影为注入的 user message，客户端从快照与回放都能对齐。
-        let _ = self
-            .server_event_inbox
-            .send(client_proto::RuntimeEvent::new(
-                client_proto::TypedRuntimeEvent::UserMessageInjected {
-                    item: client_proto::HistoryItem::SystemEvent(
-                        domain::conversation::SystemEvent::TaskNotification(notification.clone()),
-                    ),
-                    client_echo_id: None,
-                },
-            ));
-        Ok(())
+        // 仅实际写入的新内容才投影为注入的 user message；store 去重后没有
+        // 新任务时不广播，客户端从快照与回放都不会看到重复通知。
+        if let Some(fresh) = &inserted {
+            let _ = self
+                .server_event_inbox
+                .send(client_proto::RuntimeEvent::new(
+                    client_proto::TypedRuntimeEvent::UserMessageInjected {
+                        item: client_proto::HistoryItem::SystemEvent(
+                            domain::conversation::SystemEvent::TaskNotification(fresh.clone()),
+                        ),
+                        client_echo_id: None,
+                    },
+                ));
+        }
+        Ok(inserted)
     }
 
     async fn create_agent_session(

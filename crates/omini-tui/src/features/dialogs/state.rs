@@ -15,4 +15,12 @@ pub struct DialogsState {
     pub interaction_step: Option<InteractionStep>,
     /// /help 底部抽屉状态。
     pub help_drawer: Option<HelpDrawerState>,
+    /// 主会话停止确认；后台工作保持运行，只有确认后才发送取消请求。
+    pub stop_confirmation: Option<StopConfirmation>,
+}
+
+#[derive(Debug, Default)]
+pub struct StopConfirmation {
+    /// 默认保留工作，避免重复 Esc 或直接 Enter 意外取消后台任务。
+    pub stop_selected: bool,
 }

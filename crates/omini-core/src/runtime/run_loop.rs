@@ -3,6 +3,8 @@ use super::*;
 use crate::execution::handle::AgentOutput;
 use crate::execution::snapshot::{AgentLifecycle, CurrentRun};
 use crate::runtime::command::AgentCommand;
+use omini_domain::conversation::TaskNotification;
+use omini_domain::task::TaskCompletion;
 use tracing::Instrument;
 
 impl AgentRuntime {
@@ -38,6 +40,13 @@ impl AgentRuntime {
             if self.gate.is_free()
                 && let Some(start) = self.deferred_start.take()
             {
+                // 停止边界内丢弃被推迟的通知续跑：延迟启动只承载自动唤醒，
+                // 边界已撤销其资格。必须同步清除闸门的待重试标记，否则
+                // 实例快照永远报告待处理工作，无法回到可回收的空闲态。
+                if self.task_supervisor.stop_boundary_open() {
+                    self.gate.clear_deferred();
+                    continue;
+                }
                 self.process_run(start, None).await;
                 continue;
             }
@@ -55,9 +64,17 @@ impl AgentRuntime {
                     }
                 }
                 Some(completion) = self.task_completion_rx.recv() => {
+                    // 停止边界内的完成：立即结算持久化并入收件箱，既不进入
+                    // 引擎队列也不唤醒主运行；边界外的完成保持空闲自动续跑。
+                    if self
+                        .task_supervisor
+                        .completion_is_stopped(&completion.task_id)
+                    {
+                        self.persist_stopped_completions(vec![completion]).await;
+                        continue;
+                    }
                     self.query_engine.enqueue_task_completion(completion);
                     self.collect_task_completions().await;
-                    // 空闲时的任务完成通知自动续跑；收尾阶段只入队不续跑。
                     if self.state.lifecycle() == AgentLifecycle::Active
                         && !self.output.is_closed()
                     {
@@ -79,6 +96,162 @@ impl AgentRuntime {
         self.shutdown().await;
         let _ = self.output.send(AgentOutput::Closed).await;
         self.state.set_lifecycle(AgentLifecycle::Closed);
+    }
+
+    /// 确认后的主停止：先建立停止边界撤销全部自动唤醒资格，再发出取消
+    /// 信号并取消当前运行与整棵后台任务树。
+    ///
+    /// 边界必须先于取消信号建立——取消后陆续完成或仍在注册的后代都属于
+    /// 被停止的工作，其通知只结算持久化，不再驱动任何主运行。
+    pub(crate) async fn stop_main_work(&self) {
+        self.task_supervisor.open_stop_boundary();
+        self.cancelled.store(true, Ordering::Relaxed);
+        self.query_engine.notify_cancel_waiters();
+        self.task_supervisor.cancel_all().await;
+    }
+
+    /// 运行中的完成接收：停止完成立即结算入箱（不进入引擎队列，也就
+    /// 不会以 had_task_notification 触发本次运行的额外续转），边界外
+    /// 完成照常排队等待 Turn 边界的引擎排空。
+    async fn handle_run_completion(&self, completion: TaskCompletion) {
+        if self
+            .task_supervisor
+            .completion_is_stopped(&completion.task_id)
+        {
+            self.persist_stopped_completions(vec![completion]).await;
+        } else {
+            self.query_engine.enqueue_task_completion(completion);
+        }
+    }
+
+    /// 把停止边界内的完成通知立即结算落库并送入收件箱。
+    ///
+    /// 通知在完成时刻持久化并广播（UI 及时可见），但不创建主运行、不发起
+    /// Provider 请求。完成进入独立收件箱而非引擎队列：与引擎排空隔离，
+    /// 旧完成既不会在运行边界触发额外续跑（follow_up），也不会被重复注入。
+    /// 落库失败时同样入箱，由 [`Self::flush_stopped_inbox`] 在下一次显式
+    /// 输入前重试，通知不丢失。
+    async fn persist_stopped_completions(&self, completions: Vec<TaskCompletion>) {
+        if completions.is_empty() {
+            return;
+        }
+        let task_ids = completions
+            .iter()
+            .map(|completion| completion.task_id.clone())
+            .collect::<Vec<_>>();
+        let notification = TaskNotification {
+            tasks: completions.clone(),
+            created_at: Timestamp::now(),
+        };
+        match self
+            .host
+            .insert_task_notification(&self.thread_id, &notification)
+            .await
+        {
+            // 成功确认即提交的全部任务已交付（新内容本次写入、其余此前
+            // 已写入），全部提交身份从在途集合退役；重复/部分重叠结算
+            // 不会在待交付集合中留下永不清理的身份。注入收件箱仍按
+            // completions 全量去重进行。
+            Ok(_) => {
+                self.task_supervisor.mark_notifications_delivered(&task_ids);
+            }
+            Err(error) => {
+                // 失败保留在途身份，由下一次显式输入前的冲刷重试。
+                tracing::warn!(thread_id = %self.thread_id, %error, "failed to settle stopped task notification");
+                let _ = self
+                    .output
+                    .send_event(RuntimeToServerEvent::warning(format!(
+                        "后台任务通知暂时未能落库：{error}"
+                    )))
+                    .await;
+            }
+        }
+        for completion in completions {
+            self.task_supervisor.enqueue_stopped_completion(completion);
+        }
+    }
+
+    /// 结算引擎队列中残留的完成（被取消运行尚未消费的入队完成）。
+    ///
+    /// 它们完成于取消前后，同属被停止的当前工作：只结算持久化入箱，
+    /// 不再触发任何续跑；内存补齐由下一次显式输入前的收件箱冲刷完成。
+    async fn settle_stopped_completions(&mut self) {
+        let pending = self.query_engine.take_pending_completions();
+        self.persist_stopped_completions(pending).await;
+    }
+
+    /// 冲刷停止收件箱：已持久化的通知补进内存模型上下文，未持久化的
+    /// 就地重试一次，仍失败才交还引擎队列。
+    ///
+    /// 调用点都在“停止边界已关闭、新上下文即将建立”之前：
+    /// - 新的显式用户输入——通知按到达顺序排在新用户消息之前；
+    /// - 手动压缩——压缩以新 context_version 整体重写上下文，不冲刷的话
+    ///   已落库未补内存的通知将在重写后从上下文中永久丢失。
+    pub(crate) async fn flush_stopped_inbox(&mut self) {
+        let inbox = self.task_supervisor.take_stopped_inbox();
+        if inbox.is_empty() {
+            return;
+        }
+        let mut persisted = Vec::new();
+        let mut retry = Vec::new();
+        for completion in inbox {
+            if self
+                .task_supervisor
+                .notification_is_delivered(&completion.task_id)
+            {
+                persisted.push(completion);
+            } else {
+                retry.push(completion);
+            }
+        }
+        if !persisted.is_empty() {
+            self.push_notification_message(&persisted);
+        }
+        if !retry.is_empty() {
+            let notification = TaskNotification {
+                tasks: retry.clone(),
+                created_at: Timestamp::now(),
+            };
+            match self
+                .host
+                .insert_task_notification(&self.thread_id, &notification)
+                .await
+            {
+                Ok(Some(fresh)) => {
+                    let fresh_ids = fresh
+                        .tasks
+                        .iter()
+                        .map(|completion| completion.task_id.clone())
+                        .collect::<Vec<_>>();
+                    self.task_supervisor
+                        .mark_notifications_delivered(&fresh_ids);
+                    self.push_notification_message(&retry);
+                }
+                Ok(None) => {
+                    // 重试前被其它路径交付：直接补内存。
+                    self.push_notification_message(&retry);
+                }
+                Err(error) => {
+                    tracing::warn!(thread_id = %self.thread_id, %error, "deferred retry of stopped task notification failed");
+                    // 仍未落库：交还引擎队列，由本次运行的引擎排空继续重试。
+                    // 注入位置退化为用户消息之后，属罕见失败路径的取舍。
+                    self.query_engine.restore_pending_completions(retry);
+                }
+            }
+        }
+    }
+
+    /// 把（已确认落库的）通知消息按序追加进内存模型上下文。
+    fn push_notification_message(&mut self, completions: &[TaskCompletion]) {
+        let task_ids = completions
+            .iter()
+            .map(|completion| completion.task_id.clone())
+            .collect::<Vec<_>>();
+        self.messages.push(Message::from_user_text(
+            omini_domain::conversation::task_notification_text(completions),
+        ));
+        // 幂等清理未交付标记；正常路径在结算时已移除，这里通常无操作。
+        self.task_supervisor.mark_notifications_delivered(&task_ids);
     }
 
     /// 实例是否处于可回收空闲：无运行、无预留、无未完成任务且输出仍连接。
@@ -103,6 +276,14 @@ impl AgentRuntime {
         self.query_engine.notify_cancel_waiters();
         self.task_supervisor.cancel_all().await;
         self.task_supervisor.wait_until_idle().await;
+        // 任务树全部结束后还有最后一批尾部完成：它们的通知此刻尚未结算，
+        // 不落库的话重启恢复会把未投递通知重新当作自动唤醒源。
+        let mut tail = Vec::new();
+        while let Ok(completion) = self.task_completion_rx.try_recv() {
+            tail.push(completion);
+        }
+        tail.extend(self.query_engine.take_pending_completions());
+        self.persist_stopped_completions(tail).await;
         // 任务全部结束后解除 state 对 supervisor 的引用，释放其持有的
         // 输出通道克隆；实例任务退出后通道才能随之关闭。
         if let Some(initialization) = self.mcp_initialization.take() {
@@ -125,6 +306,16 @@ impl AgentRuntime {
                 if self.gate.activate(&run_id) {
                     self.deferred_start = None;
                     let _ = ack.send(Ok(()));
+                    // 新的显式用户输入开启新代：关闭停止边界，此后注册与
+                    // 完成的任务恢复自动唤醒资格（旧停止集合不受影响）。
+                    self.task_supervisor.close_stop_boundary();
+                    // 同步复位主取消标志：此前的主停止（含压缩期间取消）
+                    // 不得把取消状态带进新的显式工作。旧任务自身的取消
+                    // 令牌独立持有，不受影响。
+                    self.cancelled.store(false, Ordering::Relaxed);
+                    // 收件箱通知在用户消息进入上下文之前冲刷,保持内存
+                    // 顺序与落库历史一致。
+                    self.flush_stopped_inbox().await;
                     self.submit_user_message(message, run_id).await;
                 } else {
                     let _ = ack.send(Err(CoreError::RuntimeClosed));
@@ -154,7 +345,14 @@ impl AgentRuntime {
                 true
             }
             AgentCommand::Cancel { run_id: None, ack } => {
+                // 空闲态主停止：当前无前台运行，只撤销后台任务的唤醒资格
+                // 并取消任务树；不置 cancelled 标志，避免影响下一次运行
+                // 的取消判定。
+                self.task_supervisor.open_stop_boundary();
                 self.task_supervisor.cancel_all().await;
+                // 延迟启动可能已将完成移入引擎队列；停止后立即结算，
+                // 避免丢弃启动时把通知留到下一次输入才落库。
+                self.settle_stopped_completions().await;
                 let _ = ack.send(Ok(()));
                 true
             }
@@ -285,9 +483,7 @@ impl AgentRuntime {
             }
             AgentCommand::Cancel { run_id: None, ack } => {
                 tracing::debug!("active run cancellation requested");
-                self.cancelled.store(true, Ordering::Relaxed);
-                self.query_engine.notify_cancel_waiters();
-                self.task_supervisor.cancel_all().await;
+                self.stop_main_work().await;
                 let _ = ack.send(Ok(()));
                 true
             }
@@ -570,6 +766,13 @@ impl AgentRuntime {
             if self.state.lifecycle() == AgentLifecycle::Closing || self.output.is_closed() {
                 break;
             }
+            // 被取消的运行不再自动续跑：引擎的 follow_up 与运行期间已入队的
+            // 完成都属于被停止的工作，只结算通知持久化，不创建新运行、
+            // 不发起 Provider 请求；内存补齐留给下一次显式输入。
+            if was_cancelled {
+                self.settle_stopped_completions().await;
+                break;
+            }
             start = if follow_up {
                 RunStart::PersistedTaskNotification
             } else if collected_after_run {
@@ -777,10 +980,10 @@ impl AgentRuntime {
                             }
                         }
                         Some(completion) = self.task_completion_rx.recv() => {
-                            self.query_engine.enqueue_task_completion(completion);
+                            self.handle_run_completion(completion).await;
                             tokio::task::yield_now().await;
                             while let Ok(completion) = self.task_completion_rx.try_recv() {
-                                self.query_engine.enqueue_task_completion(completion);
+                                self.handle_run_completion(completion).await;
                             }
                         }
                         () = self.gate.wait_close_requested() => {
@@ -864,12 +1067,26 @@ impl AgentRuntime {
         )
     }
 
+    /// 批量收集通道中的完成。停止边界外的旧完成也可能滞留通道——新
+    /// 运行收尾时的本收集同样不得给予其唤醒资格：停止完成直接结算入箱，
+    /// 不进引擎队列，也就不会以 `collected_after_run` 触发额外续跑。
     async fn collect_task_completions(&mut self) -> bool {
         tokio::task::yield_now().await;
         let mut collected = false;
+        let mut stopped = Vec::new();
         while let Ok(completion) = self.task_completion_rx.try_recv() {
-            self.query_engine.enqueue_task_completion(completion);
-            collected = true;
+            if self
+                .task_supervisor
+                .completion_is_stopped(&completion.task_id)
+            {
+                stopped.push(completion);
+            } else {
+                self.query_engine.enqueue_task_completion(completion);
+                collected = true;
+            }
+        }
+        if !stopped.is_empty() {
+            self.persist_stopped_completions(stopped).await;
         }
         collected
     }

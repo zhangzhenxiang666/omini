@@ -14,6 +14,9 @@ impl AgentRuntime {
     ///
     /// 压缩期间仍接受取消、子 Run 干预与关闭；其余命令在压缩边界后重试。
     pub async fn handle_compact_context(&mut self, instructions: Option<String>) {
+        // 压缩会以新 context_version 整体重写模型上下文：先把停止收件箱中
+        // 已落库的通知补进内存，否则重写后它们将从上下文中永久丢失。
+        self.flush_stopped_inbox().await;
         if self.messages.is_empty() {
             self.send_event(RuntimeToServerEvent::Notification(Notification::warning(
                 "没有可压缩的线程历史".to_string(),
@@ -97,8 +100,14 @@ impl AgentRuntime {
                     match command {
                         AgentCommand::Cancel { run_id: None, ack } => {
                             tracing::debug!("manual compact cancellation requested");
+                            // 确认后的主停止在压缩期间同样完整生效：取消压缩、
+                            // 取消整棵后台任务树并撤销其自动唤醒资格。
+                            // （按不相交字段访问，避开压缩 future 对
+                            // messages 的可变借用。）
+                            self.task_supervisor.open_stop_boundary();
                             self.cancelled.store(true, Ordering::Relaxed);
                             self.query_engine.notify_cancel_waiters();
+                            self.task_supervisor.cancel_all().await;
                             let _ = ack.send(Ok(()));
                         }
                         AgentCommand::Cancel {

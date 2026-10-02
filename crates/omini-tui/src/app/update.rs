@@ -47,6 +47,11 @@ pub fn handle_input_event(
                 UpdateOutcome::exit()
             }
         }
+        Event::Paste(_) | Event::Mouse(_)
+            if crate::app::focus::current(state) == crate::app::focus::Focus::StopConfirmation =>
+        {
+            UpdateOutcome::default()
+        }
         Event::Paste(text) if state.note_mode() => {
             // note 模式期间放行终端 bracketed paste(Shift+Insert 等),
             // 逐字符塞进 note。修复 Bug 2 的一部分:此前主输入框分支的
@@ -114,6 +119,10 @@ fn handle_key_event(
     request_tx: &mut Effects,
 ) -> bool {
     let focus = crate::app::focus::current(state);
+    if focus == crate::app::focus::Focus::StopConfirmation {
+        handle_stop_confirmation(state, code, request_tx);
+        return true;
+    }
     if matches!(
         focus,
         crate::app::focus::Focus::Page | crate::app::focus::Focus::Model
@@ -157,11 +166,15 @@ fn handle_key_event(
             let _ = request_tx.send(ClientRequest::AgentTaskCancel { task_id });
             return true;
         }
+        if state.sessions.active_session_task_id.is_none() && state.has_background_work() {
+            state.dialogs.stop_confirmation = Some(Default::default());
+            return true;
+        }
         if state.sessions.active_session_task_id.is_none()
-            && (matches!(
+            && matches!(
                 state.sessions.views["main"].agent_status,
                 AgentStatus::Working | AgentStatus::Thinking
-            ) || state.has_active_agent_tasks())
+            )
         {
             let _ = request_tx.send(ClientRequest::RunCancel);
             return true;
@@ -184,6 +197,26 @@ fn handle_key_event(
     }
 
     handle_composer_key(state, code, modifiers, request_tx)
+}
+
+/// 确认操作只在 Enter 时提交一次；关闭与“不停止”均不改变现有工作。
+fn handle_stop_confirmation(state: &mut AppState, code: KeyCode, request_tx: &mut Effects) {
+    match code {
+        KeyCode::Esc => state.dialogs.stop_confirmation = None,
+        KeyCode::Enter => {
+            if let Some(confirmation) = state.dialogs.stop_confirmation.take()
+                && confirmation.stop_selected
+            {
+                let _ = request_tx.send(ClientRequest::RunCancel);
+            }
+        }
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Tab => {
+            if let Some(confirmation) = state.dialogs.stop_confirmation.as_mut() {
+                confirmation.stop_selected = !confirmation.stop_selected;
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn is_profile_toggle_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -471,7 +504,8 @@ mod tests {
     }
 
     #[test]
-    fn idle_main_accepts_input_and_escape_cancels_active_agent_tasks() {
+    /// 后台子任务不阻止输入；Esc 须先确认，再提交整树取消。
+    fn confirm_agent_stop() {
         let mut state = AppState::new();
         state.apply_event(RuntimeToUiEvent::AgentTaskEvent(AgentTaskEventEnvelope {
             task_id: "task_1".to_string(),
@@ -512,10 +546,134 @@ mod tests {
         ));
 
         handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert!(state.dialogs.stop_confirmation.is_some());
+        assert!(tx.requests.is_empty());
+        handle_key_event(&mut state, KeyCode::Up, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
         assert!(matches!(
             tx.requests.pop_front(),
             Some(ClientRequest::RunCancel)
         ));
+        assert!(state.dialogs.stop_confirmation.is_none());
+    }
+
+    /// 主会话活动与空闲均覆盖 Bash；重复 Esc 只关闭，默认 Enter 保留工作。
+    #[test]
+    fn decline_background_stop() {
+        for status in [
+            AgentStatus::Idle,
+            AgentStatus::Thinking,
+            AgentStatus::Working,
+        ] {
+            let mut state = AppState::new();
+            state.sessions.views["main"].agent_status = status.clone();
+            state.track_background_task("bash".into(), TaskStatus::Running);
+            let mut tx = Effects::default();
+            handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+            assert!(
+                !state
+                    .dialogs
+                    .stop_confirmation
+                    .as_ref()
+                    .unwrap()
+                    .stop_selected
+            );
+            handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+            assert!(state.dialogs.stop_confirmation.is_none());
+            assert!(tx.requests.is_empty());
+            handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+            handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+            assert!(state.dialogs.stop_confirmation.is_none());
+            assert!(tx.requests.is_empty());
+            assert_eq!(state.sessions.views["main"].agent_status, status);
+            assert_eq!(state.sessions.background_tasks["bash"], TaskStatus::Running);
+        }
+    }
+
+    /// 确认后只发送一次取消；等待确认期间任务结束仍允许提交当前工作停止。
+    #[test]
+    fn confirm_bash_stop() {
+        let mut state = AppState::new();
+        state.track_background_task("bash".into(), TaskStatus::Cancelling);
+        let mut tx = Effects::default();
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        state.track_background_task("bash".into(), TaskStatus::Cancelled);
+        handle_key_event(&mut state, KeyCode::Tab, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Enter, KeyModifiers::NONE, &mut tx);
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert_eq!(tx.requests.len(), 1);
+        assert!(matches!(
+            tx.requests.front(),
+            Some(ClientRequest::RunCancel)
+        ));
+        assert!(state.dialogs.stop_confirmation.is_none());
+    }
+
+    /// 弹窗独占输入，后台新到的权限请求不能抢走确认焦点。
+    #[test]
+    fn isolate_stop_confirmation() {
+        let mut state = AppState::new();
+        state.composer.input = "draft".into();
+        state.track_background_task("bash".into(), TaskStatus::Running);
+        let mut tx = Effects::default();
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        state.apply_event(RuntimeToUiEvent::ToolPauseRequested(permission_pause(
+            "late",
+        )));
+        state.set_note_mode(true);
+        handle_input_event(&mut state, Event::Paste("extra".into()), &mut tx);
+        handle_key_event(&mut state, KeyCode::Char('x'), KeyModifiers::NONE, &mut tx);
+        assert_eq!(state.composer.input, "draft");
+        assert!(state.dialogs.permission.note.text.is_empty());
+        assert!(tx.requests.is_empty());
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert_eq!(
+            crate::app::focus::current(&state),
+            crate::app::focus::Focus::Pause
+        );
+    }
+
+    /// 无后台工作直接中断主 Run，终态后台记录不会触发确认。
+    #[test]
+    fn stop_foreground_run() {
+        let mut state = AppState::new();
+        state.apply_event(RuntimeToUiEvent::RunStarted);
+        state.track_background_task("done".into(), TaskStatus::Completed);
+        let mut tx = Effects::default();
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert!(matches!(
+            tx.requests.front(),
+            Some(ClientRequest::RunCancel)
+        ));
+        assert!(state.dialogs.stop_confirmation.is_none());
+    }
+
+    /// 主页面确认不会影响子页面：Esc 仍只取消当前子任务树。
+    #[test]
+    fn stop_child_directly() {
+        let mut state = AppState::new();
+        add_background_task(&mut state, "child", "child_thread");
+        state.track_background_task("bash".into(), TaskStatus::Running);
+        state.sessions.active_session_task_id = Some("child".into());
+        let mut tx = Effects::default();
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        assert!(
+            matches!(tx.requests.front(), Some(ClientRequest::AgentTaskCancel { task_id }) if task_id == "child")
+        );
+        assert!(state.dialogs.stop_confirmation.is_none());
+    }
+
+    /// 会话切换撤销旧确认，防止停止新会话的工作。
+    #[test]
+    fn discard_stale_confirmation() {
+        let mut state = AppState::new();
+        state.project.current_thread_id = Some("old".into());
+        state.track_background_task("bash".into(), TaskStatus::Running);
+        let mut tx = Effects::default();
+        handle_key_event(&mut state, KeyCode::Esc, KeyModifiers::NONE, &mut tx);
+        state.apply_thread_snapshot(Some("new".into()), vec![], vec![], Default::default());
+        assert!(state.dialogs.stop_confirmation.is_none());
+        assert!(tx.requests.is_empty());
     }
 
     #[test]

@@ -157,6 +157,27 @@ impl QueryEngine {
             .push_back(completion);
     }
 
+    /// 取出全部排队完成；供停止边界结算残留完成时使用。
+    pub(crate) fn take_pending_completions(&self) -> Vec<TaskCompletion> {
+        self.pending_task_completions
+            .lock()
+            .expect("pending background task completions mutex poisoned")
+            .drain(..)
+            .collect()
+    }
+
+    /// 按原顺序放回排队的完成；停止结算后它们仍需在下一次显式输入的
+    /// 引擎排空中进入内存上下文（持久化闸门保证不重复落库）。
+    pub(crate) fn restore_pending_completions(&self, completions: Vec<TaskCompletion>) {
+        let mut pending = self
+            .pending_task_completions
+            .lock()
+            .expect("pending background task completions mutex poisoned");
+        for completion in completions {
+            pending.push_back(completion);
+        }
+    }
+
     /// 唤醒当前运行中的取消等待点。
     pub fn notify_cancel_waiters(&self) {
         if self.drain_pauses_on_start {
@@ -227,6 +248,8 @@ impl QueryEngine {
 
         match self.drain_task_completions(ctx.messages, &event_tx).await {
             TaskNotificationDrain::Injected => {}
+            // 已交付的重复请求没有新内容，对内部启动而言等同于已注入。
+            TaskNotificationDrain::AlreadyDelivered => {}
             TaskNotificationDrain::Empty if !ctx.requires_internal_input => {}
             TaskNotificationDrain::Empty | TaskNotificationDrain::Failed => {
                 notification_persistence_failed = true;
@@ -452,22 +475,9 @@ impl QueryEngine {
             tasks: completions.clone(),
             created_at: Timestamp::now(),
         };
-        let llm_message = Message::from_user_text(format!(
-            "<task_notifications>{}</task_notifications>",
-            serde_json::to_string(&completions).unwrap_or_else(|_| "[]".to_string())
-        ));
-        let task_ids = completions
-            .iter()
-            .map(|completion| completion.task_id.clone())
-            .collect::<Vec<_>>();
         let (ack, result) = tokio::sync::oneshot::channel();
         let persisted = if event_tx
-            .send(EngineToRuntimeEvent::TaskNotificationsProduced {
-                notification,
-                llm_message: llm_message.clone(),
-                task_ids,
-                ack,
-            })
+            .send(EngineToRuntimeEvent::TaskNotificationsProduced { notification, ack })
             .await
             .is_err()
         {
@@ -480,10 +490,29 @@ impl QueryEngine {
         };
 
         match persisted {
-            Ok(()) => {
-                messages.push(llm_message);
+            // 仅注入本次实际新交付的任务：已交付部分的内存副本由其交付
+            // 时刻的路径负责（运行内注入或停止收件箱冲刷），此处重复
+            // 注入会在模型上下文中造成重复消息。同一任务在批内重复
+            // 出现时按首现顺序只注入一份（存储端按 ID 去重，内存注入
+            // 必须保持同样语义）。
+            Ok(Some(fresh_ids)) => {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                let fresh: Vec<_> = completions
+                    .iter()
+                    .filter(|completion| {
+                        fresh_ids.contains(&completion.task_id)
+                            && seen.insert(completion.task_id.clone())
+                    })
+                    .cloned()
+                    .collect();
+                messages.push(Message::from_user_text(
+                    omini_domain::conversation::task_notification_text(&fresh),
+                ));
                 TaskNotificationDrain::Injected
             }
+            // 全部已交付：没有新内容进入上下文；这不是持久化失败，
+            // 通知驱动的内部启动也不应据此报错。
+            Ok(None) => TaskNotificationDrain::AlreadyDelivered,
             Err(error) => {
                 {
                     let mut pending = self
@@ -509,6 +538,8 @@ impl QueryEngine {
 enum TaskNotificationDrain {
     Empty,
     Injected,
+    /// 请求的任务此前已全部交付，本次没有写入新内容，也无需注入。
+    AlreadyDelivered,
     Failed,
 }
 
@@ -582,6 +613,76 @@ pub(crate) mod tests {
         }
     }
 
+    /// 给定持久化闸门回传的交付结果（部分新交付或全部已交付），当通知
+    /// 排空，则模型上下文只注入实际新交付的任务；全部已交付时不注入
+    /// 任何消息，也不视为失败。
+    #[tokio::test]
+    async fn drain_injects_fresh() {
+        let engine = QueryEngine::default();
+        let (event_tx, mut event_rx) = mpsc::channel(2);
+        let observer = tokio::spawn(async move {
+            let mut round = 0;
+            while let Some(event) = event_rx.recv().await {
+                if let EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } = event {
+                    round += 1;
+                    let response = if round == 1 {
+                        // 首轮：全部任务此前已交付，宿主未写入任何新内容。
+                        Ok(None)
+                    } else {
+                        // 次轮：部分重叠请求中仅 task_2 是新交付。
+                        Ok(Some(vec!["task_2".to_string()]))
+                    };
+                    ack.send(response).unwrap();
+                }
+            }
+        });
+        let mut messages = vec![Message::from_user_text("before".to_string())];
+
+        engine.enqueue_task_completion(task_completion("task_1", TaskKind::SubAgent));
+        assert_eq!(
+            engine
+                .drain_task_completions(&mut messages, &event_tx)
+                .await,
+            TaskNotificationDrain::AlreadyDelivered
+        );
+        assert_eq!(messages.len(), 1, "fully delivered batch must not inject");
+
+        engine.enqueue_task_completion(task_completion("task_1", TaskKind::SubAgent));
+        engine.enqueue_task_completion(task_completion("task_2", TaskKind::Bash));
+        // 同一 fresh 任务在批内重复出现:内存注入与存储端同样按 ID 去重。
+        engine.enqueue_task_completion(task_completion("task_2", TaskKind::Bash));
+        assert_eq!(
+            engine
+                .drain_task_completions(&mut messages, &event_tx)
+                .await,
+            TaskNotificationDrain::Injected
+        );
+        assert_eq!(messages.len(), 2);
+        let omini_model::message::ContentBlock::Text(text) = &messages[1].content[0] else {
+            panic!("task notification should be a text message");
+        };
+        assert!(text.text.contains("task_2"));
+        let payload = text
+            .text
+            .strip_prefix("<task_notifications>")
+            .and_then(|text| text.strip_suffix("</task_notifications>"))
+            .expect("task notification envelope");
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "same-task duplicate must inject exactly once"
+        );
+        assert_eq!(tasks[0]["task_id"], "task_2");
+        assert!(
+            !text.text.contains("task_1"),
+            "already delivered task must not re-enter the model context"
+        );
+
+        drop(event_tx);
+        observer.await.unwrap();
+    }
+
     #[tokio::test]
     async fn task_notifications_are_batched_and_enter_history_only_after_ack() {
         let engine = QueryEngine::default();
@@ -589,35 +690,22 @@ pub(crate) mod tests {
         engine.enqueue_task_completion(task_completion("task_2", TaskKind::Bash));
         let (event_tx, mut event_rx) = mpsc::channel(1);
         let observer = tokio::spawn(async move {
-            let EngineToRuntimeEvent::TaskNotificationsProduced {
-                notification,
-                llm_message,
-                task_ids,
-                ack,
-                ..
-            } = event_rx.recv().await.unwrap()
+            let EngineToRuntimeEvent::TaskNotificationsProduced { notification, ack } =
+                event_rx.recv().await.unwrap()
             else {
                 panic!("expected background task notification event");
             };
-            assert_eq!(task_ids, ["task_1", "task_2"]);
             assert_eq!(notification.tasks.len(), 2);
+            assert_eq!(notification.tasks[0].task_id, "task_1");
+            assert_eq!(notification.tasks[1].task_id, "task_2");
             assert_eq!(notification.tasks[0].kind, TaskKind::SubAgent);
             assert_eq!(notification.tasks[1].kind, TaskKind::Bash);
-            let omini_model::message::ContentBlock::Text(text) = &llm_message.content[0] else {
-                panic!("task notification should be a text message");
-            };
-            let payload = text
-                .text
-                .strip_prefix("<task_notifications>")
-                .and_then(|text| text.strip_suffix("</task_notifications>"))
-                .expect("task notification envelope");
-            let tasks: serde_json::Value = serde_json::from_str(payload).unwrap();
-            assert_eq!(tasks[0]["task_id"], "task_1");
-            assert_eq!(tasks[0]["status"], "completed");
-            assert_eq!(tasks[0]["kind"], "sub_agent");
-            assert_eq!(tasks[0]["label"], "general");
-            assert_eq!(tasks[0].as_object().unwrap().len(), 5);
-            ack.send(Ok(())).unwrap();
+            let task_ids = notification
+                .tasks
+                .into_iter()
+                .map(|completion| completion.task_id)
+                .collect();
+            ack.send(Ok(Some(task_ids))).unwrap();
         });
         let mut messages = vec![Message::from_user_text("before".to_string())];
 
@@ -628,11 +716,20 @@ pub(crate) mod tests {
         observer.await.unwrap();
         assert_eq!(outcome, TaskNotificationDrain::Injected);
         assert_eq!(messages.len(), 2);
-        assert!(matches!(
-            messages[1].content.as_slice(),
-            [omini_model::message::ContentBlock::Text(text)]
-                if text.text.contains("task_notifications")
-        ));
+        let omini_model::message::ContentBlock::Text(text) = &messages[1].content[0] else {
+            panic!("task notification should be a text message");
+        };
+        let payload = text
+            .text
+            .strip_prefix("<task_notifications>")
+            .and_then(|text| text.strip_suffix("</task_notifications>"))
+            .expect("task notification envelope");
+        let tasks: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(tasks[0]["task_id"], "task_1");
+        assert_eq!(tasks[0]["status"], "completed");
+        assert_eq!(tasks[0]["kind"], "sub_agent");
+        assert_eq!(tasks[0]["label"], "general");
+        assert_eq!(tasks[0].as_object().unwrap().len(), 5);
     }
 
     #[tokio::test]
@@ -847,9 +944,15 @@ pub(crate) mod tests {
                             ));
                         }
                     }
-                    EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
+                    EngineToRuntimeEvent::TaskNotificationsProduced { notification, ack } => {
                         notifications += 1;
-                        ack.send(Ok(())).unwrap();
+                        // 模拟全部任务为本次新交付：引擎应注入完整通知批次。
+                        let task_ids = notification
+                            .tasks
+                            .into_iter()
+                            .map(|task| task.task_id)
+                            .collect();
+                        ack.send(Ok(Some(task_ids))).unwrap();
                     }
                     _ => {}
                 }
@@ -990,9 +1093,15 @@ pub(crate) mod tests {
                             ));
                         }
                     }
-                    EngineToRuntimeEvent::TaskNotificationsProduced { ack, .. } => {
+                    EngineToRuntimeEvent::TaskNotificationsProduced { notification, ack } => {
                         notifications += 1;
-                        ack.send(Ok(())).unwrap();
+                        // 模拟全部任务为本次新交付：引擎应注入完整通知批次。
+                        let task_ids = notification
+                            .tasks
+                            .into_iter()
+                            .map(|task| task.task_id)
+                            .collect();
+                        ack.send(Ok(Some(task_ids))).unwrap();
                     }
                     _ => {}
                 }

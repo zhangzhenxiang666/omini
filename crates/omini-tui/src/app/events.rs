@@ -1000,6 +1000,8 @@ impl AppState {
         let active_task_id = if self.project.current_thread_id == thread_id {
             self.sessions.active_session_task_id.clone()
         } else {
+            // 确认只属于原会话，不能把停止意图带到另一个线程。
+            self.dialogs.stop_confirmation = None;
             None
         };
         self.start.show_start_screen = false;

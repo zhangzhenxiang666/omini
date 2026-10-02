@@ -380,6 +380,15 @@ impl AppState {
             .any(|node| matches!(node.status, TaskStatus::Running | TaskStatus::Cancelling))
     }
 
+    /// 后台 Bash 与子 Agent 都要求停止确认；子节点兜底覆盖快照恢复期间。
+    pub fn has_background_work(&self) -> bool {
+        self.sessions
+            .background_tasks
+            .values()
+            .any(|status| !status.is_terminal())
+            || self.has_active_agent_tasks()
+    }
+
     /// 更新主线程后台任务计数；终态立即移除，不受子会话节点回收影响。
     pub fn track_background_task(&mut self, task_id: String, status: TaskStatus) {
         if status.is_terminal() {

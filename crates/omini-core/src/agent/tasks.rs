@@ -249,6 +249,58 @@ impl AgentTaskSupervisor {
         Arc::clone(&self.task_manager)
     }
 
+    /// 在发出取消信号前建立停止边界；见 [`TaskManager::open_stop_boundary`]。
+    pub fn open_stop_boundary(&self) {
+        self.task_manager.open_stop_boundary();
+    }
+
+    /// 新的显式用户输入开启新代；见 [`TaskManager::close_stop_boundary`]。
+    pub fn close_stop_boundary(&self) {
+        self.task_manager.close_stop_boundary();
+    }
+
+    pub fn stop_boundary_open(&self) -> bool {
+        self.task_manager.stop_boundary_open()
+    }
+
+    /// 当前停止代数;见 [`TaskManager::stop_generation`]。
+    fn stop_generation(&self) -> u64 {
+        self.task_manager.stop_generation()
+    }
+
+    /// 完成是否属于被停止的工作；见 [`TaskManager::completion_is_stopped`]。
+    pub fn completion_is_stopped(&self, task_id: &str) -> bool {
+        self.task_manager.completion_is_stopped(task_id)
+    }
+
+    /// 任务自身的取消令牌是否已置位。
+    ///
+    /// 同步子任务不进入通用任务索引，`completion_is_stopped` 对它们只能
+    /// 命中边界开放期；关闭后注册的迟到后代须凭父任务（含同步父）的
+    /// 取消令牌继承停止状态。
+    fn task_is_cancelled(&self, task_id: &str) -> bool {
+        self.tasks
+            .lock()
+            .expect("agent task mutex poisoned")
+            .get(task_id)
+            .is_some_and(|entry| entry.cancelled.load(Ordering::Relaxed))
+    }
+
+    /// 该任务的通知是否已交付；见 [`TaskManager::notification_is_delivered`]。
+    pub fn notification_is_delivered(&self, task_id: &str) -> bool {
+        self.task_manager.notification_is_delivered(task_id)
+    }
+
+    /// 停止完成进入收件箱；见 [`TaskManager::enqueue_stopped_completion`]。
+    pub fn enqueue_stopped_completion(&self, completion: TaskCompletion) {
+        self.task_manager.enqueue_stopped_completion(completion);
+    }
+
+    /// 取走收件箱；见 [`TaskManager::take_stopped_inbox`]。
+    pub fn take_stopped_inbox(&self) -> Vec<TaskCompletion> {
+        self.task_manager.take_stopped_inbox()
+    }
+
     pub fn set_parent_inbox(&self, inbox: SharedPendingUserMessages) {
         *self
             .parent_inbox
@@ -647,6 +699,14 @@ impl AgentTaskSupervisor {
         runtime: Arc<ToolRuntimeContext>,
         execution_mode: AgentTaskExecutionMode,
     ) -> Result<PreparedTask, String> {
+        // 停止判定在跨 await 的子会话建立之前捕获：父任务身份与取消令牌
+        // 不会回退，而边界开放标志可能在新输入期间关闭；按发起时刻判定，
+        // 迟到注册的根任务不会被新代重新接纳。
+        let spawn_generation = self.stop_generation();
+        let spawn_during_stop = self.stop_boundary_open()
+            || runtime.task_id.as_deref().is_some_and(|parent| {
+                self.completion_is_stopped(parent) || self.task_is_cancelled(parent)
+            });
         let depth = runtime.agent_depth.saturating_add(1);
         if depth > MAX_AGENT_DEPTH {
             return Err(format!("maximum agent depth is {MAX_AGENT_DEPTH}"));
@@ -733,6 +793,15 @@ impl AgentTaskSupervisor {
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let cancel_notify = Arc::new(Notify::new());
+        // 属于被停止工作的后代(按发起时刻捕获的判定)注册即取消,与
+        // 父树的实际取消语义一致,而非只压制其完成通知。停止代数在
+        // 宿主会话创建前后比较:等待期间建立过停止边界(即便快照未含
+        // 本任务、开放标志又被新输入关闭)的迟到注册同样属于被停止的
+        // 工作,不得凭过期的发起时刻标志逃过边界。
+        let inherit_stop = spawn_during_stop || self.stop_generation() != spawn_generation;
+        if inherit_stop {
+            cancelled.store(true, Ordering::Relaxed);
+        }
         let inbox = Arc::new(Mutex::new(std::collections::VecDeque::new()));
         self.tasks
             .lock()
@@ -757,6 +826,7 @@ impl AgentTaskSupervisor {
                         Arc::clone(&cancelled),
                         Arc::clone(&cancel_notify),
                     )),
+                    inherit_stop,
                 )
                 .await;
         }
@@ -1456,7 +1526,7 @@ mod tests {
             bash.result_summary = status.is_terminal().then(|| "bash output".into());
             supervisor
                 .task_manager
-                .register(bash.clone(), None)
+                .register(bash.clone(), None, false)
                 .await
                 .unwrap();
 
@@ -1563,6 +1633,72 @@ mod tests {
         supervisor
             .reserve_task_slot(AgentTaskExecutionMode::Background)
             .expect("released background slot should be reusable");
+    }
+
+    /// 给定子任务注册在停止边界建立前开始、随后阻塞在宿主会话创建，
+    /// 当停止发生且新输入关闭边界之后宿主才返回，则该迟到注册仍归入
+    /// 停止集合并被实际取消——不得凭过期的发起时刻标志逃过边界。
+    #[tokio::test]
+    async fn late_registration_stops() {
+        let (supervisor, _events, host, _pauses, _profile) = test_supervisor(Vec::new());
+        let pause = host.pause_create_session();
+
+        let mut context = read_context(&supervisor);
+        // 子工具集由父注册表派生:空父表会让任何继承策略都得到空集,
+        // 注册一个普通工具(read)保证派生非空,spawn 才能走到宿主会话
+        // 创建——read_task 属于 agent 控制类工具,派生时会被排除。
+        let mut parent_registry = ToolRegistry::new();
+        parent_registry.register(crate::tools::read_tool::ReadTool);
+        context.tool_registry = Arc::new(parent_registry);
+        let runtime_context = Arc::make_mut(context.runtime.as_mut().expect("runtime present"));
+        runtime_context.agent_registry = Arc::new(crate::agent::AgentRegistry {
+            agents: crate::agent::builtins::built_in_agents()
+                .into_iter()
+                .map(|spec| (spec.name.clone(), spec))
+                .collect(),
+            diagnostics: Vec::new(),
+        });
+        let runtime = Arc::clone(context.runtime.as_ref().expect("runtime present"));
+        let spawner = Arc::clone(&supervisor);
+        let spawn = tokio::spawn(async move {
+            spawner
+                .spawn_background(
+                    AgentTaskRequest {
+                        name: "general".to_string(),
+                        prompt: "work".to_string(),
+                        title: "late registration".to_string(),
+                    },
+                    context,
+                    runtime,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.wait_entered())
+            .await
+            .expect("spawn must reach the host session creation");
+
+        // 停止边界建立后立即被新输入关闭：快照不含尚未注册的本任务，
+        // 开放标志也已复位，只有停止代数能揭示等待期间发生过停止。
+        supervisor.open_stop_boundary();
+        supervisor.close_stop_boundary();
+        pause.release();
+
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            spawn.await.expect("spawn should not panic")
+        })
+        .await
+        .expect("spawn should finish after the pause is released");
+        assert!(!response.is_error);
+        let payload: serde_json::Value = serde_json::from_str(&response.output).unwrap();
+        let task_id = payload["task_id"].as_str().unwrap().to_string();
+        assert!(
+            supervisor.completion_is_stopped(&task_id),
+            "registration blocked across a stop boundary must inherit stop state"
+        );
+        assert!(
+            supervisor.task_is_cancelled(&task_id),
+            "late registration must be actually cancelled, not just suppressed"
+        );
     }
 
     #[test]

@@ -139,7 +139,9 @@ impl RunGate {
         Some(run_id)
     }
 
-    fn release(&self, run_id: &str) {
+    /// 释放一个未提交的预留;生产路径由 `RunReservation::drop` 调用,
+    /// 亦供装配测试模拟宿主放弃受理窗口。
+    pub(crate) fn release(&self, run_id: &str) {
         let mut state = self.state.lock().expect("run gate lock poisoned");
         if matches!(&state.slot, GateSlot::Reserved { run_id: current } if current == run_id) {
             state.slot = GateSlot::Free;
@@ -179,6 +181,21 @@ impl RunGate {
             state.deferred = true;
             false
         }
+    }
+
+    /// 丢弃延迟启动后清除待重试标记。
+    ///
+    /// `deferred` 与运行循环持有的 `deferred_start` 是同一事实的两面；
+    /// 停止边界丢弃 `deferred_start` 时必须同步清除此标记，否则快照
+    /// 永远报告待处理工作、空闲实例无法被回收。
+    pub(crate) fn clear_deferred(&self) {
+        self.state.lock().expect("run gate lock poisoned").deferred = false;
+    }
+
+    /// 是否仍有待重试的延迟内部启动；供回收判定与测试观察共用。
+    #[cfg(test)]
+    pub(crate) fn has_deferred(&self) -> bool {
+        self.state.lock().expect("run gate lock poisoned").deferred
     }
 
     pub(crate) fn begin_maintenance(&self) -> bool {
