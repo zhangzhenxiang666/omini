@@ -180,7 +180,6 @@ pub struct ManualCompactInput<'a> {
 
 /// 执行手动 compact，不借用 `&mut AgentRuntime`，
 /// 使调用方可以在 `tokio::select!` 中同时访问 runtime 的其他字段。
-#[allow(clippy::too_many_arguments)]
 pub async fn execute_manual_compact(
     messages: &mut Vec<Message>,
     input: ManualCompactInput<'_>,

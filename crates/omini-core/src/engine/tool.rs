@@ -47,8 +47,12 @@ pub struct ToolExecutor {
     event_tx: mpsc::Sender<EngineToRuntimeEvent>,
 }
 
+#[bon::bon]
 impl ToolExecutor {
-    #[allow(clippy::too_many_arguments)]
+    /// 构造工具执行器。经 `ToolExecutor::builder()` 以命名设置器装配：
+    /// `runtime_context` 可省略（省略即 `None`，表示纯引擎路径无宿主运行时），
+    /// 其余依赖均为必填。
+    #[builder]
     pub fn new(
         settings: Arc<Settings>,
         pending_tool_pauses: PendingToolPauses,
@@ -408,17 +412,16 @@ mod tests {
     async fn tool_execution_reads_profile_when_the_tool_starts() {
         let context = ToolExecutionContext::test("write");
         let active_profile = Arc::new(RwLock::new(ActiveProfile::Main));
-        let executor = ToolExecutor::new(
-            Arc::clone(&context.settings),
-            Arc::clone(&context.pending_tool_pauses),
-            Arc::clone(&context.permission_engine),
-            Arc::clone(&active_profile),
-            Arc::clone(&context.cancelled),
-            Arc::clone(&context.cancel_notify),
-            None,
-            Arc::new(crate::tools::create_main_registry()),
-            context.event_tx.clone(),
-        );
+        let executor = ToolExecutor::builder()
+            .settings(Arc::clone(&context.settings))
+            .pending_tool_pauses(Arc::clone(&context.pending_tool_pauses))
+            .permission_engine(Arc::clone(&context.permission_engine))
+            .active_profile(Arc::clone(&active_profile))
+            .cancelled(Arc::clone(&context.cancelled))
+            .cancel_notify(Arc::clone(&context.cancel_notify))
+            .tool_registry(Arc::new(crate::tools::create_main_registry()))
+            .event_tx(context.event_tx.clone())
+            .build();
         *active_profile
             .write()
             .expect("active profile lock poisoned") = ActiveProfile::Plan;

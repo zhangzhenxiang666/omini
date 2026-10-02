@@ -171,6 +171,17 @@ pub fn render_edit(
         .unwrap_or(1)
         .max(1);
     let line_width = max_line.to_string().len().max(3);
+    let layout = DiffLayout {
+        line_width,
+        content_width: w,
+    };
+    let palette = DiffPalette {
+        ctx_bg,
+        add_bg,
+        del_bg,
+        green_fg,
+        red_fg,
+    };
 
     for (hunk_idx, (_, rows)) in expanded_hunks.iter().enumerate() {
         if hunk_idx > 0 {
@@ -181,9 +192,7 @@ pub fn render_edit(
                 w,
             ));
         }
-        render_hunk_rows(
-            &mut lines, rows, line_width, w, ctx_bg, add_bg, del_bg, green_fg, red_fg,
-        );
+        render_hunk_rows(&mut lines, rows, &layout, &palette);
     }
 
     lines
@@ -385,22 +394,44 @@ fn expand_hunk_rows(hunk: &ParsedHunk) -> Vec<HunkRow> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_hunk_rows(
-    lines: &mut Vec<Line<'static>>,
-    rows: &[HunkRow],
+/// diff 行渲染的宽度语义：行号列宽与内容宽度共同决定每行排布。
+struct DiffLayout {
+    /// 行号数字列的显示宽度。
     line_width: usize,
+    /// 渲染区域的内容宽度，用于整行背景填充。
     content_width: usize,
+}
+
+/// diff 行渲染的配色：上下文/新增/删除行的背景与前景色。
+struct DiffPalette {
     ctx_bg: Color,
     add_bg: Color,
     del_bg: Color,
     green_fg: Color,
     red_fg: Color,
+}
+
+fn render_hunk_rows(
+    lines: &mut Vec<Line<'static>>,
+    rows: &[HunkRow],
+    layout: &DiffLayout,
+    palette: &DiffPalette,
 ) {
     // 渲染规则(permission 面板和 execute 后的实际渲染都走这里,所以两边一致):
     // - 开头/结尾的纯 context(无 +/- 前缀)整段直接丢掉,不画。
     // - 中间夹着的纯 context 段:>= MIN_CONTEXT_LINES_TO_COLLAPSE 行的折叠成单个 "⋮",
     //   短于阈值的原样显示;⋮ 与 +/-/空格 marker 同一列对齐,上下不空行。
+    let DiffLayout {
+        line_width,
+        content_width,
+    } = *layout;
+    let DiffPalette {
+        ctx_bg,
+        add_bg,
+        del_bg,
+        green_fg,
+        red_fg,
+    } = *palette;
     let first_meaningful = rows.iter().position(|r| !is_plain_context(r));
     let last_meaningful = rows.iter().rposition(|r| !is_plain_context(r));
     let (Some(first), Some(last)) = (first_meaningful, last_meaningful) else {
@@ -687,6 +718,17 @@ pub fn render_write(
     let line_width = max_line.to_string().len().max(3);
 
     let ctx_bg = crate::ui::theme::BACKGROUND;
+    let layout = DiffLayout {
+        line_width,
+        content_width: w,
+    };
+    let palette = DiffPalette {
+        ctx_bg,
+        add_bg,
+        del_bg: crate::ui::theme::DELETE_BG,
+        green_fg,
+        red_fg,
+    };
     for (hunk_idx, (_, rows)) in expanded_hunks.iter().enumerate() {
         if hunk_idx > 0 {
             lines.push(padded_line_bg(
@@ -696,17 +738,7 @@ pub fn render_write(
                 w,
             ));
         }
-        render_hunk_rows(
-            &mut lines,
-            rows,
-            line_width,
-            w,
-            ctx_bg,
-            add_bg,
-            crate::ui::theme::DELETE_BG,
-            green_fg,
-            red_fg,
-        );
+        render_hunk_rows(&mut lines, rows, &layout, &palette);
     }
 
     lines

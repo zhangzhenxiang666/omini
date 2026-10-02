@@ -16,21 +16,24 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 use tracing::Instrument;
 
+#[bon::bon]
 impl ThreadSession {
     /// 同步构造：不读 DB、不跨 `.await`，所需的
     /// `ThreadSessionInputs` 由调用方提前加载并派生好。
     ///
     /// 这样拆有两个原因:
     /// 1. `create_thread` / `fork_thread_for_plan` 创建的是空 thread，
-    ///    在 `build` 里再读一次 DB 是浪费;
+    ///    在构造函数里再读一次 DB 是浪费;
     /// 2. 调用方可以在 `threads` 锁外完成异步加载,只在短临界区里
     ///    get / insert session cache,保证外层 future 始终 `Send`。
     ///
+    /// 经 `ThreadSession::builder()` 以命名设置器装配，`build()` 返回
+    /// `Result<Arc<Self>, CoreError>`，失败行为与旧构造函数一致。
     /// 装配顺序遵循 core 契约：先建实例拿到独占输出接收端，消费者任务就位后
     /// 才启动实例，启动输出不会遗漏。`idle_reclaim` 用于把可回收的空闲会话
     /// 从 manager 缓存中摘除。
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
+    #[builder]
+    pub fn new(
         project_id: String,
         settings: Settings,
         project: ProjectDir,

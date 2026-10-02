@@ -44,7 +44,7 @@ use crate::features::permissions::view::{
     build_permission_action_lines, build_permission_drawer_lines, find_tool_use,
     permission_drawer_title,
 };
-use crate::features::questions::view::build_user_input_action_lines;
+use crate::features::questions::view::build_input_hint;
 pub fn permission_drawer_height(state: &ViewContext<'_>, area: Rect) -> u16 {
     let Some(request) = state.active_tool_pause() else {
         return 0;
@@ -218,7 +218,7 @@ pub fn render_permission_drawer(
 
     let options = match &request.kind {
         ToolPauseKind::Permission(_) => build_permission_action_lines(state, &request),
-        ToolPauseKind::UserInput(preview) => build_user_input_action_lines(state, preview),
+        ToolPauseKind::UserInput(_) => build_input_hint(state),
     };
     if drawer_area.height > 2 {
         let option_lines = options.lines;

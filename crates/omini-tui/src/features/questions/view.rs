@@ -1,10 +1,9 @@
 use crate::ui::context::ViewContext;
 use crate::ui::drawer::*;
 use crate::ui::prelude::*;
-pub fn build_user_input_action_lines(
-    state: &ViewContext<'_>,
-    _preview: &crate::app::event::UserInputPreview,
-) -> Text<'static> {
+/// 构建用户输入（问题回答）抽屉底部的快捷键提示行；
+/// 文案仅取决于当前是否处于备注模式，不依赖问题内容。
+pub fn build_input_hint(state: &ViewContext<'_>) -> Text<'static> {
     if state.note_mode() {
         Text::from(vec![Line::from(vec![
             Span::styled("Tab 或 Esc ", Style::default().fg(crate::ui::theme::MUTED)),

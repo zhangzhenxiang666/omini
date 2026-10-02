@@ -214,21 +214,26 @@ impl TimelineRenderCache {
             tool_ids: &self.tool_ids,
             pending,
         };
+        let ctx = TimelineCtx {
+            state,
+            lookup: &lookup,
+            content_width: width,
+        };
         for index in start..state.session.messages.len() {
             self.checkpoints.push(MessageCheckpoint {
                 line_count: self.lines.len(),
                 activity: self.activity.clone(),
             });
             render_entry(
-                state,
+                &ctx,
                 &crate::features::timeline::projection::project_message(
                     &state.session.messages[index],
                 ),
-                &lookup,
                 &mut self.activity,
-                width,
-                &mut self.lines,
-                &mut self.selectable,
+                &mut LineSink {
+                    lines: &mut self.lines,
+                    selectable: &mut self.selectable,
+                },
             );
             #[cfg(test)]
             {
@@ -281,6 +286,33 @@ impl RenderLookup<'_, '_> {
 
     fn has_tool(&self, id: &str) -> bool {
         self.tool_ids.contains(id) || self.pending.tool_ids.contains(id)
+    }
+}
+
+/// 时间线渲染的只读上下文：视图状态、工具结果查找与内容宽度在一条
+/// 渲染链内保持一致，避免逐函数重复传递。生命周期统一收缩到
+/// 渲染链的最短借用期。
+struct TimelineCtx<'a> {
+    state: &'a ViewContext<'a>,
+    lookup: &'a RenderLookup<'a, 'a>,
+    content_width: usize,
+}
+
+/// 时间线渲染的可变输出：可见行与可选取纯文本同步追加，保持同一顺序。
+struct LineSink<'a> {
+    lines: &'a mut Vec<Line<'static>>,
+    selectable: &'a mut Vec<String>,
+}
+
+impl LineSink<'_> {
+    /// 追加一批已渲染行，并为每行登记可选取纯文本。
+    fn append(&mut self, rendered: Vec<Line<'static>>) {
+        append_rendered_lines(self.lines, self.selectable, rendered);
+    }
+
+    /// 追加渲染函数同时产出的可见行与可选取文本（两序列已对齐）。
+    fn append_with_selectable(&mut self, lines: Vec<Line<'static>>, selectable: Vec<String>) {
+        append_message_lines(self.lines, self.selectable, lines, selectable);
     }
 }
 
@@ -420,27 +452,34 @@ pub fn render_messages(state: &mut ViewContext<'_>, frame: &mut ratatui::Frame, 
         tool_ids: &cache.tool_ids,
         pending: &pending,
     };
+    let ctx = TimelineCtx {
+        state,
+        lookup: &lookup,
+        content_width,
+    };
     let mut tail_lines = Vec::new();
     let mut tail_selectable = Vec::new();
     let mut activity = cache.activity.clone();
     if let Some(pending_message) = state.session.pending_assistant.as_ref() {
         render_entry(
-            state,
+            &ctx,
             &crate::features::timeline::projection::project_pending(pending_message),
-            &lookup,
             &mut activity,
-            content_width,
-            &mut tail_lines,
-            &mut tail_selectable,
+            &mut LineSink {
+                lines: &mut tail_lines,
+                selectable: &mut tail_selectable,
+            },
         );
     }
     let preview = render_active_preview(state, &activity, content_width);
     flush_activity_group(
         &mut activity,
         preview,
-        content_width,
-        &mut tail_lines,
-        &mut tail_selectable,
+        &ctx,
+        &mut LineSink {
+            lines: &mut tail_lines,
+            selectable: &mut tail_selectable,
+        },
     );
     if !cache.lines.is_empty()
         && !tail_lines.is_empty()
@@ -628,16 +667,21 @@ fn render_message_range(
         tool_ids: &projection.tool_ids,
         pending: &pending,
     };
+    let ctx = TimelineCtx {
+        state,
+        lookup: &lookup,
+        content_width,
+    };
     let mut activity = ActivityGroup::default();
     for entry in &projection.entries {
         render_entry(
-            state,
+            &ctx,
             entry,
-            &lookup,
             &mut activity,
-            content_width,
-            &mut all_lines,
-            &mut selectable_lines,
+            &mut LineSink {
+                lines: &mut all_lines,
+                selectable: &mut selectable_lines,
+            },
         );
     }
 
@@ -645,22 +689,21 @@ fn render_message_range(
     flush_activity_group(
         &mut activity,
         preview,
-        content_width,
-        &mut all_lines,
-        &mut selectable_lines,
+        &ctx,
+        &mut LineSink {
+            lines: &mut all_lines,
+            selectable: &mut selectable_lines,
+        },
     );
     (all_lines, selectable_lines)
 }
 
 /// 全量校验和缓存重放共用此入口，保持消息边界与流式块的分组规则一致。
 fn render_entry(
-    state: &ViewContext<'_>,
+    ctx: &TimelineCtx<'_>,
     entry: &crate::features::timeline::projection::TimelineEntry<'_>,
-    lookup: &RenderLookup<'_, '_>,
     activity: &mut ActivityGroup,
-    content_width: usize,
-    all_lines: &mut Vec<Line<'static>>,
-    selectable_lines: &mut Vec<String>,
+    output: &mut LineSink<'_>,
 ) {
     match entry {
         crate::features::timeline::projection::TimelineEntry::Blocks(blocks, pending) => {
@@ -672,45 +715,32 @@ fn render_entry(
             });
             for (index, block) in blocks.iter().enumerate() {
                 render_block(
-                    state,
+                    ctx,
                     block,
                     *pending && Some(index) == active_thinking,
-                    lookup,
                     activity,
-                    content_width,
-                    all_lines,
-                    selectable_lines,
+                    output,
                 );
             }
         }
         crate::features::timeline::projection::TimelineEntry::Boundary(message) => {
-            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
+            flush_activity_group(activity, None, ctx, output);
             if let UiMessage::UserInput(input) = message {
                 render_user_message(
                     &crate::features::timeline::model::user_input_draft(input),
-                    content_width,
-                    all_lines,
-                    selectable_lines,
+                    ctx,
+                    output,
                 );
             } else {
-                let (lines, selectable) = render_ui_boundary(message, state, content_width);
-                append_message_lines(all_lines, selectable_lines, lines, selectable);
+                let (lines, selectable) = render_ui_boundary(message, ctx.state, ctx.content_width);
+                output.append_with_selectable(lines, selectable);
             }
         }
     }
 }
 
-fn render_user_message(
-    draft: &UserDraft,
-    content_width: usize,
-    all_lines: &mut Vec<Line<'static>>,
-    selectable_lines: &mut Vec<String>,
-) {
-    append_rendered_lines(
-        all_lines,
-        selectable_lines,
-        build_user_draft_lines(draft, content_width),
-    );
+fn render_user_message(draft: &UserDraft, ctx: &TimelineCtx<'_>, output: &mut LineSink<'_>) {
+    output.append(build_user_draft_lines(draft, ctx.content_width));
 }
 
 /// 渲染主 Agent 注入子会话的消息：首行以 `↳` 标记来源，续行缩进对齐，
@@ -864,16 +894,12 @@ fn render_ui_boundary(
     (lines, selectable)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_block(
-    state: &ViewContext<'_>,
+    ctx: &TimelineCtx<'_>,
     block: &crate::features::timeline::projection::BlockView<'_>,
     active_tail: bool,
-    lookup: &RenderLookup<'_, '_>,
     activity: &mut ActivityGroup,
-    content_width: usize,
-    all_lines: &mut Vec<Line<'static>>,
-    selectable_lines: &mut Vec<String>,
+    output: &mut LineSink<'_>,
 ) {
     use crate::features::timeline::projection::BlockView;
     match block {
@@ -881,7 +907,7 @@ fn render_block(
             activity.add_thinking(*duration);
             if active_tail
                 && duration.is_none()
-                && let Some(started) = state.session.thinking_started_at
+                && let Some(started) = ctx.state.session.thinking_started_at
             {
                 activity.set_active_thinking(
                     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -896,14 +922,14 @@ fn render_block(
                 activity.add_tool(tool);
                 return;
             }
-            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
-            let result = lookup.result(&tool.id);
+            flush_activity_group(activity, None, ctx, output);
+            let result = ctx.lookup.result(&tool.id);
             let lines = if tool.name == "send_message" {
                 crate::features::tools::agent::render_send_message(
                     tool,
                     result,
-                    send_message_target_label(state, tool),
-                    content_width,
+                    send_message_target_label(ctx.state, tool),
+                    ctx.content_width,
                 )
             } else {
                 render_tool(
@@ -911,21 +937,17 @@ fn render_block(
                     result,
                     None,
                     None,
-                    content_width,
-                    Some(state.project.status_bar.cwd.as_path()),
+                    ctx.content_width,
+                    Some(ctx.state.project.status_bar.cwd.as_path()),
                 )
             };
-            append_rendered_lines(all_lines, selectable_lines, lines);
+            output.append(lines);
         }
         BlockView::Text(text) if !text.trim().is_empty() => {
-            flush_activity_group(activity, None, content_width, all_lines, selectable_lines);
-            append_rendered_lines(
-                all_lines,
-                selectable_lines,
-                build_assistant_text_lines(text, content_width),
-            );
+            flush_activity_group(activity, None, ctx, output);
+            output.append(build_assistant_text_lines(text, ctx.content_width));
         }
-        BlockView::Result(result) if !lookup.has_tool(&result.tool_use_id) => {
+        BlockView::Result(result) if !ctx.lookup.has_tool(&result.tool_use_id) => {
             activity.orphan_results.push(result.as_ref().clone());
         }
         _ => {}
@@ -978,19 +1000,18 @@ fn render_active_preview(
 fn flush_activity_group(
     activity: &mut ActivityGroup,
     preview: Option<Vec<Line<'static>>>,
-    content_width: usize,
-    all_lines: &mut Vec<Line<'static>>,
-    selectable_lines: &mut Vec<String>,
+    ctx: &TimelineCtx<'_>,
+    output: &mut LineSink<'_>,
 ) {
     if activity.is_empty() {
         return;
     }
     let group = std::mem::take(activity);
-    let mut summary = group.summary(content_width);
+    let mut summary = group.summary(ctx.content_width);
     if let Some(preview) = preview {
         summary.extend(preview);
     }
-    append_rendered_lines(all_lines, selectable_lines, summary);
+    output.append(summary);
     for result in group.orphan_results {
         let color = if result.is_error {
             crate::ui::theme::ERROR
@@ -1002,11 +1023,13 @@ fn flush_activity_group(
         } else {
             result.content
         };
-        append_rendered_lines(
-            all_lines,
-            selectable_lines,
-            build_bordered_lines(&content, content_width, color, false, None),
-        );
+        output.append(build_bordered_lines(
+            &content,
+            ctx.content_width,
+            color,
+            false,
+            None,
+        ));
     }
 }
 

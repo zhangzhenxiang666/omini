@@ -25,6 +25,7 @@ edition = "2024"
 async-trait = "0.1.89"
 axum = { version = "0.8.7", features = ["ws", "macros", "multipart"] }
 base64 = "0.22.1"
+bon = "3.10.1"
 bytes = "1.11.1"
 clap = { version = "4.6.1", features = ["derive"] }
 crossterm = "0.29.0"

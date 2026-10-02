@@ -154,8 +154,13 @@ impl std::fmt::Debug for AgentTaskSupervisor {
     }
 }
 
+#[bon::bon]
 impl AgentTaskSupervisor {
-    #[allow(clippy::too_many_arguments)]
+    /// 构造任务监督器并返回共享句柄。经 `AgentTaskSupervisor::builder()`
+    /// 以命名设置器装配；`initial_tasks` / `background_tasks` 为启动恢复的
+    /// 既有任务快照，全新会话可传空集合。装配顺序保持：先建 TaskManager
+    /// 与任务表，再结算未投递的完成通知。
+    #[builder]
     pub fn new(
         output: OutputHandle,
         host: Arc<dyn AgentHost>,
@@ -1315,17 +1320,17 @@ mod tests {
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         let pending_pauses: PendingToolPauses = Arc::new(Mutex::new(HashMap::new()));
         let active_profile = Arc::new(RwLock::new(ActiveProfile::Main));
-        let supervisor = AgentTaskSupervisor::new(
-            output,
-            host.clone(),
-            completion_tx,
-            Arc::clone(&pending_pauses),
-            Arc::new(PermissionEngine::empty("/tmp")),
-            Arc::clone(&active_profile),
-            Arc::new(Mutex::new(ThreadUsageSnapshot::default())),
-            initial_tasks,
-            Vec::new(),
-        );
+        let supervisor = AgentTaskSupervisor::builder()
+            .output(output)
+            .host(host.clone())
+            .completion_tx(completion_tx)
+            .pending_tool_pauses(Arc::clone(&pending_pauses))
+            .permission_engine(Arc::new(PermissionEngine::empty("/tmp")))
+            .active_profile(Arc::clone(&active_profile))
+            .owner_usage(Arc::new(Mutex::new(ThreadUsageSnapshot::default())))
+            .initial_tasks(initial_tasks)
+            .background_tasks(Vec::new())
+            .build();
         (
             supervisor,
             events_into_runtime_events(events),

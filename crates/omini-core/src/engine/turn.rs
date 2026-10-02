@@ -25,26 +25,39 @@ use tracing::Instrument;
 const ORPHANED_TOOL_ACTIVITY: &str =
     "LLM stream emitted tool activity but Done did not include an assistant tool_use message";
 
+/// Turn 执行的稳定依赖：一次查询内不变的事件通道、取消状态与工具设施。
+/// 由 `run_query` 装配一次并贯穿全部 Turn 复用。
+pub(super) struct TurnDeps<'a> {
+    pub(super) event_tx: &'a mpsc::Sender<EngineToRuntimeEvent>,
+    pub(super) cancelled: &'a Arc<AtomicBool>,
+    pub(super) tool_definitions: &'a [ToolDefinition],
+    pub(super) tool_executor: &'a ToolExecutor,
+}
+
+/// 跨 Turn 复用的可变执行状态：工具任务集、重复调用检测与自动压缩进度。
+/// 每次 Turn 结束时约束（如工具任务必须排空）仍由调用方检查。
+pub(super) struct TurnMutableState<'a> {
+    pub(super) tool_tasks: &'a mut JoinSet<ToolRunResult>,
+    pub(super) repeat_guard: &'a mut RepeatGuard,
+    pub(super) compact_state: &'a mut AutoCompactState,
+}
+
 impl QueryEngine {
     /// 执行一个完整 LLM Turn，但不决定是否开启下一 Turn。
-    #[allow(clippy::too_many_arguments)]
+    /// 查询上下文、模式与轮次继续显式传入；稳定依赖经 `deps`、
+    /// 可变状态经 `state` 组织，保持原有借用与异步行为。
     pub(super) async fn execute_turn(
         &self,
         ctx: &mut QueryContext<'_>,
-        event_tx: &mpsc::Sender<EngineToRuntimeEvent>,
-        cancelled: &Arc<AtomicBool>,
-        tool_definitions: &[ToolDefinition],
-        tool_executor: &ToolExecutor,
-        tool_tasks: &mut JoinSet<ToolRunResult>,
-        repeat_guard: &mut RepeatGuard,
-        compact_state: &mut AutoCompactState,
+        deps: &TurnDeps<'_>,
+        state: &mut TurnMutableState<'_>,
         mode: TurnMode,
         turn_index: usize,
     ) -> TurnOutcome {
-        debug_assert!(tool_tasks.is_empty());
-        let _ = event_tx.send(EngineToRuntimeEvent::TurnStarted).await;
+        debug_assert!(state.tool_tasks.is_empty());
+        let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnStarted).await;
         if ctx.runtime_context.is_some()
-            && let Err(error) = crate::engine::commit_events(event_tx).await
+            && let Err(error) = crate::engine::commit_events(deps.event_tx).await
         {
             return TurnOutcome::Interrupted {
                 finish_reason: FinishReason::Error(error),
@@ -54,16 +67,17 @@ impl QueryEngine {
         let compact_context = compact::CompactRequestContext {
             settings: &ctx.settings,
             llm_client: &ctx.llm_client,
-            tool_definitions,
+            tool_definitions: deps.tool_definitions,
             runtime_context: ctx.runtime_context.as_deref(),
-            event_tx,
+            event_tx: deps.event_tx,
             trigger: CompactTrigger::Auto,
             custom_instructions: None,
-            cancel_token: compact::CompactCancelToken::new(cancelled, &self.cancel_notify),
+            cancel_token: compact::CompactCancelToken::new(deps.cancelled, &self.cancel_notify),
         };
-        let _ = compact::auto_compact_if_needed(ctx.messages, &compact_context, compact_state)
-            .instrument(tracing::debug_span!("compact", turn_index))
-            .await;
+        let _ =
+            compact::auto_compact_if_needed(ctx.messages, &compact_context, state.compact_state)
+                .instrument(tracing::debug_span!("compact", turn_index))
+                .await;
 
         let model = ctx.settings.active_model();
         let request = ApiRequest {
@@ -73,7 +87,7 @@ impl QueryEngine {
                 .is_finalization()
                 .then(get_max_steps_prompt)
                 .or(ctx.settings.system_prompt.as_deref()),
-            tools: (!mode.is_finalization()).then_some(tool_definitions),
+            tools: (!mode.is_finalization()).then_some(deps.tool_definitions),
             max_tokens: None,
             temperature: None,
             thinking_effort: model.thinking_effort,
@@ -83,7 +97,7 @@ impl QueryEngine {
 
         let mut stream = match crate::util::cancel::invoke_or_cancel(
             ctx.llm_client.invoke(request),
-            cancelled,
+            deps.cancelled,
             &self.cancel_notify,
         )
         .instrument(tracing::debug_span!("llm_request", turn_index))
@@ -92,16 +106,17 @@ impl QueryEngine {
             Some(Ok(stream)) => stream,
             Some(Err(error)) => {
                 let error = RuntimeError::ProviderRequest(error).to_string();
-                let _ = event_tx
+                let _ = deps
+                    .event_tx
                     .send(EngineToRuntimeEvent::Error(error.clone()))
                     .await;
-                let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
                 return TurnOutcome::Interrupted {
                     finish_reason: FinishReason::Error(error),
                 };
             }
             None => {
-                let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+                let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
                 return TurnOutcome::Interrupted {
                     finish_reason: FinishReason::Error("Cancelled".to_string()),
                 };
@@ -123,7 +138,7 @@ impl QueryEngine {
             let next = tokio::select! {
                 event = stream.next() => event,
                 _ = self.cancel_notify.notified() => {
-                    if cancelled.load(Ordering::Relaxed) {
+                    if deps.cancelled.load(Ordering::Relaxed) {
                         stream_cancelled = true;
                         break;
                     }
@@ -134,7 +149,7 @@ impl QueryEngine {
             let Some(event) = next else {
                 break;
             };
-            if cancelled.load(Ordering::Relaxed) {
+            if deps.cancelled.load(Ordering::Relaxed) {
                 stream_cancelled = true;
                 break;
             }
@@ -143,51 +158,63 @@ impl QueryEngine {
                 Ok(ApiEvent::Text(delta)) => {
                     close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
                     push_text_delta(&mut partial_blocks, &delta);
-                    let _ = event_tx.send(EngineToRuntimeEvent::TextDelta(delta)).await;
+                    let _ = deps
+                        .event_tx
+                        .send(EngineToRuntimeEvent::TextDelta(delta))
+                        .await;
                 }
                 Ok(ApiEvent::Thinking(delta)) => {
                     if thinking_started_at.is_none() {
                         thinking_started_at = Some(Instant::now());
                     }
                     push_thinking_delta(&mut partial_blocks, &delta);
-                    let _ = event_tx
+                    let _ = deps
+                        .event_tx
                         .send(EngineToRuntimeEvent::ThinkingDelta(delta))
                         .await;
                 }
                 Ok(ApiEvent::ToolUse(tool_use)) => {
                     close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
                     partial_blocks.push(ContentBlock::ToolUse(tool_use.clone()));
-                    let _ = event_tx
+                    let _ = deps
+                        .event_tx
                         .send(EngineToRuntimeEvent::ToolUse(tool_use.clone()))
                         .await;
 
                     if ctx.runtime_context.is_some()
-                        && let Err(message) = crate::engine::commit_events(event_tx).await
+                        && let Err(message) = crate::engine::commit_events(deps.event_tx).await
                     {
                         stream_error = Some(RuntimeError::Persistence { message });
                         break;
                     }
-                    if let Some(reason) =
-                        rejection_reason(&tool_use, mode, &mut requested_finalization, repeat_guard)
-                    {
+                    if let Some(reason) = rejection_reason(
+                        &tool_use,
+                        mode,
+                        &mut requested_finalization,
+                        state.repeat_guard,
+                    ) {
                         let block = ToolResultBlock {
                             tool_use_id: tool_use.id.clone(),
                             is_error: true,
                             content: reason,
                             metadata: None,
                         };
-                        let _ = event_tx
+                        let _ = deps
+                            .event_tx
                             .send(EngineToRuntimeEvent::ToolResult(block.clone()))
                             .await;
                         ready_results.push(ToolRunResult::new(block, None));
                     } else {
-                        let executor = tool_executor.clone();
-                        tool_tasks.spawn(async move { executor.execute(tool_use).await });
+                        let executor = deps.tool_executor.clone();
+                        state
+                            .tool_tasks
+                            .spawn(async move { executor.execute(tool_use).await });
                     }
                 }
                 Ok(ApiEvent::Done(done)) => {
                     close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
-                    let _ = event_tx
+                    let _ = deps
+                        .event_tx
                         .send(EngineToRuntimeEvent::UsageRecorded(done.usage))
                         .await;
                     completion = Some(done);
@@ -202,15 +229,15 @@ impl QueryEngine {
         // 流以思考结尾时的兜底结算（Err break / 意外结束 / Done 后残留）
         close_thinking_segment(&mut thinking_started_at, &mut thinking_durations);
 
-        if stream_cancelled || cancelled.load(Ordering::Relaxed) {
+        if stream_cancelled || deps.cancelled.load(Ordering::Relaxed) {
             let mut partial_blocks = partial_blocks;
             apply_thinking_durations(&mut partial_blocks, &thinking_durations);
             self.finish_interrupted_turn(
                 ctx.messages,
                 partial_blocks,
                 ready_results,
-                tool_tasks,
-                event_tx,
+                state.tool_tasks,
+                deps.event_tx,
                 None,
             )
             .await;
@@ -229,8 +256,8 @@ impl QueryEngine {
                 ctx.messages,
                 partial_blocks,
                 ready_results,
-                tool_tasks,
-                event_tx,
+                state.tool_tasks,
+                deps.event_tx,
                 Some(error.clone()),
             )
             .await;
@@ -245,7 +272,8 @@ impl QueryEngine {
         } else {
             let mut message = completion.message;
             apply_thinking_durations(&mut message.content, &thinking_durations);
-            let _ = event_tx
+            let _ = deps
+                .event_tx
                 .send(EngineToRuntimeEvent::MessageProduced(message.clone()))
                 .await;
             ctx.messages.push(message);
@@ -253,10 +281,10 @@ impl QueryEngine {
         };
 
         let (mut results, tasks_cancelled) = match drain_tasks(
-            tool_tasks,
+            state.tool_tasks,
             ready_results,
-            event_tx,
-            cancelled,
+            deps.event_tx,
+            deps.cancelled,
             &self.cancel_notify,
         )
         .await
@@ -266,23 +294,24 @@ impl QueryEngine {
         };
 
         if tasks_cancelled && let Some(index) = assistant_index {
-            results = reconcile_cancelled(&ctx.messages[index], results, event_tx).await;
+            results = reconcile_cancelled(&ctx.messages[index], results, deps.event_tx).await;
         }
 
         if orphaned_tool_activity(assistant_index, &finish_reason, &results) {
             let error = ORPHANED_TOOL_ACTIVITY.to_string();
-            let _ = event_tx
+            let _ = deps
+                .event_tx
                 .send(EngineToRuntimeEvent::Error(error.clone()))
                 .await;
-            let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+            let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
             return TurnOutcome::Interrupted {
                 finish_reason: FinishReason::Error(error),
             };
         }
 
         if tasks_cancelled {
-            commit_results(ctx.messages, results, event_tx).await;
-            let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+            commit_results(ctx.messages, results, deps.event_tx).await;
+            let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
             return TurnOutcome::Interrupted {
                 finish_reason: FinishReason::Error("Cancelled".to_string()),
             };
@@ -298,9 +327,9 @@ impl QueryEngine {
                 .map(|runtime| runtime.thread_type.as_str()),
             &results,
         );
-        commit_results(ctx.messages, results, event_tx).await;
+        commit_results(ctx.messages, results, deps.event_tx).await;
 
-        let _ = event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
+        let _ = deps.event_tx.send(EngineToRuntimeEvent::TurnEnded).await;
         TurnOutcome::Completed {
             finish_reason,
             requested_finalization,

@@ -5,11 +5,13 @@ use omini_domain::conversation::{CompactionSummary, ProposedPlan};
 use omini_model::message::{ContentBlock, Message, Role, TextBlock};
 use omini_runtime_contract::thread_domain::ActiveProfile;
 
-pub async fn persist_initial_user_message(
+/// 运行开始时按启动方式持久化初始用户消息：普通用户消息同时进入 LLM 历史
+/// 与 UI 时间线，纯输入仅进 LLM 历史，任务通知类启动没有新消息需落盘。
+/// `llm_message` 为 `None` 时直接成功返回。
+pub async fn persist_initial_message(
     thread_id: &str,
     llm_message: Option<Message>,
     start: RunStart,
-    _model_ref: &str,
     host: &dyn AgentHost,
 ) -> Result<(), crate::execution::HostError> {
     let Some(llm_message) = llm_message else {

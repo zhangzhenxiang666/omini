@@ -185,17 +185,17 @@ impl AgentRuntime {
         );
         let thread_usage = Arc::new(Mutex::new(usage));
         let (task_completion_tx, task_completion_rx) = mpsc::unbounded_channel();
-        let task_supervisor = AgentTaskSupervisor::new(
-            output.clone(),
-            Arc::clone(&host),
-            task_completion_tx,
-            Arc::clone(state.pending_tool_pauses()),
-            Arc::clone(&permission_engine),
-            Arc::clone(&active_profile),
-            Arc::clone(&thread_usage),
-            agent_tasks,
-            background_tasks,
-        );
+        let task_supervisor = AgentTaskSupervisor::builder()
+            .output(output.clone())
+            .host(Arc::clone(&host))
+            .completion_tx(task_completion_tx)
+            .pending_tool_pauses(Arc::clone(state.pending_tool_pauses()))
+            .permission_engine(Arc::clone(&permission_engine))
+            .active_profile(Arc::clone(&active_profile))
+            .owner_usage(Arc::clone(&thread_usage))
+            .initial_tasks(agent_tasks)
+            .background_tasks(background_tasks)
+            .build();
         task_supervisor.set_parent_inbox(query_engine.shared_user_messages());
         state.attach_supervisor(Arc::clone(&task_supervisor));
 

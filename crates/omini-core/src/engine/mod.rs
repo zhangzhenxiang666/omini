@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::{Notify, mpsc};
 use tokio::task::JoinSet;
 use tool::{ToolExecutor, ToolRunResult};
+use turn::{TurnDeps, TurnMutableState};
 
 pub use pause::ToolPauseResolver;
 
@@ -193,20 +194,33 @@ impl QueryEngine {
         }
 
         let tool_definitions = ctx.tool_registry.definitions();
-        let tool_executor = ToolExecutor::new(
-            Arc::clone(&ctx.settings),
-            self.tool_pause_resolver.pending_tool_pauses(),
-            Arc::clone(&self.permission_engine),
-            Arc::clone(&ctx.active_profile),
-            Arc::clone(&cancelled),
-            Arc::clone(&self.cancel_notify),
-            ctx.runtime_context.clone(),
-            Arc::clone(&ctx.tool_registry),
-            event_tx.clone(),
-        );
+        let tool_executor = ToolExecutor::builder()
+            .settings(Arc::clone(&ctx.settings))
+            .pending_tool_pauses(self.tool_pause_resolver.pending_tool_pauses())
+            .permission_engine(Arc::clone(&self.permission_engine))
+            .active_profile(Arc::clone(&ctx.active_profile))
+            .cancelled(Arc::clone(&cancelled))
+            .cancel_notify(Arc::clone(&self.cancel_notify))
+            .maybe_runtime_context(ctx.runtime_context.clone())
+            .tool_registry(Arc::clone(&ctx.tool_registry))
+            .event_tx(event_tx.clone())
+            .build();
         let mut tool_tasks = JoinSet::<ToolRunResult>::new();
         let mut compact_state = AutoCompactState::default();
         let mut repeat_guard = RepeatGuard::new(REPEAT_LIMIT);
+        // 稳定依赖与可变状态在循环外装配一次：依赖全 Turn 复用，
+        // 状态字段随 Turn 推进；循环后的排空断言仍直接检查 tool_tasks。
+        let turn_deps = TurnDeps {
+            event_tx: &event_tx,
+            cancelled: &cancelled,
+            tool_definitions: &tool_definitions,
+            tool_executor: &tool_executor,
+        };
+        let mut turn_state = TurnMutableState {
+            tool_tasks: &mut tool_tasks,
+            repeat_guard: &mut repeat_guard,
+            compact_state: &mut compact_state,
+        };
         let mut state = QueryState::new();
         let mut follow_up = false;
         let mut notification_persistence_failed = false;
@@ -251,24 +265,13 @@ impl QueryEngine {
             }
 
             debug_assert!(
-                tool_tasks.is_empty(),
+                turn_state.tool_tasks.is_empty(),
                 "previous Turn left tool tasks behind"
             );
 
             let mode = state.turn_mode();
             let outcome = self
-                .execute_turn(
-                    &mut ctx,
-                    &event_tx,
-                    &cancelled,
-                    &tool_definitions,
-                    &tool_executor,
-                    &mut tool_tasks,
-                    &mut repeat_guard,
-                    &mut compact_state,
-                    mode,
-                    state.turns(),
-                )
+                .execute_turn(&mut ctx, &turn_deps, &mut turn_state, mode, state.turns())
                 .await;
 
             if ctx.runtime_context.is_some()
@@ -322,7 +325,10 @@ impl QueryEngine {
             }
         }
 
-        debug_assert!(tool_tasks.is_empty(), "Query ended with live tool tasks");
+        debug_assert!(
+            turn_state.tool_tasks.is_empty(),
+            "Query ended with live tool tasks"
+        );
         self.tool_pause_resolver.drain_pending_tool_pauses();
         if !self.preserve_pending_on_run_boundary {
             self.clear_pending_user_messages();

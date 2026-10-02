@@ -2,14 +2,12 @@ use crate::ui::context::ViewContext;
 use crate::ui::prelude::*;
 
 pub fn interaction_drawer_height(state: &ViewContext<'_>, area: Rect) -> Option<u16> {
-    let Some(InteractionStep::ModelSelection {
-        entries, selected, ..
-    }) = &state.dialogs.interaction_step
+    let Some(InteractionStep::ModelSelection { entries, .. }) = &state.dialogs.interaction_step
     else {
         return None;
     };
 
-    let panel_height = model_panel_height(entries, *selected, area.height.saturating_sub(1));
+    let panel_height = model_panel_height(entries, area.height.saturating_sub(1));
     Some(panel_height.saturating_add(1).min(area.height))
 }
 
@@ -35,7 +33,7 @@ pub fn render_interaction(state: &mut ViewContext<'_>, frame: &mut ratatui::Fram
         return;
     };
 
-    let panel_height = model_panel_height(&entries, selected, area.height.saturating_sub(1));
+    let panel_height = model_panel_height(&entries, area.height.saturating_sub(1));
 
     let panel_area = Rect {
         x: area.x,
@@ -122,7 +120,7 @@ pub fn render_interaction(state: &mut ViewContext<'_>, frame: &mut ratatui::Fram
     }
 }
 
-fn model_panel_height(entries: &[ModelSelectionEntry], _selected: usize, area_height: u16) -> u16 {
+fn model_panel_height(entries: &[ModelSelectionEntry], area_height: u16) -> u16 {
     let has_thinking = model_entries_have_thinking(entries);
     // 标题(1) + 副标题(1) + 分隔线(1) + 条目 + 间距(0-1) + thinking(0-1) + 提示(1)
     let extra: u16 = if has_thinking { 6 } else { 4 };
@@ -391,19 +389,30 @@ mod tests {
         assert_eq!(format_context_limit(256_000).as_deref(), Some("256k"));
     }
 
+    /// 验证面板高度为 thinking 模型预留思考行与间距：仅差一个 thinking
+    /// 模型的两个条目集，高度差恒为 2 行。
     #[test]
-    fn model_panel_height_stays_stable_across_thinking_selection() {
-        let entries = vec![
+    fn reserve_effort_rows() {
+        // 给定两个仅差一个 thinking 模型的条目集，当计算面板高度，
+        // 则含 thinking 的高度多出思考行与间距两行。
+        let with_thinking = vec![
             ModelSelectionEntry::ProviderHeader {
                 name: "OpenAI".to_string(),
             },
             model_entry("fast", false),
             model_entry("reasoner", true),
         ];
+        let without_thinking = vec![
+            ModelSelectionEntry::ProviderHeader {
+                name: "OpenAI".to_string(),
+            },
+            model_entry("fast", false),
+            model_entry("lite", false),
+        ];
 
         assert_eq!(
-            model_panel_height(&entries, 1, 50),
-            model_panel_height(&entries, 2, 50)
+            model_panel_height(&with_thinking, 50),
+            model_panel_height(&without_thinking, 50) + 2
         );
     }
 
@@ -417,7 +426,7 @@ mod tests {
             model_entry("lite", false),
         ];
 
-        assert_eq!(model_panel_height(&entries, 1, 50), 7);
+        assert_eq!(model_panel_height(&entries, 50), 7);
     }
 
     #[test]

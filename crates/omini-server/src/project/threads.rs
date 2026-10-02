@@ -113,16 +113,16 @@ impl ProjectManager {
             &thread,
         )
         .await?;
-        let session = ThreadSession::build(
-            self.project_id.clone(),
-            settings,
-            self.project.clone(),
-            thread_id.clone(),
-            Arc::clone(&self.db),
-            active_profile,
-            loaded,
-            self.idle_reclaim_sender(),
-        )?;
+        let session = ThreadSession::builder()
+            .project_id(self.project_id.clone())
+            .settings(settings)
+            .project(self.project.clone())
+            .thread_id(thread_id.clone())
+            .db(Arc::clone(&self.db))
+            .active_profile(active_profile)
+            .inputs(loaded)
+            .idle_reclaim(self.idle_reclaim_sender())
+            .build()?;
         self.threads
             .lock()
             .expect("threads lock poisoned")
@@ -211,16 +211,16 @@ impl ProjectManager {
             &thread,
         )
         .await?;
-        let runtime = ThreadSession::build(
-            self.project_id.clone(),
-            settings,
-            self.project.clone(),
-            new_thread_id.clone(),
-            Arc::clone(&self.db),
-            active_profile,
-            loaded,
-            self.idle_reclaim_sender(),
-        )?;
+        let runtime = ThreadSession::builder()
+            .project_id(self.project_id.clone())
+            .settings(settings)
+            .project(self.project.clone())
+            .thread_id(new_thread_id.clone())
+            .db(Arc::clone(&self.db))
+            .active_profile(active_profile)
+            .inputs(loaded)
+            .idle_reclaim(self.idle_reclaim_sender())
+            .build()?;
         // 先插入缓存再提交初始运行：提交窗口内并发的 get_or_load_thread
         // 否则会为同一线程装配出第二个实例。
         self.threads
@@ -316,16 +316,16 @@ impl ProjectManager {
             return Ok(thread);
         }
         // 二次检查、同步装配与入缓存共用锁，不跨 await，避免装配出重复实例。
-        let thread = ThreadSession::build(
-            self.project_id.clone(),
-            settings,
-            self.project.clone(),
-            thread_id.to_string(),
-            Arc::clone(&self.db),
-            runtime_contract::thread_domain::ActiveProfile::Main,
-            loaded,
-            self.idle_reclaim_sender(),
-        )?;
+        let thread = ThreadSession::builder()
+            .project_id(self.project_id.clone())
+            .settings(settings)
+            .project(self.project.clone())
+            .thread_id(thread_id.to_string())
+            .db(Arc::clone(&self.db))
+            .active_profile(runtime_contract::thread_domain::ActiveProfile::Main)
+            .inputs(loaded)
+            .idle_reclaim(self.idle_reclaim_sender())
+            .build()?;
         threads.insert(thread_id.to_string(), Arc::clone(&thread));
         Ok(thread)
     }

@@ -589,12 +589,10 @@ impl AgentRuntime {
     ) -> (bool, bool, bool) {
         tracing::info!("agent run started");
         let requires_internal_input = matches!(start, RunStart::PendingTaskNotification);
-        let model = self.settings.active_model();
-        if let Err(error) = history::persist_initial_user_message(
+        if let Err(error) = history::persist_initial_message(
             &self.thread_id,
             self.messages.last().cloned(),
             start,
-            &format!("{}/{}", model.provider_id, model.model_id),
             self.host.as_ref(),
         )
         .await

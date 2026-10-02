@@ -32,7 +32,7 @@ mod tool_pause;
 
 pub use host::SessionHost;
 
-/// `ThreadSession::build` 这个同步构造函数所需的全部持久化输入。
+/// `ThreadSession::builder()` 这个同步构造函数所需的全部持久化输入。
 ///
 /// - `snapshot` 喂给 replay buffer 做去重(provider/model/title/usage
 ///   来自 DB 的 `Thread` 行，UI messages 与 LLM context 分别来自对应表；这是
